@@ -1,5 +1,7 @@
 use std::path::PathBuf;
+use std::time::Duration;
 
+use codex_common::approval_presets::ApprovalPreset;
 use codex_common::model_presets::ModelPreset;
 use codex_core::protocol::ConversationPathResponseEvent;
 use codex_core::protocol::Event;
@@ -7,12 +9,9 @@ use codex_file_search::FileMatch;
 
 use crate::bottom_pane::ApprovalRequest;
 use crate::history_cell::HistoryCell;
-use crate::mcp::McpWizardDraft;
 
-use codex_core::UnifiedExecOutputWindow;
 use codex_core::protocol::AskForApproval;
 use codex_core::protocol::SandboxPolicy;
-use codex_core::protocol::UnifiedExecSessionState;
 use codex_core::protocol_config_types::ReasoningEffort;
 
 #[allow(clippy::large_enum_variant)]
@@ -48,6 +47,22 @@ pub(crate) enum AppEvent {
 
     InsertHistoryCell(Box<dyn HistoryCell>),
 
+    LiveExecCommandBegin {
+        call_id: String,
+        command: Vec<String>,
+        cwd: PathBuf,
+    },
+    LiveExecOutputChunk {
+        call_id: String,
+        chunk: String,
+    },
+    LiveExecCommandFinished {
+        call_id: String,
+        exit_code: i32,
+        duration: Duration,
+        aggregated_output: String,
+    },
+
     StartCommitAnimation,
     StopCommitAnimation,
     CommitTick,
@@ -66,15 +81,31 @@ pub(crate) enum AppEvent {
 
     /// Open the reasoning selection popup after picking a model.
     OpenReasoningPopup {
-        model: String,
-        presets: Vec<ModelPreset>,
+        model: ModelPreset,
     },
+
+    /// Open the confirmation prompt before enabling full access mode.
+    OpenFullAccessConfirmation {
+        preset: ApprovalPreset,
+    },
+
+    /// Show Windows Subsystem for Linux setup instructions for auto mode.
+    ShowWindowsAutoModeInstructions,
 
     /// Update the current approval policy in the running app and widget.
     UpdateAskForApprovalPolicy(AskForApproval),
 
     /// Update the current sandbox policy in the running app and widget.
     UpdateSandboxPolicy(SandboxPolicy),
+
+    /// Update whether the full access warning prompt has been acknowledged.
+    UpdateFullAccessWarningAcknowledged(bool),
+
+    /// Persist the acknowledgement flag for the full access warning prompt.
+    PersistFullAccessWarningAcknowledged,
+
+    /// Re-open the approval presets popup.
+    OpenApprovalsPopup,
 
     /// Forwarded conversation history snapshot from the current conversation.
     ConversationHistory(ConversationPathResponseEvent),
@@ -91,86 +122,28 @@ pub(crate) enum AppEvent {
     /// Open the approval popup.
     FullScreenApprovalRequest(ApprovalRequest),
 
-    /// Open MCP manager panel when experimental overhaul is enabled.
-    OpenMcpManager,
-
-    /// Open the unified exec process manager overlay.
-    OpenProcessManager,
-
-    /// Open an input prompt targeting a unified exec session.
-    OpenUnifiedExecInputPrompt {
-        session_id: i32,
+    /// Open the feedback note entry overlay after the user selects a category.
+    OpenFeedbackNote {
+        category: FeedbackCategory,
+        include_logs: bool,
     },
 
-    /// Open the output viewer for a specific unified exec session.
-    OpenUnifiedExecOutput {
-        session_id: i32,
+    /// Open the upload consent popup for feedback after selecting a category.
+    OpenFeedbackConsent {
+        category: FeedbackCategory,
     },
 
-    /// Open the MCP wizard with optional template hint and pre-filled draft.
-    OpenMcpWizard {
-        template_id: Option<String>,
-        draft: Option<McpWizardDraft>,
-        existing_name: Option<String>,
-    },
+    /// Launch the agents context manager overlay to adjust included files.
+    OpenAgentsContextManager,
 
-    /// Apply wizard changes (persist configuration, refresh views).
-    ApplyMcpWizard {
-        draft: McpWizardDraft,
-        existing_name: Option<String>,
-    },
+    /// Clear any previously attached agents context selection after it has been consumed.
+    ClearAgentsContextSelection,
+}
 
-    /// Reload MCP servers from disk and refresh the manager view.
-    ReloadMcpServers,
-
-    /// Remove a configured MCP server.
-    RemoveMcpServer {
-        name: String,
-    },
-
-    /// Send input to a running unified exec session.
-    SendUnifiedExecInput {
-        session_id: i32,
-        input: String,
-    },
-
-    /// Kill a running unified exec session.
-    KillUnifiedExecSession {
-        session_id: i32,
-    },
-
-    /// Remove a unified exec session from the manager (after completion).
-    RemoveUnifiedExecSession {
-        session_id: i32,
-    },
-
-    /// Update the process manager with the latest unified exec snapshot.
-    UpdateProcessManagerSessions {
-        sessions: Vec<UnifiedExecSessionState>,
-    },
-
-    /// Refresh the process overview badge without opening the manager UI.
-    RefreshProcessOverview,
-
-    /// Refresh the output view for a running session.
-    RefreshUnifiedExecOutput {
-        session_id: i32,
-    },
-
-    /// Load a specific window of output for a unified exec session.
-    LoadUnifiedExecOutputWindow {
-        session_id: i32,
-        window: UnifiedExecOutputWindow,
-    },
-
-    /// Prompt the user for a destination path to export a unified exec log.
-    OpenUnifiedExecExportPrompt {
-        session_id: i32,
-    },
-
-    /// Export the unified exec log to a user-provided destination.
-    ExportUnifiedExecLog {
-        session_id: i32,
-        destination: PathBuf,
-    },
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum FeedbackCategory {
+    BadResult,
+    GoodResult,
+    Bug,
+    Other,
 }

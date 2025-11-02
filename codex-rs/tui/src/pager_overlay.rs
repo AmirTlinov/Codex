@@ -1,17 +1,33 @@
+use std::cell::RefCell;
 use std::io::Result;
+use std::path::Path;
+use std::rc::Rc;
 use std::sync::Arc;
 use std::time::Duration;
 
+use crate::exec_cell::spinner;
+use crate::exec_command::relativize_to_home;
+use crate::exec_command::strip_bash_lc_and_escape;
 use crate::history_cell::HistoryCell;
 use crate::history_cell::UserHistoryCell;
 use crate::key_hint;
 use crate::key_hint::KeyBinding;
+use crate::live_exec::LiveExecEntry;
+use crate::live_exec::LiveExecState;
+use crate::live_exec::LiveExecStatus;
 use crate::render::Insets;
+use crate::render::highlight::highlight_bash_to_lines;
+use crate::render::line_utils::prefix_lines;
+use crate::render::line_utils::push_owned_lines;
 use crate::render::renderable::InsetRenderable;
 use crate::render::renderable::Renderable;
 use crate::style::user_message_style;
 use crate::tui;
 use crate::tui::TuiEvent;
+use crate::wrapping::RtOptions;
+use crate::wrapping::word_wrap_line;
+use codex_ansi_escape::ansi_escape_line;
+use codex_common::elapsed::format_duration;
 use crossterm::event::KeyCode;
 use crossterm::event::KeyEvent;
 use ratatui::buffer::Buffer;
@@ -27,10 +43,13 @@ use ratatui::widgets::Paragraph;
 use ratatui::widgets::Widget;
 use ratatui::widgets::WidgetRef;
 use ratatui::widgets::Wrap;
+use textwrap::WordSplitter;
+use unicode_width::UnicodeWidthStr;
 
 pub(crate) enum Overlay {
     Transcript(TranscriptOverlay),
     Static(StaticOverlay),
+    LiveExec(LiveExecOverlay),
 }
 
 impl Overlay {
@@ -49,10 +68,15 @@ impl Overlay {
         Self::Static(StaticOverlay::with_renderables(renderables, title))
     }
 
+    pub(crate) fn new_live_exec(state: Rc<RefCell<LiveExecState>>) -> Self {
+        Self::LiveExec(LiveExecOverlay::new(state))
+    }
+
     pub(crate) fn handle_event(&mut self, tui: &mut tui::Tui, event: TuiEvent) -> Result<()> {
         match self {
             Overlay::Transcript(o) => o.handle_event(tui, event),
             Overlay::Static(o) => o.handle_event(tui, event),
+            Overlay::LiveExec(o) => o.handle_event(tui, event),
         }
     }
 
@@ -60,7 +84,24 @@ impl Overlay {
         match self {
             Overlay::Transcript(o) => o.is_done(),
             Overlay::Static(o) => o.is_done(),
+            Overlay::LiveExec(o) => o.is_done(),
         }
+    }
+
+    pub(crate) fn on_live_exec_state_updated(&mut self) {
+        if let Overlay::LiveExec(o) = self {
+            o.on_state_updated();
+        }
+    }
+
+    pub(crate) fn on_live_exec_opened(&mut self) {
+        if let Overlay::LiveExec(o) = self {
+            o.on_open();
+        }
+    }
+
+    pub(crate) fn is_live_exec(&self) -> bool {
+        matches!(self, Overlay::LiveExec(_))
     }
 }
 
@@ -76,6 +117,7 @@ const KEY_ESC: KeyBinding = key_hint::plain(KeyCode::Esc);
 const KEY_ENTER: KeyBinding = key_hint::plain(KeyCode::Enter);
 const KEY_CTRL_T: KeyBinding = key_hint::ctrl(KeyCode::Char('t'));
 const KEY_CTRL_C: KeyBinding = key_hint::ctrl(KeyCode::Char('c'));
+const KEY_CTRL_R: KeyBinding = key_hint::ctrl(KeyCode::Char('r'));
 
 // Common pager navigation hints rendered on the first line
 const PAGER_KEY_HINTS: &[(&[KeyBinding], &str)] = &[
@@ -549,6 +591,300 @@ impl StaticOverlay {
     }
 }
 
+pub(crate) struct LiveExecOverlay {
+    view: PagerView,
+    is_done: bool,
+    follow_bottom: bool,
+}
+
+impl LiveExecOverlay {
+    fn new(state: Rc<RefCell<LiveExecState>>) -> Self {
+        let renderable: Box<dyn Renderable> = Box::new(LiveExecRenderable::new(state));
+        let view = PagerView::new(vec![renderable], "L I V E  E X E C".to_string(), usize::MAX);
+        Self {
+            view,
+            is_done: false,
+            follow_bottom: true,
+        }
+    }
+
+    fn render(&mut self, area: Rect, buf: &mut Buffer) {
+        Clear.render(area, buf);
+        let top_h = area.height.saturating_sub(3);
+        let top = Rect::new(area.x, area.y, area.width, top_h);
+        let bottom = Rect::new(area.x, area.y + top_h, area.width, 3);
+        if self.follow_bottom {
+            self.view.scroll_offset = usize::MAX;
+            self.follow_bottom = false;
+        }
+        self.view.render(top, buf);
+        self.render_hints(bottom, buf);
+    }
+
+    fn render_hints(&self, area: Rect, buf: &mut Buffer) {
+        if area.height == 0 {
+            return;
+        }
+        let line1 = Rect::new(area.x, area.y, area.width, 1);
+        let line2 = Rect::new(area.x, area.y.saturating_add(1), area.width, 1);
+        let line3 = Rect::new(area.x, area.y.saturating_add(2), area.width, 1);
+        render_key_hints(line1, buf, PAGER_KEY_HINTS);
+        let second: [(&[KeyBinding], &str); 1] = [(&[KEY_CTRL_R], "to close")];
+        render_key_hints(line2, buf, &second);
+        let third: [(&[KeyBinding], &str); 1] = [(&[KEY_Q, KEY_CTRL_C], "to exit")];
+        render_key_hints(line3, buf, &third);
+    }
+
+    fn on_state_updated(&mut self) {
+        if self.view.is_scrolled_to_bottom() {
+            self.follow_bottom = true;
+        }
+    }
+
+    fn on_open(&mut self) {
+        self.follow_bottom = true;
+        self.view.scroll_offset = usize::MAX;
+    }
+
+    fn handle_event(&mut self, tui: &mut tui::Tui, event: TuiEvent) -> Result<()> {
+        match event {
+            TuiEvent::Key(key_event) => match key_event {
+                e if KEY_Q.is_press(e) || KEY_CTRL_C.is_press(e) || KEY_CTRL_R.is_press(e) => {
+                    self.is_done = true;
+                    Ok(())
+                }
+                other => self.view.handle_key_event(tui, other),
+            },
+            TuiEvent::Draw => {
+                tui.draw(u16::MAX, |frame| {
+                    self.render(frame.area(), frame.buffer);
+                })?;
+                Ok(())
+            }
+            _ => Ok(()),
+        }
+    }
+
+    fn is_done(&self) -> bool {
+        self.is_done
+    }
+}
+
+struct LiveExecRenderable {
+    state: Rc<RefCell<LiveExecState>>,
+}
+
+impl LiveExecRenderable {
+    fn new(state: Rc<RefCell<LiveExecState>>) -> Self {
+        Self { state }
+    }
+
+    fn build_lines(&self, width: u16) -> Vec<Line<'static>> {
+        let state = self.state.borrow();
+        let mut out: Vec<Line<'static>> = Vec::new();
+        let mut first = true;
+        for entry in state.entries() {
+            if !first {
+                out.push(Line::from(""));
+            }
+            first = false;
+            out.extend(render_live_exec_entry(entry, width, state.root_cwd()));
+        }
+        if out.is_empty() {
+            out.push(Line::from("No active commands.".dim()));
+        }
+        out
+    }
+}
+
+impl Renderable for LiveExecRenderable {
+    fn render(&self, area: Rect, buf: &mut Buffer) {
+        let lines = self.build_lines(area.width);
+        Paragraph::new(Text::from(lines))
+            .wrap(Wrap { trim: false })
+            .render(area, buf);
+    }
+
+    fn desired_height(&self, width: u16) -> u16 {
+        self.build_lines(width).len() as u16
+    }
+}
+
+fn render_live_exec_entry(
+    entry: &LiveExecEntry,
+    width: u16,
+    root_cwd: &Path,
+) -> Vec<Line<'static>> {
+    let mut lines: Vec<Line<'static>> = Vec::new();
+    let status_span = match entry.status {
+        LiveExecStatus::Running => spinner(Some(entry.started_at)),
+        LiveExecStatus::Finished { exit_code, .. } => {
+            if exit_code == 0 {
+                "•".green().bold()
+            } else {
+                "•".red().bold()
+            }
+        }
+    };
+
+    let mut header_spans: Vec<Span<'static>> = vec![status_span, " ".into()];
+    match entry.status {
+        LiveExecStatus::Running => header_spans.push("Running".bold()),
+        LiveExecStatus::Finished { exit_code: 0, .. } => header_spans.push("Succeeded".bold()),
+        LiveExecStatus::Finished { exit_code, .. } => {
+            header_spans.push(format!("Failed (exit {exit_code})").bold())
+        }
+    }
+    let duration_span = match entry.status {
+        LiveExecStatus::Running => {
+            let elapsed = entry.started_at.elapsed();
+            format!(" • {}", format_duration(elapsed)).dim()
+        }
+        LiveExecStatus::Finished { duration, .. } => {
+            format!(" • {}", format_duration(duration)).dim()
+        }
+    };
+    header_spans.push(duration_span);
+    let mut header_line = Line::from(header_spans);
+
+    let command_line = strip_bash_lc_and_escape(&entry.command);
+    let highlighted = highlight_bash_to_lines(&command_line);
+    if let Some((first, rest)) = highlighted.split_first() {
+        let available = width.saturating_sub(header_line.width() as u16).max(1) as usize;
+        let mut wrapped_first: Vec<Line<'static>> = Vec::new();
+        push_owned_lines(
+            &word_wrap_line(
+                first,
+                RtOptions::new(available).word_splitter(WordSplitter::NoHyphenation),
+            ),
+            &mut wrapped_first,
+        );
+        if let Some(segment) = wrapped_first.first() {
+            header_line.extend(segment.clone());
+        }
+        lines.push(header_line);
+
+        let continuation_opts = RtOptions::new(
+            width
+                .saturating_sub(UnicodeWidthStr::width("  │ ") as u16)
+                .max(1) as usize,
+        )
+        .word_splitter(WordSplitter::NoHyphenation);
+        let mut continuation: Vec<Line<'static>> = wrapped_first.into_iter().skip(1).collect();
+        for line in rest {
+            push_owned_lines(
+                &word_wrap_line(line, continuation_opts.clone()),
+                &mut continuation,
+            );
+        }
+        if !continuation.is_empty() {
+            lines.extend(prefix_lines(
+                continuation,
+                Span::from("  │ ").dim(),
+                Span::from("  │ ").dim(),
+            ));
+        }
+    } else {
+        lines.push(header_line);
+    }
+
+    if let Some(cwd_display) = format_cwd_for_display(&entry.cwd, root_cwd) {
+        let cwd_line = Line::from(vec!["cwd".cyan(), " ".into(), cwd_display.dim()]);
+        let cwd_opts = RtOptions::new(
+            width
+                .saturating_sub(UnicodeWidthStr::width("  │ ") as u16)
+                .max(1) as usize,
+        )
+        .word_splitter(WordSplitter::NoHyphenation);
+        let mut wrapped_cwd = Vec::new();
+        push_owned_lines(&word_wrap_line(&cwd_line, cwd_opts), &mut wrapped_cwd);
+        lines.extend(prefix_lines(
+            wrapped_cwd,
+            Span::from("  │ ").dim(),
+            Span::from("  │ ").dim(),
+        ));
+    }
+
+    if entry.truncated_lines > 0 {
+        let mut msg = format!("… dropped {} earlier lines", entry.truncated_lines);
+        if entry.truncated_partial {
+            msg.push_str(" (partial line)");
+        }
+        lines.extend(prefix_lines(
+            vec![Line::from(msg).dim()],
+            Span::from("  │ ").dim(),
+            Span::from("  │ ").dim(),
+        ));
+    }
+
+    let indent_initial = Span::from("  └ ").dim();
+    let indent_subseq = Span::from("    ");
+
+    if entry.output.is_empty() {
+        let placeholder = if entry.is_running() {
+            "(waiting for output)".dim()
+        } else {
+            "(no output)".dim()
+        };
+        lines.extend(prefix_lines(
+            vec![Line::from(placeholder)],
+            indent_initial.clone(),
+            indent_subseq.clone(),
+        ));
+        return lines;
+    }
+
+    let wrap_width = width
+        .saturating_sub(UnicodeWidthStr::width("  └ ") as u16)
+        .max(1) as usize;
+    let wrap_opts = RtOptions::new(wrap_width).word_splitter(WordSplitter::NoHyphenation);
+    let mut wrapped_output = Vec::new();
+    for raw_line in split_output_segments(&entry.output) {
+        let clean = raw_line.trim_end_matches('\r');
+        let line = ansi_escape_line(clean);
+        push_owned_lines(
+            &word_wrap_line(&line, wrap_opts.clone()),
+            &mut wrapped_output,
+        );
+    }
+    if wrapped_output.is_empty() {
+        wrapped_output.push(Line::from(""));
+    }
+    lines.extend(prefix_lines(wrapped_output, indent_initial, indent_subseq));
+    lines
+}
+
+fn format_cwd_for_display(cwd: &Path, root: &Path) -> Option<String> {
+    if cwd == root {
+        return None;
+    }
+    if let Ok(relative) = cwd.strip_prefix(root) {
+        let rel = relative.to_string_lossy();
+        if rel.is_empty() {
+            return None;
+        }
+        return Some(rel.trim_start_matches('/').to_string());
+    }
+    if let Some(home_rel) = relativize_to_home(cwd) {
+        let rel = home_rel.to_string_lossy();
+        return Some(format!("~{rel}"));
+    }
+    Some(cwd.to_string_lossy().to_string())
+}
+
+fn split_output_segments(output: &str) -> Vec<&str> {
+    if output.is_empty() {
+        return Vec::new();
+    }
+    let mut parts: Vec<&str> = output.split('\n').collect();
+    if let Some(last) = parts.last()
+        && last.is_empty()
+    {
+        parts.pop();
+    }
+    parts
+}
+
 fn render_offset_content(
     area: Rect,
     buf: &mut Buffer,
@@ -581,8 +917,10 @@ mod tests {
     use super::*;
     use codex_core::protocol::ReviewDecision;
     use insta::assert_snapshot;
+    use std::cell::RefCell;
     use std::collections::HashMap;
     use std::path::PathBuf;
+    use std::rc::Rc;
     use std::sync::Arc;
     use std::time::Duration;
 
@@ -590,6 +928,7 @@ mod tests {
     use crate::history_cell;
     use crate::history_cell::HistoryCell;
     use crate::history_cell::new_patch_event;
+    use crate::live_exec::LiveExecState;
     use codex_core::protocol::FileChange;
     use codex_protocol::parse_command::ParsedCommand;
     use ratatui::Terminal;
@@ -665,6 +1004,45 @@ mod tests {
         assert_snapshot!(term.backend());
     }
 
+    #[test]
+    fn live_exec_overlay_empty_state_renders_hint() {
+        let state = Rc::new(RefCell::new(LiveExecState::new(PathBuf::from("/work"))));
+        let mut overlay = LiveExecOverlay::new(state);
+        overlay.on_open();
+        let mut term = Terminal::new(TestBackend::new(50, 8)).expect("term");
+        term.draw(|f| overlay.render(f.area(), f.buffer_mut()))
+            .expect("draw");
+        let rendered = buffer_to_text(term.backend().buffer(), Rect::new(0, 0, 50, 8));
+        assert!(
+            rendered.contains("No active commands"),
+            "expected empty overlay hint, got:\n{rendered}"
+        );
+    }
+
+    #[test]
+    fn live_exec_overlay_stream_includes_output() {
+        let state = Rc::new(RefCell::new(LiveExecState::new(PathBuf::from("/work"))));
+        {
+            let mut s = state.borrow_mut();
+            s.begin(
+                "c1".to_string(),
+                vec!["bash".into(), "-lc".into(), "cat".into()],
+                PathBuf::from("/work"),
+            );
+            s.append_chunk("c1", "hello\nworld");
+        }
+        let mut overlay = LiveExecOverlay::new(state);
+        overlay.on_open();
+        let mut term = Terminal::new(TestBackend::new(60, 10)).expect("term");
+        term.draw(|f| overlay.render(f.area(), f.buffer_mut()))
+            .expect("draw");
+        let rendered = buffer_to_text(term.backend().buffer(), Rect::new(0, 0, 60, 10));
+        assert!(
+            rendered.contains("hello") && rendered.contains("world"),
+            "expected streamed output, got:\n{rendered}"
+        );
+    }
+
     fn buffer_to_text(buf: &Buffer, area: Rect) -> String {
         let mut out = String::new();
         for y in area.y..area.bottom() {
@@ -697,7 +1075,8 @@ mod tests {
                 content: "hello\nworld\n".to_string(),
             },
         );
-        let approval_cell: Arc<dyn HistoryCell> = Arc::new(new_patch_event(approval_changes, &cwd));
+        let approval_cell: Arc<dyn HistoryCell> =
+            Arc::new(new_patch_event(approval_changes, None, &cwd));
         cells.push(approval_cell);
 
         let mut apply_changes = HashMap::new();
@@ -707,7 +1086,8 @@ mod tests {
                 content: "hello\nworld\n".to_string(),
             },
         );
-        let apply_begin_cell: Arc<dyn HistoryCell> = Arc::new(new_patch_event(apply_changes, &cwd));
+        let apply_begin_cell: Arc<dyn HistoryCell> =
+            Arc::new(new_patch_event(apply_changes, None, &cwd));
         cells.push(apply_begin_cell);
 
         let apply_end_cell: Arc<dyn HistoryCell> =
@@ -724,8 +1104,7 @@ mod tests {
             "exec-1",
             CommandOutput {
                 exit_code: 0,
-                stdout: "src\nREADME.md\n".into(),
-                stderr: String::new(),
+                aggregated_output: "src\nREADME.md\n".into(),
                 formatted_output: "src\nREADME.md\n".into(),
             },
             Duration::from_millis(420),

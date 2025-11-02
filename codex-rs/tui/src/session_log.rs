@@ -164,6 +164,49 @@ pub(crate) fn log_inbound_app_event(event: &AppEvent) {
             });
             LOGGER.write_json_line(value);
         }
+        AppEvent::LiveExecCommandBegin {
+            call_id,
+            command,
+            cwd,
+            ..
+        } => {
+            let value = json!({
+                "ts": now_ts(),
+                "dir": "to_tui",
+                "kind": "live_exec_begin",
+                "call_id": call_id,
+                "argv": command,
+                "cwd": cwd,
+            });
+            LOGGER.write_json_line(value);
+        }
+        AppEvent::LiveExecOutputChunk { call_id, chunk } => {
+            let value = json!({
+                "ts": now_ts(),
+                "dir": "to_tui",
+                "kind": "live_exec_chunk",
+                "call_id": call_id,
+                "len": chunk.len(),
+            });
+            LOGGER.write_json_line(value);
+        }
+        AppEvent::LiveExecCommandFinished {
+            call_id,
+            exit_code,
+            duration,
+            aggregated_output,
+        } => {
+            let value = json!({
+                "ts": now_ts(),
+                "dir": "to_tui",
+                "kind": "live_exec_end",
+                "call_id": call_id,
+                "exit_code": exit_code,
+                "duration_ms": duration.as_millis(),
+                "output_len": aggregated_output.len(),
+            });
+            LOGGER.write_json_line(value);
+        }
         // Noise or control flow – record variant only
         other => {
             let value = json!({

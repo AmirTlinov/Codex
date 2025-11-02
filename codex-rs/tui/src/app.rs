@@ -1,4 +1,6 @@
-use crate::UpdateAction;
+use crate::agents_context_manager::AgentsContextManagerConfig;
+use crate::agents_context_manager::AgentsContextManagerOutcome;
+use crate::agents_context_manager::run_agents_context_manager;
 use crate::app_backtrack::BacktrackState;
 use crate::app_event::AppEvent;
 use crate::app_event_sender::AppEventSender;
@@ -7,28 +9,21 @@ use crate::chatwidget::ChatWidget;
 use crate::diff_render::DiffSummary;
 use crate::exec_command::strip_bash_lc_and_escape;
 use crate::file_search::FileSearchManager;
+use crate::format_token_count;
 use crate::history_cell::HistoryCell;
-use crate::mcp::McpManagerEntry;
-use crate::mcp::McpManagerState;
-use crate::mcp::McpWizardDraft;
+use crate::live_exec::LiveExecState;
 use crate::pager_overlay::Overlay;
-use crate::process_manager::ProcessManagerEntry;
-use crate::process_manager::entry_and_data_from_output;
 use crate::render::highlight::highlight_bash_to_lines;
 use crate::resume_picker::ResumeSelection;
 use crate::tui;
 use crate::tui::TuiEvent;
+use crate::updates::UpdateAction;
 use codex_ansi_escape::ansi_escape_line;
 use codex_core::AuthManager;
-use codex_core::CodexConversation;
 use codex_core::ConversationManager;
-use codex_core::UnifiedExecError;
-use codex_core::UnifiedExecOutputWindow;
 use codex_core::config::Config;
 use codex_core::config::persist_model_selection;
-use codex_core::config_types::McpServerConfig;
-use codex_core::mcp::registry::McpRegistry;
-use codex_core::mcp::templates::TemplateCatalog;
+use codex_core::config::set_hide_full_access_warning;
 use codex_core::model_family::find_family_for_model;
 use codex_core::protocol::SessionSource;
 use codex_core::protocol::TokenUsage;
@@ -36,14 +31,15 @@ use codex_core::protocol_config_types::ReasoningEffort as ReasoningEffortConfig;
 use codex_protocol::ConversationId;
 use color_eyre::eyre::Result;
 use color_eyre::eyre::WrapErr;
-use color_eyre::eyre::eyre;
 use crossterm::event::KeyCode;
 use crossterm::event::KeyEvent;
 use crossterm::event::KeyEventKind;
 use ratatui::style::Stylize;
 use ratatui::text::Line;
-use std::collections::BTreeMap;
+use std::cell::RefCell;
+use std::collections::HashSet;
 use std::path::PathBuf;
+use std::rc::Rc;
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering;
@@ -51,8 +47,9 @@ use std::thread;
 use std::time::Duration;
 use tokio::select;
 use tokio::sync::mpsc::unbounded_channel;
-// use uuid::Uuid;
-use tracing::warn;
+
+#[cfg(not(debug_assertions))]
+use crate::history_cell::UpdateAvailableHistoryCell;
 
 #[derive(Debug, Clone)]
 pub struct AppExitInfo {
@@ -75,10 +72,12 @@ pub(crate) struct App {
 
     pub(crate) transcript_cells: Vec<Arc<dyn HistoryCell>>,
 
+    pub(crate) live_exec: Rc<RefCell<LiveExecState>>,
+
     // Pager overlay state (Transcript or Static like Diff)
     pub(crate) overlay: Option<Overlay>,
     pub(crate) deferred_history_lines: Vec<Line<'static>>,
-    pub(crate) has_emitted_history_lines: bool,
+    has_emitted_history_lines: bool,
 
     pub(crate) enhanced_keys_supported: bool,
 
@@ -87,15 +86,13 @@ pub(crate) struct App {
 
     // Esc-backtracking state grouped
     pub(crate) backtrack: crate::app_backtrack::BacktrackState,
-
+    pub(crate) feedback: codex_feedback::CodexFeedback,
     /// Set when the user confirms an update; propagated on exit.
     pub(crate) pending_update_action: Option<UpdateAction>,
-
-    /// Cached unified exec sessions for reuse when opening the manager.
-    latest_process_manager_entries: Vec<ProcessManagerEntry>,
 }
 
 impl App {
+    #[allow(clippy::too_many_arguments)]
     pub async fn run(
         tui: &mut tui::Tui,
         auth_manager: Arc<AuthManager>,
@@ -104,6 +101,7 @@ impl App {
         initial_prompt: Option<String>,
         initial_images: Vec<PathBuf>,
         resume_selection: ResumeSelection,
+        feedback: codex_feedback::CodexFeedback,
     ) -> Result<AppExitInfo> {
         use tokio_stream::StreamExt;
         let (app_event_tx, mut app_event_rx) = unbounded_channel();
@@ -126,6 +124,7 @@ impl App {
                     initial_images: initial_images.clone(),
                     enhanced_keys_supported,
                     auth_manager: auth_manager.clone(),
+                    feedback: feedback.clone(),
                 };
                 ChatWidget::new(init, conversation_manager.clone())
             }
@@ -148,6 +147,7 @@ impl App {
                     initial_images: initial_images.clone(),
                     enhanced_keys_supported,
                     auth_manager: auth_manager.clone(),
+                    feedback: feedback.clone(),
                 };
                 ChatWidget::new_from_existing(
                     init,
@@ -158,6 +158,9 @@ impl App {
         };
 
         let file_search = FileSearchManager::new(config.cwd.clone(), app_event_tx.clone());
+        let live_exec_root = config.cwd.clone();
+        #[cfg(not(debug_assertions))]
+        let upgrade_version = crate::updates::get_upgrade_version(&config);
 
         let mut app = Self {
             server: conversation_manager,
@@ -167,6 +170,7 @@ impl App {
             config,
             active_profile,
             file_search,
+            live_exec: Rc::new(RefCell::new(LiveExecState::new(live_exec_root))),
             enhanced_keys_supported,
             transcript_cells: Vec::new(),
             overlay: None,
@@ -174,9 +178,21 @@ impl App {
             has_emitted_history_lines: false,
             commit_anim_running: Arc::new(AtomicBool::new(false)),
             backtrack: BacktrackState::default(),
+            feedback: feedback.clone(),
             pending_update_action: None,
-            latest_process_manager_entries: Vec::new(),
         };
+
+        #[cfg(not(debug_assertions))]
+        if let Some(latest_version) = upgrade_version {
+            app.handle_event(
+                tui,
+                AppEvent::InsertHistoryCell(Box::new(UpdateAvailableHistoryCell::new(
+                    latest_version,
+                    crate::updates::get_update_action(),
+                ))),
+            )
+            .await?;
+        }
 
         let tui_events = tui.event_stream();
         tokio::pin!(tui_events);
@@ -253,6 +269,7 @@ impl App {
                     initial_images: Vec::new(),
                     enhanced_keys_supported: self.enhanced_keys_supported,
                     auth_manager: self.auth_manager.clone(),
+                    feedback: self.feedback.clone(),
                 };
                 self.chat_widget = ChatWidget::new(init, self.server.clone());
                 tui.frame_requester().schedule_frame();
@@ -281,6 +298,53 @@ impl App {
                     } else {
                         tui.insert_history_lines(display);
                     }
+                }
+            }
+            AppEvent::LiveExecCommandBegin {
+                call_id,
+                command,
+                cwd,
+            } => {
+                {
+                    let mut state = self.live_exec.borrow_mut();
+                    state.begin(call_id, command, cwd);
+                }
+                if let Some(overlay) = &mut self.overlay {
+                    overlay.on_live_exec_state_updated();
+                }
+                if matches!(self.overlay, Some(Overlay::LiveExec(_))) {
+                    tui.frame_requester().schedule_frame();
+                }
+            }
+            AppEvent::LiveExecOutputChunk { call_id, chunk } => {
+                let updated = {
+                    let mut state = self.live_exec.borrow_mut();
+                    state.append_chunk(&call_id, &chunk)
+                };
+                if updated {
+                    if let Some(overlay) = &mut self.overlay {
+                        overlay.on_live_exec_state_updated();
+                    }
+                    if matches!(self.overlay, Some(Overlay::LiveExec(_))) {
+                        tui.frame_requester().schedule_frame();
+                    }
+                }
+            }
+            AppEvent::LiveExecCommandFinished {
+                call_id,
+                exit_code,
+                duration,
+                aggregated_output,
+            } => {
+                {
+                    let mut state = self.live_exec.borrow_mut();
+                    state.finish(&call_id, exit_code, duration, aggregated_output);
+                }
+                if let Some(overlay) = &mut self.overlay {
+                    overlay.on_live_exec_state_updated();
+                }
+                if matches!(self.overlay, Some(Overlay::LiveExec(_))) {
+                    tui.frame_requester().schedule_frame();
                 }
             }
             AppEvent::StartCommitAnimation => {
@@ -313,75 +377,6 @@ impl App {
             }
             AppEvent::ExitRequest => {
                 return Ok(false);
-            }
-            AppEvent::OpenMcpManager => {
-                self.open_mcp_manager()?;
-            }
-            AppEvent::OpenProcessManager => {
-                self.open_process_manager().await?;
-            }
-            AppEvent::OpenUnifiedExecOutput { session_id } => {
-                self.open_unified_exec_output(session_id).await?;
-            }
-            AppEvent::OpenUnifiedExecInputPrompt { session_id } => {
-                self.chat_widget.open_unified_exec_input_prompt(session_id);
-            }
-            AppEvent::SendUnifiedExecInput { session_id, input } => {
-                self.send_unified_exec_input(session_id, input).await?;
-            }
-            AppEvent::KillUnifiedExecSession { session_id } => {
-                self.kill_unified_exec_session(session_id).await?;
-            }
-            AppEvent::RemoveUnifiedExecSession { session_id } => {
-                self.remove_unified_exec_session(session_id).await?;
-            }
-            AppEvent::RefreshUnifiedExecOutput { session_id } => {
-                self.refresh_unified_exec_output(session_id).await?;
-            }
-            AppEvent::LoadUnifiedExecOutputWindow { session_id, window } => {
-                self.load_unified_exec_output_window(session_id, window)
-                    .await?;
-            }
-            AppEvent::OpenUnifiedExecExportPrompt { session_id } => {
-                self.chat_widget.open_unified_exec_export_prompt(session_id);
-            }
-            AppEvent::ExportUnifiedExecLog {
-                session_id,
-                destination,
-            } => {
-                self.export_unified_exec_log(session_id, destination)
-                    .await?;
-            }
-            AppEvent::UpdateProcessManagerSessions { sessions } => {
-                self.latest_process_manager_entries = sessions
-                    .into_iter()
-                    .map(ProcessManagerEntry::from_state)
-                    .collect();
-                self.chat_widget
-                    .update_process_manager(self.latest_process_manager_entries.clone());
-            }
-            AppEvent::RefreshProcessOverview => {
-                self.chat_widget
-                    .refresh_process_overview(&self.latest_process_manager_entries);
-            }
-            AppEvent::OpenMcpWizard {
-                template_id,
-                draft,
-                existing_name,
-            } => {
-                self.open_mcp_wizard(template_id, draft, existing_name)?;
-            }
-            AppEvent::ApplyMcpWizard {
-                draft,
-                existing_name,
-            } => {
-                self.apply_mcp_wizard(draft, existing_name)?;
-            }
-            AppEvent::ReloadMcpServers => {
-                self.reload_mcp_servers()?;
-            }
-            AppEvent::RemoveMcpServer { name } => {
-                self.remove_mcp_server(name)?;
             }
             AppEvent::CodexOp(op) => self.chat_widget.submit_op(op),
             AppEvent::DiffResult(text) => {
@@ -418,8 +413,119 @@ impl App {
                     self.config.model_family = family;
                 }
             }
-            AppEvent::OpenReasoningPopup { model, presets } => {
-                self.chat_widget.open_reasoning_popup(model, presets);
+            AppEvent::OpenReasoningPopup { model } => {
+                self.chat_widget.open_reasoning_popup(model);
+            }
+            AppEvent::OpenFullAccessConfirmation { preset } => {
+                self.chat_widget.open_full_access_confirmation(preset);
+            }
+            AppEvent::OpenFeedbackNote {
+                category,
+                include_logs,
+            } => {
+                self.chat_widget.open_feedback_note(category, include_logs);
+            }
+            AppEvent::OpenFeedbackConsent { category } => {
+                self.chat_widget.open_feedback_consent(category);
+            }
+            AppEvent::OpenAgentsContextManager => {
+                let all_entries = match self.config.load_all_agents_context_entries() {
+                    Ok(entries) => entries,
+                    Err(err) => {
+                        tracing::error!("failed to load agents context entries: {err}");
+                        self.chat_widget.add_error_message(format!(
+                            "Failed to load agents context entries: {err}"
+                        ));
+                        return Ok(true);
+                    }
+                };
+                let enabled_paths: HashSet<String> = self
+                    .config
+                    .agents_context_entries
+                    .iter()
+                    .map(|entry| entry.relative_path.clone())
+                    .collect();
+                let hidden_paths = enabled_paths.clone();
+
+                let manager_config = AgentsContextManagerConfig {
+                    tools: self.config.agents_tools.clone(),
+                    warning_tokens: self.config.agents_context_warning_tokens,
+                    model_context_window: self.config.model_context_window,
+                    global_agents_home: self.config.agents_home.clone(),
+                    project_agents_home: self.config.project_agents_home.clone(),
+                    cwd: self.config.cwd.clone(),
+                    enabled_paths,
+                    hidden_paths,
+                    include_mode: self.chat_widget.agents_context_include_mode(),
+                    existing_include: &self.config.agents_context_include,
+                    existing_exclude: &self.config.agents_context_exclude,
+                };
+                match run_agents_context_manager(tui, all_entries, manager_config).await? {
+                    AgentsContextManagerOutcome::Cancelled => {}
+                    AgentsContextManagerOutcome::Applied { include, exclude } => {
+                        match self.config.refresh_agents_context_entries(include, exclude) {
+                            Ok(()) => {
+                                self.chat_widget
+                                    .apply_agents_context_from_config(&self.config);
+                                let include_mode = !self.config.agents_context_include.is_empty();
+                                self.chat_widget
+                                    .set_agents_context_include_mode(include_mode);
+                                let count = self.config.agents_context_entries.len();
+                                let tokens = self.config.agents_context_prompt_tokens;
+                                if count > 0 {
+                                    self.chat_widget.set_pending_context_prompt(
+                                        self.config.agents_context_prompt.clone(),
+                                    );
+                                    let message = if count == 1 {
+                                        format!(
+                                            "Attached 1 agents context file (~{} tokens) to your next message.",
+                                            format_token_count(tokens)
+                                        )
+                                    } else {
+                                        format!(
+                                            "Attached {count} agents context files (~{} tokens) to your next message.",
+                                            format_token_count(tokens)
+                                        )
+                                    };
+                                    self.chat_widget.add_info_message(
+                                        message,
+                                        Some(
+                                            "Send your message to include this context."
+                                                .to_string(),
+                                        ),
+                                    );
+                                } else {
+                                    self.chat_widget.set_pending_context_prompt(None);
+                                    self.chat_widget
+                                        .set_agents_context_include_mode(include_mode);
+                                    self.chat_widget.add_info_message(
+                                        "Agents context disabled for upcoming messages."
+                                            .to_string(),
+                                        Some("Use `/context` to attach context again.".to_string()),
+                                    );
+                                }
+                            }
+                            Err(err) => {
+                                tracing::error!("failed to apply agents context filters: {err}");
+                                self.chat_widget.add_error_message(format!(
+                                    "Failed to apply agents context filters: {err}"
+                                ));
+                            }
+                        }
+                    }
+                }
+            }
+            AppEvent::ClearAgentsContextSelection => {
+                let include_mode = self.chat_widget.agents_context_include_mode();
+                crate::disable_agents_context_for_run(&mut self.config);
+                self.chat_widget
+                    .apply_agents_context_from_config(&self.config);
+                self.chat_widget
+                    .set_agents_context_include_mode(include_mode);
+                self.chat_widget.set_pending_context_prompt(None);
+            }
+            AppEvent::ShowWindowsAutoModeInstructions => {
+                self.chat_widget.open_windows_auto_mode_instructions();
             }
             AppEvent::PersistModelSelection { model, effort } => {
                 let profile = self.active_profile.as_deref();
@@ -466,6 +572,23 @@ impl App {
             AppEvent::UpdateSandboxPolicy(policy) => {
                 self.chat_widget.set_sandbox_policy(policy);
             }
+            AppEvent::UpdateFullAccessWarningAcknowledged(ack) => {
+                self.chat_widget.set_full_access_warning_acknowledged(ack);
+            }
+            AppEvent::PersistFullAccessWarningAcknowledged => {
+                if let Err(err) = set_hide_full_access_warning(&self.config.codex_home, true) {
+                    tracing::error!(
+                        error = %err,
+                        "failed to persist full access warning acknowledgement"
+                    );
+                    self.chat_widget.add_error_message(format!(
+                        "Failed to save full access confirmation preference: {err}"
+                    ));
+                }
+            }
+            AppEvent::OpenApprovalsPopup => {
+                self.chat_widget.open_approvals_popup();
+            }
             AppEvent::OpenReviewBranchPicker(cwd) => {
                 self.chat_widget.show_review_branch_picker(&cwd).await;
             }
@@ -501,359 +624,6 @@ impl App {
     pub(crate) fn token_usage(&self) -> codex_core::protocol::TokenUsage {
         self.chat_widget.token_usage()
     }
-    fn open_mcp_manager(&mut self) -> Result<()> {
-        if !self.config.experimental_mcp_overhaul {
-            self.chat_widget.show_mcp_history_summary();
-            return Ok(());
-        }
-
-        let catalog = self.load_template_catalog();
-        let registry = McpRegistry::new(&self.config, catalog);
-        let state = McpManagerState::from_registry(&registry);
-        let entries: Vec<McpManagerEntry> = state
-            .servers
-            .into_iter()
-            .map(|snapshot| {
-                let health = registry.health_report(&snapshot.name);
-                McpManagerEntry { snapshot, health }
-            })
-            .collect();
-
-        self.chat_widget
-            .show_mcp_manager(entries, state.template_count);
-        Ok(())
-    }
-
-    fn open_mcp_wizard(
-        &mut self,
-        template_id: Option<String>,
-        draft: Option<McpWizardDraft>,
-        existing_name: Option<String>,
-    ) -> Result<()> {
-        if !self.config.experimental_mcp_overhaul {
-            self.chat_widget.show_mcp_history_summary();
-            return Ok(());
-        }
-
-        let catalog = self.load_template_catalog();
-        let mut draft = draft.unwrap_or_default();
-        if draft.template_id.is_none()
-            && let Some(id) = template_id
-            && let Some(cfg) = catalog.instantiate(&id)
-        {
-            draft.apply_template_config(&cfg);
-            draft.template_id = Some(id);
-        }
-        if draft.name.is_empty()
-            && existing_name.is_none()
-            && let Some(id) = draft.template_id.clone()
-        {
-            draft.name = sanitize_name(&id);
-        }
-
-        self.chat_widget
-            .show_mcp_wizard(catalog, Some(draft), existing_name);
-        Ok(())
-    }
-
-    async fn open_process_manager(&mut self) -> Result<()> {
-        if let Some(entries) = self.load_unified_exec_entries().await? {
-            self.latest_process_manager_entries = entries.clone();
-            self.chat_widget.show_process_manager(entries);
-        } else if !self.latest_process_manager_entries.is_empty() {
-            self.chat_widget
-                .show_process_manager(self.latest_process_manager_entries.clone());
-        }
-        Ok(())
-    }
-
-    async fn refresh_process_manager(&mut self) -> Result<()> {
-        self.open_process_manager().await
-    }
-
-    async fn load_unified_exec_entries(&mut self) -> Result<Option<Vec<ProcessManagerEntry>>> {
-        let conversation = match self.conversation_for_unified_exec().await? {
-            Some(conv) => conv,
-            None => return Ok(None),
-        };
-
-        let snapshots = conversation.unified_exec_sessions().await;
-        let entries = snapshots
-            .into_iter()
-            .map(ProcessManagerEntry::from_snapshot)
-            .collect();
-        Ok(Some(entries))
-    }
-
-    fn upsert_process_entry(&mut self, entry: ProcessManagerEntry) {
-        if let Some(existing) = self
-            .latest_process_manager_entries
-            .iter_mut()
-            .find(|existing| existing.session_id == entry.session_id)
-        {
-            *existing = entry;
-        } else {
-            self.latest_process_manager_entries.push(entry);
-        }
-    }
-
-    async fn open_unified_exec_output(&mut self, session_id: i32) -> Result<()> {
-        let conversation = match self.conversation_for_unified_exec().await? {
-            Some(conv) => conv,
-            None => return Ok(()),
-        };
-
-        let Some(output) = conversation.unified_exec_output(session_id).await else {
-            self.chat_widget
-                .add_info_message(format!("Session {session_id} is no longer tracked."), None);
-            return Ok(());
-        };
-
-        let (entry, data) = entry_and_data_from_output(output);
-        self.upsert_process_entry(entry.clone());
-        self.chat_widget
-            .update_process_manager(self.latest_process_manager_entries.clone());
-        self.chat_widget.update_unified_exec_output(entry, data);
-        Ok(())
-    }
-
-    async fn refresh_unified_exec_output(&mut self, session_id: i32) -> Result<()> {
-        self.open_unified_exec_output(session_id).await
-    }
-
-    async fn load_unified_exec_output_window(
-        &mut self,
-        session_id: i32,
-        window: UnifiedExecOutputWindow,
-    ) -> Result<()> {
-        let conversation = match self.conversation_for_unified_exec().await? {
-            Some(conv) => conv,
-            None => return Ok(()),
-        };
-
-        let Some(output) = conversation
-            .unified_exec_output_window(session_id, window)
-            .await
-        else {
-            self.chat_widget
-                .add_info_message(format!("Session {session_id} is no longer tracked."), None);
-            return Ok(());
-        };
-
-        let (entry, data) = entry_and_data_from_output(output);
-        self.upsert_process_entry(entry.clone());
-        self.chat_widget
-            .update_process_manager(self.latest_process_manager_entries.clone());
-        self.chat_widget.update_unified_exec_output(entry, data);
-        Ok(())
-    }
-
-    async fn export_unified_exec_log(
-        &mut self,
-        session_id: i32,
-        destination: PathBuf,
-    ) -> Result<()> {
-        let conversation = match self.conversation_for_unified_exec().await? {
-            Some(conv) => conv,
-            None => return Ok(()),
-        };
-
-        match conversation
-            .export_unified_exec_log(session_id, destination.clone())
-            .await
-        {
-            Ok(()) => self.chat_widget.add_info_message(
-                format!(
-                    "Exported session {session_id} log to {}",
-                    destination.display()
-                ),
-                None,
-            ),
-            Err(err) => self
-                .chat_widget
-                .add_error_message(format!("Failed to export session {session_id} log: {err}")),
-        }
-        Ok(())
-    }
-
-    async fn conversation_for_unified_exec(&mut self) -> Result<Option<Arc<CodexConversation>>> {
-        let Some(conversation_id) = self.chat_widget.conversation_id() else {
-            self.chat_widget.add_info_message(
-                "Unified exec sessions become available after the first turn.".to_string(),
-                None,
-            );
-            return Ok(None);
-        };
-
-        match self.server.get_conversation(conversation_id).await {
-            Ok(conv) => Ok(Some(conv)),
-            Err(err) => {
-                self.chat_widget
-                    .add_error_message(format!("Failed to access active conversation: {err}"));
-                Ok(None)
-            }
-        }
-    }
-
-    async fn send_unified_exec_input(&mut self, session_id: i32, input: String) -> Result<()> {
-        let conversation = match self.conversation_for_unified_exec().await? {
-            Some(conv) => conv,
-            None => return Ok(()),
-        };
-
-        let mut chunk = input;
-        if !chunk.ends_with('\n') {
-            chunk.push('\n');
-        }
-        let chunks = vec![chunk];
-        match conversation
-            .run_unified_exec(Some(session_id), &chunks, None)
-            .await
-        {
-            Ok(_) => {}
-            Err(UnifiedExecError::UnknownSessionId { .. }) => {
-                self.chat_widget
-                    .add_info_message(format!("Session {session_id} is no longer active."), None);
-            }
-            Err(err) => {
-                self.chat_widget
-                    .add_error_message(format!("Failed to send input: {err}"));
-            }
-        }
-
-        self.refresh_process_manager().await?;
-        Ok(())
-    }
-
-    async fn kill_unified_exec_session(&mut self, session_id: i32) -> Result<()> {
-        let conversation = match self.conversation_for_unified_exec().await? {
-            Some(conv) => conv,
-            None => return Ok(()),
-        };
-
-        if !conversation.kill_unified_exec_session(session_id).await {
-            self.chat_widget
-                .add_info_message(format!("Session {session_id} is no longer running."), None);
-        }
-
-        self.refresh_process_manager().await?;
-        Ok(())
-    }
-
-    async fn remove_unified_exec_session(&mut self, session_id: i32) -> Result<()> {
-        let conversation = match self.conversation_for_unified_exec().await? {
-            Some(conv) => conv,
-            None => return Ok(()),
-        };
-
-        if !conversation.remove_unified_exec_session(session_id).await {
-            self.chat_widget
-                .add_info_message(format!("Session {session_id} is no longer tracked."), None);
-        }
-
-        self.refresh_process_manager().await?;
-        Ok(())
-    }
-
-    fn apply_mcp_wizard(
-        &mut self,
-        draft: McpWizardDraft,
-        existing_name: Option<String>,
-    ) -> Result<()> {
-        if !self.config.experimental_mcp_overhaul {
-            self.chat_widget.show_mcp_history_summary();
-            return Ok(());
-        }
-
-        let catalog = self.load_template_catalog();
-        let retry_draft = draft.clone();
-        let server_config = match draft.build_server_config(&catalog) {
-            Ok(cfg) => cfg,
-            Err(err) => {
-                self.chat_widget
-                    .add_error_message(format!("Failed to validate MCP server: {err}"));
-                self.chat_widget
-                    .show_mcp_wizard(catalog, Some(retry_draft), existing_name);
-                return Ok(());
-            }
-        };
-
-        let registry = McpRegistry::new(&self.config, catalog);
-        registry
-            .upsert_server_with_existing(
-                existing_name.as_deref(),
-                &draft.name,
-                server_config.clone(),
-            )
-            .map_err(|err| eyre!(err))?;
-
-        if let Some(ref old_name) = existing_name
-            && old_name != &draft.name
-        {
-            self.config.mcp_servers.remove(old_name);
-        }
-        self.config
-            .mcp_servers
-            .insert(draft.name.clone(), server_config);
-        self.chat_widget
-            .set_mcp_servers(self.current_mcp_servers_btree());
-        self.chat_widget
-            .add_info_message(format!("Saved MCP server '{}'", draft.name), None);
-        self.open_mcp_manager()?;
-        Ok(())
-    }
-
-    fn reload_mcp_servers(&mut self) -> Result<()> {
-        if !self.config.experimental_mcp_overhaul {
-            self.chat_widget.show_mcp_history_summary();
-            return Ok(());
-        }
-
-        let catalog = self.load_template_catalog();
-        let registry = McpRegistry::new(&self.config, catalog);
-        let servers = registry.reload_servers().map_err(|err| eyre!(err))?;
-        self.config.mcp_servers = servers.clone().into_iter().collect();
-        self.chat_widget.set_mcp_servers(servers);
-        self.open_mcp_manager()?;
-        Ok(())
-    }
-
-    fn remove_mcp_server(&mut self, name: String) -> Result<()> {
-        if !self.config.experimental_mcp_overhaul {
-            self.chat_widget.show_mcp_history_summary();
-            return Ok(());
-        }
-
-        let catalog = self.load_template_catalog();
-        let registry = McpRegistry::new(&self.config, catalog);
-        if registry.remove_server(&name).map_err(|err| eyre!(err))? {
-            self.config.mcp_servers.remove(&name);
-            self.chat_widget
-                .set_mcp_servers(self.current_mcp_servers_btree());
-            self.chat_widget
-                .add_info_message(format!("Removed MCP server '{name}'."), None);
-        } else {
-            self.chat_widget
-                .add_info_message(format!("No MCP server named '{name}' found."), None);
-        }
-        self.open_mcp_manager()?;
-        Ok(())
-    }
-
-    fn load_template_catalog(&self) -> TemplateCatalog {
-        TemplateCatalog::load_default().unwrap_or_else(|err| {
-            warn!(error = %err, "Failed to load MCP templates");
-            TemplateCatalog::empty()
-        })
-    }
-
-    fn current_mcp_servers_btree(&self) -> BTreeMap<String, McpServerConfig> {
-        self.config
-            .mcp_servers
-            .iter()
-            .map(|(k, v)| (k.clone(), v.clone()))
-            .collect()
-    }
 
     fn on_update_reasoning_effort(&mut self, effort: Option<ReasoningEffortConfig>) {
         self.chat_widget.set_reasoning_effort(effort);
@@ -862,6 +632,23 @@ impl App {
 
     async fn handle_key_event(&mut self, tui: &mut tui::Tui, key_event: KeyEvent) {
         match key_event {
+            KeyEvent {
+                code: KeyCode::Char('r'),
+                modifiers: crossterm::event::KeyModifiers::CONTROL,
+                kind: KeyEventKind::Press,
+                ..
+            } => {
+                if matches!(self.overlay, Some(ref overlay) if overlay.is_live_exec()) {
+                    self.close_transcript_overlay(tui);
+                } else {
+                    let _ = tui.enter_alt_screen();
+                    self.overlay = Some(Overlay::new_live_exec(self.live_exec.clone()));
+                    if let Some(overlay) = &mut self.overlay {
+                        overlay.on_live_exec_opened();
+                    }
+                    tui.frame_requester().schedule_frame();
+                }
+            }
             KeyEvent {
                 code: KeyCode::Char('t'),
                 modifiers: crossterm::event::KeyModifiers::CONTROL,
@@ -920,17 +707,6 @@ impl App {
         };
     }
 }
-fn sanitize_name(id: &str) -> String {
-    id.chars()
-        .map(|c| {
-            if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
-                c
-            } else {
-                '-'
-            }
-        })
-        .collect()
-}
 
 #[cfg(test)]
 mod tests {
@@ -964,6 +740,8 @@ mod tests {
             AuthManager::from_auth_for_testing(CodexAuth::from_api_key("Test API Key"));
         let file_search = FileSearchManager::new(config.cwd.clone(), app_event_tx.clone());
 
+        let live_exec_root = config.cwd.clone();
+
         App {
             server,
             app_event_tx,
@@ -972,6 +750,7 @@ mod tests {
             config,
             active_profile: None,
             file_search,
+            live_exec: Rc::new(RefCell::new(LiveExecState::new(live_exec_root))),
             transcript_cells: Vec::new(),
             overlay: None,
             deferred_history_lines: Vec::new(),
@@ -979,8 +758,8 @@ mod tests {
             enhanced_keys_supported: false,
             commit_anim_running: Arc::new(AtomicBool::new(false)),
             backtrack: BacktrackState::default(),
+            feedback: codex_feedback::CodexFeedback::new(),
             pending_update_action: None,
-            latest_process_manager_entries: Vec::new(),
         }
     }
 

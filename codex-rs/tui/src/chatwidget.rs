@@ -2,14 +2,11 @@ use std::collections::HashMap;
 use std::collections::VecDeque;
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::time::SystemTime;
 
 use codex_core::config::Config;
-use codex_core::config_types::McpServerConfig;
 use codex_core::config_types::Notifications;
 use codex_core::git_info::current_branch_name;
 use codex_core::git_info::local_git_branches;
-use codex_core::mcp::templates::TemplateCatalog;
 use codex_core::project_doc::DEFAULT_PROJECT_DOC_FILENAME;
 use codex_core::protocol::AgentMessageDeltaEvent;
 use codex_core::protocol::AgentMessageEvent;
@@ -26,8 +23,6 @@ use codex_core::protocol::ExecApprovalRequestEvent;
 use codex_core::protocol::ExecCommandBeginEvent;
 use codex_core::protocol::ExecCommandEndEvent;
 use codex_core::protocol::ExitedReviewModeEvent;
-use codex_core::protocol::InputItem;
-use codex_core::protocol::InputMessageKind;
 use codex_core::protocol::ListCustomPromptsResponseEvent;
 use codex_core::protocol::McpListToolsResponseEvent;
 use codex_core::protocol::McpToolCallBeginEvent;
@@ -42,13 +37,15 @@ use codex_core::protocol::TokenUsage;
 use codex_core::protocol::TokenUsageInfo;
 use codex_core::protocol::TurnAbortReason;
 use codex_core::protocol::TurnDiffEvent;
-use codex_core::protocol::UnifiedExecSessionsEvent;
+use codex_core::protocol::UndoCompletedEvent;
+use codex_core::protocol::UndoStartedEvent;
 use codex_core::protocol::UserMessageEvent;
 use codex_core::protocol::ViewImageToolCallEvent;
 use codex_core::protocol::WebSearchBeginEvent;
 use codex_core::protocol::WebSearchEndEvent;
 use codex_protocol::ConversationId;
 use codex_protocol::parse_command::ParsedCommand;
+use codex_protocol::user_input::UserInput;
 use crossterm::event::KeyCode;
 use crossterm::event::KeyEvent;
 use crossterm::event::KeyEventKind;
@@ -58,10 +55,13 @@ use ratatui::buffer::Buffer;
 use ratatui::layout::Constraint;
 use ratatui::layout::Layout;
 use ratatui::layout::Rect;
+use ratatui::style::Color;
 use ratatui::style::Stylize;
 use ratatui::text::Line;
+use ratatui::widgets::Paragraph;
 use ratatui::widgets::Widget;
 use ratatui::widgets::WidgetRef;
+use ratatui::widgets::Wrap;
 use tokio::sync::mpsc::UnboundedSender;
 use tracing::debug;
 
@@ -72,7 +72,6 @@ use crate::bottom_pane::BottomPane;
 use crate::bottom_pane::BottomPaneParams;
 use crate::bottom_pane::CancellationEvent;
 use crate::bottom_pane::InputResult;
-use crate::bottom_pane::ProcessOverview;
 use crate::bottom_pane::SelectionAction;
 use crate::bottom_pane::SelectionItem;
 use crate::bottom_pane::SelectionViewParams;
@@ -83,29 +82,19 @@ use crate::diff_render::display_path_for;
 use crate::exec_cell::CommandOutput;
 use crate::exec_cell::ExecCell;
 use crate::exec_cell::new_active_exec_command;
+use crate::format_percent;
 use crate::get_git_diff::get_git_diff;
 use crate::history_cell;
 use crate::history_cell::AgentMessageCell;
 use crate::history_cell::HistoryCell;
 use crate::history_cell::McpToolCallCell;
 use crate::markdown::append_markdown;
-use crate::mcp::McpManagerEntry;
-use crate::mcp::McpManagerInit;
-use crate::mcp::McpManagerView;
-use crate::mcp::McpWizardDraft;
-use crate::mcp::McpWizardInit;
-use crate::mcp::McpWizardView;
-use crate::process_manager::ProcessManagerEntry;
-use crate::process_manager::ProcessManagerInit;
-use crate::process_manager::ProcessManagerView;
-use crate::process_manager::ProcessOutputData;
-use crate::process_manager::ProcessOutputInit;
-use crate::process_manager::ProcessOutputView;
-use crate::process_manager::ProcessStatus;
+#[cfg(target_os = "windows")]
+use crate::onboarding::WSL_INSTRUCTIONS;
 use crate::render::renderable::ColumnRenderable;
+use crate::render::renderable::Renderable;
 use crate::slash_command::SlashCommand;
 use crate::status::RateLimitSnapshotDisplay;
-use crate::status_indicator_widget::fmt_elapsed_compact;
 use crate::text_formatting::truncate_text;
 use crate::tui::FrameRequester;
 mod interrupts;
@@ -129,20 +118,14 @@ use codex_core::protocol::AskForApproval;
 use codex_core::protocol::SandboxPolicy;
 use codex_core::protocol_config_types::ReasoningEffort as ReasoningEffortConfig;
 use codex_file_search::FileMatch;
-use codex_git_tooling::CreateGhostCommitOptions;
-use codex_git_tooling::GhostCommit;
-use codex_git_tooling::GitToolingError;
-use codex_git_tooling::create_ghost_commit;
-use codex_git_tooling::restore_ghost_commit;
 use codex_protocol::plan_tool::UpdatePlanArgs;
 use strum::IntoEnumIterator;
-
-const MAX_TRACKED_GHOST_COMMITS: usize = 20;
 
 // Track information about an in-flight exec command.
 struct RunningCommand {
     command: Vec<String>,
     parsed_cmd: Vec<ParsedCommand>,
+    output: String,
 }
 
 const RATE_LIMIT_WARNING_THRESHOLDS: [f64; 3] = [75.0, 90.0, 95.0];
@@ -157,9 +140,9 @@ impl RateLimitWarningState {
     fn take_warnings(
         &mut self,
         secondary_used_percent: Option<f64>,
-        secondary_window_minutes: Option<u64>,
+        secondary_window_minutes: Option<i64>,
         primary_used_percent: Option<f64>,
-        primary_window_minutes: Option<u64>,
+        primary_window_minutes: Option<i64>,
     ) -> Vec<String> {
         let reached_secondary_cap =
             matches!(secondary_used_percent, Some(percent) if percent == 100.0);
@@ -210,12 +193,14 @@ impl RateLimitWarningState {
     }
 }
 
-pub(crate) fn get_limits_duration(windows_minutes: u64) -> String {
-    const MINUTES_PER_HOUR: u64 = 60;
-    const MINUTES_PER_DAY: u64 = 24 * MINUTES_PER_HOUR;
-    const MINUTES_PER_WEEK: u64 = 7 * MINUTES_PER_DAY;
-    const MINUTES_PER_MONTH: u64 = 30 * MINUTES_PER_DAY;
-    const ROUNDING_BIAS_MINUTES: u64 = 3;
+pub(crate) fn get_limits_duration(windows_minutes: i64) -> String {
+    const MINUTES_PER_HOUR: i64 = 60;
+    const MINUTES_PER_DAY: i64 = 24 * MINUTES_PER_HOUR;
+    const MINUTES_PER_WEEK: i64 = 7 * MINUTES_PER_DAY;
+    const MINUTES_PER_MONTH: i64 = 30 * MINUTES_PER_DAY;
+    const ROUNDING_BIAS_MINUTES: i64 = 3;
+
+    let windows_minutes = windows_minutes.max(0);
 
     if windows_minutes <= MINUTES_PER_DAY.saturating_add(ROUNDING_BIAS_MINUTES) {
         let adjusted = windows_minutes.saturating_add(ROUNDING_BIAS_MINUTES);
@@ -239,6 +224,7 @@ pub(crate) struct ChatWidgetInit {
     pub(crate) initial_images: Vec<PathBuf>,
     pub(crate) enhanced_keys_supported: bool,
     pub(crate) auth_manager: Arc<AuthManager>,
+    pub(crate) feedback: codex_feedback::CodexFeedback,
 }
 
 pub(crate) struct ChatWidget {
@@ -256,6 +242,7 @@ pub(crate) struct ChatWidget {
     // Stream lifecycle controller
     stream_controller: Option<StreamController>,
     running_commands: HashMap<String, RunningCommand>,
+    running_command_order: VecDeque<String>,
     task_complete_pending: bool,
     // Queue of interruptive UI events deferred during an active write cycle
     interrupts: InterruptManager,
@@ -263,6 +250,8 @@ pub(crate) struct ChatWidget {
     reasoning_buffer: String,
     // Accumulates full reasoning content for transcript-only recording
     full_reasoning_buffer: String,
+    // Baseline status header that reflects context usage.
+    base_status_header: String,
     // Current status header shown in the status indicator.
     current_status_header: String,
     // Previous status header to restore after a transient stream retry.
@@ -280,17 +269,18 @@ pub(crate) struct ChatWidget {
     pending_notification: Option<Notification>,
     // Simple review mode flag; used to adjust layout and banners.
     is_review_mode: bool,
-    // List of ghost commits corresponding to each turn.
-    ghost_snapshots: Vec<GhostCommit>,
-    ghost_snapshots_disabled: bool,
     // Whether to add a final message separator after the last message
     needs_final_message_separator: bool,
 
-    process_overview_hidden: bool,
-    process_overview_cache: Vec<ProcessManagerEntry>,
-    process_overview_auto_revealed: bool,
-
     last_rendered_width: std::cell::Cell<Option<usize>>,
+    // Feedback sink for /feedback
+    feedback: codex_feedback::CodexFeedback,
+    // Current session rollout path (if known)
+    current_rollout_path: Option<PathBuf>,
+    // Context block queued to attach to the next user message.
+    pending_context_prompt: Option<String>,
+    // Whether the agents context manager should start in include mode.
+    agents_context_include_mode: bool,
 }
 
 struct UserMessage {
@@ -316,16 +306,6 @@ fn create_initial_user_message(text: String, image_paths: Vec<PathBuf>) -> Optio
 }
 
 impl ChatWidget {
-    fn model_description_for(slug: &str) -> Option<&'static str> {
-        if slug.starts_with("gpt-5-codex") {
-            Some("Optimized for coding tasks with many tools.")
-        } else if slug.starts_with("gpt-5") {
-            Some("Broad world knowledge with strong general reasoning.")
-        } else {
-            None
-        }
-    }
-
     fn flush_answer_stream_with_separator(&mut self) {
         if let Some(mut controller) = self.stream_controller.take()
             && let Some(cell) = controller.finalize()
@@ -335,11 +315,93 @@ impl ChatWidget {
     }
 
     fn set_status_header(&mut self, header: String) {
-        if self.current_status_header == header {
-            return;
-        }
         self.current_status_header = header.clone();
         self.bottom_pane.update_status_header(header);
+    }
+
+    fn compose_base_status_header(&self) -> String {
+        let window = self
+            .token_info
+            .as_ref()
+            .and_then(|info| info.model_context_window)
+            .or(self.config.model_context_window)
+            .filter(|w| *w > 0);
+
+        let agents_tokens = self.config.agents_context_prompt_tokens as f64;
+        if let Some(window) = window {
+            let agents_pct = (agents_tokens / window as f64 * 100.0).clamp(0.0, 100.0);
+            let left_pct = (100.0 - agents_pct).clamp(0.0, 100.0);
+            let left = format_percent(left_pct);
+            format!("Working • {left} context left")
+        } else {
+            String::from("Working")
+        }
+    }
+
+    fn reset_base_status_header(&mut self) {
+        let base = self.compose_base_status_header();
+        self.base_status_header = base.clone();
+        self.set_status_header(base);
+        self.update_context_metrics();
+    }
+
+    fn recompute_base_status_header(&mut self) {
+        let base = self.compose_base_status_header();
+        let should_update = self.current_status_header == self.base_status_header;
+        self.base_status_header = base.clone();
+        if should_update {
+            self.set_status_header(base);
+        }
+        self.update_context_metrics();
+    }
+
+    fn context_window_capacity(&self) -> Option<i64> {
+        self.token_info
+            .as_ref()
+            .and_then(|info| info.model_context_window)
+            .or(self.config.model_context_window)
+            .filter(|value| *value > 0)
+    }
+
+    fn compute_agents_percent(&self, window: Option<i64>) -> Option<i64> {
+        let window = window?;
+        if window <= 0 {
+            return None;
+        }
+        let agents_tokens = self.config.agents_context_prompt_tokens as i64;
+        if agents_tokens == 0 {
+            return Some(0);
+        }
+        let percent = (agents_tokens as f64 / window as f64 * 100.0).round() as i64;
+        Some(percent.clamp(0, 100))
+    }
+
+    fn update_context_metrics(&mut self) {
+        let window = self.context_window_capacity();
+        let agents_tokens = self.config.agents_context_prompt_tokens;
+        let agents_percent = self.compute_agents_percent(window);
+
+        let left_percent = if let Some(info) = self.token_info.as_ref() {
+            window.map(|capacity| {
+                info.last_token_usage
+                    .percent_of_context_window_remaining(capacity)
+                    .clamp(0, 100)
+            })
+        } else if let Some(window) = window {
+            let agents_percent = agents_percent.unwrap_or_else(|| {
+                if window > 0 {
+                    (agents_tokens as f64 / window as f64 * 100.0).round() as i64
+                } else {
+                    0
+                }
+            });
+            Some((100 - agents_percent).clamp(0, 100))
+        } else {
+            Some(100)
+        };
+
+        self.bottom_pane
+            .set_context_metrics(left_percent, agents_percent, agents_tokens);
     }
 
     // --- Small event handlers ---
@@ -347,6 +409,7 @@ impl ChatWidget {
         self.bottom_pane
             .set_history_metadata(event.history_log_id, event.history_entry_count);
         self.conversation_id = Some(event.session_id);
+        self.current_rollout_path = Some(event.rollout_path.clone());
         let initial_messages = event.initial_messages.clone();
         let model_for_header = event.model.clone();
         self.session_header.set_model(&model_for_header);
@@ -366,6 +429,39 @@ impl ChatWidget {
         if !self.suppress_session_configured_redraw {
             self.request_redraw();
         }
+    }
+
+    pub(crate) fn open_feedback_note(
+        &mut self,
+        category: crate::app_event::FeedbackCategory,
+        include_logs: bool,
+    ) {
+        // Build a fresh snapshot at the time of opening the note overlay.
+        let snapshot = self.feedback.snapshot(self.conversation_id);
+        let rollout = if include_logs {
+            self.current_rollout_path.clone()
+        } else {
+            None
+        };
+        let view = crate::bottom_pane::FeedbackNoteView::new(
+            category,
+            snapshot,
+            rollout,
+            self.app_event_tx.clone(),
+            include_logs,
+        );
+        self.bottom_pane.show_view(Box::new(view));
+        self.request_redraw();
+    }
+
+    pub(crate) fn open_feedback_consent(&mut self, category: crate::app_event::FeedbackCategory) {
+        let params = crate::bottom_pane::feedback_upload_consent_params(
+            self.app_event_tx.clone(),
+            category,
+            self.current_rollout_path.clone(),
+        );
+        self.bottom_pane.show_selection_view(params);
+        self.request_redraw();
     }
 
     fn on_agent_message(&mut self, message: String) {
@@ -426,7 +522,8 @@ impl ChatWidget {
         self.bottom_pane.clear_ctrl_c_quit_hint();
         self.bottom_pane.set_task_running(true);
         self.retry_status_header = None;
-        self.set_status_header(String::from("Working"));
+        self.bottom_pane.set_interrupt_hint_visible(true);
+        self.reset_base_status_header();
         self.full_reasoning_buffer.clear();
         self.reasoning_buffer.clear();
         self.request_redraw();
@@ -450,15 +547,9 @@ impl ChatWidget {
 
     pub(crate) fn set_token_info(&mut self, info: Option<TokenUsageInfo>) {
         if let Some(info) = info {
-            let context_window = info
-                .model_context_window
-                .or(self.config.model_context_window);
-            let percent = context_window.map(|window| {
-                info.last_token_usage
-                    .percent_of_context_window_remaining(window)
-            });
-            self.bottom_pane.set_context_window_percent(percent);
             self.token_info = Some(info);
+            self.update_context_metrics();
+            self.recompute_base_status_header();
         }
     }
 
@@ -521,7 +612,7 @@ impl ChatWidget {
 
         if reason != TurnAbortReason::ReviewEnded {
             self.add_to_history(history_cell::new_error_event(
-                "Conversation interrupted - tell the model what to do differently".to_owned(),
+                "Conversation interrupted - tell the model what to do differently. Something went wrong? Hit `/feedback` to report the issue.".to_owned(),
             ));
         }
 
@@ -580,14 +671,24 @@ impl ChatWidget {
 
     fn on_exec_command_output_delta(
         &mut self,
-        _ev: codex_core::protocol::ExecCommandOutputDeltaEvent,
+        ev: codex_core::protocol::ExecCommandOutputDeltaEvent,
     ) {
-        // TODO: Handle streaming exec output if/when implemented
+        use codex_core::protocol::ExecCommandOutputDeltaEvent;
+        let ExecCommandOutputDeltaEvent { call_id, chunk, .. } = ev;
+        if let Some(cmd) = self.running_commands.get_mut(&call_id) {
+            let text = String::from_utf8_lossy(&chunk).to_string();
+            cmd.output.push_str(&text);
+            self.app_event_tx.send(AppEvent::LiveExecOutputChunk {
+                call_id,
+                chunk: text,
+            });
+        }
     }
 
     fn on_patch_apply_begin(&mut self, event: PatchApplyBeginEvent) {
         self.add_to_history(history_cell::new_patch_event(
             event.changes,
+            event.reason,
             &self.config.cwd,
         ));
     }
@@ -661,6 +762,32 @@ impl ChatWidget {
         debug!("BackgroundEvent: {message}");
     }
 
+    fn on_undo_started(&mut self, event: UndoStartedEvent) {
+        self.bottom_pane.ensure_status_indicator();
+        self.bottom_pane.set_interrupt_hint_visible(false);
+        let message = event
+            .message
+            .unwrap_or_else(|| "Undo in progress...".to_string());
+        self.set_status_header(message);
+    }
+
+    fn on_undo_completed(&mut self, event: UndoCompletedEvent) {
+        let UndoCompletedEvent { success, message } = event;
+        self.bottom_pane.hide_status_indicator();
+        let message = message.unwrap_or_else(|| {
+            if success {
+                "Undo completed successfully.".to_string()
+            } else {
+                "Undo failed.".to_string()
+            }
+        });
+        if success {
+            self.add_info_message(message, None);
+        } else {
+            self.add_error_message(message);
+        }
+    }
+
     fn on_stream_error(&mut self, message: String) {
         if self.retry_status_header.is_none() {
             self.retry_status_header = Some(self.current_status_header.clone());
@@ -729,7 +856,6 @@ impl ChatWidget {
                 self.needs_final_message_separator = false;
             }
             self.stream_controller = Some(StreamController::new(
-                self.config.clone(),
                 self.last_rendered_width.get().map(|w| w.saturating_sub(2)),
             ));
         }
@@ -743,10 +869,17 @@ impl ChatWidget {
 
     pub(crate) fn handle_exec_end_now(&mut self, ev: ExecCommandEndEvent) {
         let running = self.running_commands.remove(&ev.call_id);
+        self.running_command_order.retain(|id| id != &ev.call_id);
         let (command, parsed) = match running {
             Some(rc) => (rc.command, rc.parsed_cmd),
             None => (vec![ev.call_id.clone()], Vec::new()),
         };
+        self.app_event_tx.send(AppEvent::LiveExecCommandFinished {
+            call_id: ev.call_id.clone(),
+            exit_code: ev.exit_code,
+            duration: ev.duration,
+            aggregated_output: ev.aggregated_output.clone(),
+        });
 
         let needs_new = self
             .active_cell
@@ -771,9 +904,8 @@ impl ChatWidget {
                 &ev.call_id,
                 CommandOutput {
                     exit_code: ev.exit_code,
-                    stdout: ev.stdout.clone(),
-                    stderr: ev.stderr.clone(),
                     formatted_output: ev.formatted_output.clone(),
+                    aggregated_output: ev.aggregated_output.clone(),
                 },
                 ev.duration,
             );
@@ -804,6 +936,7 @@ impl ChatWidget {
             id,
             command: ev.command,
             reason: ev.reason,
+            risk: ev.risk,
         };
         self.bottom_pane.push_approval_request(request);
         self.request_redraw();
@@ -831,35 +964,46 @@ impl ChatWidget {
     }
 
     pub(crate) fn handle_exec_begin_now(&mut self, ev: ExecCommandBeginEvent) {
+        let ExecCommandBeginEvent {
+            call_id,
+            command,
+            cwd,
+            parsed_cmd,
+        } = ev;
         // Ensure the status indicator is visible while the command runs.
+        self.running_command_order.retain(|id| id != &call_id);
+        self.running_command_order.push_back(call_id.clone());
         self.running_commands.insert(
-            ev.call_id.clone(),
+            call_id.clone(),
             RunningCommand {
-                command: ev.command.clone(),
-                parsed_cmd: ev.parsed_cmd.clone(),
+                command: command.clone(),
+                parsed_cmd: parsed_cmd.clone(),
+                output: String::new(),
             },
         );
         if let Some(cell) = self
             .active_cell
             .as_mut()
             .and_then(|c| c.as_any_mut().downcast_mut::<ExecCell>())
-            && let Some(new_exec) = cell.with_added_call(
-                ev.call_id.clone(),
-                ev.command.clone(),
-                ev.parsed_cmd.clone(),
-            )
+            && let Some(new_exec) =
+                cell.with_added_call(call_id.clone(), command.clone(), parsed_cmd.clone())
         {
             *cell = new_exec;
         } else {
             self.flush_active_cell();
 
             self.active_cell = Some(Box::new(new_active_exec_command(
-                ev.call_id.clone(),
-                ev.command.clone(),
-                ev.parsed_cmd,
+                call_id.clone(),
+                command.clone(),
+                parsed_cmd,
             )));
         }
 
+        self.app_event_tx.send(AppEvent::LiveExecCommandBegin {
+            call_id,
+            command,
+            cwd,
+        });
         self.request_redraw();
     }
 
@@ -936,12 +1080,13 @@ impl ChatWidget {
             initial_images,
             enhanced_keys_supported,
             auth_manager,
+            feedback,
         } = common;
         let mut rng = rand::rng();
         let placeholder = EXAMPLE_PROMPTS[rng.random_range(0..EXAMPLE_PROMPTS.len())].to_string();
         let codex_op_tx = spawn_agent(config.clone(), app_event_tx.clone(), conversation_manager);
 
-        Self {
+        let mut widget = Self {
             app_event_tx: app_event_tx.clone(),
             frame_requester: frame_requester.clone(),
             codex_op_tx,
@@ -966,10 +1111,12 @@ impl ChatWidget {
             rate_limit_warnings: RateLimitWarningState::default(),
             stream_controller: None,
             running_commands: HashMap::new(),
+            running_command_order: VecDeque::new(),
             task_complete_pending: false,
             interrupts: InterruptManager::new(),
             reasoning_buffer: String::new(),
             full_reasoning_buffer: String::new(),
+            base_status_header: String::from("Working"),
             current_status_header: String::from("Working"),
             retry_status_header: None,
             conversation_id: None,
@@ -978,14 +1125,17 @@ impl ChatWidget {
             suppress_session_configured_redraw: false,
             pending_notification: None,
             is_review_mode: false,
-            ghost_snapshots: Vec::new(),
-            ghost_snapshots_disabled: true,
             needs_final_message_separator: false,
-            process_overview_hidden: false,
-            process_overview_cache: Vec::new(),
-            process_overview_auto_revealed: false,
             last_rendered_width: std::cell::Cell::new(None),
-        }
+            feedback,
+            current_rollout_path: None,
+            pending_context_prompt: None,
+            agents_context_include_mode: !config.agents_context_include.is_empty(),
+        };
+        widget.base_status_header = widget.compose_base_status_header();
+        widget.current_status_header = widget.base_status_header.clone();
+        widget.update_context_metrics();
+        widget
     }
 
     /// Create a ChatWidget attached to an existing conversation (e.g., a fork).
@@ -1002,6 +1152,7 @@ impl ChatWidget {
             initial_images,
             enhanced_keys_supported,
             auth_manager,
+            feedback,
         } = common;
         let mut rng = rand::rng();
         let placeholder = EXAMPLE_PROMPTS[rng.random_range(0..EXAMPLE_PROMPTS.len())].to_string();
@@ -1009,7 +1160,7 @@ impl ChatWidget {
         let codex_op_tx =
             spawn_agent_from_existing(conversation, session_configured, app_event_tx.clone());
 
-        Self {
+        let mut widget = Self {
             app_event_tx: app_event_tx.clone(),
             frame_requester: frame_requester.clone(),
             codex_op_tx,
@@ -1034,10 +1185,12 @@ impl ChatWidget {
             rate_limit_warnings: RateLimitWarningState::default(),
             stream_controller: None,
             running_commands: HashMap::new(),
+            running_command_order: VecDeque::new(),
             task_complete_pending: false,
             interrupts: InterruptManager::new(),
             reasoning_buffer: String::new(),
             full_reasoning_buffer: String::new(),
+            base_status_header: String::from("Working"),
             current_status_header: String::from("Working"),
             retry_status_header: None,
             conversation_id: None,
@@ -1046,14 +1199,17 @@ impl ChatWidget {
             suppress_session_configured_redraw: true,
             pending_notification: None,
             is_review_mode: false,
-            ghost_snapshots: Vec::new(),
-            ghost_snapshots_disabled: true,
             needs_final_message_separator: false,
-            process_overview_hidden: false,
-            process_overview_cache: Vec::new(),
-            process_overview_auto_revealed: false,
             last_rendered_width: std::cell::Cell::new(None),
-        }
+            feedback,
+            current_rollout_path: None,
+            pending_context_prompt: None,
+            agents_context_include_mode: !config.agents_context_include.is_empty(),
+        };
+        widget.base_status_header = widget.compose_base_status_header();
+        widget.current_status_header = widget.base_status_header.clone();
+        widget.update_context_metrics();
+        widget
     }
 
     pub fn desired_height(&self, width: u16) -> u16 {
@@ -1084,26 +1240,6 @@ impl ChatWidget {
                 if let Ok((path, info)) = paste_image_to_temp_png() {
                     self.attach_image(path, info.width, info.height, info.encoded_format.label());
                 }
-                return;
-            }
-            KeyEvent {
-                code: KeyCode::Char(c),
-                modifiers,
-                kind: KeyEventKind::Press,
-                ..
-            } if modifiers == (KeyModifiers::ALT | KeyModifiers::SHIFT)
-                && c.eq_ignore_ascii_case(&'p') =>
-            {
-                self.toggle_process_overview_visibility();
-                return;
-            }
-            KeyEvent {
-                code: KeyCode::Char(c),
-                modifiers,
-                kind: KeyEventKind::Press,
-                ..
-            } if modifiers == KeyModifiers::ALT && c.eq_ignore_ascii_case(&'p') => {
-                self.app_event_tx.send(AppEvent::OpenProcessManager);
                 return;
             }
             other if other.kind == KeyEventKind::Press => {
@@ -1176,6 +1312,13 @@ impl ChatWidget {
             return;
         }
         match cmd {
+            SlashCommand::Feedback => {
+                // Step 1: pick a category (UI built in feedback_view)
+                let params =
+                    crate::bottom_pane::feedback_selection_params(self.app_event_tx.clone());
+                self.bottom_pane.show_selection_view(params);
+                self.request_redraw();
+            }
             SlashCommand::New => {
                 self.app_event_tx.send(AppEvent::NewSession);
             }
@@ -1195,6 +1338,9 @@ impl ChatWidget {
                 self.clear_token_usage();
                 self.app_event_tx.send(AppEvent::CodexOp(Op::Compact));
             }
+            SlashCommand::Context => {
+                self.app_event_tx.send(AppEvent::OpenAgentsContextManager);
+            }
             SlashCommand::Review => {
                 self.open_review_popup();
             }
@@ -1208,13 +1354,16 @@ impl ChatWidget {
                 self.app_event_tx.send(AppEvent::ExitRequest);
             }
             SlashCommand::Logout => {
-                if let Err(e) = codex_core::auth::logout(&self.config.codex_home) {
+                if let Err(e) = codex_core::auth::logout(
+                    &self.config.codex_home,
+                    self.config.cli_auth_credentials_store_mode,
+                ) {
                     tracing::error!("failed to logout: {e}");
                 }
                 self.app_event_tx.send(AppEvent::ExitRequest);
             }
             SlashCommand::Undo => {
-                self.undo_last_snapshot();
+                self.app_event_tx.send(AppEvent::CodexOp(Op::Undo));
             }
             SlashCommand::Diff => {
                 self.add_diff_in_progress();
@@ -1327,20 +1476,25 @@ impl ChatWidget {
 
     fn submit_user_message(&mut self, user_message: UserMessage) {
         let UserMessage { text, image_paths } = user_message;
-        if text.is_empty() && image_paths.is_empty() {
+        let pending_context = self.pending_context_prompt.take();
+        let had_pending_context = pending_context.is_some();
+
+        if text.is_empty() && image_paths.is_empty() && !had_pending_context {
             return;
         }
 
-        self.capture_ghost_snapshot();
+        let mut items: Vec<UserInput> = Vec::new();
 
-        let mut items: Vec<InputItem> = Vec::new();
+        if let Some(context) = pending_context {
+            items.push(UserInput::Text { text: context });
+        }
 
         if !text.is_empty() {
-            items.push(InputItem::Text { text: text.clone() });
+            items.push(UserInput::Text { text: text.clone() });
         }
 
         for path in image_paths {
-            items.push(InputItem::LocalImage { path });
+            items.push(UserInput::LocalImage { path });
         }
 
         self.codex_op_tx
@@ -1363,57 +1517,11 @@ impl ChatWidget {
             self.add_to_history(history_cell::new_user_prompt(text));
         }
         self.needs_final_message_separator = false;
-    }
 
-    fn capture_ghost_snapshot(&mut self) {
-        if self.ghost_snapshots_disabled {
-            return;
+        if had_pending_context {
+            self.app_event_tx
+                .send(AppEvent::ClearAgentsContextSelection);
         }
-
-        let options = CreateGhostCommitOptions::new(&self.config.cwd);
-        match create_ghost_commit(&options) {
-            Ok(commit) => {
-                self.ghost_snapshots.push(commit);
-                if self.ghost_snapshots.len() > MAX_TRACKED_GHOST_COMMITS {
-                    self.ghost_snapshots.remove(0);
-                }
-            }
-            Err(err) => {
-                self.ghost_snapshots_disabled = true;
-                let (message, hint) = match &err {
-                    GitToolingError::NotAGitRepository { .. } => (
-                        "Snapshots disabled: current directory is not a Git repository."
-                            .to_string(),
-                        None,
-                    ),
-                    _ => (
-                        format!("Snapshots disabled after error: {err}"),
-                        Some(
-                            "Restart Codex after resolving the issue to re-enable snapshots."
-                                .to_string(),
-                        ),
-                    ),
-                };
-                self.add_info_message(message, hint);
-                tracing::warn!("failed to create ghost snapshot: {err}");
-            }
-        }
-    }
-
-    fn undo_last_snapshot(&mut self) {
-        let Some(commit) = self.ghost_snapshots.pop() else {
-            self.add_info_message("No snapshot available to undo.".to_string(), None);
-            return;
-        };
-
-        if let Err(err) = restore_ghost_commit(&self.config.cwd, &commit) {
-            self.add_error_message(format!("Failed to restore snapshot: {err}"));
-            self.ghost_snapshots.push(commit);
-            return;
-        }
-
-        let short_id: String = commit.id().chars().take(8).collect();
-        self.add_info_message(format!("Restored workspace to snapshot {short_id}"), None);
     }
 
     /// Replay a subset of initial events into the UI to seed the transcript when
@@ -1503,7 +1611,6 @@ impl ChatWidget {
             EventMsg::ViewImageToolCall(ev) => self.on_view_image_tool_call(ev),
             EventMsg::McpToolCallBegin(ev) => self.on_mcp_tool_call_begin(ev),
             EventMsg::McpToolCallEnd(ev) => self.on_mcp_tool_call_end(ev),
-            EventMsg::UnifiedExecSessions(ev) => self.on_unified_exec_sessions(ev),
             EventMsg::WebSearchBegin(ev) => self.on_web_search_begin(ev),
             EventMsg::WebSearchEnd(ev) => self.on_web_search_end(ev),
             EventMsg::GetHistoryEntryResponse(ev) => self.on_get_history_entry_response(ev),
@@ -1514,20 +1621,21 @@ impl ChatWidget {
             EventMsg::BackgroundEvent(BackgroundEventEvent { message }) => {
                 self.on_background_event(message)
             }
+            EventMsg::UndoStarted(ev) => self.on_undo_started(ev),
+            EventMsg::UndoCompleted(ev) => self.on_undo_completed(ev),
             EventMsg::StreamError(StreamErrorEvent { message }) => self.on_stream_error(message),
             EventMsg::UserMessage(ev) => {
                 if from_replay {
                     self.on_user_message_event(ev);
                 }
             }
-            EventMsg::ConversationPath(ev) => {
-                self.app_event_tx
-                    .send(crate::app_event::AppEvent::ConversationHistory(ev));
-            }
             EventMsg::EnteredReviewMode(review_request) => {
                 self.on_entered_review_mode(review_request)
             }
             EventMsg::ExitedReviewMode(review) => self.on_exited_review_mode(review),
+            EventMsg::RawResponseItem(_)
+            | EventMsg::ItemStarted(_)
+            | EventMsg::ItemCompleted(_) => {}
         }
     }
 
@@ -1556,7 +1664,7 @@ impl ChatWidget {
                 } else {
                     // Show explanation when there are no structured findings.
                     let mut rendered: Vec<ratatui::text::Line<'static>> = vec!["".into()];
-                    append_markdown(&explanation, None, &mut rendered, &self.config);
+                    append_markdown(&explanation, None, &mut rendered);
                     let body_cell = AgentMessageCell::new(rendered, false);
                     self.app_event_tx
                         .send(AppEvent::InsertHistoryCell(Box::new(body_cell)));
@@ -1565,7 +1673,7 @@ impl ChatWidget {
                 let message_text =
                     codex_core::review_format::format_review_findings_block(&output.findings, None);
                 let mut message_lines: Vec<ratatui::text::Line<'static>> = Vec::new();
-                append_markdown(&message_text, None, &mut message_lines, &self.config);
+                append_markdown(&message_text, None, &mut message_lines);
                 let body_cell = AgentMessageCell::new(message_lines, true);
                 self.app_event_tx
                     .send(AppEvent::InsertHistoryCell(Box::new(body_cell)));
@@ -1580,25 +1688,10 @@ impl ChatWidget {
         self.request_redraw();
     }
 
-    fn on_unified_exec_sessions(&mut self, event: UnifiedExecSessionsEvent) {
-        self.app_event_tx
-            .send(AppEvent::UpdateProcessManagerSessions {
-                sessions: event.sessions,
-            });
-    }
-
     fn on_user_message_event(&mut self, event: UserMessageEvent) {
-        match event.kind {
-            Some(InputMessageKind::EnvironmentContext)
-            | Some(InputMessageKind::UserInstructions) => {
-                // Skip XML‑wrapped context blocks in the transcript.
-            }
-            Some(InputMessageKind::Plain) | None => {
-                let message = event.message.trim();
-                if !message.is_empty() {
-                    self.add_to_history(history_cell::new_user_prompt(message.to_string()));
-                }
-            }
+        let message = event.message.trim();
+        if !message.is_empty() {
+            self.add_to_history(history_cell::new_user_prompt(message.to_string()));
         }
     }
 
@@ -1676,6 +1769,7 @@ impl ChatWidget {
             context_usage,
             &self.conversation_id,
             self.rate_limit_snapshot.as_ref(),
+            Local::now(),
         ));
     }
 
@@ -1686,39 +1780,22 @@ impl ChatWidget {
         let auth_mode = self.auth_manager.auth().map(|auth| auth.mode);
         let presets: Vec<ModelPreset> = builtin_model_presets(auth_mode);
 
-        let mut grouped: Vec<(&str, Vec<ModelPreset>)> = Vec::new();
-        for preset in presets.into_iter() {
-            if let Some((_, entries)) = grouped.iter_mut().find(|(model, _)| *model == preset.model)
-            {
-                entries.push(preset);
-            } else {
-                grouped.push((preset.model, vec![preset]));
-            }
-        }
-
         let mut items: Vec<SelectionItem> = Vec::new();
-        for (model_slug, entries) in grouped.into_iter() {
-            let name = model_slug.to_string();
-            let description = Self::model_description_for(model_slug)
-                .map(std::string::ToString::to_string)
-                .or_else(|| {
-                    entries
-                        .iter()
-                        .find(|preset| !preset.description.is_empty())
-                        .map(|preset| preset.description.to_string())
-                })
-                .or_else(|| entries.first().map(|preset| preset.description.to_string()));
-            let is_current = model_slug == current_model;
-            let model_slug_string = model_slug.to_string();
-            let presets_for_model = entries.clone();
+        for preset in presets.into_iter() {
+            let description = if preset.description.is_empty() {
+                None
+            } else {
+                Some(preset.description.to_string())
+            };
+            let is_current = preset.model == current_model;
+            let preset_for_action = preset;
             let actions: Vec<SelectionAction> = vec![Box::new(move |tx| {
                 tx.send(AppEvent::OpenReasoningPopup {
-                    model: model_slug_string.clone(),
-                    presets: presets_for_model.clone(),
+                    model: preset_for_action,
                 });
             })];
             items.push(SelectionItem {
-                name,
+                name: preset.display_name.to_string(),
                 description,
                 is_current,
                 actions,
@@ -1737,25 +1814,19 @@ impl ChatWidget {
     }
 
     /// Open a popup to choose the reasoning effort (stage 2) for the given model.
-    pub(crate) fn open_reasoning_popup(&mut self, model_slug: String, presets: Vec<ModelPreset>) {
-        let default_effort = ReasoningEffortConfig::default();
+    pub(crate) fn open_reasoning_popup(&mut self, preset: ModelPreset) {
+        let default_effort: ReasoningEffortConfig = preset.default_reasoning_effort;
+        let supported = preset.supported_reasoning_efforts;
 
-        let has_none_choice = presets.iter().any(|preset| preset.effort.is_none());
         struct EffortChoice {
             stored: Option<ReasoningEffortConfig>,
             display: ReasoningEffortConfig,
         }
         let mut choices: Vec<EffortChoice> = Vec::new();
         for effort in ReasoningEffortConfig::iter() {
-            if presets.iter().any(|preset| preset.effort == Some(effort)) {
+            if supported.iter().any(|option| option.effort == effort) {
                 choices.push(EffortChoice {
                     stored: Some(effort),
-                    display: effort,
-                });
-            }
-            if has_none_choice && default_effort == effort {
-                choices.push(EffortChoice {
-                    stored: None,
                     display: effort,
                 });
             }
@@ -1767,27 +1838,21 @@ impl ChatWidget {
             });
         }
 
-        let default_choice: Option<ReasoningEffortConfig> = if has_none_choice {
-            None
-        } else if choices
+        let default_choice: Option<ReasoningEffortConfig> = choices
             .iter()
             .any(|choice| choice.stored == Some(default_effort))
-        {
-            Some(default_effort)
-        } else {
-            choices
-                .iter()
-                .find_map(|choice| choice.stored)
-                .or(Some(default_effort))
-        };
+            .then_some(Some(default_effort))
+            .flatten()
+            .or_else(|| choices.iter().find_map(|choice| choice.stored))
+            .or(Some(default_effort));
 
-        let is_current_model = self.config.model == model_slug;
+        let model_slug = preset.model.to_string();
+        let is_current_model = self.config.model == preset.model;
         let highlight_choice = if is_current_model {
             self.config.model_reasoning_effort
         } else {
             default_choice
         };
-
         let mut items: Vec<SelectionItem> = Vec::new();
         for choice in choices.iter() {
             let effort = choice.display;
@@ -1799,19 +1864,19 @@ impl ChatWidget {
                 effort_label.push_str(" (default)");
             }
 
-            let description = presets
-                .iter()
-                .find(|preset| preset.effort == choice.stored && !preset.description.is_empty())
-                .map(|preset| preset.description.to_string())
-                .or_else(|| {
-                    presets
+            let description = choice
+                .stored
+                .and_then(|effort| {
+                    supported
                         .iter()
-                        .find(|preset| preset.effort == choice.stored)
-                        .map(|preset| preset.description.to_string())
-                });
+                        .find(|option| option.effort == effort)
+                        .map(|option| option.description.to_string())
+                })
+                .filter(|text| !text.is_empty());
 
             let warning = "⚠ High reasoning effort can quickly consume Plus plan rate limits.";
-            let show_warning = model_slug == "gpt-5-codex" && effort == ReasoningEffortConfig::High;
+            let show_warning =
+                preset.model == "gpt-5-codex" && effort == ReasoningEffortConfig::High;
             let selected_description = show_warning.then(|| {
                 description
                     .as_ref()
@@ -1828,6 +1893,7 @@ impl ChatWidget {
                     model: Some(model_for_action.clone()),
                     effort: Some(effort_for_action),
                     summary: None,
+                    agents_context_prompt: None,
                 }));
                 tx.send(AppEvent::UpdateModel(model_for_action.clone()));
                 tx.send(AppEvent::UpdateReasoningEffort(effort_for_action));
@@ -1874,25 +1940,58 @@ impl ChatWidget {
         let current_sandbox = self.config.sandbox_policy.clone();
         let mut items: Vec<SelectionItem> = Vec::new();
         let presets: Vec<ApprovalPreset> = builtin_approval_presets();
+        #[cfg(target_os = "windows")]
+        let header_renderable: Box<dyn Renderable> = if self
+            .config
+            .forced_auto_mode_downgraded_on_windows
+        {
+            use ratatui_macros::line;
+
+            let mut header = ColumnRenderable::new();
+            header.push(line![
+                "Codex forced your settings back to Read Only on this Windows machine.".bold()
+            ]);
+            header.push(line![
+                "To re-enable Auto mode, run Codex inside Windows Subsystem for Linux (WSL) or enable Full Access manually.".dim()
+                ]);
+            Box::new(header)
+        } else {
+            Box::new(())
+        };
+        #[cfg(not(target_os = "windows"))]
+        let header_renderable: Box<dyn Renderable> = Box::new(());
         for preset in presets.into_iter() {
             let is_current =
                 current_approval == preset.approval && current_sandbox == preset.sandbox;
-            let approval = preset.approval;
-            let sandbox = preset.sandbox.clone();
             let name = preset.label.to_string();
-            let description = Some(preset.description.to_string());
-            let actions: Vec<SelectionAction> = vec![Box::new(move |tx| {
-                tx.send(AppEvent::CodexOp(Op::OverrideTurnContext {
-                    cwd: None,
-                    approval_policy: Some(approval),
-                    sandbox_policy: Some(sandbox.clone()),
-                    model: None,
-                    effort: None,
-                    summary: None,
-                }));
-                tx.send(AppEvent::UpdateAskForApprovalPolicy(approval));
-                tx.send(AppEvent::UpdateSandboxPolicy(sandbox.clone()));
-            })];
+            let description_text = preset.description;
+            let description = if cfg!(target_os = "windows") && preset.id == "auto" {
+                Some(format!(
+                    "{description_text}\nRequires Windows Subsystem for Linux (WSL). Show installation instructions..."
+                ))
+            } else {
+                Some(description_text.to_string())
+            };
+            let requires_confirmation = preset.id == "full-access"
+                && !self
+                    .config
+                    .notices
+                    .hide_full_access_warning
+                    .unwrap_or(false);
+            let actions: Vec<SelectionAction> = if requires_confirmation {
+                let preset_clone = preset.clone();
+                vec![Box::new(move |tx| {
+                    tx.send(AppEvent::OpenFullAccessConfirmation {
+                        preset: preset_clone.clone(),
+                    });
+                })]
+            } else if cfg!(target_os = "windows") && preset.id == "auto" {
+                vec![Box::new(|tx| {
+                    tx.send(AppEvent::ShowWindowsAutoModeInstructions);
+                })]
+            } else {
+                Self::approval_preset_actions(preset.approval, preset.sandbox.clone())
+            };
             items.push(SelectionItem {
                 name,
                 description,
@@ -1907,9 +2006,131 @@ impl ChatWidget {
             title: Some("Select Approval Mode".to_string()),
             footer_hint: Some(standard_popup_hint_line()),
             items,
+            header: header_renderable,
             ..Default::default()
         });
     }
+
+    fn approval_preset_actions(
+        approval: AskForApproval,
+        sandbox: SandboxPolicy,
+    ) -> Vec<SelectionAction> {
+        vec![Box::new(move |tx| {
+            let sandbox_clone = sandbox.clone();
+            tx.send(AppEvent::CodexOp(Op::OverrideTurnContext {
+                cwd: None,
+                approval_policy: Some(approval),
+                sandbox_policy: Some(sandbox_clone.clone()),
+                model: None,
+                effort: None,
+                summary: None,
+                agents_context_prompt: None,
+            }));
+            tx.send(AppEvent::UpdateAskForApprovalPolicy(approval));
+            tx.send(AppEvent::UpdateSandboxPolicy(sandbox_clone));
+        })]
+    }
+
+    pub(crate) fn open_full_access_confirmation(&mut self, preset: ApprovalPreset) {
+        let approval = preset.approval;
+        let sandbox = preset.sandbox;
+        let mut header_children: Vec<Box<dyn Renderable>> = Vec::new();
+        let title_line = Line::from("Enable full access?").bold();
+        let info_line = Line::from(vec![
+            "When Codex runs with full access, it can edit any file on your computer and run commands with network, without your approval. "
+                .into(),
+            "Exercise caution when enabling full access. This significantly increases the risk of data loss, leaks, or unexpected behavior."
+                .fg(Color::Red),
+        ]);
+        header_children.push(Box::new(title_line));
+        header_children.push(Box::new(
+            Paragraph::new(vec![info_line]).wrap(Wrap { trim: false }),
+        ));
+        let header = ColumnRenderable::with(header_children);
+
+        let mut accept_actions = Self::approval_preset_actions(approval, sandbox.clone());
+        accept_actions.push(Box::new(|tx| {
+            tx.send(AppEvent::UpdateFullAccessWarningAcknowledged(true));
+        }));
+
+        let mut accept_and_remember_actions = Self::approval_preset_actions(approval, sandbox);
+        accept_and_remember_actions.push(Box::new(|tx| {
+            tx.send(AppEvent::UpdateFullAccessWarningAcknowledged(true));
+            tx.send(AppEvent::PersistFullAccessWarningAcknowledged);
+        }));
+
+        let deny_actions: Vec<SelectionAction> = vec![Box::new(|tx| {
+            tx.send(AppEvent::OpenApprovalsPopup);
+        })];
+
+        let items = vec![
+            SelectionItem {
+                name: "Yes, continue anyway".to_string(),
+                description: Some("Apply full access for this session".to_string()),
+                actions: accept_actions,
+                dismiss_on_select: true,
+                ..Default::default()
+            },
+            SelectionItem {
+                name: "Yes, and don't ask again".to_string(),
+                description: Some("Enable full access and remember this choice".to_string()),
+                actions: accept_and_remember_actions,
+                dismiss_on_select: true,
+                ..Default::default()
+            },
+            SelectionItem {
+                name: "Cancel".to_string(),
+                description: Some("Go back without enabling full access".to_string()),
+                actions: deny_actions,
+                dismiss_on_select: true,
+                ..Default::default()
+            },
+        ];
+
+        self.bottom_pane.show_selection_view(SelectionViewParams {
+            footer_hint: Some(standard_popup_hint_line()),
+            items,
+            header: Box::new(header),
+            ..Default::default()
+        });
+    }
+
+    #[cfg(target_os = "windows")]
+    pub(crate) fn open_windows_auto_mode_instructions(&mut self) {
+        use ratatui_macros::line;
+
+        let mut header = ColumnRenderable::new();
+        header.push(line![
+            "Auto mode requires Windows Subsystem for Linux (WSL2).".bold()
+        ]);
+        header.push(line!["Run Codex inside WSL to enable sandboxed commands."]);
+        header.push(line![""]);
+        header.push(Paragraph::new(WSL_INSTRUCTIONS).wrap(Wrap { trim: false }));
+
+        let items = vec![SelectionItem {
+            name: "Back".to_string(),
+            description: Some(
+                "Return to the approval mode list. Auto mode stays disabled outside WSL."
+                    .to_string(),
+            ),
+            actions: vec![Box::new(|tx| {
+                tx.send(AppEvent::OpenApprovalsPopup);
+            })],
+            dismiss_on_select: true,
+            ..Default::default()
+        }];
+
+        self.bottom_pane.show_selection_view(SelectionViewParams {
+            title: None,
+            footer_hint: Some(standard_popup_hint_line()),
+            items,
+            header: Box::new(header),
+            ..Default::default()
+        });
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    pub(crate) fn open_windows_auto_mode_instructions(&mut self) {}
 
     /// Set the approval policy in the widget's config copy.
     pub(crate) fn set_approval_policy(&mut self, policy: AskForApproval) {
@@ -1919,6 +2140,10 @@ impl ChatWidget {
     /// Set the sandbox policy in the widget's config copy.
     pub(crate) fn set_sandbox_policy(&mut self, policy: SandboxPolicy) {
         self.config.sandbox_policy = policy;
+    }
+
+    pub(crate) fn set_full_access_warning_acknowledged(&mut self, acknowledged: bool) {
+        self.config.notices.hide_full_access_warning = Some(acknowledged);
     }
 
     /// Set the reasoning effort in the widget's config copy.
@@ -1932,6 +2157,31 @@ impl ChatWidget {
         self.config.model = model.to_string();
     }
 
+    pub(crate) fn apply_agents_context_from_config(&mut self, config: &Config) {
+        self.config.agents_context_entries = config.agents_context_entries.clone();
+        self.config.agents_context_include = config.agents_context_include.clone();
+        self.config.agents_context_exclude = config.agents_context_exclude.clone();
+        self.config.agents_context_prompt = config.agents_context_prompt.clone();
+        self.config.agents_context_prompt_tokens = config.agents_context_prompt_tokens;
+        self.config.agents_context_prompt_truncated = config.agents_context_prompt_truncated;
+        self.agents_context_include_mode = !self.config.agents_context_include.is_empty();
+        self.update_context_metrics();
+        self.recompute_base_status_header();
+        self.request_redraw();
+    }
+
+    pub(crate) fn set_pending_context_prompt(&mut self, prompt: Option<String>) {
+        self.pending_context_prompt = prompt;
+    }
+
+    pub(crate) fn set_agents_context_include_mode(&mut self, include_mode: bool) {
+        self.agents_context_include_mode = include_mode;
+    }
+
+    pub(crate) fn agents_context_include_mode(&self) -> bool {
+        self.agents_context_include_mode
+    }
+
     pub(crate) fn add_info_message(&mut self, message: String, hint: Option<String>) {
         self.add_to_history(history_cell::new_info_event(message, hint));
         self.request_redraw();
@@ -1943,339 +2193,6 @@ impl ChatWidget {
     }
 
     pub(crate) fn add_mcp_output(&mut self) {
-        if self.config.experimental_mcp_overhaul {
-            self.app_event_tx.send(AppEvent::OpenMcpManager);
-            return;
-        }
-
-        self.show_mcp_history_summary();
-    }
-
-    pub(crate) fn show_mcp_manager(
-        &mut self,
-        entries: Vec<McpManagerEntry>,
-        template_count: usize,
-    ) {
-        let init = McpManagerInit {
-            app_event_tx: self.app_event_tx.clone(),
-            entries,
-            template_count,
-        };
-        self.bottom_pane
-            .show_custom_view(Box::new(McpManagerView::new(init)));
-    }
-
-    pub(crate) fn show_mcp_wizard(
-        &mut self,
-        catalog: TemplateCatalog,
-        draft: Option<McpWizardDraft>,
-        existing_name: Option<String>,
-    ) {
-        let init = McpWizardInit {
-            app_event_tx: self.app_event_tx.clone(),
-            catalog,
-            draft,
-            existing_name,
-        };
-        self.bottom_pane
-            .show_custom_view(Box::new(McpWizardView::new(init)));
-    }
-
-    fn summarize_process_command(command: &[String]) -> String {
-        if command.is_empty() {
-            "(detached)".to_string()
-        } else {
-            command.join(" ")
-        }
-    }
-
-    fn format_elapsed_label(time: SystemTime) -> String {
-        match SystemTime::now().duration_since(time) {
-            Ok(duration) => {
-                if duration.as_secs() == 0 {
-                    "just now".to_string()
-                } else {
-                    format!("{} ago", fmt_elapsed_compact(duration.as_secs()))
-                }
-            }
-            Err(_) => "just now".to_string(),
-        }
-    }
-
-    fn format_optional_elapsed_label(time: Option<SystemTime>) -> String {
-        time.map(Self::format_elapsed_label)
-            .unwrap_or_else(|| "no output yet".to_string())
-    }
-
-    fn process_overview(entries: &[ProcessManagerEntry]) -> Option<ProcessOverview> {
-        if entries.is_empty() {
-            return None;
-        }
-
-        let mut running_entries: Vec<&ProcessManagerEntry> = entries
-            .iter()
-            .filter(|entry| entry.status == ProcessStatus::Running)
-            .collect();
-        let mut completed_entries: Vec<&ProcessManagerEntry> = entries
-            .iter()
-            .filter(|entry| entry.status == ProcessStatus::Exited)
-            .collect();
-
-        let running_count = running_entries.len();
-        let completed_count = completed_entries.len();
-
-        let header = match (running_count, completed_count) {
-            (0, 0) => "Processes: none".to_string(),
-            (r, 0) => {
-                let label = if r == 1 { "process" } else { "processes" };
-                format!("Processes: {r} running {label}")
-            }
-            (0, c) => {
-                let label = if c == 1 { "process" } else { "processes" };
-                format!("Processes: {c} done {label}")
-            }
-            (r, c) => format!("Processes: {r} running · {c} done"),
-        };
-
-        running_entries.sort_by_key(|entry| entry.last_output_at.unwrap_or(entry.started_at));
-        running_entries.reverse();
-        const MAX_RUNNING_DETAILS: usize = 3;
-        let running_details: Vec<String> = running_entries
-            .iter()
-            .take(MAX_RUNNING_DETAILS)
-            .map(|entry| {
-                let command = Self::summarize_process_command(&entry.command);
-                let started = Self::format_elapsed_label(entry.started_at);
-                let last_output = Self::format_optional_elapsed_label(entry.last_output_at);
-                format!("{command} · started {started} · last output {last_output}")
-            })
-            .collect();
-        let running_more = running_count.saturating_sub(running_details.len());
-
-        completed_entries.sort_by_key(|entry| entry.last_output_at.unwrap_or(entry.started_at));
-        completed_entries.reverse();
-        const MAX_COMPLETED_DETAILS: usize = 3;
-        let completed_details: Vec<String> = completed_entries
-            .iter()
-            .take(MAX_COMPLETED_DETAILS)
-            .map(|entry| {
-                let command = Self::summarize_process_command(&entry.command);
-                let finished = Self::format_optional_elapsed_label(entry.last_output_at);
-                format!("{command} · finished {finished}")
-            })
-            .collect();
-        let completed_more = completed_count.saturating_sub(completed_details.len());
-
-        let footer_summary = if running_count == 0 && completed_count == 0 {
-            None
-        } else {
-            let mut parts = Vec::new();
-            if running_count > 0 {
-                parts.push(format!("● {running_count} running"));
-            }
-            if completed_count > 0 {
-                parts.push(format!("○ {completed_count} done"));
-            }
-            Some(parts.join("  "))
-        };
-
-        Some(ProcessOverview {
-            header,
-            running_details,
-            running_more,
-            completed_details,
-            completed_more,
-            footer_summary,
-        })
-    }
-
-    fn apply_process_overview(&mut self, entries: &[ProcessManagerEntry]) {
-        let had_running = self
-            .process_overview_cache
-            .iter()
-            .any(|entry| entry.status == ProcessStatus::Running);
-
-        if entries.is_empty() {
-            self.bottom_pane.set_process_overview(None);
-            self.process_overview_auto_revealed = false;
-            self.process_overview_cache.clear();
-            return;
-        }
-
-        let has_running = entries
-            .iter()
-            .any(|entry| entry.status == ProcessStatus::Running);
-
-        if has_running && !had_running {
-            // A fresh background task just started; ensure the summary is visible again.
-            if self.process_overview_hidden {
-                self.add_info_message(
-                    "Background process started; showing process summary.".to_string(),
-                    None,
-                );
-            }
-            self.process_overview_hidden = false;
-            self.process_overview_auto_revealed = false;
-        }
-
-        self.process_overview_cache = entries.to_vec();
-
-        let has_running = entries
-            .iter()
-            .any(|entry| entry.status == ProcessStatus::Running);
-
-        if self.process_overview_hidden {
-            if has_running && !self.process_overview_auto_revealed {
-                self.process_overview_hidden = false;
-                self.process_overview_auto_revealed = true;
-                self.add_info_message(
-                    "New background process started; showing process summary.".to_string(),
-                    None,
-                );
-            } else {
-                self.bottom_pane.set_process_overview(None);
-                return;
-            }
-        } else {
-            self.process_overview_auto_revealed = false;
-        }
-
-        let overview = Self::process_overview(entries);
-        self.bottom_pane.set_process_overview(overview);
-        self.request_redraw();
-    }
-
-    pub(crate) fn refresh_process_overview(&mut self, entries: &[ProcessManagerEntry]) {
-        self.apply_process_overview(entries);
-    }
-
-    fn toggle_process_overview_visibility(&mut self) {
-        if self.process_overview_hidden {
-            self.process_overview_hidden = false;
-            self.process_overview_auto_revealed = false;
-            if self.process_overview_cache.is_empty() {
-                self.app_event_tx.send(AppEvent::RefreshProcessOverview);
-            } else {
-                let cached = self.process_overview_cache.clone();
-                self.apply_process_overview(&cached);
-                self.app_event_tx.send(AppEvent::RefreshProcessOverview);
-            }
-        } else {
-            self.process_overview_hidden = true;
-            self.process_overview_auto_revealed = true;
-            self.bottom_pane.set_process_overview(None);
-            self.add_info_message(
-                "Process summary hidden. Press Alt+Shift+P to show it again.".to_string(),
-                None,
-            );
-            self.request_redraw();
-        }
-    }
-
-    pub(crate) fn show_process_manager(&mut self, entries: Vec<ProcessManagerEntry>) {
-        self.process_overview_hidden = false;
-        self.process_overview_auto_revealed = false;
-        self.apply_process_overview(&entries);
-        let init = ProcessManagerInit {
-            app_event_tx: self.app_event_tx.clone(),
-            entries,
-        };
-        self.bottom_pane
-            .show_custom_view(Box::new(ProcessManagerView::new(init)));
-    }
-
-    pub(crate) fn update_process_manager(&mut self, entries: Vec<ProcessManagerEntry>) {
-        self.apply_process_overview(&entries);
-        if let Some(view) = self.bottom_pane.active_view_mut()
-            && let Some(manager) = view.as_any_mut().downcast_mut::<ProcessManagerView>()
-        {
-            manager.set_entries(entries);
-            self.request_redraw();
-        }
-    }
-
-    pub(crate) fn show_unified_exec_output(
-        &mut self,
-        entry: ProcessManagerEntry,
-        data: ProcessOutputData,
-    ) {
-        let init = ProcessOutputInit {
-            app_event_tx: self.app_event_tx.clone(),
-            entry,
-            data,
-        };
-        self.bottom_pane
-            .show_custom_view(Box::new(ProcessOutputView::new(init)));
-    }
-
-    pub(crate) fn update_unified_exec_output(
-        &mut self,
-        entry: ProcessManagerEntry,
-        data: ProcessOutputData,
-    ) {
-        if let Some(view) = self.bottom_pane.active_view_mut()
-            && let Some(output_view) = view.as_any_mut().downcast_mut::<ProcessOutputView>()
-            && output_view.session_id() == entry.session_id
-        {
-            output_view.update_entry(entry);
-            output_view.set_output_data(data);
-            self.request_redraw();
-        } else {
-            self.show_unified_exec_output(entry, data);
-        }
-    }
-
-    pub(crate) fn open_unified_exec_input_prompt(&mut self, session_id: i32) {
-        let title = format!("Send input to session {session_id}");
-        let placeholder = "Input will be written to the process stdin".to_string();
-        let context = Some(format!("Session ID: {session_id}"));
-        let app_event_tx = self.app_event_tx.clone();
-        let view = CustomPromptView::new(
-            title,
-            placeholder,
-            context,
-            Box::new(move |text| {
-                app_event_tx.send(AppEvent::SendUnifiedExecInput {
-                    session_id,
-                    input: text,
-                });
-            }),
-        );
-        self.bottom_pane.show_custom_view(Box::new(view));
-    }
-
-    pub(crate) fn open_unified_exec_export_prompt(&mut self, session_id: i32) {
-        let title = format!("Export log for session {session_id}");
-        let placeholder = "Path to save the log (relative or absolute)".to_string();
-        let context = Some("Example: logs/unified-exec-session.log".to_string());
-        let app_event_tx = self.app_event_tx.clone();
-        let view = CustomPromptView::new(
-            title,
-            placeholder,
-            context,
-            Box::new(move |text| {
-                let trimmed = text.trim();
-                if trimmed.is_empty() {
-                    return;
-                }
-                let destination = PathBuf::from(trimmed);
-                app_event_tx.send(AppEvent::ExportUnifiedExecLog {
-                    session_id,
-                    destination,
-                });
-            }),
-        );
-        self.bottom_pane.show_custom_view(Box::new(view));
-    }
-
-    pub(crate) fn set_mcp_servers(
-        &mut self,
-        servers: std::collections::BTreeMap<String, McpServerConfig>,
-    ) {
-        self.config.mcp_servers = servers.into_iter().collect();
-    }
-
-    pub(crate) fn show_mcp_history_summary(&mut self) {
         if self.config.mcp_servers.is_empty() {
             self.add_to_history(history_cell::empty_mcp_output());
         } else {
@@ -2343,6 +2260,8 @@ impl ChatWidget {
         self.add_to_history(history_cell::new_mcp_tools_output(
             &self.config,
             ev.tools,
+            ev.resources,
+            ev.resource_templates,
             &ev.auth_statuses,
         ));
     }
@@ -2534,6 +2453,10 @@ impl ChatWidget {
 
     pub(crate) fn conversation_id(&self) -> Option<ConversationId> {
         self.conversation_id
+    }
+
+    pub(crate) fn rollout_path(&self) -> Option<PathBuf> {
+        self.current_rollout_path.clone()
     }
 
     /// Return a reference to the widget's current config (includes any

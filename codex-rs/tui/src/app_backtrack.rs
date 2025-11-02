@@ -40,6 +40,10 @@ impl App {
         tui: &mut tui::Tui,
         event: TuiEvent,
     ) -> Result<bool> {
+        if !matches!(self.overlay, Some(Overlay::Transcript(_))) {
+            self.overlay_forward_event(tui, event)?;
+            return Ok(true);
+        }
         if self.backtrack.overlay_preview_active {
             match event {
                 TuiEvent::Key(KeyEvent {
@@ -103,9 +107,16 @@ impl App {
         nth_user_message: usize,
     ) {
         self.backtrack.pending = Some((base_id, nth_user_message, prefill));
-        self.app_event_tx.send(crate::app_event::AppEvent::CodexOp(
-            codex_core::protocol::Op::GetPath,
-        ));
+        if let Some(path) = self.chat_widget.rollout_path() {
+            let ev = ConversationPathResponseEvent {
+                conversation_id: base_id,
+                path,
+            };
+            self.app_event_tx
+                .send(crate::app_event::AppEvent::ConversationHistory(ev));
+        } else {
+            tracing::error!("rollout path unavailable; cannot backtrack");
+        }
     }
 
     /// Open transcript overlay (enters alternate screen and shows full transcript).
@@ -339,6 +350,7 @@ impl App {
             initial_images: Vec::new(),
             enhanced_keys_supported: self.enhanced_keys_supported,
             auth_manager: self.auth_manager.clone(),
+            feedback: self.feedback.clone(),
         };
         self.chat_widget =
             crate::chatwidget::ChatWidget::new_from_existing(init, conv, session_configured);
