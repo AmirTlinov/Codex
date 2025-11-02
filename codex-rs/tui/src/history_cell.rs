@@ -1504,6 +1504,39 @@ mod tests {
         assert!(rendered.contains("example.py"));
         assert!(rendered.contains("2 lines"));
         assert!(!rendered.contains("line one"));
+
+        let transcript = render_transcript(&cell).join("\n");
+        assert!(transcript.contains("Write"));
+        assert!(transcript.contains("example.py"));
+        assert!(!transcript.contains("line one"));
+    }
+
+    #[test]
+    fn heredoc_command_pipeline_append_summary() {
+        let script = "cat <<'EOF' | sudo tee -a \"./logs/output.txt\"\nvalue\nEOF\n";
+        let call_id = "c_pipeline".to_string();
+        let mut cell = ExecCell::new(ExecCall {
+            call_id: call_id.clone(),
+            command: vec!["bash".into(), "-lc".into(), script.to_string()],
+            parsed: vec![ParsedCommand::Unknown {
+                cmd: script.to_string(),
+            }],
+            output: None,
+            start_time: Some(Instant::now()),
+            duration: None,
+        });
+
+        cell.complete_call(&call_id, CommandOutput::default(), Duration::from_millis(1));
+
+        let rendered = render_lines(&cell.display_lines(80)).join("\n");
+        assert!(rendered.contains("Append"));
+        assert!(rendered.contains("logs/output.txt"));
+        assert!(!rendered.contains("value"));
+
+        let transcript = render_transcript(&cell).join("\n");
+        assert!(transcript.contains("Append"));
+        assert!(transcript.contains("logs/output.txt"));
+        assert!(!transcript.contains("value"));
     }
 
     #[test]

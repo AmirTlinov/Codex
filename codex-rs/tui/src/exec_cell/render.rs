@@ -164,7 +164,12 @@ impl HistoryCell for ExecCell {
                 lines.push("".into());
             }
             let script = strip_bash_lc_and_escape(&call.command);
-            let highlighted_script = highlight_bash_to_lines(&script);
+            let heredoc = detect_cat_heredoc(&script);
+            let script_for_display = heredoc
+                .as_ref()
+                .map(|info| info.command_line.as_str())
+                .unwrap_or(&script);
+            let highlighted_script = highlight_bash_to_lines(script_for_display);
             let cmd_display = word_wrap_lines(
                 &highlighted_script,
                 RtOptions::new(width as usize)
@@ -172,6 +177,25 @@ impl HistoryCell for ExecCell {
                     .subsequent_indent("    ".into()),
             );
             lines.extend(cmd_display);
+
+            if let Some(info) = heredoc.as_ref() {
+                let summary_line = heredoc_summary_line(info);
+                let prefix_block = PrefixedBlock::new("  └ ", "    ");
+                let wrap_width = prefix_block.wrap_width(width);
+                let mut summary_wrapped: Vec<Line<'static>> = Vec::new();
+                push_owned_lines(
+                    &word_wrap_line(
+                        &summary_line,
+                        RtOptions::new(wrap_width).word_splitter(WordSplitter::NoHyphenation),
+                    ),
+                    &mut summary_wrapped,
+                );
+                lines.extend(prefix_lines(
+                    summary_wrapped,
+                    Span::from(prefix_block.initial_prefix).dim(),
+                    Span::from(prefix_block.subsequent_prefix),
+                ));
+            }
 
             if let Some(output) = call.output.as_ref() {
                 lines.extend(output.formatted_output.lines().map(ansi_escape_line));
@@ -394,16 +418,7 @@ impl ExecCell {
         }
 
         if let Some(info) = heredoc.as_ref() {
-            let mut summary_spans: Vec<Span<'static>> = Vec::new();
-            let label = if info.append { "Append" } else { "Write" };
-            summary_spans.push(label.cyan());
-            summary_spans.push(" ".into());
-            summary_spans.push(format_path_span(&info.target));
-            if let Some(count) = pluralize_lines(info.line_count) {
-                summary_spans.push(" ".into());
-                summary_spans.push(Span::from(format!("({count})")).dim());
-            }
-            let summary_line = Line::from(summary_spans);
+            let summary_line = heredoc_summary_line(info);
             lines.extend(prefix_lines(
                 vec![summary_line],
                 Span::from(layout.output_block.initial_prefix).dim(),
@@ -530,15 +545,15 @@ struct HeredocInfo {
     append: bool,
 }
 
+#[derive(Debug)]
+struct HeredocTarget {
+    target: String,
+    append: bool,
+}
+
 fn summarize_unknown_command(cmd: &str) -> Option<(&'static str, Vec<Span<'static>>)> {
     let info = detect_cat_heredoc(cmd)?;
-    let label = if info.append { "Append" } else { "Write" };
-    let mut spans: Vec<Span<'static>> = Vec::new();
-    spans.push(format_path_span(&info.target));
-    if let Some(count) = pluralize_lines(info.line_count) {
-        spans.push(" ".into());
-        spans.push(Span::from(format!("({count})")).dim());
-    }
+    let (label, spans) = heredoc_summary_parts(&info);
     Some((label, spans))
 }
 
@@ -549,9 +564,8 @@ fn detect_cat_heredoc(script: &str) -> Option<HeredocInfo> {
     if !trimmed_start.starts_with("cat ") || !trimmed_start.contains("<<") {
         return None;
     }
-    let target = extract_redirection_target(first_line)?;
+    let target = parse_heredoc_target(first_line)?;
     let terminator = parse_heredoc_terminator(first_line)?;
-    let append = trimmed_start.contains(">>");
 
     let mut line_count = 0usize;
     let mut found_end = false;
@@ -568,9 +582,9 @@ fn detect_cat_heredoc(script: &str) -> Option<HeredocInfo> {
 
     Some(HeredocInfo {
         command_line: first_line.to_string(),
-        target,
+        target: target.target,
         line_count,
-        append,
+        append: target.append,
     })
 }
 
@@ -609,44 +623,194 @@ fn parse_heredoc_terminator(line: &str) -> Option<String> {
     }
 }
 
-fn extract_redirection_target(line: &str) -> Option<String> {
-    let idx = line.rfind('>')?;
-    if idx + 1 >= line.len() {
-        return None;
-    }
-    let mut segment = line[idx + 1..].trim();
-    if segment.is_empty() || segment.starts_with('&') {
-        return None;
-    }
-    while segment.starts_with('>') {
-        segment = segment[1..].trim_start();
-    }
-    if segment.starts_with('&') || segment.is_empty() {
-        return None;
-    }
-    if segment.starts_with('"') || segment.starts_with('\'') {
-        let mut chars = segment.chars();
-        let quote = chars.next()?;
-        let mut collected = String::new();
-        for ch in chars {
-            if ch == quote {
-                break;
+fn parse_heredoc_target(line: &str) -> Option<HeredocTarget> {
+    parse_tee_target(line).or_else(|| parse_redirection_target(line))
+}
+
+#[allow(clippy::while_let_on_iterator)]
+fn parse_redirection_target(line: &str) -> Option<HeredocTarget> {
+    let mut in_single = false;
+    let mut in_double = false;
+    let mut iter = line.char_indices().peekable();
+    while let Some((idx, ch)) = iter.next() {
+        match ch {
+            '\'' => {
+                if !in_double {
+                    in_single = !in_single;
+                }
             }
-            collected.push(ch);
+            '"' => {
+                if !in_single {
+                    in_double = !in_double;
+                }
+            }
+            '>' if !in_single && !in_double => {
+                // Skip file descriptor redirects like 2>
+                let is_descriptor_redirect = line[..idx]
+                    .chars()
+                    .rev()
+                    .find(|c| !c.is_whitespace())
+                    .is_some_and(|c| c.is_ascii_digit());
+                if is_descriptor_redirect {
+                    continue;
+                }
+
+                let mut append = false;
+                let mut consumed = 1usize;
+                while let Some(&(_, next_ch)) = iter.peek() {
+                    if next_ch == '>' {
+                        append = true;
+                        consumed += 1;
+                        iter.next();
+                    } else {
+                        break;
+                    }
+                }
+
+                let rest = &line[idx + consumed..];
+                let Some(parsed) = parse_token(rest) else {
+                    continue;
+                };
+                if parsed.token.starts_with('&') || parsed.token.is_empty() {
+                    continue;
+                }
+                return Some(HeredocTarget {
+                    target: parsed.token,
+                    append,
+                });
+            }
+            _ => {}
         }
-        if collected.is_empty() {
-            None
-        } else {
-            Some(collected)
-        }
-    } else {
-        let token = segment
-            .split_whitespace()
-            .next()
-            .unwrap_or_default()
-            .to_string();
-        if token.is_empty() { None } else { Some(token) }
     }
+    None
+}
+
+#[allow(clippy::while_let_on_iterator)]
+fn parse_tee_target(line: &str) -> Option<HeredocTarget> {
+    let mut in_single = false;
+    let mut in_double = false;
+    let mut iter = line.char_indices().peekable();
+    while let Some((idx, ch)) = iter.next() {
+        match ch {
+            '\'' => {
+                if !in_double {
+                    in_single = !in_single;
+                }
+            }
+            '"' => {
+                if !in_single {
+                    in_double = !in_double;
+                }
+            }
+            '|' if !in_single && !in_double => {
+                let rest = &line[idx + 1..];
+                if let Some(target) = parse_tee_segment(rest) {
+                    return Some(target);
+                }
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+fn parse_tee_segment(segment: &str) -> Option<HeredocTarget> {
+    let mut rest = segment.trim_start();
+    if let Some(stripped) = rest.strip_prefix("sudo ") {
+        rest = stripped.trim_start();
+    }
+    if !rest.starts_with("tee") {
+        return None;
+    }
+    rest = &rest["tee".len()..];
+    let mut append = false;
+    let mut remainder = rest;
+    loop {
+        let parsed = parse_token(remainder)?;
+        if parsed.token.is_empty() {
+            return None;
+        }
+        remainder = parsed.remainder;
+        if parsed.token.starts_with('-') {
+            if parsed.token == "-a" || parsed.token == "--append" {
+                append = true;
+            }
+            if remainder.trim_start().is_empty() {
+                return None;
+            }
+            continue;
+        }
+        if parsed.token == "-" {
+            return None;
+        }
+        return Some(HeredocTarget {
+            target: parsed.token,
+            append,
+        });
+    }
+}
+
+struct ParsedToken<'a> {
+    token: String,
+    remainder: &'a str,
+}
+
+fn parse_token(input: &str) -> Option<ParsedToken<'_>> {
+    let trimmed = input.trim_start();
+    if trimmed.is_empty() {
+        return None;
+    }
+    let offset = input.len() - trimmed.len();
+    let mut token = String::new();
+    let mut in_single = false;
+    let mut in_double = false;
+    for (idx, ch) in trimmed.char_indices() {
+        match ch {
+            '\'' if !in_double => {
+                in_single = !in_single;
+            }
+            '"' if !in_single => {
+                in_double = !in_double;
+            }
+            c if c.is_whitespace() && !in_single && !in_double => {
+                let remainder_idx = idx + ch.len_utf8();
+                let remainder = &input[offset + remainder_idx..];
+                return Some(ParsedToken { token, remainder });
+            }
+            _ => {
+                token.push(ch);
+            }
+        }
+    }
+    if in_single || in_double {
+        return None;
+    }
+    Some(ParsedToken {
+        token,
+        remainder: "",
+    })
+}
+
+fn heredoc_summary_parts(info: &HeredocInfo) -> (&'static str, Vec<Span<'static>>) {
+    let label = if info.append { "Append" } else { "Write" };
+    let mut spans: Vec<Span<'static>> = Vec::new();
+    spans.push(format_path_span(&info.target));
+    if let Some(count) = pluralize_lines(info.line_count) {
+        spans.push(" ".into());
+        spans.push(Span::from(format!("({count})")).dim());
+    }
+    (label, spans)
+}
+
+fn heredoc_summary_line(info: &HeredocInfo) -> Line<'static> {
+    let (label, mut spans) = heredoc_summary_parts(info);
+    let mut line_spans: Vec<Span<'static>> = Vec::with_capacity(spans.len() + 2);
+    line_spans.push(label.cyan());
+    if !spans.is_empty() {
+        line_spans.push(" ".into());
+        line_spans.append(&mut spans);
+    }
+    Line::from(line_spans)
 }
 
 fn format_path_span(path: &str) -> Span<'static> {
