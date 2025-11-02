@@ -33,7 +33,6 @@ use crate::model_family::find_family_for_model;
 use crate::model_provider_info::ModelProviderInfo;
 use crate::model_provider_info::built_in_model_providers;
 use crate::openai_model_info::get_model_info;
-use crate::project_doc::DEFAULT_PROJECT_DOC_FILENAME;
 use crate::project_doc::LOCAL_PROJECT_DOC_FILENAME;
 use crate::protocol::AskForApproval;
 use crate::protocol::SandboxPolicy;
@@ -160,7 +159,7 @@ pub struct Config {
     /// Defaults to `false`.
     pub show_raw_agent_reasoning: bool,
 
-    /// User-provided instructions from AGENTS.md.
+    /// User-provided instructions from AGENTS.override.md.
     pub user_instructions: Option<String>,
 
     /// Base instructions override.
@@ -1938,14 +1937,11 @@ impl Config {
 
     fn load_instructions(codex_dir: Option<&Path>) -> Option<String> {
         let base = codex_dir?;
-        for candidate in [LOCAL_PROJECT_DOC_FILENAME, DEFAULT_PROJECT_DOC_FILENAME] {
-            let mut path = base.to_path_buf();
-            path.push(candidate);
-            if let Ok(contents) = std::fs::read_to_string(&path) {
-                let trimmed = contents.trim();
-                if !trimmed.is_empty() {
-                    return Some(trimmed.to_string());
-                }
+        let path = base.join(LOCAL_PROJECT_DOC_FILENAME);
+        if let Ok(contents) = std::fs::read_to_string(&path) {
+            let trimmed = contents.trim();
+            if !trimmed.is_empty() {
+                return Some(trimmed.to_string());
             }
         }
         None
