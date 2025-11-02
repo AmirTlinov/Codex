@@ -27,7 +27,6 @@ use textwrap::WordSplitter;
 use unicode_width::UnicodeWidthStr;
 
 pub(crate) const TOOL_CALL_MAX_LINES: usize = 5;
-const HEREDOC_PREVIEW_LIMIT: usize = 3;
 
 pub(crate) struct OutputLinesParams {
     pub(crate) include_angle_pipe: bool,
@@ -180,22 +179,19 @@ impl HistoryCell for ExecCell {
             lines.extend(cmd_display);
 
             if let Some(info) = heredoc.as_ref() {
+                let summary_line = heredoc_summary_line(info);
                 let prefix_block = PrefixedBlock::new("  └ ", "    ");
                 let wrap_width = prefix_block.wrap_width(width);
-                let mut wrapped: Vec<Line<'static>> = Vec::new();
-                let mut block_lines: Vec<Line<'static>> = vec![heredoc_summary_line(info)];
-                block_lines.extend(heredoc_preview_lines(info));
-                for line in block_lines {
-                    push_owned_lines(
-                        &word_wrap_line(
-                            &line,
-                            RtOptions::new(wrap_width).word_splitter(WordSplitter::NoHyphenation),
-                        ),
-                        &mut wrapped,
-                    );
-                }
+                let mut summary_wrapped: Vec<Line<'static>> = Vec::new();
+                push_owned_lines(
+                    &word_wrap_line(
+                        &summary_line,
+                        RtOptions::new(wrap_width).word_splitter(WordSplitter::NoHyphenation),
+                    ),
+                    &mut summary_wrapped,
+                );
                 lines.extend(prefix_lines(
-                    wrapped,
+                    summary_wrapped,
                     Span::from(prefix_block.initial_prefix).dim(),
                     Span::from(prefix_block.subsequent_prefix),
                 ));
@@ -422,17 +418,14 @@ impl ExecCell {
         }
 
         if let Some(info) = heredoc.as_ref() {
-            let mut block_lines: Vec<Line<'static>> = vec![heredoc_summary_line(info)];
-            block_lines.extend(heredoc_preview_lines(info));
+            let summary_line = heredoc_summary_line(info);
             let mut wrapped_block: Vec<Line<'static>> = Vec::new();
             let wrap_width = layout.output_block.wrap_width(width);
             let wrap_opts = RtOptions::new(wrap_width).word_splitter(WordSplitter::NoHyphenation);
-            for line in block_lines {
-                push_owned_lines(
-                    &word_wrap_line(&line, wrap_opts.clone()),
-                    &mut wrapped_block,
-                );
-            }
+            push_owned_lines(
+                &word_wrap_line(&summary_line, wrap_opts),
+                &mut wrapped_block,
+            );
             lines.extend(prefix_lines(
                 wrapped_block,
                 Span::from(layout.output_block.initial_prefix).dim(),
@@ -557,8 +550,6 @@ struct HeredocInfo {
     command_line: String,
     destinations: Vec<HeredocTarget>,
     line_count: usize,
-    preview: Vec<String>,
-    preview_omitted: bool,
 }
 
 #[derive(Debug)]
@@ -612,16 +603,12 @@ fn detect_heredoc_command(script: &str) -> Option<HeredocInfo> {
     let destinations = parse_heredoc_destinations(first_line);
     let terminator = parse_heredoc_terminator(first_line)?;
 
-    let mut preview: Vec<String> = Vec::new();
     let mut line_count = 0usize;
     let mut found_end = false;
     for line in lines {
         if line.trim() == terminator {
             found_end = true;
             break;
-        }
-        if preview.len() < HEREDOC_PREVIEW_LIMIT {
-            preview.push(line.to_string());
         }
         line_count += 1;
     }
@@ -634,8 +621,6 @@ fn detect_heredoc_command(script: &str) -> Option<HeredocInfo> {
         command_line: first_line.to_string(),
         destinations,
         line_count,
-        preview_omitted: line_count > preview.len(),
-        preview,
     })
 }
 
@@ -922,24 +907,6 @@ fn heredoc_summary_line(info: &HeredocInfo) -> Line<'static> {
         spans.extend(summary.detail_spans);
     }
     Line::from(spans)
-}
-
-fn heredoc_preview_lines(info: &HeredocInfo) -> Vec<Line<'static>> {
-    if info.preview.is_empty() {
-        return Vec::new();
-    }
-    let mut lines: Vec<Line<'static>> = info
-        .preview
-        .iter()
-        .map(|text| Line::from(vec![Span::from(text.clone()).dim()]))
-        .collect();
-    if info.preview_omitted {
-        let omitted = info.line_count.saturating_sub(info.preview.len());
-        lines.push(Line::from(vec![
-            Span::from(format!("… +{omitted} more")).dim(),
-        ]));
-    }
-    lines
 }
 
 fn format_path_span(path: &str) -> Span<'static> {
