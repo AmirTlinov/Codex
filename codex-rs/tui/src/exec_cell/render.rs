@@ -3,6 +3,7 @@ use std::time::Instant;
 use super::model::CommandOutput;
 use super::model::ExecCall;
 use super::model::ExecCell;
+use crate::exec_command::relativize_to_home;
 use crate::exec_command::strip_bash_lc_and_escape;
 use crate::history_cell::HistoryCell;
 use crate::render::highlight::highlight_bash_to_lines;
@@ -28,7 +29,6 @@ use unicode_width::UnicodeWidthStr;
 pub(crate) const TOOL_CALL_MAX_LINES: usize = 5;
 
 pub(crate) struct OutputLinesParams {
-    pub(crate) only_err: bool,
     pub(crate) include_angle_pipe: bool,
     pub(crate) include_prefix: bool,
 }
@@ -59,22 +59,12 @@ pub(crate) fn output_lines(
     params: OutputLinesParams,
 ) -> OutputLines {
     let OutputLinesParams {
-        only_err,
         include_angle_pipe,
         include_prefix,
     } = params;
     let CommandOutput {
-        exit_code,
-        stdout,
-        stderr,
-        ..
+        aggregated_output, ..
     } = match output {
-        Some(output) if only_err && output.exit_code == 0 => {
-            return OutputLines {
-                lines: Vec::new(),
-                omitted: None,
-            };
-        }
         Some(output) => output,
         None => {
             return OutputLines {
@@ -84,7 +74,7 @@ pub(crate) fn output_lines(
         }
     };
 
-    let src = if *exit_code == 0 { stdout } else { stderr };
+    let src = aggregated_output;
     let lines: Vec<&str> = src.lines().collect();
     let total = lines.len();
     let limit = TOOL_CALL_MAX_LINES;
@@ -309,7 +299,11 @@ impl ExecCell {
                             lines.push(("Search", spans));
                         }
                         ParsedCommand::Unknown { cmd } => {
-                            lines.push(("Run", vec![cmd.clone().into()]));
+                            if let Some((label, spans)) = summarize_unknown_command(cmd) {
+                                lines.push((label, spans));
+                            } else {
+                                lines.push(("Run", vec![cmd.clone().into()]));
+                            }
                         }
                     }
                 }
@@ -351,8 +345,13 @@ impl ExecCell {
             Line::from(vec![bullet.clone(), " ".into(), title.bold(), " ".into()]);
         let header_prefix_width = header_line.width();
 
-        let cmd_display = strip_bash_lc_and_escape(&call.command);
-        let highlighted_lines = highlight_bash_to_lines(&cmd_display);
+        let raw_script = strip_bash_lc_and_escape(&call.command);
+        let heredoc = detect_cat_heredoc(&raw_script);
+        let script_for_display = heredoc
+            .as_ref()
+            .map(|info| info.command_line.as_str())
+            .unwrap_or(&raw_script);
+        let highlighted_lines = highlight_bash_to_lines(script_for_display);
 
         let continuation_wrap_width = layout.command_continuation.wrap_width(width);
         let continuation_opts =
@@ -394,11 +393,28 @@ impl ExecCell {
             ));
         }
 
+        if let Some(info) = heredoc.as_ref() {
+            let mut summary_spans: Vec<Span<'static>> = Vec::new();
+            let label = if info.append { "Append" } else { "Write" };
+            summary_spans.push(label.cyan());
+            summary_spans.push(" ".into());
+            summary_spans.push(format_path_span(&info.target));
+            if let Some(count) = pluralize_lines(info.line_count) {
+                summary_spans.push(" ".into());
+                summary_spans.push(Span::from(format!("({count})")).dim());
+            }
+            let summary_line = Line::from(summary_spans);
+            lines.extend(prefix_lines(
+                vec![summary_line],
+                Span::from(layout.output_block.initial_prefix).dim(),
+                Span::from(layout.output_block.subsequent_prefix),
+            ));
+        }
+
         if let Some(output) = call.output.as_ref() {
             let raw_output = output_lines(
                 Some(output),
                 OutputLinesParams {
-                    only_err: false,
                     include_angle_pipe: false,
                     include_prefix: false,
                 },
@@ -503,6 +519,167 @@ impl ExecCell {
 
     fn ellipsis_line(omitted: usize) -> Line<'static> {
         Line::from(vec![format!("… +{omitted} lines").dim()])
+    }
+}
+
+#[derive(Debug)]
+struct HeredocInfo {
+    command_line: String,
+    target: String,
+    line_count: usize,
+    append: bool,
+}
+
+fn summarize_unknown_command(cmd: &str) -> Option<(&'static str, Vec<Span<'static>>)> {
+    let info = detect_cat_heredoc(cmd)?;
+    let label = if info.append { "Append" } else { "Write" };
+    let mut spans: Vec<Span<'static>> = Vec::new();
+    spans.push(format_path_span(&info.target));
+    if let Some(count) = pluralize_lines(info.line_count) {
+        spans.push(" ".into());
+        spans.push(Span::from(format!("({count})")).dim());
+    }
+    Some((label, spans))
+}
+
+fn detect_cat_heredoc(script: &str) -> Option<HeredocInfo> {
+    let mut lines = script.lines();
+    let first_line = lines.next()?.trim();
+    let trimmed_start = first_line.trim_start();
+    if !trimmed_start.starts_with("cat ") || !trimmed_start.contains("<<") {
+        return None;
+    }
+    let target = extract_redirection_target(first_line)?;
+    let terminator = parse_heredoc_terminator(first_line)?;
+    let append = trimmed_start.contains(">>");
+
+    let mut line_count = 0usize;
+    let mut found_end = false;
+    for line in lines {
+        if line.trim() == terminator {
+            found_end = true;
+            break;
+        }
+        line_count += 1;
+    }
+    if !found_end {
+        return None;
+    }
+
+    Some(HeredocInfo {
+        command_line: first_line.to_string(),
+        target,
+        line_count,
+        append,
+    })
+}
+
+fn parse_heredoc_terminator(line: &str) -> Option<String> {
+    let idx = line.find("<<")?;
+    let mut rest = &line[idx + 2..];
+    rest = rest.trim_start();
+    if let Some(stripped) = rest.strip_prefix('-') {
+        rest = stripped.trim_start();
+    }
+    let mut chars = rest.chars();
+    let first = chars.next()?;
+    if first == '\'' || first == '"' {
+        let quote = first;
+        let mut terminator = String::new();
+        for ch in chars {
+            if ch == quote {
+                break;
+            }
+            terminator.push(ch);
+        }
+        if terminator.is_empty() {
+            None
+        } else {
+            Some(terminator)
+        }
+    } else {
+        let mut terminator = first.to_string();
+        for ch in chars {
+            if ch.is_whitespace() || ch == '>' {
+                break;
+            }
+            terminator.push(ch);
+        }
+        Some(terminator)
+    }
+}
+
+fn extract_redirection_target(line: &str) -> Option<String> {
+    let idx = line.rfind('>')?;
+    if idx + 1 >= line.len() {
+        return None;
+    }
+    let mut segment = line[idx + 1..].trim();
+    if segment.is_empty() || segment.starts_with('&') {
+        return None;
+    }
+    while segment.starts_with('>') {
+        segment = segment[1..].trim_start();
+    }
+    if segment.starts_with('&') || segment.is_empty() {
+        return None;
+    }
+    if segment.starts_with('"') || segment.starts_with('\'') {
+        let mut chars = segment.chars();
+        let quote = chars.next()?;
+        let mut collected = String::new();
+        for ch in chars {
+            if ch == quote {
+                break;
+            }
+            collected.push(ch);
+        }
+        if collected.is_empty() {
+            None
+        } else {
+            Some(collected)
+        }
+    } else {
+        let token = segment
+            .split_whitespace()
+            .next()
+            .unwrap_or_default()
+            .to_string();
+        if token.is_empty() { None } else { Some(token) }
+    }
+}
+
+fn format_path_span(path: &str) -> Span<'static> {
+    let display = format_path_for_display(path);
+    let adjusted = if display.contains(char::is_whitespace) {
+        format!("\"{display}\"")
+    } else {
+        display
+    };
+    adjusted.into()
+}
+
+fn format_path_for_display(path: &str) -> String {
+    let trimmed = path.trim().trim_matches('"').trim_matches('\'');
+    if let Some(rel) = relativize_to_home(trimmed) {
+        let rel_str = rel.to_string_lossy();
+        if rel_str.is_empty() {
+            "~".to_string()
+        } else {
+            format!("~{rel_str}")
+        }
+    } else {
+        trimmed.to_string()
+    }
+}
+
+fn pluralize_lines(count: usize) -> Option<String> {
+    if count == 0 {
+        None
+    } else if count == 1 {
+        Some("1 line".to_string())
+    } else {
+        Some(format!("{count} lines"))
     }
 }
 
