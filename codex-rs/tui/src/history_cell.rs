@@ -1503,12 +1503,12 @@ mod tests {
         assert!(rendered.contains("Write"));
         assert!(rendered.contains("example.py"));
         assert!(rendered.contains("2 lines"));
-        assert!(!rendered.contains("line one"));
+        assert!(rendered.contains("line one"));
 
         let transcript = render_transcript(&cell).join("\n");
         assert!(transcript.contains("Write"));
         assert!(transcript.contains("example.py"));
-        assert!(!transcript.contains("line one"));
+        assert!(transcript.contains("line one"));
     }
 
     #[test]
@@ -1531,12 +1531,88 @@ mod tests {
         let rendered = render_lines(&cell.display_lines(80)).join("\n");
         assert!(rendered.contains("Append"));
         assert!(rendered.contains("logs/output.txt"));
-        assert!(!rendered.contains("value"));
+        assert!(rendered.contains("value"));
 
         let transcript = render_transcript(&cell).join("\n");
         assert!(transcript.contains("Append"));
         assert!(transcript.contains("logs/output.txt"));
-        assert!(!transcript.contains("value"));
+        assert!(transcript.contains("value"));
+    }
+
+    #[test]
+    fn heredoc_command_python_run_summary() {
+        let script = "python - <<'PY'\nprint('hello')\nprint('world')\nPY\n";
+        let call_id = "c_python".to_string();
+        let mut cell = ExecCell::new(ExecCall {
+            call_id: call_id.clone(),
+            command: vec!["bash".into(), "-lc".into(), script.to_string()],
+            parsed: vec![ParsedCommand::Unknown {
+                cmd: script.to_string(),
+            }],
+            output: None,
+            start_time: Some(Instant::now()),
+            duration: None,
+        });
+
+        cell.complete_call(&call_id, CommandOutput::default(), Duration::from_millis(1));
+
+        let rendered = render_lines(&cell.display_lines(80)).join("\n");
+        assert!(rendered.contains("Run"));
+        assert!(rendered.contains("python"));
+        assert!(rendered.contains("print('hello')"));
+
+        let transcript = render_transcript(&cell).join("\n");
+        assert!(transcript.contains("Run"));
+        assert!(transcript.contains("python"));
+        assert!(transcript.contains("print('world')"));
+    }
+
+    #[test]
+    fn heredoc_command_tee_multiple_targets_summary() {
+        let script = "cat <<'EOF' | tee file-a.txt file-b.txt\ncontent\nEOF\n";
+        let call_id = "c_tee".to_string();
+        let mut cell = ExecCell::new(ExecCall {
+            call_id: call_id.clone(),
+            command: vec!["bash".into(), "-lc".into(), script.to_string()],
+            parsed: vec![ParsedCommand::Unknown {
+                cmd: script.to_string(),
+            }],
+            output: None,
+            start_time: Some(Instant::now()),
+            duration: None,
+        });
+
+        cell.complete_call(&call_id, CommandOutput::default(), Duration::from_millis(1));
+
+        let rendered = render_lines(&cell.display_lines(80)).join("\n");
+        assert!(rendered.contains("Write"));
+        assert!(rendered.contains("file-a.txt"));
+        assert!(rendered.contains("(+1 more)"));
+        assert!(rendered.contains("content"));
+    }
+
+    #[test]
+    fn heredoc_preview_shows_ellipsis_when_truncated() {
+        let script = "cat <<'EOF' > ./notes.txt\n1\n2\n3\n4\n5\nEOF\n";
+        let call_id = "c_long".to_string();
+        let mut cell = ExecCell::new(ExecCall {
+            call_id: call_id.clone(),
+            command: vec!["bash".into(), "-lc".into(), script.to_string()],
+            parsed: vec![ParsedCommand::Unknown {
+                cmd: script.to_string(),
+            }],
+            output: None,
+            start_time: Some(Instant::now()),
+            duration: None,
+        });
+
+        cell.complete_call(&call_id, CommandOutput::default(), Duration::from_millis(1));
+
+        let rendered = render_lines(&cell.display_lines(80)).join("\n");
+        assert!(rendered.contains("… +2 more"));
+
+        let transcript = render_transcript(&cell).join("\n");
+        assert!(transcript.contains("… +2 more"));
     }
 
     #[test]
