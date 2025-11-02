@@ -78,6 +78,7 @@ use toml_edit::Table as TomlTable;
 use walkdir::WalkDir;
 
 use self::mcp_registry::resolve_registry;
+use self::mcp_registry::resolve_server;
 
 #[cfg(target_os = "windows")]
 pub const OPENAI_DEFAULT_MODEL: &str = "gpt-5";
@@ -1803,12 +1804,17 @@ impl Config {
             cfg.mcp_schema_version,
         )?;
 
-        let mut mcp_servers =
+        let mut agents_servers =
             load_agents_mcp_servers(&agents_home, project_agents_home.as_deref())?;
-        for (key, server) in registry.servers {
-            mcp_servers.insert(key, server);
+        let mut resolved_agents = HashMap::new();
+        for (name, server) in agents_servers.drain() {
+            let resolved = resolve_server(&name, &server, &registry.templates)?;
+            resolved_agents.insert(name, resolved);
         }
-
+        for (key, server) in registry.servers {
+            resolved_agents.insert(key, server);
+        }
+        let mcp_servers = resolved_agents;
         let mcp_templates = registry.templates;
         let mcp_schema_version = Some(registry.schema_version);
         let experimental_mcp_overhaul = cfg
@@ -3850,6 +3856,65 @@ trust_level = "trusted"
         .expect_err("future schema version should error");
 
         assert_eq!(err.kind(), std::io::ErrorKind::InvalidData);
+    }
+
+    #[test]
+    fn agent_servers_apply_template_defaults() -> std::io::Result<()> {
+        let codex_home = TempDir::new()?;
+        let agents_dir = codex_home.path().join(".agents").join("mcp");
+        std::fs::create_dir_all(&agents_dir)?;
+        std::fs::write(
+            agents_dir.join("mcp.toml"),
+            r#"
+[docs]
+template_id = " docs/local@1 "
+disabled_tools = ["legacy"]
+"#,
+        )?;
+
+        let templates = HashMap::from([(
+            "docs/local@1".to_string(),
+            McpTemplate {
+                defaults: Some(McpTemplateDefaults {
+                    command: Some("docs-server".to_string()),
+                    args: vec!["--port".to_string(), "8080".to_string()],
+                    tags: vec!["template".to_string()],
+                    ..Default::default()
+                }),
+                ..Default::default()
+            },
+        )]);
+
+        let cfg = ConfigToml {
+            mcp_templates: templates,
+            ..Default::default()
+        };
+
+        let config = Config::load_from_base_config_with_overrides(
+            cfg,
+            ConfigOverrides::default(),
+            codex_home.path().to_path_buf(),
+        )?;
+
+        let docs = config
+            .mcp_servers
+            .get("docs")
+            .expect("docs server should load");
+        match &docs.transport {
+            McpServerTransportConfig::Stdio { command, args, .. } => {
+                assert_eq!(command, "docs-server");
+                assert_eq!(args, &vec!["--port".to_string(), "8080".to_string()]);
+            }
+            other => panic!("unexpected transport: {other:?}"),
+        }
+        assert_eq!(docs.template_id.as_deref(), Some("docs/local@1"));
+        assert_eq!(docs.tags, vec!["template".to_string()]);
+        assert_eq!(
+            docs.disabled_tools.as_ref(),
+            Some(&vec!["legacy".to_string()])
+        );
+
+        Ok(())
     }
 
     #[tokio::test]

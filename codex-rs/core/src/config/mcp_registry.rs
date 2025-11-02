@@ -74,7 +74,7 @@ fn normalize_schema_version(
     }
 }
 
-fn resolve_server(
+pub(crate) fn resolve_server(
     server_name: &str,
     source: &McpServerConfig,
     templates: &HashMap<String, McpTemplate>,
@@ -85,7 +85,11 @@ fn resolve_server(
         .map(|raw| raw.trim())
         .map(str::to_string);
 
-    if source.template_id.is_some() && trimmed_id.as_ref().is_none_or(std::string::String::is_empty) {
+    if source.template_id.is_some()
+        && trimmed_id
+            .as_ref()
+            .is_none_or(std::string::String::is_empty)
+    {
         return Err(Error::new(
             ErrorKind::InvalidData,
             format!("MCP server `{server_name}` has an empty template_id"),
@@ -185,9 +189,10 @@ fn apply_template_defaults(
                 *env_vars = merge_env_vars(&defaults.env_vars, &source_env_vars);
 
                 if cwd.is_none()
-                    && let Some(default_cwd) = defaults.cwd.as_ref() {
-                        *cwd = Some(default_cwd.clone());
-                    }
+                    && let Some(default_cwd) = defaults.cwd.as_ref()
+                {
+                    *cwd = Some(default_cwd.clone());
+                }
             }
             (
                 McpServerTransportConfig::StreamableHttp {
@@ -558,15 +563,17 @@ fn merge_tags(template_tags: &[String], server_tags: &[String]) -> Vec<String> {
     let mut merged = Vec::new();
     for tag in template_tags {
         if let Some(value) = trimmed_non_empty(tag)
-            && seen.insert(value.clone()) {
-                merged.push(value);
-            }
+            && seen.insert(value.clone())
+        {
+            merged.push(value);
+        }
     }
     for tag in server_tags {
         if let Some(value) = trimmed_non_empty(tag)
-            && seen.insert(value.clone()) {
-                merged.push(value);
-            }
+            && seen.insert(value.clone())
+        {
+            merged.push(value);
+        }
     }
     merged
 }
@@ -613,15 +620,17 @@ fn merge_env_vars(template_vars: &[String], server_vars: &[String]) -> Vec<Strin
     let mut merged = Vec::new();
     for value in template_vars {
         if let Some(normalized) = trimmed_non_empty(value)
-            && seen.insert(normalized.clone()) {
-                merged.push(normalized);
-            }
+            && seen.insert(normalized.clone())
+        {
+            merged.push(normalized);
+        }
     }
     for value in server_vars {
         if let Some(normalized) = trimmed_non_empty(value)
-            && seen.insert(normalized.clone()) {
-                merged.push(normalized);
-            }
+            && seen.insert(normalized.clone())
+        {
+            merged.push(normalized);
+        }
     }
     merged
 }
@@ -678,8 +687,5 @@ fn trimmed_non_empty(value: impl AsRef<str>) -> Option<String> {
 }
 
 fn normalized_list(values: &[String]) -> Vec<String> {
-    values
-        .iter()
-        .filter_map(trimmed_non_empty)
-        .collect()
+    values.iter().filter_map(trimmed_non_empty).collect()
 }
