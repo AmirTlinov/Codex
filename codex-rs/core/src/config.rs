@@ -1,5 +1,6 @@
-pub mod migrations;
+mod mcp_registry;
 
+use crate::auth::AuthCredentialsStoreMode;
 use crate::config_loader::LoadedConfigLayers;
 pub use crate::config_loader::load_config_as_toml;
 use crate::config_loader::load_config_layers_with_overrides;
@@ -10,6 +11,7 @@ use crate::config_types::History;
 use crate::config_types::McpServerConfig;
 use crate::config_types::McpServerTransportConfig;
 use crate::config_types::McpTemplate;
+use crate::config_types::Notice;
 use crate::config_types::Notifications;
 use crate::config_types::OtelConfig;
 use crate::config_types::OtelConfigToml;
@@ -31,31 +33,51 @@ use crate::model_family::find_family_for_model;
 use crate::model_provider_info::ModelProviderInfo;
 use crate::model_provider_info::built_in_model_providers;
 use crate::openai_model_info::get_model_info;
+use crate::project_doc::DEFAULT_PROJECT_DOC_FILENAME;
+use crate::project_doc::LOCAL_PROJECT_DOC_FILENAME;
 use crate::protocol::AskForApproval;
 use crate::protocol::SandboxPolicy;
 use anyhow::Context;
 use codex_app_server_protocol::Tools;
 use codex_app_server_protocol::UserSavedConfig;
+use codex_protocol::config_types::ForcedLoginMethod;
 use codex_protocol::config_types::ReasoningEffort;
 use codex_protocol::config_types::ReasoningSummary;
 use codex_protocol::config_types::SandboxMode;
 use codex_protocol::config_types::Verbosity;
+use codex_protocol::protocol::AGENTS_CONTEXT_CLOSE_TAG;
+use codex_protocol::protocol::AGENTS_CONTEXT_OPEN_TAG;
 use codex_rmcp_client::OAuthCredentialsStoreMode;
+use codex_utils_string::take_bytes_at_char_boundary;
+use codex_utils_tokenizer::Tokenizer;
 use dirs::home_dir;
+use dunce::canonicalize;
 use serde::Deserialize;
+use serde_json::Value as JsonValue;
+use similar::DiffableStr;
+use std::cmp::max;
 use std::collections::BTreeMap;
 use std::collections::HashMap;
+use std::fs;
+use std::io::BufReader;
 use std::io::ErrorKind;
+use std::io::Read;
+use std::path::Component;
 use std::path::Path;
 use std::path::PathBuf;
 
+#[cfg(unix)]
+use std::os::unix::fs::PermissionsExt;
+
 use tempfile::NamedTempFile;
-use tokio::runtime::Handle;
 use toml::Value as TomlValue;
 use toml_edit::Array as TomlArray;
 use toml_edit::DocumentMut;
 use toml_edit::Item as TomlItem;
 use toml_edit::Table as TomlTable;
+use walkdir::WalkDir;
+
+use self::mcp_registry::resolve_registry;
 
 #[cfg(target_os = "windows")]
 pub const OPENAI_DEFAULT_MODEL: &str = "gpt-5";
@@ -71,6 +93,22 @@ pub(crate) const PROJECT_DOC_MAX_BYTES: usize = 32 * 1024; // 32 KiB
 
 pub(crate) const CONFIG_TOML_FILE: &str = "config.toml";
 
+const AGENTS_HOME_DEFAULT_SUBDIRS: &[&str] = &["context", "tools", "mcp"];
+const AGENTS_CONTEXT_PROMPT_MAX_BYTES: usize = 1024 * 1024; // 1 MiB
+const AGENTS_CONTEXT_FILE_MAX_BYTES: usize = 256 * 1024; // 256 KiB
+const AGENTS_CONTEXT_IMPORT_MAX_FILES: usize = 512;
+pub const AGENTS_CONTEXT_WARNING_TOKENS: usize = 50_000;
+const AGENTS_CONTEXT_WARNING_TOKENS_MIN: usize = 1_000;
+const AGENTS_CONTEXT_TRUNCATION_NOTICE: &str = "[... agents context truncated ...]";
+const AGENTS_CONTEXT_FILE_TRUNCATION_NOTICE: &str = "_Content truncated to 256 KiB._";
+
+#[derive(Clone)]
+pub struct AgentsContextRender {
+    pub prompt: Option<String>,
+    pub token_count: usize,
+    pub truncated: bool,
+}
+
 /// Application configuration loaded from disk and merged with overrides.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Config {
@@ -83,10 +121,10 @@ pub struct Config {
     pub model_family: ModelFamily,
 
     /// Size of the context window for the model, in tokens.
-    pub model_context_window: Option<u64>,
+    pub model_context_window: Option<i64>,
 
     /// Maximum number of output tokens.
-    pub model_max_output_tokens: Option<u64>,
+    pub model_max_output_tokens: Option<i64>,
 
     /// Token usage threshold triggering auto-compaction of conversation history.
     pub model_auto_compact_token_limit: Option<i64>,
@@ -101,6 +139,14 @@ pub struct Config {
     pub approval_policy: AskForApproval,
 
     pub sandbox_policy: SandboxPolicy,
+
+    /// True if the user passed in an override or set a value in config.toml
+    /// for either of approval_policy or sandbox_mode.
+    pub did_user_set_custom_approval_policy_or_sandbox_mode: bool,
+
+    /// On Windows, indicates that a previously configured workspace-write sandbox
+    /// was coerced to read-only because native auto mode is unsupported.
+    pub forced_auto_mode_downgraded_on_windows: bool,
 
     pub shell_environment_policy: ShellEnvironmentPolicy,
 
@@ -150,17 +196,20 @@ pub struct Config {
     /// resolved against this path.
     pub cwd: PathBuf,
 
+    /// Preferred store for CLI auth credentials.
+    /// file (default): Use a file in the Codex home directory.
+    /// keyring: Use an OS-specific keyring service.
+    /// auto: Use the OS-specific keyring service if available, otherwise use a file.
+    pub cli_auth_credentials_store_mode: AuthCredentialsStoreMode,
+
     /// Definition for MCP servers that Codex can reach out to for tool calls.
     pub mcp_servers: HashMap<String, McpServerConfig>,
 
-    /// Optional templates leveraged by the MCP wizard experience.
+    /// Template catalogue used by the MCP wizard / CLI helpers.
     pub mcp_templates: HashMap<String, McpTemplate>,
 
-    /// Schema version for MCP configuration blocks as declared on disk.
+    /// On-disk schema version for MCP configuration.
     pub mcp_schema_version: Option<u32>,
-
-    /// Feature flag indicating whether overhaul-specific behaviours are enabled.
-    pub experimental_mcp_overhaul: bool,
 
     /// Preferred store for MCP OAuth credentials.
     /// keyring: Use an OS-specific keyring service.
@@ -183,6 +232,40 @@ pub struct Config {
     /// Directory containing all Codex state (defaults to `~/.codex` but can be
     /// overridden by the `CODEX_HOME` environment variable).
     pub codex_home: PathBuf,
+
+    /// Directory containing shared agent context, tools, and MCP resources.
+    /// Defaults to `~/.agents` (sibling to `~/.codex`) unless overridden.
+    pub agents_home: PathBuf,
+
+    /// Optional project-scoped agents directory discovered in the workspace.
+    /// When present, entries from this path augment or override the global
+    /// [`agents_home`].
+    pub project_agents_home: Option<PathBuf>,
+
+    /// Context documents sourced from the global and project `.agents/context` directories.
+    pub agents_context_entries: Vec<AgentContextEntry>,
+
+    /// Helper scripts discovered under `.agents/tools`.
+    pub agents_tools: Vec<AgentToolEntry>,
+
+    /// Pre-rendered prompt block that surfaces the aggregated agents context.
+    pub agents_context_prompt: Option<String>,
+
+    /// Token count of the agents context prompt.
+    pub agents_context_prompt_tokens: usize,
+
+    /// Whether the agents context prompt was truncated due to size limits.
+    pub agents_context_prompt_truncated: bool,
+
+    /// Threshold after which Codex will warn about agents context size.
+    pub agents_context_warning_tokens: usize,
+
+    /// Normalized allow-list of context entries (files or directories) that should be loaded.
+    /// When empty, all entries are eligible unless excluded.
+    pub agents_context_include: Vec<String>,
+
+    /// Normalized deny-list of context entries (files or directories) that should be skipped.
+    pub agents_context_exclude: Vec<String>,
 
     /// Settings that govern if and what will be written to `~/.codex/history.jsonl`.
     pub history: History,
@@ -213,8 +296,11 @@ pub struct Config {
     /// Base URL for requests to ChatGPT (as opposed to the OpenAI API).
     pub chatgpt_base_url: String,
 
-    /// Include an experimental plan tool that the model can use to update its current plan and status of each step.
-    pub include_plan_tool: bool,
+    /// When set, restricts ChatGPT login to a specific workspace identifier.
+    pub forced_chatgpt_workspace_id: Option<String>,
+
+    /// When set, restricts the login mechanism users may use.
+    pub forced_login_method: Option<ForcedLoginMethod>,
 
     /// Include the `apply_patch` tool for models that benefit from invoking
     /// file edits as a structured tool call. When unset, this falls back to the
@@ -223,14 +309,20 @@ pub struct Config {
 
     pub tools_web_search_request: bool,
 
+    /// When `true`, run a model-based assessment for commands denied by the sandbox.
+    pub experimental_sandbox_command_assessment: bool,
+
     pub use_experimental_streamable_shell_tool: bool,
 
     /// If set to `true`, used only the experimental unified exec tool.
-    pub use_unified_exec_tool: bool,
+    pub use_experimental_unified_exec_tool: bool,
 
     /// If set to `true`, use the experimental official Rust MCP client.
     /// https://github.com/modelcontextprotocol/rust-sdk
     pub use_experimental_use_rmcp_client: bool,
+
+    /// Gating flag for the MCP management overhaul (wizard, migrations, templates).
+    pub experimental_mcp_overhaul: bool,
 
     /// Include the `view_image` tool that lets the agent attach a local image path to context.
     pub include_view_image_tool: bool,
@@ -241,8 +333,15 @@ pub struct Config {
     /// The active profile name used to derive this `Config` (if any).
     pub active_profile: Option<String>,
 
+    /// The currently active project config, resolved by checking if cwd:
+    /// is (1) part of a git repo, (2) a git worktree, or (3) just using the cwd
+    pub active_project: ProjectConfig,
+
     /// Tracks whether the Windows onboarding screen has been acknowledged.
     pub windows_wsl_setup_acknowledged: bool,
+
+    /// Collection of various notices we show the user
+    pub notices: Notice,
 
     /// When true, disables burst-paste detection for typed input entirely.
     /// All characters are inserted as they are received, and no buffering
@@ -251,6 +350,55 @@ pub struct Config {
 
     /// OTEL configuration (exporter type, endpoint, headers, etc.).
     pub otel: crate::config_types::OtelConfig,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct AgentContextEntry {
+    pub source: AgentsSource,
+    pub relative_path: String,
+    pub absolute_path: PathBuf,
+    pub content: String,
+    pub truncated: bool,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct AgentToolEntry {
+    pub source: AgentsSource,
+    pub relative_path: String,
+    pub absolute_path: PathBuf,
+    pub executable: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AgentsContextImport {
+    /// Source path to copy into `.agents/context`.
+    pub source: PathBuf,
+    /// Destination scope (global or project) for the imported assets.
+    pub target: AgentsSource,
+    /// Optional relative directory (under `.agents/context`) where the import should live.
+    /// When omitted, files and directories are copied to the root of the context directory.
+    pub destination_dir: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct AgentsContextImportResult {
+    /// Context entries produced by the newly imported assets.
+    pub added_entries: Vec<AgentContextEntry>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AgentsSource {
+    Global,
+    Project,
+}
+
+impl AgentsSource {
+    pub(crate) fn label(self) -> &'static str {
+        match self {
+            AgentsSource::Global => "global",
+            AgentsSource::Project => "project",
+        }
+    }
 }
 
 impl Config {
@@ -273,6 +421,62 @@ impl Config {
         })?;
 
         Self::load_from_base_config_with_overrides(cfg, overrides, codex_home)
+    }
+
+    /// Rebuild the pre-rendered agents context prompt from the currently loaded entries and tools.
+    pub fn rebuild_agents_context_prompt(&mut self) {
+        let AgentsContextRender {
+            prompt,
+            token_count,
+            truncated,
+        } = render_agents_context_prompt(
+            &self.agents_context_entries,
+            &self.agents_tools,
+            self.project_agents_home.as_deref(),
+        );
+        self.agents_context_prompt = prompt;
+        self.agents_context_prompt_tokens = token_count;
+        self.agents_context_prompt_truncated = truncated;
+    }
+
+    /// Refresh the loaded agents context entries using the supplied include/exclude filters.
+    pub fn refresh_agents_context_entries(
+        &mut self,
+        include: Vec<String>,
+        exclude: Vec<String>,
+    ) -> std::io::Result<()> {
+        let entries = load_agents_context_entries(
+            &self.agents_home,
+            self.project_agents_home.as_deref(),
+            &include,
+            &exclude,
+        )?;
+        self.agents_context_include = include;
+        self.agents_context_exclude = exclude;
+        self.agents_context_entries = entries;
+        self.rebuild_agents_context_prompt();
+        Ok(())
+    }
+
+    /// Refresh agents context entries after normalizing raw include/exclude filters.
+    pub fn refresh_agents_context_filters(
+        &mut self,
+        include: &[String],
+        exclude: &[String],
+    ) -> std::io::Result<()> {
+        let include = normalize_agents_filter_list(include, "agents_context_include")?;
+        let exclude = normalize_agents_filter_list(exclude, "agents_context_exclude")?;
+        self.refresh_agents_context_entries(include, exclude)
+    }
+
+    /// Load all available agents context entries ignoring include/exclude filters.
+    pub fn load_all_agents_context_entries(&self) -> std::io::Result<Vec<AgentContextEntry>> {
+        load_agents_context_entries(
+            &self.agents_home,
+            self.project_agents_home.as_deref(),
+            &[],
+            &[],
+        )
     }
 }
 
@@ -325,64 +529,28 @@ fn apply_overlays(
     base
 }
 
-async fn load_global_mcp_servers_inner(
-    codex_home: &Path,
-) -> std::io::Result<BTreeMap<String, McpServerConfig>> {
-    let root_value = load_config_as_toml(codex_home).await?;
-    let Some(servers_value) = root_value.get("mcp_servers") else {
-        return Ok(BTreeMap::new());
-    };
-
-    ensure_no_inline_bearer_tokens(servers_value)?;
-
-    servers_value
-        .clone()
-        .try_into()
-        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))
-}
-
 pub async fn load_global_mcp_servers(
     codex_home: &Path,
 ) -> std::io::Result<BTreeMap<String, McpServerConfig>> {
-    load_global_mcp_servers_inner(codex_home).await
-}
+    let root_value = load_config_as_toml(codex_home).await?;
+    let config_toml: ConfigToml = root_value.try_into().map_err(|err| {
+        std::io::Error::new(
+            ErrorKind::InvalidData,
+            format!("failed to deserialize config.toml: {err}"),
+        )
+    })?;
 
-pub fn load_global_mcp_servers_blocking(
-    codex_home: &Path,
-) -> std::io::Result<BTreeMap<String, McpServerConfig>> {
-    match Handle::try_current() {
-        Ok(handle) => handle.block_on(load_global_mcp_servers_inner(codex_home)),
-        Err(_) => {
-            let runtime = tokio::runtime::Builder::new_current_thread()
-                .enable_all()
-                .build()
-                .map_err(std::io::Error::other)?;
-            runtime.block_on(load_global_mcp_servers_inner(codex_home))
-        }
-    }
+    let config = Config::load_from_base_config_with_overrides(
+        config_toml,
+        ConfigOverrides::default(),
+        codex_home.to_path_buf(),
+    )?;
+
+    Ok(config.mcp_servers.into_iter().collect())
 }
 
 /// We briefly allowed plain text bearer_token fields in MCP server configs.
 /// We want to warn people who recently added these fields but can remove this after a few months.
-fn ensure_no_inline_bearer_tokens(value: &TomlValue) -> std::io::Result<()> {
-    let Some(servers_table) = value.as_table() else {
-        return Ok(());
-    };
-
-    for (server_name, server_value) in servers_table {
-        if let Some(server_table) = server_value.as_table()
-            && server_table.contains_key("bearer_token")
-        {
-            let message = format!(
-                "mcp_servers.{server_name} uses unsupported `bearer_token`; set `bearer_token_env_var`."
-            );
-            return Err(std::io::Error::new(ErrorKind::InvalidData, message));
-        }
-    }
-
-    Ok(())
-}
-
 pub fn write_global_mcp_servers(
     codex_home: &Path,
     servers: &BTreeMap<String, McpServerConfig>,
@@ -406,25 +574,14 @@ pub fn write_global_mcp_servers(
         for (name, config) in servers {
             let mut entry = TomlTable::new();
             entry.set_implicit(false);
-
-            if let Some(display_name) = &config.display_name {
-                entry["display_name"] = toml_edit::value(display_name.clone());
-            }
-
-            if let Some(category) = &config.category {
-                entry["category"] = toml_edit::value(category.clone());
-            }
-
-            if let Some(template_id) = &config.template_id {
-                entry["template_id"] = toml_edit::value(template_id.clone());
-            }
-
-            if let Some(description) = &config.description {
-                entry["description"] = toml_edit::value(description.clone());
-            }
-
             match &config.transport {
-                McpServerTransportConfig::Stdio { command, args, env } => {
+                McpServerTransportConfig::Stdio {
+                    command,
+                    args,
+                    env,
+                    env_vars,
+                    cwd,
+                } => {
                     entry["command"] = toml_edit::value(command.clone());
 
                     if !args.is_empty() {
@@ -447,14 +604,49 @@ pub fn write_global_mcp_servers(
                         }
                         entry["env"] = TomlItem::Table(env_table);
                     }
+
+                    if !env_vars.is_empty() {
+                        entry["env_vars"] =
+                            TomlItem::Value(env_vars.iter().collect::<TomlArray>().into());
+                    }
+
+                    if let Some(cwd) = cwd {
+                        entry["cwd"] = toml_edit::value(cwd.to_string_lossy().to_string());
+                    }
                 }
                 McpServerTransportConfig::StreamableHttp {
                     url,
                     bearer_token_env_var,
+                    http_headers,
+                    env_http_headers,
                 } => {
                     entry["url"] = toml_edit::value(url.clone());
                     if let Some(env_var) = bearer_token_env_var {
                         entry["bearer_token_env_var"] = toml_edit::value(env_var.clone());
+                    }
+                    if let Some(headers) = http_headers
+                        && !headers.is_empty()
+                    {
+                        let mut table = TomlTable::new();
+                        table.set_implicit(false);
+                        let mut pairs: Vec<_> = headers.iter().collect();
+                        pairs.sort_by(|(a, _), (b, _)| a.cmp(b));
+                        for (key, value) in pairs {
+                            table.insert(key, toml_edit::value(value.clone()));
+                        }
+                        entry["http_headers"] = TomlItem::Table(table);
+                    }
+                    if let Some(headers) = env_http_headers
+                        && !headers.is_empty()
+                    {
+                        let mut table = TomlTable::new();
+                        table.set_implicit(false);
+                        let mut pairs: Vec<_> = headers.iter().collect();
+                        pairs.sort_by(|(a, _), (b, _)| a.cmp(b));
+                        for (key, value) in pairs {
+                            table.insert(key, toml_edit::value(value.clone()));
+                        }
+                        entry["env_http_headers"] = TomlItem::Table(table);
                     }
                 }
             }
@@ -471,16 +663,123 @@ pub fn write_global_mcp_servers(
                 entry["tool_timeout_sec"] = toml_edit::value(timeout.as_secs_f64());
             }
 
+            if let Some(enabled_tools) = &config.enabled_tools {
+                entry["enabled_tools"] =
+                    TomlItem::Value(enabled_tools.iter().collect::<TomlArray>().into());
+            }
+
+            if let Some(disabled_tools) = &config.disabled_tools {
+                entry["disabled_tools"] =
+                    TomlItem::Value(disabled_tools.iter().collect::<TomlArray>().into());
+            }
+
+            if let Some(display_name) = config.display_name.as_ref().and_then(|value| {
+                let trimmed = value.trim();
+                if trimmed.is_empty() {
+                    None
+                } else {
+                    Some(trimmed.to_string())
+                }
+            }) {
+                entry["display_name"] = toml_edit::value(display_name);
+            }
+
+            if let Some(category) = config.category.as_ref().and_then(|value| {
+                let trimmed = value.trim();
+                if trimmed.is_empty() {
+                    None
+                } else {
+                    Some(trimmed.to_string())
+                }
+            }) {
+                entry["category"] = toml_edit::value(category);
+            }
+
+            if let Some(template_id) = config.template_id.as_ref().and_then(|value| {
+                let trimmed = value.trim();
+                if trimmed.is_empty() {
+                    None
+                } else {
+                    Some(trimmed.to_string())
+                }
+            }) {
+                entry["template_id"] = toml_edit::value(template_id);
+            }
+
+            if let Some(description) = config.description.as_ref().and_then(|value| {
+                let trimmed = value.trim();
+                if trimmed.is_empty() {
+                    None
+                } else {
+                    Some(trimmed.to_string())
+                }
+            }) {
+                entry["description"] = toml_edit::value(description);
+            }
+
+            if !config.tags.is_empty() {
+                entry["tags"] = TomlItem::Value(config.tags.iter().collect::<TomlArray>().into());
+            }
+
+            if let Some(metadata) = config.metadata.as_ref()
+                && !metadata.is_empty()
+            {
+                let mut table = TomlTable::new();
+                table.set_implicit(false);
+                let mut pairs: Vec<_> = metadata.iter().collect();
+                pairs.sort_by(|(a, _), (b, _)| a.cmp(b));
+                for (key, value) in pairs {
+                    table.insert(key, toml_edit::value(value.clone()));
+                }
+                entry["metadata"] = TomlItem::Table(table);
+            }
+
+            if let Some(created_at) = config.created_at.as_ref().and_then(|value| {
+                let trimmed = value.trim();
+                if trimmed.is_empty() {
+                    None
+                } else {
+                    Some(trimmed.to_string())
+                }
+            }) {
+                entry["created_at"] = toml_edit::value(created_at);
+            }
+
+            if let Some(last_verified_at) = config.last_verified_at.as_ref().and_then(|value| {
+                let trimmed = value.trim();
+                if trimmed.is_empty() {
+                    None
+                } else {
+                    Some(trimmed.to_string())
+                }
+            }) {
+                entry["last_verified_at"] = toml_edit::value(last_verified_at);
+            }
+
             if let Some(auth) = &config.auth {
                 let mut auth_table = TomlTable::new();
                 auth_table.set_implicit(false);
-                if let Some(kind) = &auth.kind {
-                    auth_table["type"] = toml_edit::value(kind.clone());
+                if let Some(kind) = auth.kind.as_ref().and_then(|value| {
+                    let trimmed = value.trim();
+                    if trimmed.is_empty() {
+                        None
+                    } else {
+                        Some(trimmed.to_string())
+                    }
+                }) {
+                    auth_table["type"] = toml_edit::value(kind);
                 }
-                if let Some(secret_ref) = &auth.secret_ref {
-                    auth_table["secret_ref"] = toml_edit::value(secret_ref.clone());
+                if let Some(secret_ref) = auth.secret_ref.as_ref().and_then(|value| {
+                    let trimmed = value.trim();
+                    if trimmed.is_empty() {
+                        None
+                    } else {
+                        Some(trimmed.to_string())
+                    }
+                }) {
+                    auth_table["secret_ref"] = toml_edit::value(secret_ref);
                 }
-                if let Some(env) = &auth.env
+                if let Some(env) = auth.env.as_ref()
                     && !env.is_empty()
                 {
                     let mut env_table = TomlTable::new();
@@ -492,79 +791,69 @@ pub fn write_global_mcp_servers(
                     }
                     auth_table["env"] = TomlItem::Table(env_table);
                 }
-                entry["auth"] = TomlItem::Table(auth_table);
+                if !auth_table.is_empty() {
+                    entry["auth"] = TomlItem::Table(auth_table);
+                }
             }
 
-            if let Some(health) = &config.healthcheck {
-                let mut health_table = TomlTable::new();
-                health_table.set_implicit(false);
-                if let Some(kind) = &health.kind {
-                    health_table["type"] = toml_edit::value(kind.clone());
-                }
-                if let Some(command) = &health.command {
-                    health_table["command"] = toml_edit::value(command.clone());
-                }
-                if !health.args.is_empty() {
-                    let mut args = TomlArray::new();
-                    for arg in &health.args {
-                        args.push(arg.clone());
+            if let Some(healthcheck) = &config.healthcheck {
+                let mut table = TomlTable::new();
+                table.set_implicit(false);
+                if let Some(kind) = healthcheck.kind.as_ref().and_then(|value| {
+                    let trimmed = value.trim();
+                    if trimmed.is_empty() {
+                        None
+                    } else {
+                        Some(trimmed.to_string())
                     }
-                    health_table["args"] = TomlItem::Value(args.into());
+                }) {
+                    table["type"] = toml_edit::value(kind);
                 }
-                if let Some(timeout) = health.timeout_ms {
-                    let timeout = i64::try_from(timeout).map_err(|_| {
-                        std::io::Error::new(
-                            std::io::ErrorKind::InvalidData,
-                            "healthcheck.timeout_ms exceeds supported range",
-                        )
-                    })?;
-                    health_table["timeout_ms"] = toml_edit::value(timeout);
+                if let Some(command) = healthcheck.command.as_ref().and_then(|value| {
+                    let trimmed = value.trim();
+                    if trimmed.is_empty() {
+                        None
+                    } else {
+                        Some(trimmed.to_string())
+                    }
+                }) {
+                    table["command"] = toml_edit::value(command);
                 }
-                if let Some(interval) = health.interval_seconds {
-                    let interval = i64::try_from(interval).map_err(|_| {
-                        std::io::Error::new(
-                            std::io::ErrorKind::InvalidData,
-                            "healthcheck.interval_seconds exceeds supported range",
-                        )
-                    })?;
-                    health_table["interval_seconds"] = toml_edit::value(interval);
+                if !healthcheck.args.is_empty() {
+                    table["args"] =
+                        TomlItem::Value(healthcheck.args.iter().collect::<TomlArray>().into());
                 }
-                if let Some(endpoint) = &health.endpoint {
-                    health_table["endpoint"] = toml_edit::value(endpoint.clone());
+                if let Some(timeout_ms) = healthcheck.timeout_ms {
+                    table["timeout_ms"] =
+                        toml_edit::value(i64::try_from(timeout_ms).unwrap_or(i64::MAX));
                 }
-                if let Some(protocol) = &health.protocol {
-                    health_table["protocol"] = toml_edit::value(protocol.clone());
+                if let Some(interval_seconds) = healthcheck.interval_seconds {
+                    table["interval_seconds"] =
+                        toml_edit::value(i64::try_from(interval_seconds).unwrap_or(i64::MAX));
                 }
-                entry["healthcheck"] = TomlItem::Table(health_table);
-            }
-
-            if !config.tags.is_empty() {
-                let mut tags = TomlArray::new();
-                for tag in &config.tags {
-                    tags.push(tag.clone());
+                if let Some(endpoint) = healthcheck.endpoint.as_ref().and_then(|value| {
+                    let trimmed = value.trim();
+                    if trimmed.is_empty() {
+                        None
+                    } else {
+                        Some(trimmed.to_string())
+                    }
+                }) {
+                    table["endpoint"] = toml_edit::value(endpoint);
                 }
-                entry["tags"] = TomlItem::Value(tags.into());
-            }
-
-            if let Some(created_at) = &config.created_at {
-                entry["created_at"] = toml_edit::value(created_at.clone());
-            }
-
-            if let Some(last_verified_at) = &config.last_verified_at {
-                entry["last_verified_at"] = toml_edit::value(last_verified_at.clone());
-            }
-
-            if let Some(metadata) = &config.metadata
-                && !metadata.is_empty()
-            {
-                let mut metadata_table = TomlTable::new();
-                metadata_table.set_implicit(false);
-                let mut entries: Vec<_> = metadata.iter().collect();
-                entries.sort_by(|(a, _), (b, _)| a.cmp(b));
-                for (key, value) in entries {
-                    metadata_table.insert(key, toml_edit::value(value.clone()));
+                if let Some(protocol) = healthcheck.protocol.as_ref().and_then(|value| {
+                    let trimmed = value.trim();
+                    if trimmed.is_empty() {
+                        None
+                    } else {
+                        Some(trimmed.to_string())
+                    }
+                }) {
+                    table["protocol"] = toml_edit::value(protocol);
                 }
-                entry["metadata"] = TomlItem::Table(metadata_table);
+                if !table.is_empty() {
+                    entry["healthcheck"] = TomlItem::Table(table);
+                }
             }
 
             doc["mcp_servers"][name.as_str()] = TomlItem::Table(entry);
@@ -691,6 +980,54 @@ pub fn set_windows_wsl_setup_acknowledged(
     tmp_file.persist(config_path)?;
 
     Ok(())
+}
+
+/// Persist the acknowledgement flag for the full access warning prompt.
+pub fn set_hide_full_access_warning(codex_home: &Path, acknowledged: bool) -> anyhow::Result<()> {
+    let config_path = codex_home.join(CONFIG_TOML_FILE);
+    let mut doc = match std::fs::read_to_string(config_path.clone()) {
+        Ok(s) => s.parse::<DocumentMut>()?,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => DocumentMut::new(),
+        Err(e) => return Err(e.into()),
+    };
+
+    let notices_table = load_or_create_top_level_table(&mut doc, Notice::TABLE_KEY)?;
+
+    notices_table["hide_full_access_warning"] = toml_edit::value(acknowledged);
+
+    std::fs::create_dir_all(codex_home)?;
+    let tmp_file = NamedTempFile::new_in(codex_home)?;
+    std::fs::write(tmp_file.path(), doc.to_string())?;
+    tmp_file.persist(config_path)?;
+
+    Ok(())
+}
+
+fn load_or_create_top_level_table<'a>(
+    doc: &'a mut DocumentMut,
+    key: &str,
+) -> anyhow::Result<&'a mut toml_edit::Table> {
+    let mut created_table = false;
+
+    let root = doc.as_table_mut();
+    let needs_table =
+        !root.contains_key(key) || root.get(key).and_then(|item| item.as_table()).is_none();
+    if needs_table {
+        root.insert(key, toml_edit::table());
+        created_table = true;
+    }
+
+    let Some(table) = doc[key].as_table_mut() else {
+        return Err(anyhow::anyhow!(format!(
+            "table [{key}] missing after initialization"
+        )));
+    };
+
+    if created_table {
+        table.set_implicit(true);
+    }
+
+    Ok(table)
 }
 
 fn ensure_profile_table<'a>(
@@ -859,10 +1196,10 @@ pub struct ConfigToml {
     pub model_provider: Option<String>,
 
     /// Size of the context window for the model, in tokens.
-    pub model_context_window: Option<u64>,
+    pub model_context_window: Option<i64>,
 
     /// Maximum number of output tokens.
-    pub model_max_output_tokens: Option<u64>,
+    pub model_max_output_tokens: Option<i64>,
 
     /// Token usage threshold triggering auto-compaction of conversation history.
     pub model_auto_compact_token_limit: Option<i64>,
@@ -886,15 +1223,42 @@ pub struct ConfigToml {
     /// System instructions.
     pub instructions: Option<String>,
 
+    /// When set, restricts ChatGPT login to a specific workspace identifier.
+    #[serde(default)]
+    pub forced_chatgpt_workspace_id: Option<String>,
+
+    /// When set, restricts the login mechanism users may use.
+    #[serde(default)]
+    pub forced_login_method: Option<ForcedLoginMethod>,
+
+    /// Preferred backend for storing CLI auth credentials.
+    /// file (default): Use a file in the Codex home directory.
+    /// keyring: Use an OS-specific keyring service.
+    /// auto: Use the keyring if available, otherwise use a file.
+    #[serde(default)]
+    pub cli_auth_credentials_store: Option<AuthCredentialsStoreMode>,
+
+    /// Optional override for the shared agents home directory.
+    pub agents_home: Option<PathBuf>,
+
+    /// Optional override for agents context warning threshold (in tokens).
+    pub agents_context_warning_tokens: Option<usize>,
+
+    /// Optional allow-list of relative context paths (files or directories) to include.
+    pub agents_context_include: Option<Vec<String>>,
+
+    /// Optional deny-list of relative context paths (files or directories) to exclude.
+    pub agents_context_exclude: Option<Vec<String>>,
+
     /// Definition for MCP servers that Codex can reach out to for tool calls.
     #[serde(default)]
     pub mcp_servers: HashMap<String, McpServerConfig>,
 
-    /// Templates that can seed MCP server configuration via wizard flows.
+    /// Template catalogue for MCP server bootstrap.
     #[serde(default)]
     pub mcp_templates: HashMap<String, McpTemplate>,
 
-    /// Schema version for MCP-related configuration.
+    /// On-disk schema version for MCP configuration migrations.
     pub mcp_schema_version: Option<u32>,
 
     /// Preferred backend for storing MCP OAuth credentials.
@@ -955,17 +1319,6 @@ pub struct ConfigToml {
     /// Base URL for requests to ChatGPT (as opposed to the OpenAI API).
     pub chatgpt_base_url: Option<String>,
 
-    /// Legacy, now use features
-    pub experimental_instructions_file: Option<PathBuf>,
-    pub experimental_use_exec_command_tool: Option<bool>,
-    #[serde(alias = "experimental_use_unified_exec_tool")]
-    pub use_unified_exec_tool: Option<bool>,
-    pub experimental_use_rmcp_client: Option<bool>,
-    pub experimental_use_freeform_apply_patch: Option<bool>,
-
-    #[serde(default)]
-    pub experimental: Option<ExperimentalConfigToml>,
-
     pub projects: Option<HashMap<String, ProjectConfig>>,
 
     /// Nested tools section for feature toggles
@@ -985,6 +1338,25 @@ pub struct ConfigToml {
 
     /// Tracks whether the Windows onboarding screen has been acknowledged.
     pub windows_wsl_setup_acknowledged: Option<bool>,
+
+    /// Collection of in-product notices (different from notifications)
+    /// See [`crate::config_types::Notices`] for more details
+    pub notice: Option<Notice>,
+
+    /// Legacy, now use features
+    pub experimental_instructions_file: Option<PathBuf>,
+    pub experimental_use_exec_command_tool: Option<bool>,
+    pub experimental_use_unified_exec_tool: Option<bool>,
+    pub experimental_use_rmcp_client: Option<bool>,
+    pub experimental_use_freeform_apply_patch: Option<bool>,
+    pub experimental_sandbox_command_assessment: Option<bool>,
+
+    /// Nested experimental toggles (`[experimental]` table).
+    #[serde(default)]
+    pub experimental: Option<ExperimentalToml>,
+
+    /// Back-compat direct key for the MCP overhaul flag.
+    pub experimental_mcp_overhaul: Option<bool>,
 }
 
 impl From<ConfigToml> for UserSavedConfig {
@@ -999,6 +1371,8 @@ impl From<ConfigToml> for UserSavedConfig {
             approval_policy: config_toml.approval_policy,
             sandbox_mode: config_toml.sandbox_mode,
             sandbox_settings: config_toml.sandbox_workspace_write.map(From::from),
+            forced_chatgpt_workspace_id: config_toml.forced_chatgpt_workspace_id,
+            forced_login_method: config_toml.forced_login_method,
             model: config_toml.model,
             model_reasoning_effort: config_toml.model_reasoning_effort,
             model_reasoning_summary: config_toml.model_reasoning_summary,
@@ -1015,10 +1389,13 @@ pub struct ProjectConfig {
     pub trust_level: Option<String>,
 }
 
-#[derive(Deserialize, Debug, Clone, Default, PartialEq)]
-pub struct ExperimentalConfigToml {
-    #[serde(default)]
-    pub mcp_overhaul: Option<bool>,
+impl ProjectConfig {
+    pub fn is_trusted(&self) -> bool {
+        match &self.trust_level {
+            Some(trust_level) => trust_level == "trusted",
+            None => false,
+        }
+    }
 }
 
 #[derive(Deserialize, Debug, Clone, Default, PartialEq)]
@@ -1031,6 +1408,12 @@ pub struct ToolsToml {
     pub view_image: Option<bool>,
 }
 
+#[derive(Deserialize, Debug, Clone, Default, PartialEq)]
+pub struct ExperimentalToml {
+    #[serde(default)]
+    pub mcp_overhaul: Option<bool>,
+}
+
 impl From<ToolsToml> for Tools {
     fn from(tools_toml: ToolsToml) -> Self {
         Self {
@@ -1040,13 +1423,35 @@ impl From<ToolsToml> for Tools {
     }
 }
 
+#[derive(Debug, PartialEq, Eq)]
+pub struct SandboxPolicyResolution {
+    pub policy: SandboxPolicy,
+    pub forced_auto_mode_downgraded_on_windows: bool,
+}
+
 impl ConfigToml {
     /// Derive the effective sandbox policy from the configuration.
-    fn derive_sandbox_policy(&self, sandbox_mode_override: Option<SandboxMode>) -> SandboxPolicy {
+    fn derive_sandbox_policy(
+        &self,
+        sandbox_mode_override: Option<SandboxMode>,
+        profile_sandbox_mode: Option<SandboxMode>,
+        resolved_cwd: &Path,
+    ) -> SandboxPolicyResolution {
         let resolved_sandbox_mode = sandbox_mode_override
+            .or(profile_sandbox_mode)
             .or(self.sandbox_mode)
+            .or_else(|| {
+                // if no sandbox_mode is set, but user has marked directory as trusted, use WorkspaceWrite
+                self.get_active_project(resolved_cwd).and_then(|p| {
+                    if p.is_trusted() {
+                        Some(SandboxMode::WorkspaceWrite)
+                    } else {
+                        None
+                    }
+                })
+            })
             .unwrap_or_default();
-        match resolved_sandbox_mode {
+        let mut sandbox_policy = match resolved_sandbox_mode {
             SandboxMode::ReadOnly => SandboxPolicy::new_read_only_policy(),
             SandboxMode::WorkspaceWrite => match self.sandbox_workspace_write.as_ref() {
                 Some(SandboxWorkspaceWrite {
@@ -1063,33 +1468,40 @@ impl ConfigToml {
                 None => SandboxPolicy::new_workspace_write_policy(),
             },
             SandboxMode::DangerFullAccess => SandboxPolicy::DangerFullAccess,
+        };
+        let mut forced_auto_mode_downgraded_on_windows = false;
+        if cfg!(target_os = "windows")
+            && matches!(resolved_sandbox_mode, SandboxMode::WorkspaceWrite)
+        {
+            sandbox_policy = SandboxPolicy::new_read_only_policy();
+            forced_auto_mode_downgraded_on_windows = true;
+        }
+        SandboxPolicyResolution {
+            policy: sandbox_policy,
+            forced_auto_mode_downgraded_on_windows,
         }
     }
 
-    pub fn is_cwd_trusted(&self, resolved_cwd: &Path) -> bool {
+    /// Resolves the cwd to an existing project, or returns None if ConfigToml
+    /// does not contain a project corresponding to cwd or a git repo for cwd
+    pub fn get_active_project(&self, resolved_cwd: &Path) -> Option<ProjectConfig> {
         let projects = self.projects.clone().unwrap_or_default();
 
-        let is_path_trusted = |path: &Path| {
-            let path_str = path.to_string_lossy().to_string();
-            projects
-                .get(&path_str)
-                .map(|p| p.trust_level.as_deref() == Some("trusted"))
-                .unwrap_or(false)
-        };
-
-        // Fast path: exact cwd match
-        if is_path_trusted(resolved_cwd) {
-            return true;
+        if let Some(project_config) = projects.get(&resolved_cwd.to_string_lossy().to_string()) {
+            return Some(project_config.clone());
         }
 
-        // If cwd lives inside a git worktree, check whether the root git project
+        // If cwd lives inside a git repo/worktree, check whether the root git project
         // (the primary repository working directory) is trusted. This lets
         // worktrees inherit trust from the main project.
-        if let Some(root_project) = resolve_root_git_project_for_trust(resolved_cwd) {
-            return is_path_trusted(&root_project);
+        if let Some(repo_root) = resolve_root_git_project_for_trust(resolved_cwd)
+            && let Some(project_config_for_root) =
+                projects.get(&repo_root.to_string_lossy().to_string_lossy().to_string())
+        {
+            return Some(project_config_for_root.clone());
         }
 
-        false
+        None
     }
 
     pub fn get_config_profile(
@@ -1125,12 +1537,15 @@ pub struct ConfigOverrides {
     pub model_provider: Option<String>,
     pub config_profile: Option<String>,
     pub codex_linux_sandbox_exe: Option<PathBuf>,
+    pub agents_home: Option<PathBuf>,
     pub base_instructions: Option<String>,
-    pub include_plan_tool: Option<bool>,
     pub include_apply_patch_tool: Option<bool>,
     pub include_view_image_tool: Option<bool>,
     pub show_raw_agent_reasoning: Option<bool>,
     pub tools_web_search_request: Option<bool>,
+    pub experimental_sandbox_command_assessment: Option<bool>,
+    /// Additional directories that should be treated as writable roots for this session.
+    pub additional_writable_roots: Vec<PathBuf>,
 }
 
 impl Config {
@@ -1148,17 +1563,19 @@ impl Config {
             model,
             review_model: override_review_model,
             cwd,
-            approval_policy,
+            approval_policy: approval_policy_override,
             sandbox_mode,
             model_provider,
             config_profile: config_profile_key,
             codex_linux_sandbox_exe,
+            agents_home: agents_home_override,
             base_instructions,
-            include_plan_tool: include_plan_tool_override,
             include_apply_patch_tool: include_apply_patch_tool_override,
             include_view_image_tool: include_view_image_tool_override,
             show_raw_agent_reasoning,
             tools_web_search_request: override_tools_web_search_request,
+            experimental_sandbox_command_assessment: sandbox_command_assessment_override,
+            additional_writable_roots,
         } = overrides;
 
         let active_profile_name = config_profile_key
@@ -1180,15 +1597,112 @@ impl Config {
         };
 
         let feature_overrides = FeatureOverrides {
-            include_plan_tool: include_plan_tool_override,
             include_apply_patch_tool: include_apply_patch_tool_override,
             include_view_image_tool: include_view_image_tool_override,
             web_search_request: override_tools_web_search_request,
+            experimental_sandbox_command_assessment: sandbox_command_assessment_override,
         };
 
         let features = Features::from_config(&cfg, &config_profile, feature_overrides);
 
-        let sandbox_policy = cfg.derive_sandbox_policy(sandbox_mode);
+        let resolved_cwd = {
+            use std::env;
+
+            match cwd {
+                None => {
+                    tracing::info!("cwd not set, using current dir");
+                    env::current_dir()?
+                }
+                Some(p) if p.is_absolute() => p,
+                Some(p) => {
+                    // Resolve relative path against the current working directory.
+                    tracing::info!("cwd is relative, resolving against current dir");
+                    let mut current = env::current_dir()?;
+                    current.push(p);
+                    current
+                }
+            }
+        };
+        let agents_home = compute_agents_home(
+            agents_home_override,
+            cfg.agents_home.as_ref(),
+            &resolved_cwd,
+            &codex_home,
+        )?;
+        let project_agents_home = find_project_agents_home(&resolved_cwd);
+        let raw_agents_context_include = cfg.agents_context_include.clone().unwrap_or_default();
+        let agents_context_include =
+            normalize_agents_filter_list(&raw_agents_context_include, "agents_context_include")?;
+        let raw_agents_context_exclude = cfg.agents_context_exclude.clone().unwrap_or_default();
+        let agents_context_exclude =
+            normalize_agents_filter_list(&raw_agents_context_exclude, "agents_context_exclude")?;
+        let agents_context_entries = load_agents_context_entries(
+            &agents_home,
+            project_agents_home.as_deref(),
+            &agents_context_include,
+            &agents_context_exclude,
+        )?;
+        let agents_tools = load_agents_tools(&agents_home, project_agents_home.as_deref())?;
+        let AgentsContextRender {
+            prompt: agents_context_prompt,
+            token_count: agents_context_prompt_tokens,
+            truncated: agents_context_prompt_truncated,
+        } = render_agents_context_prompt(
+            &agents_context_entries,
+            &agents_tools,
+            project_agents_home.as_deref(),
+        );
+        let agents_context_warning_tokens = cfg
+            .agents_context_warning_tokens
+            .map(|value| max(value, AGENTS_CONTEXT_WARNING_TOKENS_MIN))
+            .unwrap_or(AGENTS_CONTEXT_WARNING_TOKENS);
+        let additional_writable_roots: Vec<PathBuf> = additional_writable_roots
+            .into_iter()
+            .map(|path| {
+                let absolute = if path.is_absolute() {
+                    path
+                } else {
+                    resolved_cwd.join(path)
+                };
+                match canonicalize(&absolute) {
+                    Ok(canonical) => canonical,
+                    Err(_) => absolute,
+                }
+            })
+            .collect();
+        let active_project = cfg
+            .get_active_project(&resolved_cwd)
+            .unwrap_or(ProjectConfig { trust_level: None });
+
+        let SandboxPolicyResolution {
+            policy: mut sandbox_policy,
+            forced_auto_mode_downgraded_on_windows,
+        } = cfg.derive_sandbox_policy(sandbox_mode, config_profile.sandbox_mode, &resolved_cwd);
+        if let SandboxPolicy::WorkspaceWrite { writable_roots, .. } = &mut sandbox_policy {
+            for path in additional_writable_roots {
+                if !writable_roots.iter().any(|existing| existing == &path) {
+                    writable_roots.push(path);
+                }
+            }
+        }
+        let approval_policy = approval_policy_override
+            .or(config_profile.approval_policy)
+            .or(cfg.approval_policy)
+            .unwrap_or_else(|| {
+                if active_project.is_trusted() {
+                    // If no explicit approval policy is set, but we trust cwd, default to OnRequest
+                    AskForApproval::OnRequest
+                } else {
+                    AskForApproval::default()
+                }
+            });
+        let did_user_set_custom_approval_policy_or_sandbox_mode = approval_policy_override
+            .is_some()
+            || config_profile.approval_policy.is_some()
+            || cfg.approval_policy.is_some()
+            || sandbox_mode.is_some()
+            || config_profile.sandbox_mode.is_some()
+            || cfg.sandbox_mode.is_some();
 
         let mut model_providers = built_in_model_providers();
         // Merge user-defined providers into the built-in list.
@@ -1212,40 +1726,28 @@ impl Config {
 
         let shell_environment_policy = cfg.shell_environment_policy.into();
 
-        let resolved_cwd = {
-            use std::env;
-
-            match cwd {
-                None => {
-                    tracing::info!("cwd not set, using current dir");
-                    env::current_dir()?
-                }
-                Some(p) if p.is_absolute() => p,
-                Some(p) => {
-                    // Resolve relative path against the current working directory.
-                    tracing::info!("cwd is relative, resolving against current dir");
-                    let mut current = env::current_dir()?;
-                    current.push(p);
-                    current
-                }
-            }
-        };
-
         let history = cfg.history.unwrap_or_default();
 
-        let include_plan_tool_flag = features.enabled(Feature::PlanTool);
         let include_apply_patch_tool_flag = features.enabled(Feature::ApplyPatchFreeform);
         let include_view_image_tool_flag = features.enabled(Feature::ViewImageTool);
         let tools_web_search_request = features.enabled(Feature::WebSearchRequest);
         let use_experimental_streamable_shell_tool = features.enabled(Feature::StreamableShell);
-        let use_unified_exec_tool = features.enabled(Feature::UnifiedExec);
+        let use_experimental_unified_exec_tool = features.enabled(Feature::UnifiedExec);
         let use_experimental_use_rmcp_client = features.enabled(Feature::RmcpClient);
+        let experimental_sandbox_command_assessment =
+            features.enabled(Feature::SandboxCommandAssessment);
 
-        let experimental_mcp_overhaul = cfg
-            .experimental
-            .as_ref()
-            .and_then(|exp| exp.mcp_overhaul)
-            .unwrap_or(false);
+        let forced_chatgpt_workspace_id =
+            cfg.forced_chatgpt_workspace_id.as_ref().and_then(|value| {
+                let trimmed = value.trim();
+                if trimmed.is_empty() {
+                    None
+                } else {
+                    Some(trimmed.to_string())
+                }
+            });
+
+        let forced_login_method = cfg.forced_login_method;
 
         let model = model
             .or(config_profile.model)
@@ -1293,6 +1795,29 @@ impl Config {
             .or(cfg.review_model)
             .unwrap_or_else(default_review_model);
 
+        let builtin_templates: HashMap<String, McpTemplate> = HashMap::new();
+        let registry = resolve_registry(
+            &builtin_templates,
+            &cfg.mcp_templates,
+            &cfg.mcp_servers,
+            cfg.mcp_schema_version,
+        )?;
+
+        let mut mcp_servers =
+            load_agents_mcp_servers(&agents_home, project_agents_home.as_deref())?;
+        for (key, server) in registry.servers {
+            mcp_servers.insert(key, server);
+        }
+
+        let mcp_templates = registry.templates;
+        let mcp_schema_version = Some(registry.schema_version);
+        let experimental_mcp_overhaul = cfg
+            .experimental
+            .as_ref()
+            .and_then(|exp| exp.mcp_overhaul)
+            .or(cfg.experimental_mcp_overhaul)
+            .unwrap_or(false);
+
         let config = Self {
             model,
             review_model,
@@ -1303,18 +1828,20 @@ impl Config {
             model_provider_id,
             model_provider,
             cwd: resolved_cwd,
-            approval_policy: approval_policy
-                .or(config_profile.approval_policy)
-                .or(cfg.approval_policy)
-                .unwrap_or_else(AskForApproval::default),
+            approval_policy,
             sandbox_policy,
+            did_user_set_custom_approval_policy_or_sandbox_mode,
+            forced_auto_mode_downgraded_on_windows,
             shell_environment_policy,
             notify: cfg.notify,
             user_instructions,
             base_instructions,
-            mcp_servers: cfg.mcp_servers,
-            mcp_templates: cfg.mcp_templates,
-            mcp_schema_version: cfg.mcp_schema_version,
+            // The config.toml omits "_mode" because it's a config file. However, "_mode"
+            // is important in code to differentiate the mode from the store implementation.
+            cli_auth_credentials_store_mode: cfg.cli_auth_credentials_store.unwrap_or_default(),
+            mcp_servers,
+            mcp_templates,
+            mcp_schema_version,
             experimental_mcp_overhaul,
             // The config.toml omits "_mode" because it's a config file. However, "_mode"
             // is important in code to differentiate the mode from the store implementation.
@@ -1335,6 +1862,16 @@ impl Config {
                 })
                 .collect(),
             codex_home,
+            agents_home,
+            project_agents_home,
+            agents_context_entries,
+            agents_tools,
+            agents_context_prompt,
+            agents_context_prompt_tokens,
+            agents_context_prompt_truncated,
+            agents_context_warning_tokens,
+            agents_context_include,
+            agents_context_exclude,
             history,
             file_opener: cfg.file_opener.unwrap_or(UriBasedFileOpener::VsCode),
             codex_linux_sandbox_exe,
@@ -1356,16 +1893,20 @@ impl Config {
                 .chatgpt_base_url
                 .or(cfg.chatgpt_base_url)
                 .unwrap_or("https://chatgpt.com/backend-api/".to_string()),
-            include_plan_tool: include_plan_tool_flag,
+            forced_chatgpt_workspace_id,
+            forced_login_method,
             include_apply_patch_tool: include_apply_patch_tool_flag,
             tools_web_search_request,
+            experimental_sandbox_command_assessment,
             use_experimental_streamable_shell_tool,
-            use_unified_exec_tool,
+            use_experimental_unified_exec_tool,
             use_experimental_use_rmcp_client,
             include_view_image_tool: include_view_image_tool_flag,
             features,
             active_profile: active_profile_name,
+            active_project,
             windows_wsl_setup_acknowledged: cfg.windows_wsl_setup_acknowledged.unwrap_or(false),
+            notices: cfg.notice.unwrap_or_default(),
             disable_paste_burst: cfg.disable_paste_burst.unwrap_or(false),
             tui_notifications: cfg
                 .tui
@@ -1390,20 +1931,18 @@ impl Config {
     }
 
     fn load_instructions(codex_dir: Option<&Path>) -> Option<String> {
-        let mut p = match codex_dir {
-            Some(p) => p.to_path_buf(),
-            None => return None,
-        };
-
-        p.push("AGENTS.md");
-        std::fs::read_to_string(&p).ok().and_then(|s| {
-            let s = s.trim();
-            if s.is_empty() {
-                None
-            } else {
-                Some(s.to_string())
+        let base = codex_dir?;
+        for candidate in [LOCAL_PROJECT_DOC_FILENAME, DEFAULT_PROJECT_DOC_FILENAME] {
+            let mut path = base.to_path_buf();
+            path.push(candidate);
+            if let Ok(contents) = std::fs::read_to_string(&path) {
+                let trimmed = contents.trim();
+                if !trimmed.is_empty() {
+                    return Some(trimmed.to_string());
+                }
             }
-        })
+        }
+        None
     }
 
     fn get_base_instructions(
@@ -1484,6 +2023,993 @@ pub fn find_codex_home() -> std::io::Result<PathBuf> {
     Ok(p)
 }
 
+fn compute_agents_home(
+    override_path: Option<PathBuf>,
+    config_path: Option<&PathBuf>,
+    cwd: &Path,
+    codex_home: &Path,
+) -> std::io::Result<PathBuf> {
+    let candidate = if let Some(path) = override_path {
+        normalize_agents_home_candidate(path, cwd)
+    } else if let Some(path) = config_path {
+        normalize_agents_home_candidate(path.clone(), cwd)
+    } else if let Ok(env_home) = std::env::var("AGENTS_HOME") {
+        if env_home.trim().is_empty() {
+            default_agents_home_for(codex_home)
+        } else {
+            normalize_agents_home_candidate(PathBuf::from(env_home), cwd)
+        }
+    } else {
+        default_agents_home_for(codex_home)
+    };
+
+    ensure_agents_home_layout(&candidate)?;
+    Ok(candidate)
+}
+
+fn find_project_agents_home(cwd: &Path) -> Option<PathBuf> {
+    let mut cursor = cwd.to_path_buf();
+    loop {
+        let candidate = cursor.join(".agents");
+        if candidate.is_dir() {
+            return Some(candidate);
+        }
+
+        if cursor.join(".git").exists() || !cursor.pop() {
+            break;
+        }
+    }
+    None
+}
+
+fn normalize_agents_home_candidate(candidate: PathBuf, cwd: &Path) -> PathBuf {
+    if let Some(raw) = candidate.to_str() {
+        if raw == "~" {
+            if let Some(home) = home_dir() {
+                return home;
+            }
+        } else if let Some(stripped) = raw.strip_prefix("~/")
+            && let Some(home) = home_dir()
+        {
+            return home.join(stripped);
+        }
+    }
+
+    if candidate.is_absolute() {
+        candidate
+    } else {
+        cwd.join(candidate)
+    }
+}
+
+fn default_agents_home_for(codex_home: &Path) -> PathBuf {
+    if let Some(file_name) = codex_home.file_name().and_then(|name| name.to_str())
+        && file_name == ".codex"
+        && let Some(parent) = codex_home.parent()
+    {
+        return parent.join(".agents");
+    }
+
+    codex_home.join(".agents")
+}
+
+fn ensure_agents_home_layout(base: &Path) -> std::io::Result<()> {
+    fs::create_dir_all(base)?;
+    for child in AGENTS_HOME_DEFAULT_SUBDIRS {
+        fs::create_dir_all(base.join(child))?;
+    }
+    Ok(())
+}
+
+fn load_agents_mcp_servers(
+    global_agents_home: &Path,
+    project_agents_home: Option<&Path>,
+) -> std::io::Result<HashMap<String, McpServerConfig>> {
+    let mut combined = load_agents_mcp_from_dir(global_agents_home, true)?;
+    if let Some(local_home) = project_agents_home {
+        let local_entries = load_agents_mcp_from_dir(local_home, false)?;
+        combined.extend(local_entries);
+    }
+    Ok(combined)
+}
+
+fn parse_agents_mcp_toml(
+    contents: &str,
+    path: &Path,
+) -> std::io::Result<HashMap<String, McpServerConfig>> {
+    let value: TomlValue = toml::from_str(contents).map_err(|err| {
+        std::io::Error::new(
+            ErrorKind::InvalidData,
+            format!("failed to parse {} as TOML: {err}", path.display()),
+        )
+    })?;
+    let parsed: BTreeMap<String, McpServerConfig> = value.try_into().map_err(|err| {
+        std::io::Error::new(
+            ErrorKind::InvalidData,
+            format!("invalid MCP configuration in {}: {err}", path.display()),
+        )
+    })?;
+    Ok(parsed.into_iter().collect())
+}
+
+fn parse_agents_mcp_json(
+    contents: &str,
+    path: &Path,
+) -> std::io::Result<HashMap<String, McpServerConfig>> {
+    let value: JsonValue = serde_json::from_str(contents).map_err(|err| {
+        std::io::Error::new(
+            ErrorKind::InvalidData,
+            format!("failed to parse {} as JSON: {err}", path.display()),
+        )
+    })?;
+    serde_json::from_value::<HashMap<String, McpServerConfig>>(value).map_err(|err| {
+        std::io::Error::new(
+            ErrorKind::InvalidData,
+            format!("invalid MCP configuration in {}: {err}", path.display()),
+        )
+    })
+}
+
+fn load_agents_mcp_from_dir(
+    agents_home: &Path,
+    ensure_structure: bool,
+) -> std::io::Result<HashMap<String, McpServerConfig>> {
+    if ensure_structure {
+        ensure_agents_home_layout(agents_home)?;
+    } else if !agents_home.exists() {
+        return Ok(HashMap::new());
+    }
+
+    let config_dir = agents_home.join("mcp");
+    if ensure_structure {
+        fs::create_dir_all(&config_dir)?;
+    } else if !config_dir.exists() {
+        return Ok(HashMap::new());
+    }
+
+    let candidate = ["mcp.config", "mcp.toml", "mcp.json"]
+        .into_iter()
+        .map(|name| config_dir.join(name))
+        .find(|path| path.is_file());
+
+    let Some(path) = candidate else {
+        return Ok(HashMap::new());
+    };
+
+    let contents = fs::read_to_string(&path)?;
+    if contents.trim().is_empty() {
+        return Ok(HashMap::new());
+    }
+
+    let extension = path
+        .extension()
+        .and_then(|ext| ext.to_str())
+        .map(str::to_ascii_lowercase);
+
+    if matches!(extension.as_deref(), Some("json")) {
+        parse_agents_mcp_json(&contents, &path)
+    } else if matches!(extension.as_deref(), Some("toml")) {
+        parse_agents_mcp_toml(&contents, &path)
+    } else {
+        match parse_agents_mcp_toml(&contents, &path) {
+            Ok(value) => Ok(value),
+            Err(toml_err) => match parse_agents_mcp_json(&contents, &path) {
+                Ok(value) => Ok(value),
+                Err(json_err) => Err(std::io::Error::new(
+                    ErrorKind::InvalidData,
+                    format!(
+                        "failed to parse {} as TOML ({toml_err}) or JSON ({json_err})",
+                        path.display()
+                    ),
+                )),
+            },
+        }
+    }
+}
+
+fn load_agents_context_entries(
+    global_agents_home: &Path,
+    project_agents_home: Option<&Path>,
+    include_filters: &[String],
+    exclude_filters: &[String],
+) -> std::io::Result<Vec<AgentContextEntry>> {
+    let mut entries: BTreeMap<String, AgentContextEntry> = BTreeMap::new();
+    load_agents_context_from_dir(global_agents_home, true, AgentsSource::Global, &mut entries)?;
+    if let Some(local_home) = project_agents_home {
+        load_agents_context_from_dir(local_home, false, AgentsSource::Project, &mut entries)?;
+    }
+    let mut collected: Vec<AgentContextEntry> = entries.into_values().collect();
+
+    if !include_filters.is_empty() {
+        collected.retain(|entry| {
+            include_filters
+                .iter()
+                .any(|filter| agents_path_matches_filter(&entry.relative_path, filter))
+        });
+    }
+
+    if !exclude_filters.is_empty() {
+        collected.retain(|entry| {
+            !exclude_filters
+                .iter()
+                .any(|filter| agents_path_matches_filter(&entry.relative_path, filter))
+        });
+    }
+
+    Ok(collected)
+}
+
+fn normalize_agents_filter_list(values: &[String], field: &str) -> std::io::Result<Vec<String>> {
+    let mut normalized = Vec::new();
+    for raw in values {
+        let trimmed = raw.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        let Some(mut relative) = normalize_agents_relative_path(Path::new(trimmed)) else {
+            return Err(std::io::Error::new(
+                ErrorKind::InvalidInput,
+                format!(
+                    "{field} entry `{raw}` must be a relative path without `..` or absolute components"
+                ),
+            ));
+        };
+        while relative.ends_with('/') {
+            relative.pop();
+        }
+        if relative.is_empty() {
+            return Err(std::io::Error::new(
+                ErrorKind::InvalidInput,
+                format!("{field} entry `{raw}` must reference a file or directory name, found `/`"),
+            ));
+        }
+        normalized.push(relative);
+    }
+    normalized.sort();
+    normalized.dedup();
+    Ok(normalized)
+}
+
+fn agents_path_matches_filter(path: &str, filter: &str) -> bool {
+    if filter.is_empty() {
+        return false;
+    }
+    if path == filter {
+        return true;
+    }
+    if path.starts_with(filter) {
+        path.as_bytes().get(filter.len()) == Some(&b'/')
+    } else {
+        false
+    }
+}
+
+fn load_agents_context_from_dir(
+    agents_home: &Path,
+    ensure_structure: bool,
+    source: AgentsSource,
+    entries: &mut BTreeMap<String, AgentContextEntry>,
+) -> std::io::Result<()> {
+    if ensure_structure {
+        ensure_agents_home_layout(agents_home)?;
+    } else if !agents_home.exists() {
+        return Ok(());
+    }
+
+    let context_dir = agents_home.join("context");
+    if ensure_structure {
+        fs::create_dir_all(&context_dir)?;
+    } else if !context_dir.exists() {
+        return Ok(());
+    }
+
+    for entry in WalkDir::new(&context_dir).follow_links(false) {
+        let entry = match entry {
+            Ok(entry) => entry,
+            Err(err) => {
+                let err_string = err.to_string();
+                if let Some(io) = err.into_io_error() {
+                    return Err(io);
+                }
+                return Err(std::io::Error::other(format!(
+                    "failed to walk {}: {err_string}",
+                    context_dir.display()
+                )));
+            }
+        };
+        if entry.file_type().is_dir() {
+            continue;
+        }
+        if !entry.file_type().is_file() && !entry.file_type().is_symlink() {
+            continue;
+        }
+
+        let path = entry.into_path();
+        let relative = match path.strip_prefix(&context_dir) {
+            Ok(rel) => rel,
+            Err(_) => continue,
+        };
+
+        let Some(relative_str) = normalize_agents_relative_path(relative) else {
+            tracing::warn!(
+                "Skipping agents context file with unsupported path: {}",
+                path.display()
+            );
+            continue;
+        };
+
+        let metadata = match fs::metadata(&path) {
+            Ok(metadata) => metadata,
+            Err(err) => {
+                tracing::warn!(
+                    "Failed to read metadata for agents context file {}: {err}",
+                    path.display()
+                );
+                continue;
+            }
+        };
+
+        if let Some(entry) = read_agents_context_entry(source, &path, &relative_str, metadata)? {
+            entries.insert(relative_str, entry);
+        }
+    }
+
+    Ok(())
+}
+
+fn read_agents_context_entry(
+    source: AgentsSource,
+    absolute_path: &Path,
+    relative_path: &str,
+    metadata: fs::Metadata,
+) -> std::io::Result<Option<AgentContextEntry>> {
+    if metadata.is_dir() {
+        tracing::debug!(
+            "Skipping agents context entry that points to a directory: {}",
+            absolute_path.display()
+        );
+        return Ok(None);
+    }
+
+    if !metadata.is_file() && !metadata.file_type().is_symlink() {
+        tracing::debug!(
+            "Skipping agents context entry that is neither file nor symlink: {}",
+            absolute_path.display()
+        );
+        return Ok(None);
+    }
+
+    if metadata.len() > AGENTS_CONTEXT_FILE_MAX_BYTES as u64 {
+        tracing::warn!(
+            "Agents context file `{}` exceeds {} bytes; truncating.",
+            absolute_path.display(),
+            AGENTS_CONTEXT_FILE_MAX_BYTES
+        );
+    }
+
+    let mut reader = BufReader::new(fs::File::open(absolute_path)?);
+    let mut buffer: Vec<u8> = Vec::new();
+    reader
+        .by_ref()
+        .take((AGENTS_CONTEXT_FILE_MAX_BYTES + 4) as u64)
+        .read_to_end(&mut buffer)?;
+
+    let mut content = String::from_utf8_lossy(&buffer).into_owned();
+    let truncated = metadata.len() > AGENTS_CONTEXT_FILE_MAX_BYTES as u64
+        || content.len() > AGENTS_CONTEXT_FILE_MAX_BYTES;
+    if truncated {
+        let trimmed = take_bytes_at_char_boundary(&content, AGENTS_CONTEXT_FILE_MAX_BYTES);
+        content = trimmed.to_string();
+    }
+
+    if content.trim().is_empty() {
+        return Ok(None);
+    }
+
+    Ok(Some(AgentContextEntry {
+        source,
+        relative_path: relative_path.to_string(),
+        absolute_path: absolute_path.to_path_buf(),
+        content,
+        truncated,
+    }))
+}
+
+/// Copy a file or directory into the agents context directory and return the
+/// newly available entries so callers can refresh their view without
+/// re-scanning the entire tree.
+pub fn import_agents_context(
+    global_agents_home: &Path,
+    project_agents_home: Option<&Path>,
+    cwd: &Path,
+    import: AgentsContextImport,
+) -> std::io::Result<AgentsContextImportResult> {
+    let AgentsContextImport {
+        source,
+        target,
+        destination_dir,
+    } = import;
+
+    let expanded_source = expand_tilde(&source);
+    let candidate = if expanded_source.is_absolute() {
+        expanded_source
+    } else {
+        cwd.join(expanded_source)
+    };
+
+    let canonical_source = canonicalize(&candidate).map_err(|err| {
+        std::io::Error::new(
+            err.kind(),
+            format!(
+                "failed to resolve import source `{}`: {err}",
+                source.display()
+            ),
+        )
+    })?;
+
+    let metadata = fs::metadata(&canonical_source).map_err(|err| {
+        std::io::Error::new(
+            err.kind(),
+            format!(
+                "failed to read metadata for import source `{}`: {err}",
+                canonical_source.display()
+            ),
+        )
+    })?;
+
+    if !metadata.is_file() && !metadata.is_dir() && !metadata.file_type().is_symlink() {
+        return Err(std::io::Error::new(
+            ErrorKind::InvalidInput,
+            format!(
+                "import source `{}` must be a regular file, directory, or symlink",
+                canonical_source.display()
+            ),
+        ));
+    }
+
+    let agents_home = match target {
+        AgentsSource::Global => global_agents_home,
+        AgentsSource::Project => project_agents_home.ok_or_else(|| {
+            std::io::Error::new(
+                ErrorKind::NotFound,
+                "project `.agents` directory not detected for this workspace",
+            )
+        })?,
+    };
+
+    ensure_agents_home_layout(agents_home)?;
+    let context_dir = agents_home.join("context");
+
+    if canonical_source.starts_with(&context_dir) {
+        return Err(std::io::Error::new(
+            ErrorKind::InvalidInput,
+            "source path already lives inside the target `.agents/context` directory",
+        ));
+    }
+
+    let destination_dir = destination_dir
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(normalize_destination_dir)
+        .transpose()?;
+
+    let destination_root = match destination_dir.as_deref() {
+        Some(relative) if !relative.is_empty() => context_dir.join(relative),
+        _ => context_dir.clone(),
+    };
+
+    fs::create_dir_all(&destination_root)?;
+
+    let mut added_entries: Vec<AgentContextEntry> = Vec::new();
+
+    if metadata.is_dir() {
+        let dir_name = canonical_source
+            .file_name()
+            .ok_or_else(|| {
+                std::io::Error::new(
+                    ErrorKind::InvalidInput,
+                    format!(
+                        "cannot determine directory name for `{}`",
+                        canonical_source.display()
+                    ),
+                )
+            })?
+            .to_owned();
+        let target_root = destination_root.join(&dir_name);
+        if target_root.exists() {
+            return Err(std::io::Error::new(
+                ErrorKind::AlreadyExists,
+                format!(
+                    "agents context destination `{}` already exists",
+                    target_root.display()
+                ),
+            ));
+        }
+        let mut imported_files = 0usize;
+        copy_directory_into_context(
+            target,
+            &canonical_source,
+            &target_root,
+            &context_dir,
+            &mut added_entries,
+            &mut imported_files,
+        )?;
+    } else {
+        validate_import_file_size(&metadata, &canonical_source)?;
+        ensure_import_capacity(0, 1)?;
+        let file_name = canonical_source.file_name().ok_or_else(|| {
+            std::io::Error::new(
+                ErrorKind::InvalidInput,
+                format!(
+                    "cannot determine file name for `{}`",
+                    canonical_source.display()
+                ),
+            )
+        })?;
+        let destination_path = destination_root.join(file_name);
+        if destination_path.exists() {
+            return Err(std::io::Error::new(
+                ErrorKind::AlreadyExists,
+                format!(
+                    "agents context destination `{}` already exists",
+                    destination_path.display()
+                ),
+            ));
+        }
+        if let Some(parent) = destination_path.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        fs::copy(&canonical_source, &destination_path)?;
+        let dest_metadata = fs::metadata(&destination_path)?;
+        let relative = relative_path_in_context(&destination_path, &context_dir)?;
+        if let Some(entry) =
+            read_agents_context_entry(target, &destination_path, &relative, dest_metadata)?
+        {
+            added_entries.push(entry);
+        }
+    }
+
+    added_entries.sort_by(|a, b| a.relative_path.cmp(&b.relative_path));
+
+    Ok(AgentsContextImportResult { added_entries })
+}
+
+fn normalize_destination_dir(raw: &str) -> std::io::Result<String> {
+    let trimmed = raw.trim_matches('/');
+    if trimmed.is_empty() {
+        return Ok(String::new());
+    }
+    let Some(normalized) = normalize_agents_relative_path(Path::new(trimmed)) else {
+        return Err(std::io::Error::new(
+            ErrorKind::InvalidInput,
+            format!(
+                "destination directory `{raw}` must be a relative path without `..` components"
+            ),
+        ));
+    };
+    Ok(normalized)
+}
+
+fn expand_tilde(path: &Path) -> PathBuf {
+    let Some(text) = path.to_str() else {
+        return path.to_path_buf();
+    };
+    if let Some(stripped) = text.strip_prefix("~/") {
+        if let Some(home) = home_dir() {
+            return home.join(stripped);
+        }
+    } else if text == "~"
+        && let Some(home) = home_dir()
+    {
+        return home;
+    }
+    path.to_path_buf()
+}
+
+fn copy_directory_into_context(
+    target: AgentsSource,
+    source_root: &Path,
+    destination_root: &Path,
+    context_dir: &Path,
+    added_entries: &mut Vec<AgentContextEntry>,
+    imported_files: &mut usize,
+) -> std::io::Result<()> {
+    fs::create_dir_all(destination_root)?;
+    for entry in WalkDir::new(source_root).follow_links(false) {
+        let entry = entry.map_err(|err| {
+            let err_display = err.to_string();
+            match err.into_io_error() {
+                Some(io) => io,
+                None => std::io::Error::other(format!(
+                    "failed to walk {}: {err_display}",
+                    source_root.display()
+                )),
+            }
+        })?;
+
+        let relative = entry.path().strip_prefix(source_root).map_err(|_| {
+            std::io::Error::other(format!(
+                "failed to compute relative path for `{}`",
+                entry.path().display()
+            ))
+        })?;
+
+        let target_path = if relative.as_os_str().is_empty() {
+            destination_root.to_path_buf()
+        } else {
+            destination_root.join(relative)
+        };
+
+        if entry.file_type().is_dir() {
+            fs::create_dir_all(&target_path)?;
+            continue;
+        }
+
+        if !entry.file_type().is_file() && !entry.file_type().is_symlink() {
+            continue;
+        }
+
+        let metadata = fs::metadata(entry.path())?;
+        validate_import_file_size(&metadata, entry.path())?;
+        ensure_import_capacity(*imported_files, 1)?;
+
+        if target_path.exists() {
+            return Err(std::io::Error::new(
+                ErrorKind::AlreadyExists,
+                format!(
+                    "agents context destination `{}` already exists",
+                    target_path.display()
+                ),
+            ));
+        }
+
+        if let Some(parent) = target_path.parent() {
+            fs::create_dir_all(parent)?;
+        }
+
+        fs::copy(entry.path(), &target_path)?;
+        *imported_files += 1;
+        let metadata = fs::metadata(&target_path)?;
+        let relative = relative_path_in_context(&target_path, context_dir)?;
+        if let Some(context_entry) =
+            read_agents_context_entry(target, &target_path, &relative, metadata)?
+        {
+            added_entries.push(context_entry);
+        }
+    }
+
+    Ok(())
+}
+
+fn relative_path_in_context(path: &Path, context_dir: &Path) -> std::io::Result<String> {
+    let relative = path.strip_prefix(context_dir).map_err(|_| {
+        std::io::Error::other(format!(
+            "destination `{}` is outside of the `.agents/context` directory",
+            path.display()
+        ))
+    })?;
+    let Some(normalized) = normalize_agents_relative_path(relative) else {
+        return Err(std::io::Error::new(
+            ErrorKind::InvalidData,
+            format!(
+                "failed to normalize agents context path `{}`",
+                relative.display()
+            ),
+        ));
+    };
+    Ok(normalized)
+}
+
+fn validate_import_file_size(metadata: &fs::Metadata, path: &Path) -> std::io::Result<()> {
+    if metadata.len() > AGENTS_CONTEXT_FILE_MAX_BYTES as u64 {
+        return Err(std::io::Error::new(
+            ErrorKind::InvalidInput,
+            format!(
+                "agents context import rejects `{}` because files must be <= {} bytes",
+                path.display(),
+                AGENTS_CONTEXT_FILE_MAX_BYTES
+            ),
+        ));
+    }
+    Ok(())
+}
+
+fn ensure_import_capacity(current: usize, additional: usize) -> std::io::Result<()> {
+    if current + additional > AGENTS_CONTEXT_IMPORT_MAX_FILES {
+        return Err(std::io::Error::new(
+            ErrorKind::InvalidInput,
+            format!(
+                "agents context import would add more than {AGENTS_CONTEXT_IMPORT_MAX_FILES} files in one operation"
+            ),
+        ));
+    }
+    Ok(())
+}
+
+fn load_agents_tools(
+    global_agents_home: &Path,
+    project_agents_home: Option<&Path>,
+) -> std::io::Result<Vec<AgentToolEntry>> {
+    let mut entries: BTreeMap<String, AgentToolEntry> = BTreeMap::new();
+    load_agents_tools_from_dir(global_agents_home, true, AgentsSource::Global, &mut entries)?;
+    if let Some(local_home) = project_agents_home {
+        load_agents_tools_from_dir(local_home, false, AgentsSource::Project, &mut entries)?;
+    }
+    Ok(entries.into_values().collect())
+}
+
+fn load_agents_tools_from_dir(
+    agents_home: &Path,
+    ensure_structure: bool,
+    source: AgentsSource,
+    entries: &mut BTreeMap<String, AgentToolEntry>,
+) -> std::io::Result<()> {
+    if ensure_structure {
+        ensure_agents_home_layout(agents_home)?;
+    } else if !agents_home.exists() {
+        return Ok(());
+    }
+
+    let tools_dir = agents_home.join("tools");
+    if ensure_structure {
+        fs::create_dir_all(&tools_dir)?;
+    } else if !tools_dir.exists() {
+        return Ok(());
+    }
+
+    for entry in WalkDir::new(&tools_dir).follow_links(false) {
+        let entry = match entry {
+            Ok(entry) => entry,
+            Err(err) => {
+                let err_string = err.to_string();
+                if let Some(io) = err.into_io_error() {
+                    return Err(io);
+                }
+                return Err(std::io::Error::other(format!(
+                    "failed to walk {}: {err_string}",
+                    tools_dir.display()
+                )));
+            }
+        };
+
+        if entry.file_type().is_dir() {
+            continue;
+        }
+        if !entry.file_type().is_file() && !entry.file_type().is_symlink() {
+            continue;
+        }
+
+        let path = entry.into_path();
+        let relative = match path.strip_prefix(&tools_dir) {
+            Ok(rel) => rel,
+            Err(_) => continue,
+        };
+
+        let Some(relative_str) = normalize_agents_relative_path(relative) else {
+            tracing::warn!(
+                "Skipping agents tool with unsupported path: {}",
+                path.display()
+            );
+            continue;
+        };
+
+        let metadata = match fs::metadata(&path) {
+            Ok(metadata) => metadata,
+            Err(err) => {
+                tracing::warn!(
+                    "Failed to read metadata for agents tool {}: {err}",
+                    path.display()
+                );
+                continue;
+            }
+        };
+
+        let executable = detect_executable(&path, &metadata);
+
+        entries.insert(
+            relative_str.clone(),
+            AgentToolEntry {
+                source,
+                relative_path: relative_str,
+                absolute_path: path,
+                executable,
+            },
+        );
+    }
+
+    Ok(())
+}
+
+fn normalize_agents_relative_path(path: &Path) -> Option<String> {
+    let mut parts: Vec<&str> = Vec::new();
+    for component in path.components() {
+        match component {
+            Component::Normal(part) => parts.push(part.to_str()?),
+            Component::CurDir => continue,
+            Component::ParentDir => return None,
+            _ => return None,
+        }
+    }
+    Some(parts.join("/"))
+}
+
+fn detect_executable(path: &Path, metadata: &fs::Metadata) -> bool {
+    #[cfg(unix)]
+    {
+        let _ = path;
+        metadata.permissions().mode() & 0o111 != 0
+    }
+    #[cfg(not(unix))]
+    {
+        if metadata.permissions().readonly() {
+            return false;
+        }
+        let Some(ext) = path.extension().and_then(|ext| ext.to_str()) else {
+            return false;
+        };
+        matches!(
+            ext.to_ascii_lowercase().as_str(),
+            "bat" | "cmd" | "exe" | "ps1" | "py"
+        )
+    }
+}
+
+fn format_agents_path_for_display(path: &Path) -> String {
+    if let Some(home) = home_dir()
+        && let Ok(stripped) = path.strip_prefix(&home)
+    {
+        let suffix = stripped.to_string_lossy();
+        if suffix.is_empty() {
+            "~".to_string()
+        } else if suffix.starts_with(std::path::MAIN_SEPARATOR) {
+            format!("~{suffix}")
+        } else {
+            format!("~{}{}", std::path::MAIN_SEPARATOR, suffix)
+        }
+    } else {
+        path.display().to_string()
+    }
+}
+
+pub fn render_agents_context_preview(
+    context_entries: &[AgentContextEntry],
+    tool_entries: &[AgentToolEntry],
+    project_agents_home: Option<&Path>,
+) -> AgentsContextRender {
+    render_agents_context_prompt(context_entries, tool_entries, project_agents_home)
+}
+
+fn render_agents_context_prompt(
+    context_entries: &[AgentContextEntry],
+    tool_entries: &[AgentToolEntry],
+    project_agents_home: Option<&Path>,
+) -> AgentsContextRender {
+    fn display_path(
+        source: AgentsSource,
+        subdir: &str,
+        relative: &str,
+        absolute: &Path,
+        project_agents_home: Option<&Path>,
+    ) -> String {
+        match source {
+            AgentsSource::Global => format_agents_path_for_display(absolute),
+            AgentsSource::Project => {
+                if let Some(project_home) = project_agents_home
+                    && let Ok(stripped) = absolute.strip_prefix(project_home)
+                {
+                    let stripped = normalize_agents_relative_path(stripped)
+                        .unwrap_or_else(|| relative.to_string());
+                    format!(".agents/{stripped}")
+                } else {
+                    format!(".agents/{subdir}/{relative}")
+                }
+            }
+        }
+    }
+
+    if context_entries.is_empty() && tool_entries.is_empty() {
+        return AgentsContextRender {
+            prompt: None,
+            token_count: 0,
+            truncated: false,
+        };
+    }
+
+    let tokenizer = Tokenizer::try_default().ok();
+    let mut body_truncated = false;
+    let mut body = String::new();
+
+    if !context_entries.is_empty() {
+        body.push_str("## Context Files\n\n");
+        for entry in context_entries {
+            body.push_str(&format!(
+                "### {} [{}]\nLocation: {}\n",
+                entry.relative_path,
+                entry.source.label(),
+                display_path(
+                    entry.source,
+                    "context",
+                    &entry.relative_path,
+                    &entry.absolute_path,
+                    project_agents_home
+                )
+            ));
+            if entry.truncated {
+                body.push_str(AGENTS_CONTEXT_FILE_TRUNCATION_NOTICE);
+                body.push('\n');
+                body_truncated = true;
+            }
+            body.push('\n');
+            body.push_str(entry.content.trim_end());
+            body.push_str("\n\n");
+        }
+    }
+
+    if !tool_entries.is_empty() {
+        body.push_str("## Tools\n");
+        for tool in tool_entries {
+            let suffix = if tool.executable {
+                ""
+            } else {
+                " (not executable)"
+            };
+            body.push_str(&format!(
+                "- {} [{}] -> {}{}\n",
+                tool.relative_path,
+                tool.source.label(),
+                display_path(
+                    tool.source,
+                    "tools",
+                    &tool.relative_path,
+                    &tool.absolute_path,
+                    project_agents_home
+                ),
+                suffix
+            ));
+        }
+        body.push('\n');
+    }
+
+    let mut body_text = body.trim_end().to_string();
+    if body_text.len() > AGENTS_CONTEXT_PROMPT_MAX_BYTES {
+        let trimmed = take_bytes_at_char_boundary(&body_text, AGENTS_CONTEXT_PROMPT_MAX_BYTES);
+        body_text = trimmed.to_string();
+        if !body_text.ends_with('\n') {
+            body_text.push('\n');
+        }
+        body_text.push_str(AGENTS_CONTEXT_TRUNCATION_NOTICE);
+        body_truncated = true;
+    }
+
+    if body_text.trim().is_empty() {
+        return AgentsContextRender {
+            prompt: None,
+            token_count: 0,
+            truncated: body_truncated,
+        };
+    }
+
+    let prompt = format!(
+        "{open}\n\n{body}\n\n{close}",
+        open = AGENTS_CONTEXT_OPEN_TAG,
+        body = body_text.trim_end(),
+        close = AGENTS_CONTEXT_CLOSE_TAG,
+    );
+
+    let token_count = if let Some(ref tokenizer) = tokenizer {
+        tokenizer.count(&prompt) as usize
+    } else {
+        prompt.len().div_ceil(4)
+    };
+
+    AgentsContextRender {
+        prompt: Some(prompt),
+        token_count,
+        truncated: body_truncated,
+    }
+}
+
 /// Returns the path to the folder where Codex logs are stored. Does not verify
 /// that the directory exists.
 pub fn log_dir(cfg: &Config) -> std::io::Result<PathBuf> {
@@ -1495,14 +3021,26 @@ pub fn log_dir(cfg: &Config) -> std::io::Result<PathBuf> {
 #[cfg(test)]
 mod tests {
     use crate::config_types::HistoryPersistence;
+    use crate::config_types::McpAuthConfig;
+    use crate::config_types::McpHealthcheckConfig;
+    use crate::config_types::McpServerConfig;
+    use crate::config_types::McpServerTransportConfig;
+    use crate::config_types::McpTemplate;
+    use crate::config_types::McpTemplateDefaults;
     use crate::config_types::Notifications;
     use crate::features::Feature;
 
     use super::*;
+    use core_test_support::load_default_config_for_test;
+    use core_test_support::seed_global_agents_context;
     use pretty_assertions::assert_eq;
 
+    use std::collections::HashMap;
+    use std::path::PathBuf;
     use std::time::Duration;
     use tempfile::TempDir;
+
+    use super::mcp_registry::CURRENT_SCHEMA_VERSION;
 
     #[test]
     fn test_toml_parsing() {
@@ -1537,6 +3075,35 @@ persistence = "none"
     }
 
     #[test]
+    fn normalize_filter_list_trims_trailing_slash() {
+        let input = vec!["notes/".to_string()];
+        let normalized = super::normalize_agents_filter_list(&input, "agents_context_include")
+            .expect("normalize");
+        assert_eq!(normalized, vec!["notes".to_string()]);
+    }
+
+    #[test]
+    fn refresh_filters_normalizes_values() -> std::io::Result<()> {
+        let home = TempDir::new().expect("temp home");
+        seed_global_agents_context(&home, "notes/guide.md", "Remember");
+        let mut config = load_default_config_for_test(&home);
+        config
+            .refresh_agents_context_entries(Vec::<String>::new(), Vec::<String>::new())
+            .expect("initial refresh");
+
+        config.refresh_agents_context_filters(&["notes/".to_string()], &[])?;
+        assert_eq!(config.agents_context_include, vec!["notes".to_string()]);
+        assert!(
+            config
+                .agents_context_entries
+                .iter()
+                .all(|entry| entry.relative_path.starts_with("notes/"))
+        );
+
+        Ok(())
+    }
+
+    #[test]
     fn tui_config_missing_notifications_field_defaults_to_disabled() {
         let cfg = r#"
 [tui]
@@ -1560,9 +3127,17 @@ network_access = false  # This should be ignored.
         let sandbox_full_access_cfg = toml::from_str::<ConfigToml>(sandbox_full_access)
             .expect("TOML deserialization should succeed");
         let sandbox_mode_override = None;
+        let resolution = sandbox_full_access_cfg.derive_sandbox_policy(
+            sandbox_mode_override,
+            None,
+            &PathBuf::from("/tmp/test"),
+        );
         assert_eq!(
-            SandboxPolicy::DangerFullAccess,
-            sandbox_full_access_cfg.derive_sandbox_policy(sandbox_mode_override)
+            resolution,
+            SandboxPolicyResolution {
+                policy: SandboxPolicy::DangerFullAccess,
+                forced_auto_mode_downgraded_on_windows: false,
+            }
         );
 
         let sandbox_read_only = r#"
@@ -1575,9 +3150,17 @@ network_access = true  # This should be ignored.
         let sandbox_read_only_cfg = toml::from_str::<ConfigToml>(sandbox_read_only)
             .expect("TOML deserialization should succeed");
         let sandbox_mode_override = None;
+        let resolution = sandbox_read_only_cfg.derive_sandbox_policy(
+            sandbox_mode_override,
+            None,
+            &PathBuf::from("/tmp/test"),
+        );
         assert_eq!(
-            SandboxPolicy::ReadOnly,
-            sandbox_read_only_cfg.derive_sandbox_policy(sandbox_mode_override)
+            resolution,
+            SandboxPolicyResolution {
+                policy: SandboxPolicy::ReadOnly,
+                forced_auto_mode_downgraded_on_windows: false,
+            }
         );
 
         let sandbox_workspace_write = r#"
@@ -1594,15 +3177,170 @@ exclude_slash_tmp = true
         let sandbox_workspace_write_cfg = toml::from_str::<ConfigToml>(sandbox_workspace_write)
             .expect("TOML deserialization should succeed");
         let sandbox_mode_override = None;
-        assert_eq!(
-            SandboxPolicy::WorkspaceWrite {
-                writable_roots: vec![PathBuf::from("/my/workspace")],
-                network_access: false,
-                exclude_tmpdir_env_var: true,
-                exclude_slash_tmp: true,
-            },
-            sandbox_workspace_write_cfg.derive_sandbox_policy(sandbox_mode_override)
+        let resolution = sandbox_workspace_write_cfg.derive_sandbox_policy(
+            sandbox_mode_override,
+            None,
+            &PathBuf::from("/tmp/test"),
         );
+        if cfg!(target_os = "windows") {
+            assert_eq!(
+                resolution,
+                SandboxPolicyResolution {
+                    policy: SandboxPolicy::ReadOnly,
+                    forced_auto_mode_downgraded_on_windows: true,
+                }
+            );
+        } else {
+            assert_eq!(
+                resolution,
+                SandboxPolicyResolution {
+                    policy: SandboxPolicy::WorkspaceWrite {
+                        writable_roots: vec![PathBuf::from("/my/workspace")],
+                        network_access: false,
+                        exclude_tmpdir_env_var: true,
+                        exclude_slash_tmp: true,
+                    },
+                    forced_auto_mode_downgraded_on_windows: false,
+                }
+            );
+        }
+
+        let sandbox_workspace_write = r#"
+sandbox_mode = "workspace-write"
+
+[sandbox_workspace_write]
+writable_roots = [
+    "/my/workspace",
+]
+exclude_tmpdir_env_var = true
+exclude_slash_tmp = true
+
+[projects."/tmp/test"]
+trust_level = "trusted"
+"#;
+
+        let sandbox_workspace_write_cfg = toml::from_str::<ConfigToml>(sandbox_workspace_write)
+            .expect("TOML deserialization should succeed");
+        let sandbox_mode_override = None;
+        let resolution = sandbox_workspace_write_cfg.derive_sandbox_policy(
+            sandbox_mode_override,
+            None,
+            &PathBuf::from("/tmp/test"),
+        );
+        if cfg!(target_os = "windows") {
+            assert_eq!(
+                resolution,
+                SandboxPolicyResolution {
+                    policy: SandboxPolicy::ReadOnly,
+                    forced_auto_mode_downgraded_on_windows: true,
+                }
+            );
+        } else {
+            assert_eq!(
+                resolution,
+                SandboxPolicyResolution {
+                    policy: SandboxPolicy::WorkspaceWrite {
+                        writable_roots: vec![PathBuf::from("/my/workspace")],
+                        network_access: false,
+                        exclude_tmpdir_env_var: true,
+                        exclude_slash_tmp: true,
+                    },
+                    forced_auto_mode_downgraded_on_windows: false,
+                }
+            );
+        }
+    }
+
+    #[test]
+    fn add_dir_override_extends_workspace_writable_roots() -> std::io::Result<()> {
+        let temp_dir = TempDir::new()?;
+        let frontend = temp_dir.path().join("frontend");
+        let backend = temp_dir.path().join("backend");
+        std::fs::create_dir_all(&frontend)?;
+        std::fs::create_dir_all(&backend)?;
+
+        let overrides = ConfigOverrides {
+            cwd: Some(frontend),
+            sandbox_mode: Some(SandboxMode::WorkspaceWrite),
+            additional_writable_roots: vec![PathBuf::from("../backend"), backend.clone()],
+            ..Default::default()
+        };
+
+        let config = Config::load_from_base_config_with_overrides(
+            ConfigToml::default(),
+            overrides,
+            temp_dir.path().to_path_buf(),
+        )?;
+
+        let expected_backend = canonicalize(&backend).expect("canonicalize backend directory");
+        if cfg!(target_os = "windows") {
+            assert!(
+                config.forced_auto_mode_downgraded_on_windows,
+                "expected workspace-write request to be downgraded on Windows"
+            );
+            match config.sandbox_policy {
+                SandboxPolicy::ReadOnly => {}
+                other => panic!("expected read-only policy on Windows, got {other:?}"),
+            }
+        } else {
+            match config.sandbox_policy {
+                SandboxPolicy::WorkspaceWrite { writable_roots, .. } => {
+                    assert_eq!(
+                        writable_roots
+                            .iter()
+                            .filter(|root| **root == expected_backend)
+                            .count(),
+                        1,
+                        "expected single writable root entry for {}",
+                        expected_backend.display()
+                    );
+                }
+                other => panic!("expected workspace-write policy, got {other:?}"),
+            }
+        }
+
+        Ok(())
+    }
+
+    #[test]
+    fn config_defaults_to_file_cli_auth_store_mode() -> std::io::Result<()> {
+        let codex_home = TempDir::new()?;
+        let cfg = ConfigToml::default();
+
+        let config = Config::load_from_base_config_with_overrides(
+            cfg,
+            ConfigOverrides::default(),
+            codex_home.path().to_path_buf(),
+        )?;
+
+        assert_eq!(
+            config.cli_auth_credentials_store_mode,
+            AuthCredentialsStoreMode::File,
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    fn config_honors_explicit_keyring_auth_store_mode() -> std::io::Result<()> {
+        let codex_home = TempDir::new()?;
+        let cfg = ConfigToml {
+            cli_auth_credentials_store: Some(AuthCredentialsStoreMode::Keyring),
+            ..Default::default()
+        };
+
+        let config = Config::load_from_base_config_with_overrides(
+            cfg,
+            ConfigOverrides::default(),
+            codex_home.path().to_path_buf(),
+        )?;
+
+        assert_eq!(
+            config.cli_auth_credentials_store_mode,
+            AuthCredentialsStoreMode::Keyring,
+        );
+
+        Ok(())
     }
 
     #[test]
@@ -1631,7 +3369,6 @@ exclude_slash_tmp = true
         profiles.insert(
             "work".to_string(),
             ConfigProfile {
-                include_plan_tool: Some(true),
                 include_view_image_tool: Some(false),
                 ..Default::default()
             },
@@ -1648,10 +3385,83 @@ exclude_slash_tmp = true
             codex_home.path().to_path_buf(),
         )?;
 
-        assert!(config.features.enabled(Feature::PlanTool));
         assert!(!config.features.enabled(Feature::ViewImageTool));
-        assert!(config.include_plan_tool);
         assert!(!config.include_view_image_tool);
+
+        Ok(())
+    }
+
+    #[test]
+    fn profile_sandbox_mode_overrides_base() -> std::io::Result<()> {
+        let codex_home = TempDir::new()?;
+        let mut profiles = HashMap::new();
+        profiles.insert(
+            "work".to_string(),
+            ConfigProfile {
+                sandbox_mode: Some(SandboxMode::DangerFullAccess),
+                ..Default::default()
+            },
+        );
+        let cfg = ConfigToml {
+            profiles,
+            profile: Some("work".to_string()),
+            sandbox_mode: Some(SandboxMode::ReadOnly),
+            ..Default::default()
+        };
+
+        let config = Config::load_from_base_config_with_overrides(
+            cfg,
+            ConfigOverrides::default(),
+            codex_home.path().to_path_buf(),
+        )?;
+
+        assert!(matches!(
+            config.sandbox_policy,
+            SandboxPolicy::DangerFullAccess
+        ));
+        assert!(config.did_user_set_custom_approval_policy_or_sandbox_mode);
+
+        Ok(())
+    }
+
+    #[test]
+    fn cli_override_takes_precedence_over_profile_sandbox_mode() -> std::io::Result<()> {
+        let codex_home = TempDir::new()?;
+        let mut profiles = HashMap::new();
+        profiles.insert(
+            "work".to_string(),
+            ConfigProfile {
+                sandbox_mode: Some(SandboxMode::DangerFullAccess),
+                ..Default::default()
+            },
+        );
+        let cfg = ConfigToml {
+            profiles,
+            profile: Some("work".to_string()),
+            ..Default::default()
+        };
+
+        let overrides = ConfigOverrides {
+            sandbox_mode: Some(SandboxMode::WorkspaceWrite),
+            ..Default::default()
+        };
+
+        let config = Config::load_from_base_config_with_overrides(
+            cfg,
+            overrides,
+            codex_home.path().to_path_buf(),
+        )?;
+
+        if cfg!(target_os = "windows") {
+            assert!(matches!(config.sandbox_policy, SandboxPolicy::ReadOnly));
+            assert!(config.forced_auto_mode_downgraded_on_windows);
+        } else {
+            assert!(matches!(
+                config.sandbox_policy,
+                SandboxPolicy::WorkspaceWrite { .. }
+            ));
+            assert!(!config.forced_auto_mode_downgraded_on_windows);
+        }
 
         Ok(())
     }
@@ -1660,7 +3470,6 @@ exclude_slash_tmp = true
     fn feature_table_overrides_legacy_flags() -> std::io::Result<()> {
         let codex_home = TempDir::new()?;
         let mut entries = BTreeMap::new();
-        entries.insert("plan_tool".to_string(), false);
         entries.insert("apply_patch_freeform".to_string(), false);
         let cfg = ConfigToml {
             features: Some(crate::features::FeaturesToml { entries }),
@@ -1673,9 +3482,7 @@ exclude_slash_tmp = true
             codex_home.path().to_path_buf(),
         )?;
 
-        assert!(!config.features.enabled(Feature::PlanTool));
         assert!(!config.features.enabled(Feature::ApplyPatchFreeform));
-        assert!(!config.include_plan_tool);
         assert!(!config.include_apply_patch_tool);
 
         Ok(())
@@ -1686,7 +3493,7 @@ exclude_slash_tmp = true
         let codex_home = TempDir::new()?;
         let cfg = ConfigToml {
             experimental_use_exec_command_tool: Some(true),
-            use_unified_exec_tool: Some(true),
+            experimental_use_unified_exec_tool: Some(true),
             experimental_use_rmcp_client: Some(true),
             experimental_use_freeform_apply_patch: Some(true),
             ..Default::default()
@@ -1705,7 +3512,7 @@ exclude_slash_tmp = true
 
         assert!(config.include_apply_patch_tool);
         assert!(config.use_experimental_streamable_shell_tool);
-        assert!(config.use_unified_exec_tool);
+        assert!(config.use_experimental_unified_exec_tool);
         assert!(config.use_experimental_use_rmcp_client);
 
         Ok(())
@@ -1731,6 +3538,318 @@ exclude_slash_tmp = true
         );
 
         Ok(())
+    }
+
+    #[test]
+    fn config_applies_mcp_template_defaults() -> std::io::Result<()> {
+        let codex_home = TempDir::new()?;
+
+        let mut template_metadata = HashMap::new();
+        template_metadata.insert("owner".to_string(), "docs-team".to_string());
+
+        let mut defaults_metadata = HashMap::new();
+        defaults_metadata.insert("tier".to_string(), "gold".to_string());
+
+        let mut defaults_env = HashMap::new();
+        defaults_env.insert("LOG_LEVEL".to_string(), "info".to_string());
+        defaults_env.insert("SEARCH_ROOT".to_string(), "/srv/docs".to_string());
+
+        let mut defaults_auth_env = HashMap::new();
+        defaults_auth_env.insert("TOKEN".to_string(), "${DOCS_TOKEN}".to_string());
+
+        let template = McpTemplate {
+            version: Some("1.0".to_string()),
+            summary: Some("Local docs server".to_string()),
+            category: Some("knowledge".to_string()),
+            defaults: Some(McpTemplateDefaults {
+                command: Some("docs-server".to_string()),
+                args: vec!["--port".to_string(), "8080".to_string()],
+                env: Some(defaults_env),
+                env_vars: vec!["API_TOKEN".to_string()],
+                cwd: Some(PathBuf::from("/srv/docs")),
+                auth: Some(McpAuthConfig {
+                    kind: Some("api_key".to_string()),
+                    secret_ref: Some("mcp/docs/token".to_string()),
+                    env: Some(defaults_auth_env),
+                }),
+                healthcheck: Some(McpHealthcheckConfig {
+                    kind: Some("command".to_string()),
+                    command: Some("docs-health".to_string()),
+                    args: vec!["--ping".to_string()],
+                    timeout_ms: Some(1_500),
+                    interval_seconds: Some(3_600),
+                    endpoint: None,
+                    protocol: None,
+                }),
+                tags: vec!["template".to_string(), "internal".to_string()],
+                startup_timeout_sec: Some(12.0),
+                tool_timeout_sec: Some(30.0),
+                enabled_tools: Some(vec!["search".to_string()]),
+                disabled_tools: Some(vec!["debug".to_string()]),
+                description: Some("Docs server template".to_string()),
+                metadata: Some(defaults_metadata),
+                http_headers: None,
+                env_http_headers: None,
+            }),
+            metadata: Some(template_metadata),
+        };
+
+        let mut server_env = HashMap::new();
+        server_env.insert("LOG_LEVEL".to_string(), "debug".to_string());
+
+        let mut server_auth_env = HashMap::new();
+        server_auth_env.insert("TOKEN".to_string(), "${DOCS_OVERRIDE}".to_string());
+
+        let mut server_metadata = HashMap::new();
+        server_metadata.insert("owner".to_string(), "platform".to_string());
+        server_metadata.insert("region".to_string(), "us-west".to_string());
+
+        let server = McpServerConfig {
+            transport: McpServerTransportConfig::Stdio {
+                command: "docs-server".to_string(),
+                args: Vec::new(),
+                env: Some(server_env),
+                env_vars: vec!["SESSION_TOKEN".to_string()],
+                cwd: None,
+            },
+            display_name: Some("Docs Toolkit".to_string()),
+            category: Some("knowledge".to_string()),
+            template_id: Some(" docs/local@1 ".to_string()),
+            description: None,
+            auth: Some(McpAuthConfig {
+                kind: None,
+                secret_ref: None,
+                env: Some(server_auth_env),
+            }),
+            healthcheck: None,
+            tags: vec!["custom".to_string()],
+            metadata: Some(server_metadata),
+            created_at: None,
+            last_verified_at: None,
+            enabled: true,
+            startup_timeout_sec: None,
+            tool_timeout_sec: Some(Duration::from_secs(45)),
+            enabled_tools: None,
+            disabled_tools: Some(vec!["legacy".to_string()]),
+        };
+
+        let cfg = ConfigToml {
+            mcp_servers: HashMap::from([("docs".to_string(), server)]),
+            mcp_templates: HashMap::from([("docs/local@1".to_string(), template)]),
+            ..Default::default()
+        };
+
+        let config = Config::load_from_base_config_with_overrides(
+            cfg,
+            ConfigOverrides::default(),
+            codex_home.path().to_path_buf(),
+        )?;
+
+        let docs = config
+            .mcp_servers
+            .get("docs")
+            .expect("docs server should load");
+        match &docs.transport {
+            McpServerTransportConfig::Stdio {
+                command,
+                args,
+                env,
+                env_vars,
+                cwd,
+            } => {
+                assert_eq!(command, "docs-server");
+                assert_eq!(args, &vec!["--port".to_string(), "8080".to_string()]);
+                let env = env.as_ref().expect("env merged");
+                assert_eq!(env.get("LOG_LEVEL"), Some(&"debug".to_string()));
+                assert_eq!(env.get("SEARCH_ROOT"), Some(&"/srv/docs".to_string()));
+                assert_eq!(
+                    env_vars,
+                    &vec!["API_TOKEN".to_string(), "SESSION_TOKEN".to_string()]
+                );
+                assert_eq!(
+                    cwd.as_ref()
+                        .map(|path| path.display().to_string())
+                        .as_deref(),
+                    Some("/srv/docs")
+                );
+            }
+            other => panic!("unexpected transport: {other:?}"),
+        }
+        assert_eq!(docs.description.as_deref(), Some("Docs server template"));
+        assert_eq!(
+            docs.tags,
+            vec![
+                "template".to_string(),
+                "internal".to_string(),
+                "custom".to_string()
+            ]
+        );
+        let metadata = docs.metadata.as_ref().expect("metadata merged");
+        assert_eq!(metadata.get("tier"), Some(&"gold".to_string()));
+        assert_eq!(metadata.get("owner"), Some(&"platform".to_string()));
+        assert_eq!(metadata.get("region"), Some(&"us-west".to_string()));
+        let auth = docs.auth.as_ref().expect("auth merged");
+        assert_eq!(auth.kind.as_deref(), Some("api_key"));
+        assert_eq!(auth.secret_ref.as_deref(), Some("mcp/docs/token"));
+        let auth_env = auth.env.as_ref().expect("auth env merged");
+        assert_eq!(auth_env.get("TOKEN"), Some(&"${DOCS_OVERRIDE}".to_string()));
+        let health = docs.healthcheck.as_ref().expect("healthcheck merged");
+        assert_eq!(health.kind.as_deref(), Some("command"));
+        assert_eq!(health.command.as_deref(), Some("docs-health"));
+        assert_eq!(health.args, vec!["--ping".to_string()]);
+        assert_eq!(health.timeout_ms, Some(1_500));
+        assert_eq!(health.interval_seconds, Some(3_600));
+        assert_eq!(docs.startup_timeout_sec, Some(Duration::from_secs(12)));
+        assert_eq!(docs.tool_timeout_sec, Some(Duration::from_secs(45)));
+        assert_eq!(
+            docs.enabled_tools.as_ref(),
+            Some(&vec!["search".to_string()])
+        );
+        assert_eq!(
+            docs.disabled_tools.as_ref(),
+            Some(&vec!["legacy".to_string()])
+        );
+        assert_eq!(docs.template_id.as_deref(), Some("docs/local@1"));
+
+        assert_eq!(config.mcp_schema_version, Some(1));
+        let template_entry = config
+            .mcp_templates
+            .get("docs/local@1")
+            .expect("template present");
+        assert_eq!(template_entry.summary.as_deref(), Some("Local docs server"));
+        assert_eq!(
+            template_entry
+                .metadata
+                .as_ref()
+                .and_then(|map| map.get("owner")),
+            Some(&"docs-team".to_string())
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    fn config_rejects_unknown_mcp_template() {
+        let codex_home = TempDir::new().expect("temp home");
+        let server = McpServerConfig {
+            transport: McpServerTransportConfig::Stdio {
+                command: "docs-server".to_string(),
+                args: Vec::new(),
+                env: None,
+                env_vars: Vec::new(),
+                cwd: None,
+            },
+            template_id: Some("missing".to_string()),
+            ..Default::default()
+        };
+
+        let cfg = ConfigToml {
+            mcp_servers: HashMap::from([("docs".to_string(), server)]),
+            ..Default::default()
+        };
+
+        let err = Config::load_from_base_config_with_overrides(
+            cfg,
+            ConfigOverrides::default(),
+            codex_home.path().to_path_buf(),
+        )
+        .expect_err("missing template should error");
+
+        assert_eq!(err.kind(), std::io::ErrorKind::InvalidData);
+        assert!(
+            err.to_string().contains("unknown template `missing`"),
+            "unexpected error message: {err}"
+        );
+    }
+
+    #[test]
+    fn config_rejects_incompatible_template_transport() {
+        let codex_home = TempDir::new().expect("temp home");
+        let template = McpTemplate {
+            defaults: Some(McpTemplateDefaults {
+                command: Some("docs-server".to_string()),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+
+        let server = McpServerConfig {
+            transport: McpServerTransportConfig::StreamableHttp {
+                url: "https://example.com/mcp".to_string(),
+                bearer_token_env_var: None,
+                http_headers: None,
+                env_http_headers: None,
+            },
+            template_id: Some("docs/std@1".to_string()),
+            ..Default::default()
+        };
+
+        let cfg = ConfigToml {
+            mcp_servers: HashMap::from([("docs".to_string(), server)]),
+            mcp_templates: HashMap::from([("docs/std@1".to_string(), template)]),
+            ..Default::default()
+        };
+
+        let err = Config::load_from_base_config_with_overrides(
+            cfg,
+            ConfigOverrides::default(),
+            codex_home.path().to_path_buf(),
+        )
+        .expect_err("incompatible template should error");
+
+        assert_eq!(err.kind(), std::io::ErrorKind::InvalidData);
+        assert!(
+            err.to_string().contains("uses streamable_http transport"),
+            "unexpected error message: {err}"
+        );
+    }
+
+    #[test]
+    fn config_defaults_schema_version_when_missing() -> std::io::Result<()> {
+        let codex_home = TempDir::new()?;
+        let cfg = ConfigToml::default();
+
+        let config = Config::load_from_base_config_with_overrides(
+            cfg,
+            ConfigOverrides::default(),
+            codex_home.path().to_path_buf(),
+        )?;
+
+        assert_eq!(config.mcp_schema_version, Some(CURRENT_SCHEMA_VERSION));
+        assert!(config.mcp_servers.is_empty());
+        assert!(config.mcp_templates.is_empty());
+
+        Ok(())
+    }
+
+    #[test]
+    fn config_rejects_future_schema_version() {
+        let codex_home = TempDir::new().expect("temp home");
+        let server = McpServerConfig {
+            transport: McpServerTransportConfig::Stdio {
+                command: "docs-server".to_string(),
+                args: Vec::new(),
+                env: None,
+                env_vars: Vec::new(),
+                cwd: None,
+            },
+            ..Default::default()
+        };
+
+        let cfg = ConfigToml {
+            mcp_servers: HashMap::from([("docs".to_string(), server)]),
+            mcp_schema_version: Some(CURRENT_SCHEMA_VERSION + 1),
+            ..Default::default()
+        };
+
+        let err = Config::load_from_base_config_with_overrides(
+            cfg,
+            ConfigOverrides::default(),
+            codex_home.path().to_path_buf(),
+        )
+        .expect_err("future schema version should error");
+
+        assert_eq!(err.kind(), std::io::ErrorKind::InvalidData);
     }
 
     #[tokio::test]
@@ -1786,8 +3905,6 @@ exclude_slash_tmp = true
         let codex_home = TempDir::new()?;
 
         let mut servers = BTreeMap::new();
-        let mut metadata = HashMap::new();
-        metadata.insert("scope".to_string(), "docs".to_string());
         servers.insert(
             "docs".to_string(),
             McpServerConfig {
@@ -1795,20 +3912,40 @@ exclude_slash_tmp = true
                     command: "echo".to_string(),
                     args: vec!["hello".to_string()],
                     env: None,
+                    env_vars: Vec::new(),
+                    cwd: None,
                 },
-                display_name: Some("Documentation".to_string()),
-                category: Some("internal".to_string()),
-                template_id: Some("default".to_string()),
-                description: Some("Docs indexing server".to_string()),
-                auth: None,
-                healthcheck: None,
-                created_at: Some("2025-01-01T00:00:00Z".to_string()),
-                last_verified_at: None,
-                tags: vec!["search".to_string()],
-                metadata: Some(metadata),
-                enabled: true,
                 startup_timeout_sec: Some(Duration::from_secs(3)),
                 tool_timeout_sec: Some(Duration::from_secs(5)),
+                display_name: Some("Docs Toolkit".to_string()),
+                category: Some("knowledge".to_string()),
+                template_id: Some("docs/local@1".to_string()),
+                description: Some("Local docs template".to_string()),
+                tags: vec!["internal".to_string(), "docs".to_string()],
+                metadata: Some(HashMap::from([
+                    ("owner".to_string(), "docs-team".to_string()),
+                    ("region".to_string(), "us".to_string()),
+                ])),
+                created_at: Some("2025-01-01T00:00:00Z".to_string()),
+                last_verified_at: Some("2025-01-02T12:00:00Z".to_string()),
+                auth: Some(McpAuthConfig {
+                    kind: Some("api_key".to_string()),
+                    secret_ref: Some("mcp/docs/token".to_string()),
+                    env: Some(HashMap::from([(
+                        "DOCS_TOKEN".to_string(),
+                        "secret-value".to_string(),
+                    )])),
+                }),
+                healthcheck: Some(McpHealthcheckConfig {
+                    kind: Some("command".to_string()),
+                    command: Some("docs-health".to_string()),
+                    args: vec!["--ping".to_string()],
+                    timeout_ms: Some(1_500),
+                    interval_seconds: Some(3_600),
+                    endpoint: None,
+                    protocol: None,
+                }),
+                ..McpServerConfig::default()
             },
         );
 
@@ -1818,28 +3955,51 @@ exclude_slash_tmp = true
         assert_eq!(loaded.len(), 1);
         let docs = loaded.get("docs").expect("docs entry");
         match &docs.transport {
-            McpServerTransportConfig::Stdio { command, args, env } => {
+            McpServerTransportConfig::Stdio {
+                command,
+                args,
+                env,
+                env_vars,
+                cwd,
+            } => {
                 assert_eq!(command, "echo");
                 assert_eq!(args, &vec!["hello".to_string()]);
                 assert!(env.is_none());
+                assert!(env_vars.is_empty());
+                assert!(cwd.is_none());
             }
             other => panic!("unexpected transport {other:?}"),
         }
         assert_eq!(docs.startup_timeout_sec, Some(Duration::from_secs(3)));
         assert_eq!(docs.tool_timeout_sec, Some(Duration::from_secs(5)));
         assert!(docs.enabled);
-        assert_eq!(docs.display_name.as_deref(), Some("Documentation"));
-        assert_eq!(docs.category.as_deref(), Some("internal"));
-        assert_eq!(docs.template_id.as_deref(), Some("default"));
-        assert_eq!(docs.description.as_deref(), Some("Docs indexing server"));
-        assert_eq!(docs.tags, vec!["search".to_string()]);
+        assert_eq!(docs.display_name.as_deref(), Some("Docs Toolkit"));
+        assert_eq!(docs.category.as_deref(), Some("knowledge"));
+        assert_eq!(docs.template_id.as_deref(), Some("docs/local@1"));
+        assert_eq!(docs.description.as_deref(), Some("Local docs template"));
+        assert_eq!(docs.tags, vec!["internal", "docs"]);
+        let metadata = docs.metadata.as_ref().expect("metadata present");
+        assert_eq!(metadata.get("owner"), Some(&"docs-team".to_string()));
+        assert_eq!(metadata.get("region"), Some(&"us".to_string()));
+        assert_eq!(docs.created_at.as_deref(), Some("2025-01-01T00:00:00Z"));
         assert_eq!(
-            docs.metadata
-                .as_ref()
-                .and_then(|m| m.get("scope"))
-                .map(String::as_str),
-            Some("docs")
+            docs.last_verified_at.as_deref(),
+            Some("2025-01-02T12:00:00Z")
         );
+        let auth = docs.auth.as_ref().expect("auth present");
+        assert_eq!(auth.kind.as_deref(), Some("api_key"));
+        assert_eq!(auth.secret_ref.as_deref(), Some("mcp/docs/token"));
+        let auth_env = auth.env.as_ref().expect("auth env present");
+        assert_eq!(
+            auth_env.get("DOCS_TOKEN"),
+            Some(&"secret-value".to_string())
+        );
+        let health = docs.healthcheck.as_ref().expect("healthcheck present");
+        assert_eq!(health.kind.as_deref(), Some("command"));
+        assert_eq!(health.command.as_deref(), Some("docs-health"));
+        assert_eq!(health.args, vec!["--ping".to_string()]);
+        assert_eq!(health.timeout_ms, Some(1_500));
+        assert_eq!(health.interval_seconds, Some(3_600));
 
         let empty = BTreeMap::new();
         write_global_mcp_servers(codex_home.path(), &empty)?;
@@ -1905,31 +4065,6 @@ startup_timeout_ms = 2500
     }
 
     #[tokio::test]
-    async fn load_global_mcp_servers_rejects_inline_bearer_token() -> anyhow::Result<()> {
-        let codex_home = TempDir::new()?;
-        let config_path = codex_home.path().join(CONFIG_TOML_FILE);
-
-        std::fs::write(
-            &config_path,
-            r#"
-[mcp_servers.docs]
-url = "https://example.com/mcp"
-bearer_token = "secret"
-"#,
-        )?;
-
-        let err = load_global_mcp_servers(codex_home.path())
-            .await
-            .expect_err("bearer_token entries should be rejected");
-
-        assert_eq!(err.kind(), std::io::ErrorKind::InvalidData);
-        assert!(err.to_string().contains("bearer_token"));
-        assert!(err.to_string().contains("bearer_token_env_var"));
-
-        Ok(())
-    }
-
-    #[tokio::test]
     async fn write_global_mcp_servers_serializes_env_sorted() -> anyhow::Result<()> {
         let codex_home = TempDir::new()?;
 
@@ -1943,6 +4078,8 @@ bearer_token = "secret"
                         ("ZIG_VAR".to_string(), "3".to_string()),
                         ("ALPHA_VAR".to_string(), "1".to_string()),
                     ])),
+                    env_vars: Vec::new(),
+                    cwd: None,
                 },
                 ..McpServerConfig::default()
             },
@@ -1967,7 +4104,13 @@ ZIG_VAR = "3"
         let loaded = load_global_mcp_servers(codex_home.path()).await?;
         let docs = loaded.get("docs").expect("docs entry");
         match &docs.transport {
-            McpServerTransportConfig::Stdio { command, args, env } => {
+            McpServerTransportConfig::Stdio {
+                command,
+                args,
+                env,
+                env_vars,
+                cwd,
+            } => {
                 assert_eq!(command, "docs-server");
                 assert_eq!(args, &vec!["--verbose".to_string()]);
                 let env = env
@@ -1975,6 +4118,8 @@ ZIG_VAR = "3"
                     .expect("env should be preserved for stdio transport");
                 assert_eq!(env.get("ALPHA_VAR"), Some(&"1".to_string()));
                 assert_eq!(env.get("ZIG_VAR"), Some(&"3".to_string()));
+                assert!(env_vars.is_empty());
+                assert!(cwd.is_none());
             }
             other => panic!("unexpected transport {other:?}"),
         }
@@ -1983,15 +4128,97 @@ ZIG_VAR = "3"
     }
 
     #[tokio::test]
-    async fn write_global_mcp_servers_serializes_streamable_http() -> anyhow::Result<()> {
+    async fn write_global_mcp_servers_serializes_env_vars() -> anyhow::Result<()> {
         let codex_home = TempDir::new()?;
 
-        let mut servers = BTreeMap::from([(
+        let servers = BTreeMap::from([(
+            "docs".to_string(),
+            McpServerConfig {
+                transport: McpServerTransportConfig::Stdio {
+                    command: "docs-server".to_string(),
+                    args: Vec::new(),
+                    env: None,
+                    env_vars: vec!["ALPHA".to_string(), "BETA".to_string()],
+                    cwd: None,
+                },
+                ..McpServerConfig::default()
+            },
+        )]);
+
+        write_global_mcp_servers(codex_home.path(), &servers)?;
+
+        let config_path = codex_home.path().join(CONFIG_TOML_FILE);
+        let serialized = std::fs::read_to_string(&config_path)?;
+        assert!(
+            serialized.contains(r#"env_vars = ["ALPHA", "BETA"]"#),
+            "serialized config missing env_vars field:\n{serialized}"
+        );
+
+        let loaded = load_global_mcp_servers(codex_home.path()).await?;
+        let docs = loaded.get("docs").expect("docs entry");
+        match &docs.transport {
+            McpServerTransportConfig::Stdio { env_vars, .. } => {
+                assert_eq!(env_vars, &vec!["ALPHA".to_string(), "BETA".to_string()]);
+            }
+            other => panic!("unexpected transport {other:?}"),
+        }
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn write_global_mcp_servers_serializes_cwd() -> anyhow::Result<()> {
+        let codex_home = TempDir::new()?;
+
+        let cwd_path = PathBuf::from("/tmp/codex-mcp");
+        let servers = BTreeMap::from([(
+            "docs".to_string(),
+            McpServerConfig {
+                transport: McpServerTransportConfig::Stdio {
+                    command: "docs-server".to_string(),
+                    args: Vec::new(),
+                    env: None,
+                    env_vars: Vec::new(),
+                    cwd: Some(cwd_path.clone()),
+                },
+                ..McpServerConfig::default()
+            },
+        )]);
+
+        write_global_mcp_servers(codex_home.path(), &servers)?;
+
+        let config_path = codex_home.path().join(CONFIG_TOML_FILE);
+        let serialized = std::fs::read_to_string(&config_path)?;
+        assert!(
+            serialized.contains(r#"cwd = "/tmp/codex-mcp""#),
+            "serialized config missing cwd field:\n{serialized}"
+        );
+
+        let loaded = load_global_mcp_servers(codex_home.path()).await?;
+        let docs = loaded.get("docs").expect("docs entry");
+        match &docs.transport {
+            McpServerTransportConfig::Stdio { cwd, .. } => {
+                assert_eq!(cwd.as_deref(), Some(Path::new("/tmp/codex-mcp")));
+            }
+            other => panic!("unexpected transport {other:?}"),
+        }
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn write_global_mcp_servers_streamable_http_serializes_bearer_token() -> anyhow::Result<()>
+    {
+        let codex_home = TempDir::new()?;
+
+        let servers = BTreeMap::from([(
             "docs".to_string(),
             McpServerConfig {
                 transport: McpServerTransportConfig::StreamableHttp {
                     url: "https://example.com/mcp".to_string(),
                     bearer_token_env_var: Some("MCP_TOKEN".to_string()),
+                    http_headers: None,
+                    env_http_headers: None,
                 },
                 startup_timeout_sec: Some(Duration::from_secs(2)),
                 ..McpServerConfig::default()
@@ -2017,13 +4244,116 @@ startup_timeout_sec = 2.0
             McpServerTransportConfig::StreamableHttp {
                 url,
                 bearer_token_env_var,
+                http_headers,
+                env_http_headers,
             } => {
                 assert_eq!(url, "https://example.com/mcp");
                 assert_eq!(bearer_token_env_var.as_deref(), Some("MCP_TOKEN"));
+                assert!(http_headers.is_none());
+                assert!(env_http_headers.is_none());
             }
             other => panic!("unexpected transport {other:?}"),
         }
         assert_eq!(docs.startup_timeout_sec, Some(Duration::from_secs(2)));
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn write_global_mcp_servers_streamable_http_serializes_custom_headers()
+    -> anyhow::Result<()> {
+        let codex_home = TempDir::new()?;
+
+        let servers = BTreeMap::from([(
+            "docs".to_string(),
+            McpServerConfig {
+                transport: McpServerTransportConfig::StreamableHttp {
+                    url: "https://example.com/mcp".to_string(),
+                    bearer_token_env_var: Some("MCP_TOKEN".to_string()),
+                    http_headers: Some(HashMap::from([("X-Doc".to_string(), "42".to_string())])),
+                    env_http_headers: Some(HashMap::from([(
+                        "X-Auth".to_string(),
+                        "DOCS_AUTH".to_string(),
+                    )])),
+                },
+                startup_timeout_sec: Some(Duration::from_secs(2)),
+                ..McpServerConfig::default()
+            },
+        )]);
+        write_global_mcp_servers(codex_home.path(), &servers)?;
+
+        let config_path = codex_home.path().join(CONFIG_TOML_FILE);
+        let serialized = std::fs::read_to_string(&config_path)?;
+        assert_eq!(
+            serialized,
+            r#"[mcp_servers.docs]
+url = "https://example.com/mcp"
+bearer_token_env_var = "MCP_TOKEN"
+startup_timeout_sec = 2.0
+
+[mcp_servers.docs.http_headers]
+X-Doc = "42"
+
+[mcp_servers.docs.env_http_headers]
+X-Auth = "DOCS_AUTH"
+"#
+        );
+
+        let loaded = load_global_mcp_servers(codex_home.path()).await?;
+        let docs = loaded.get("docs").expect("docs entry");
+        match &docs.transport {
+            McpServerTransportConfig::StreamableHttp {
+                http_headers,
+                env_http_headers,
+                ..
+            } => {
+                assert_eq!(
+                    http_headers,
+                    &Some(HashMap::from([("X-Doc".to_string(), "42".to_string())]))
+                );
+                assert_eq!(
+                    env_http_headers,
+                    &Some(HashMap::from([(
+                        "X-Auth".to_string(),
+                        "DOCS_AUTH".to_string()
+                    )]))
+                );
+            }
+            other => panic!("unexpected transport {other:?}"),
+        }
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn write_global_mcp_servers_streamable_http_removes_optional_sections()
+    -> anyhow::Result<()> {
+        let codex_home = TempDir::new()?;
+
+        let config_path = codex_home.path().join(CONFIG_TOML_FILE);
+
+        let mut servers = BTreeMap::from([(
+            "docs".to_string(),
+            McpServerConfig {
+                transport: McpServerTransportConfig::StreamableHttp {
+                    url: "https://example.com/mcp".to_string(),
+                    bearer_token_env_var: Some("MCP_TOKEN".to_string()),
+                    http_headers: Some(HashMap::from([("X-Doc".to_string(), "42".to_string())])),
+                    env_http_headers: Some(HashMap::from([(
+                        "X-Auth".to_string(),
+                        "DOCS_AUTH".to_string(),
+                    )])),
+                },
+                startup_timeout_sec: Some(Duration::from_secs(2)),
+                ..McpServerConfig::default()
+            },
+        )]);
+
+        write_global_mcp_servers(codex_home.path(), &servers)?;
+        let serialized_with_optional = std::fs::read_to_string(&config_path)?;
+        assert!(serialized_with_optional.contains("bearer_token_env_var = \"MCP_TOKEN\""));
+        assert!(serialized_with_optional.contains("[mcp_servers.docs.http_headers]"));
+        assert!(serialized_with_optional.contains("[mcp_servers.docs.env_http_headers]"));
 
         servers.insert(
             "docs".to_string(),
@@ -2031,6 +4361,8 @@ startup_timeout_sec = 2.0
                 transport: McpServerTransportConfig::StreamableHttp {
                     url: "https://example.com/mcp".to_string(),
                     bearer_token_env_var: None,
+                    http_headers: None,
+                    env_http_headers: None,
                 },
                 ..McpServerConfig::default()
             },
@@ -2051,9 +4383,109 @@ url = "https://example.com/mcp"
             McpServerTransportConfig::StreamableHttp {
                 url,
                 bearer_token_env_var,
+                http_headers,
+                env_http_headers,
             } => {
                 assert_eq!(url, "https://example.com/mcp");
                 assert!(bearer_token_env_var.is_none());
+                assert!(http_headers.is_none());
+                assert!(env_http_headers.is_none());
+            }
+            other => panic!("unexpected transport {other:?}"),
+        }
+
+        assert!(docs.startup_timeout_sec.is_none());
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn write_global_mcp_servers_streamable_http_isolates_headers_between_servers()
+    -> anyhow::Result<()> {
+        let codex_home = TempDir::new()?;
+        let config_path = codex_home.path().join(CONFIG_TOML_FILE);
+
+        let servers = BTreeMap::from([
+            (
+                "docs".to_string(),
+                McpServerConfig {
+                    transport: McpServerTransportConfig::StreamableHttp {
+                        url: "https://example.com/mcp".to_string(),
+                        bearer_token_env_var: Some("MCP_TOKEN".to_string()),
+                        http_headers: Some(HashMap::from([(
+                            "X-Doc".to_string(),
+                            "42".to_string(),
+                        )])),
+                        env_http_headers: Some(HashMap::from([(
+                            "X-Auth".to_string(),
+                            "DOCS_AUTH".to_string(),
+                        )])),
+                    },
+                    startup_timeout_sec: Some(Duration::from_secs(2)),
+                    ..McpServerConfig::default()
+                },
+            ),
+            (
+                "logs".to_string(),
+                McpServerConfig {
+                    transport: McpServerTransportConfig::Stdio {
+                        command: "logs-server".to_string(),
+                        args: vec!["--follow".to_string()],
+                        env: None,
+                        env_vars: Vec::new(),
+                        cwd: None,
+                    },
+                    ..McpServerConfig::default()
+                },
+            ),
+        ]);
+
+        write_global_mcp_servers(codex_home.path(), &servers)?;
+
+        let serialized = std::fs::read_to_string(&config_path)?;
+        assert!(
+            serialized.contains("[mcp_servers.docs.http_headers]"),
+            "serialized config missing docs headers section:\n{serialized}"
+        );
+        assert!(
+            !serialized.contains("[mcp_servers.logs.http_headers]"),
+            "serialized config should not add logs headers section:\n{serialized}"
+        );
+        assert!(
+            !serialized.contains("[mcp_servers.logs.env_http_headers]"),
+            "serialized config should not add logs env headers section:\n{serialized}"
+        );
+        assert!(
+            !serialized.contains("mcp_servers.logs.bearer_token_env_var"),
+            "serialized config should not add bearer token to logs:\n{serialized}"
+        );
+
+        let loaded = load_global_mcp_servers(codex_home.path()).await?;
+        let docs = loaded.get("docs").expect("docs entry");
+        match &docs.transport {
+            McpServerTransportConfig::StreamableHttp {
+                http_headers,
+                env_http_headers,
+                ..
+            } => {
+                assert_eq!(
+                    http_headers,
+                    &Some(HashMap::from([("X-Doc".to_string(), "42".to_string())]))
+                );
+                assert_eq!(
+                    env_http_headers,
+                    &Some(HashMap::from([(
+                        "X-Auth".to_string(),
+                        "DOCS_AUTH".to_string()
+                    )]))
+                );
+            }
+            other => panic!("unexpected transport {other:?}"),
+        }
+        let logs = loaded.get("logs").expect("logs entry");
+        match &logs.transport {
+            McpServerTransportConfig::Stdio { env, .. } => {
+                assert!(env.is_none());
             }
             other => panic!("unexpected transport {other:?}"),
         }
@@ -2072,6 +4504,8 @@ url = "https://example.com/mcp"
                     command: "docs-server".to_string(),
                     args: Vec::new(),
                     env: None,
+                    env_vars: Vec::new(),
+                    cwd: None,
                 },
                 enabled: false,
                 ..McpServerConfig::default()
@@ -2090,6 +4524,47 @@ url = "https://example.com/mcp"
         let loaded = load_global_mcp_servers(codex_home.path()).await?;
         let docs = loaded.get("docs").expect("docs entry");
         assert!(!docs.enabled);
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn write_global_mcp_servers_serializes_tool_filters() -> anyhow::Result<()> {
+        let codex_home = TempDir::new()?;
+
+        let servers = BTreeMap::from([(
+            "docs".to_string(),
+            McpServerConfig {
+                transport: McpServerTransportConfig::Stdio {
+                    command: "docs-server".to_string(),
+                    args: Vec::new(),
+                    env: None,
+                    env_vars: Vec::new(),
+                    cwd: None,
+                },
+                enabled_tools: Some(vec!["allowed".to_string()]),
+                disabled_tools: Some(vec!["blocked".to_string()]),
+                ..McpServerConfig::default()
+            },
+        )]);
+
+        write_global_mcp_servers(codex_home.path(), &servers)?;
+
+        let config_path = codex_home.path().join(CONFIG_TOML_FILE);
+        let serialized = std::fs::read_to_string(&config_path)?;
+        assert!(serialized.contains(r#"enabled_tools = ["allowed"]"#));
+        assert!(serialized.contains(r#"disabled_tools = ["blocked"]"#));
+
+        let loaded = load_global_mcp_servers(codex_home.path()).await?;
+        let docs = loaded.get("docs").expect("docs entry");
+        assert_eq!(
+            docs.enabled_tools.as_ref(),
+            Some(&vec!["allowed".to_string()])
+        );
+        assert_eq!(
+            docs.disabled_tools.as_ref(),
+            Some(&vec!["blocked".to_string()])
+        );
 
         Ok(())
     }
@@ -2255,6 +4730,536 @@ model = "gpt-5-codex"
         }
     }
 
+    #[test]
+    fn agents_home_defaults_next_to_dot_codex() -> std::io::Result<()> {
+        let parent = TempDir::new().expect("temp parent");
+        let codex_home = parent.path().join(".codex");
+        fs::create_dir_all(&codex_home)?;
+
+        let config = Config::load_from_base_config_with_overrides(
+            ConfigToml::default(),
+            ConfigOverrides::default(),
+            codex_home,
+        )?;
+
+        let expected_agents = parent.path().join(".agents");
+        assert_eq!(expected_agents, config.agents_home);
+        for child in AGENTS_HOME_DEFAULT_SUBDIRS {
+            let subdir = config.agents_home.join(child);
+            assert!(
+                subdir.is_dir(),
+                "expected agents subdir `{}` to exist",
+                subdir.display()
+            );
+        }
+
+        Ok(())
+    }
+
+    #[test]
+    fn agents_home_defaults_within_custom_codex_home() -> std::io::Result<()> {
+        let codex_root = TempDir::new().expect("temp codex root");
+        let codex_home = codex_root.path().join("codex-state");
+        fs::create_dir_all(&codex_home)?;
+
+        let config = Config::load_from_base_config_with_overrides(
+            ConfigToml::default(),
+            ConfigOverrides::default(),
+            codex_home.clone(),
+        )?;
+
+        let expected_agents = codex_home.join(".agents");
+        assert_eq!(expected_agents, config.agents_home);
+        for child in AGENTS_HOME_DEFAULT_SUBDIRS {
+            assert!(config.agents_home.join(child).is_dir());
+        }
+
+        Ok(())
+    }
+
+    #[test]
+    fn agents_workspace_resources_loaded() -> std::io::Result<()> {
+        let parent = TempDir::new().expect("temp parent");
+        let codex_home = parent.path().join(".codex");
+        fs::create_dir_all(&codex_home)?;
+
+        let context_dir = parent.path().join(".agents").join("context");
+        fs::create_dir_all(&context_dir)?;
+        fs::write(context_dir.join("global.md"), "Global memo.")?;
+
+        let tools_dir = parent.path().join(".agents").join("tools");
+        fs::create_dir_all(&tools_dir)?;
+        fs::write(
+            tools_dir.join("calc.py"),
+            "#!/usr/bin/env python3\nprint(1+1)\n",
+        )?;
+
+        let workspace = TempDir::new().expect("temp workspace");
+
+        let config = Config::load_from_base_config_with_overrides(
+            ConfigToml::default(),
+            ConfigOverrides {
+                cwd: Some(workspace.path().to_path_buf()),
+                ..ConfigOverrides::default()
+            },
+            codex_home,
+        )?;
+
+        assert_eq!(config.agents_context_entries.len(), 1);
+        let entry = &config.agents_context_entries[0];
+        assert_eq!(entry.relative_path, "global.md");
+        assert!(matches!(entry.source, AgentsSource::Global));
+        assert_eq!(entry.content.trim(), "Global memo.");
+        assert!(!entry.truncated);
+        assert_eq!(
+            entry.absolute_path,
+            parent
+                .path()
+                .join(".agents")
+                .join("context")
+                .join("global.md")
+        );
+
+        assert_eq!(config.agents_tools.len(), 1);
+        let tool = &config.agents_tools[0];
+        assert_eq!(tool.relative_path, "calc.py");
+        assert!(matches!(tool.source, AgentsSource::Global));
+        assert_eq!(
+            tool.absolute_path,
+            parent.path().join(".agents").join("tools").join("calc.py")
+        );
+
+        let prompt = config
+            .agents_context_prompt
+            .as_ref()
+            .expect("context prompt expected");
+        assert!(prompt.starts_with(AGENTS_CONTEXT_OPEN_TAG));
+        assert!(prompt.contains("Global memo."));
+        assert!(prompt.contains("calc.py"));
+        assert!(prompt.ends_with(AGENTS_CONTEXT_CLOSE_TAG));
+        assert!(!config.agents_context_prompt_truncated);
+        assert!(config.agents_context_prompt_tokens > 0);
+        assert_eq!(
+            config.agents_context_warning_tokens,
+            AGENTS_CONTEXT_WARNING_TOKENS
+        );
+        let expected_context_path = format_agents_path_for_display(
+            &parent
+                .path()
+                .join(".agents")
+                .join("context")
+                .join("global.md"),
+        );
+        assert!(
+            prompt.contains(&expected_context_path),
+            "prompt should list global context location {expected_context_path}, got {prompt}"
+        );
+        let expected_tool_path = format_agents_path_for_display(
+            &parent.path().join(".agents").join("tools").join("calc.py"),
+        );
+        assert!(
+            prompt.contains(&expected_tool_path),
+            "prompt should list global tool location {expected_tool_path}, got {prompt}"
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    fn agents_context_include_filters_entries() -> std::io::Result<()> {
+        let parent = TempDir::new()?;
+        let codex_home = parent.path().join(".codex");
+        fs::create_dir_all(&codex_home)?;
+
+        let context_dir = parent.path().join(".agents").join("context");
+        fs::create_dir_all(context_dir.join("notes"))?;
+        fs::write(context_dir.join("global.md"), "Global memo")?;
+        fs::write(context_dir.join("notes").join("project.md"), "Project memo")?;
+
+        let workspace = TempDir::new()?;
+
+        let cfg = ConfigToml {
+            agents_context_include: Some(vec!["notes".to_string()]),
+            ..Default::default()
+        };
+
+        let config = Config::load_from_base_config_with_overrides(
+            cfg,
+            ConfigOverrides {
+                cwd: Some(workspace.path().to_path_buf()),
+                ..ConfigOverrides::default()
+            },
+            codex_home,
+        )?;
+
+        let paths: Vec<_> = config
+            .agents_context_entries
+            .iter()
+            .map(|entry| entry.relative_path.as_str())
+            .collect();
+        assert_eq!(paths, vec!["notes/project.md"]);
+        assert_eq!(config.agents_context_include, vec!["notes".to_string()]);
+        assert!(config.agents_context_exclude.is_empty());
+
+        Ok(())
+    }
+
+    #[test]
+    fn agents_context_exclude_filters_entries() -> std::io::Result<()> {
+        let parent = TempDir::new()?;
+        let codex_home = parent.path().join(".codex");
+        fs::create_dir_all(&codex_home)?;
+
+        let context_dir = parent.path().join(".agents").join("context");
+        fs::create_dir_all(context_dir.join("notes"))?;
+        fs::write(context_dir.join("global.md"), "Global memo")?;
+        fs::write(context_dir.join("notes").join("project.md"), "Project memo")?;
+        fs::write(context_dir.join("notes").join("old.md"), "Stale memo")?;
+
+        let workspace = TempDir::new()?;
+
+        let cfg = ConfigToml {
+            agents_context_exclude: Some(vec!["notes/old.md".to_string(), "notes".to_string()]),
+            ..Default::default()
+        };
+
+        let config = Config::load_from_base_config_with_overrides(
+            cfg,
+            ConfigOverrides {
+                cwd: Some(workspace.path().to_path_buf()),
+                ..ConfigOverrides::default()
+            },
+            codex_home,
+        )?;
+
+        let paths: Vec<_> = config
+            .agents_context_entries
+            .iter()
+            .map(|entry| entry.relative_path.as_str())
+            .collect();
+        assert_eq!(paths, vec!["global.md"]);
+        assert!(config.agents_context_include.is_empty());
+        assert_eq!(
+            config.agents_context_exclude,
+            vec!["notes".to_string(), "notes/old.md".to_string()]
+        );
+
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn agents_context_skips_symlinked_directories() -> std::io::Result<()> {
+        use std::os::unix::fs::symlink;
+
+        let parent = TempDir::new().expect("temp parent");
+        let codex_home = parent.path().join(".codex");
+        fs::create_dir_all(&codex_home)?;
+
+        let agents_dir = parent.path().join(".agents");
+        let context_dir = agents_dir.join("context");
+        fs::create_dir_all(&context_dir)?;
+        fs::create_dir_all(agents_dir.join("tools"))?;
+
+        fs::write(context_dir.join("notes.md"), "Global memo.")?;
+
+        let target_dir = agents_dir.join("embedding-src");
+        fs::create_dir_all(&target_dir)?;
+        fs::write(target_dir.join("data.md"), "Ignored directory entry")?;
+        symlink(&target_dir, context_dir.join("embedding-link"))?;
+
+        let config = Config::load_from_base_config_with_overrides(
+            ConfigToml::default(),
+            ConfigOverrides::default(),
+            codex_home,
+        )?;
+
+        assert_eq!(config.agents_context_entries.len(), 1);
+        let entry = &config.agents_context_entries[0];
+        assert_eq!(entry.relative_path, "notes.md");
+        assert_eq!(entry.content.trim(), "Global memo.");
+        assert!(config.agents_context_prompt_tokens > 0);
+        assert!(!config.agents_context_prompt_truncated);
+        assert_eq!(
+            config.agents_context_warning_tokens,
+            AGENTS_CONTEXT_WARNING_TOKENS
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    fn project_agents_context_overrides_global_entries() -> std::io::Result<()> {
+        let parent = TempDir::new().expect("temp parent");
+        let codex_home = parent.path().join(".codex");
+        fs::create_dir_all(&codex_home)?;
+
+        let global_context_dir = parent.path().join(".agents").join("context");
+        fs::create_dir_all(&global_context_dir)?;
+        fs::write(global_context_dir.join("memo.md"), "Global memo.")?;
+        let global_tools_dir = parent.path().join(".agents").join("tools");
+        fs::create_dir_all(&global_tools_dir)?;
+        fs::write(global_tools_dir.join("cli.sh"), "echo global\n")?;
+
+        let project = TempDir::new().expect("project temp dir");
+        fs::create_dir_all(project.path().join(".git"))?;
+        let project_context_dir = project.path().join(".agents").join("context");
+        fs::create_dir_all(&project_context_dir)?;
+        fs::write(project_context_dir.join("memo.md"), "Project memo.")?;
+        let project_tools_dir = project.path().join(".agents").join("tools");
+        fs::create_dir_all(&project_tools_dir)?;
+        fs::write(project_tools_dir.join("cli.sh"), "echo project\n")?;
+
+        let overrides = ConfigOverrides {
+            cwd: Some(project.path().to_path_buf()),
+            ..Default::default()
+        };
+        let config = Config::load_from_base_config_with_overrides(
+            ConfigToml::default(),
+            overrides,
+            codex_home,
+        )?;
+
+        assert_eq!(config.agents_context_entries.len(), 1);
+        let entry = &config.agents_context_entries[0];
+        assert!(matches!(entry.source, AgentsSource::Project));
+        assert_eq!(entry.relative_path, "memo.md");
+        assert_eq!(entry.content.trim(), "Project memo.");
+
+        assert_eq!(config.agents_tools.len(), 1);
+        let tool = &config.agents_tools[0];
+        assert!(matches!(tool.source, AgentsSource::Project));
+        assert_eq!(tool.relative_path, "cli.sh");
+
+        let prompt = config
+            .agents_context_prompt
+            .as_ref()
+            .expect("context prompt expected");
+        assert!(prompt.contains("Project memo."));
+        assert!(!prompt.contains("Global memo."));
+        assert!(prompt.contains("cli.sh"));
+        assert!(prompt.starts_with(AGENTS_CONTEXT_OPEN_TAG));
+
+        Ok(())
+    }
+
+    #[test]
+    fn agents_prompt_uses_custom_home_override() -> std::io::Result<()> {
+        let codex_home = TempDir::new().expect("codex home");
+        let custom_home = TempDir::new().expect("agents home override");
+        let agents_home = custom_home.path().join("agents-store");
+        fs::create_dir_all(agents_home.join("context"))?;
+        fs::create_dir_all(agents_home.join("tools"))?;
+
+        fs::write(agents_home.join("context").join("memo.md"), "Global memo.")?;
+        fs::write(agents_home.join("tools").join("helper.sh"), "echo helper\n")?;
+
+        let config = Config::load_from_base_config_with_overrides(
+            ConfigToml::default(),
+            ConfigOverrides {
+                agents_home: Some(agents_home.clone()),
+                ..Default::default()
+            },
+            codex_home.path().to_path_buf(),
+        )?;
+
+        let prompt = config
+            .agents_context_prompt
+            .as_ref()
+            .expect("context prompt expected");
+        let expected_context =
+            format_agents_path_for_display(&agents_home.join("context").join("memo.md"));
+        assert!(
+            prompt.contains(&expected_context),
+            "prompt should mention overridden context path {expected_context}, got {prompt}"
+        );
+        let expected_tool =
+            format_agents_path_for_display(&agents_home.join("tools").join("helper.sh"));
+        assert!(
+            prompt.contains(&expected_tool),
+            "prompt should mention overridden tool path {expected_tool}, got {prompt}"
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    fn project_agents_home_detected_when_present() -> std::io::Result<()> {
+        let project = TempDir::new().expect("project temp dir");
+        std::fs::create_dir_all(project.path().join(".git"))?;
+        std::fs::create_dir_all(project.path().join(".agents"))?;
+
+        let codex_home = TempDir::new().expect("codex home");
+
+        let overrides = ConfigOverrides {
+            cwd: Some(project.path().to_path_buf()),
+            ..Default::default()
+        };
+
+        let config = Config::load_from_base_config_with_overrides(
+            ConfigToml::default(),
+            overrides,
+            codex_home.path().to_path_buf(),
+        )?;
+
+        assert_eq!(
+            config.project_agents_home,
+            Some(project.path().join(".agents"))
+        );
+        assert!(
+            !project.path().join(".agents").join("mcp").exists(),
+            "local agents directory should not be auto-initialized"
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    fn project_agents_home_overrides_global_mcp_entries() -> std::io::Result<()> {
+        let codex_home = TempDir::new().expect("codex home");
+        let global_agents = codex_home.path().join(".agents").join("mcp");
+        std::fs::create_dir_all(&global_agents)?;
+        std::fs::write(
+            global_agents.join("mcp.json"),
+            r#"{
+  "global": { "command": "global-docs" },
+  "docs": { "command": "global-docs" }
+}"#,
+        )?;
+
+        let project = TempDir::new().expect("project temp dir");
+        std::fs::create_dir_all(project.path().join(".git"))?;
+        let local_agents = project.path().join(".agents").join("mcp");
+        std::fs::create_dir_all(&local_agents)?;
+        std::fs::write(
+            local_agents.join("mcp.config"),
+            "[docs]\ncommand = \"local-docs\"\n",
+        )?;
+
+        let overrides = ConfigOverrides {
+            cwd: Some(project.path().to_path_buf()),
+            ..Default::default()
+        };
+
+        let config = Config::load_from_base_config_with_overrides(
+            ConfigToml::default(),
+            overrides,
+            codex_home.path().to_path_buf(),
+        )?;
+
+        assert_eq!(
+            config.project_agents_home,
+            Some(project.path().join(".agents"))
+        );
+
+        let docs = config
+            .mcp_servers
+            .get("docs")
+            .expect("docs entry should be present");
+        if let McpServerTransportConfig::Stdio { command, .. } = &docs.transport {
+            assert_eq!(command, "local-docs");
+        } else {
+            panic!("expected stdio transport for docs");
+        }
+
+        let global = config
+            .mcp_servers
+            .get("global")
+            .expect("global entry should be present");
+        if let McpServerTransportConfig::Stdio { command, .. } = &global.transport {
+            assert_eq!(command, "global-docs");
+        } else {
+            panic!("expected stdio transport for global");
+        }
+
+        Ok(())
+    }
+
+    #[test]
+    fn agents_home_toml_mcp_config_loaded() -> std::io::Result<()> {
+        let parent = TempDir::new().expect("temp parent");
+        let codex_home = parent.path().join(".codex");
+        fs::create_dir_all(&codex_home)?;
+        let mcp_dir = parent.path().join(".agents").join("mcp");
+        fs::create_dir_all(&mcp_dir)?;
+        fs::write(
+            mcp_dir.join("mcp.config"),
+            r#"[docs]
+command = "docs-server"
+"#,
+        )?;
+
+        let config = Config::load_from_base_config_with_overrides(
+            ConfigToml::default(),
+            ConfigOverrides::default(),
+            codex_home,
+        )?;
+
+        let expected = McpServerConfig {
+            transport: McpServerTransportConfig::Stdio {
+                command: "docs-server".to_string(),
+                args: Vec::new(),
+                env: None,
+                env_vars: Vec::new(),
+                cwd: None,
+            },
+            ..McpServerConfig::default()
+        };
+        assert_eq!(
+            config.mcp_servers.get("docs"),
+            Some(&expected),
+            "expected docs server from agents_home"
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    fn agents_home_json_mcp_config_respects_config_overrides() -> std::io::Result<()> {
+        let parent = TempDir::new().expect("temp parent");
+        let codex_home = parent.path().join(".codex");
+        fs::create_dir_all(&codex_home)?;
+        let mcp_dir = parent.path().join(".agents").join("mcp");
+        fs::create_dir_all(&mcp_dir)?;
+        fs::write(
+            mcp_dir.join("mcp.json"),
+            r#"{ "docs": { "command": "json-docs" } }"#,
+        )?;
+
+        let mut toml_cfg = ConfigToml::default();
+        toml_cfg.mcp_servers.insert(
+            "docs".to_string(),
+            McpServerConfig {
+                transport: McpServerTransportConfig::Stdio {
+                    command: "toml-docs".to_string(),
+                    args: Vec::new(),
+                    env: None,
+                    env_vars: Vec::new(),
+                    cwd: None,
+                },
+                ..McpServerConfig::default()
+            },
+        );
+
+        let config = Config::load_from_base_config_with_overrides(
+            toml_cfg,
+            ConfigOverrides::default(),
+            codex_home,
+        )?;
+
+        let server = config
+            .mcp_servers
+            .get("docs")
+            .expect("docs server should exist");
+        if let McpServerTransportConfig::Stdio { command, .. } = &server.transport {
+            assert_eq!(command, "toml-docs");
+        } else {
+            panic!("expected stdio transport for docs");
+        }
+
+        Ok(())
+    }
+
     fn create_test_fixture() -> std::io::Result<PrecedenceTestFixture> {
         let toml = r#"
 model = "o3"
@@ -2316,6 +5321,7 @@ model_verbosity = "high"
             env_key: Some("OPENAI_API_KEY".to_string()),
             wire_api: crate::WireApi::Chat,
             env_key_instructions: None,
+            experimental_bearer_token: None,
             query_params: None,
             http_headers: None,
             env_http_headers: None,
@@ -2374,6 +5380,7 @@ model_verbosity = "high"
             o3_profile_overrides,
             fixture.codex_home(),
         )?;
+        let expected_agents_home = default_agents_home_for(&fixture.codex_home());
         assert_eq!(
             Config {
                 model: "o3".to_string(),
@@ -2381,24 +5388,37 @@ model_verbosity = "high"
                 model_family: find_family_for_model("o3").expect("known model slug"),
                 model_context_window: Some(200_000),
                 model_max_output_tokens: Some(100_000),
-                model_auto_compact_token_limit: None,
+                model_auto_compact_token_limit: Some(180_000),
                 model_provider_id: "openai".to_string(),
                 model_provider: fixture.openai_provider.clone(),
                 approval_policy: AskForApproval::Never,
                 sandbox_policy: SandboxPolicy::new_read_only_policy(),
+                did_user_set_custom_approval_policy_or_sandbox_mode: true,
+                forced_auto_mode_downgraded_on_windows: false,
                 shell_environment_policy: ShellEnvironmentPolicy::default(),
                 user_instructions: None,
                 notify: None,
                 cwd: fixture.cwd(),
+                cli_auth_credentials_store_mode: Default::default(),
                 mcp_servers: HashMap::new(),
                 mcp_templates: HashMap::new(),
-                mcp_schema_version: None,
+                mcp_schema_version: Some(CURRENT_SCHEMA_VERSION),
                 experimental_mcp_overhaul: false,
                 mcp_oauth_credentials_store_mode: Default::default(),
                 model_providers: fixture.model_provider_map.clone(),
                 project_doc_max_bytes: PROJECT_DOC_MAX_BYTES,
                 project_doc_fallback_filenames: Vec::new(),
                 codex_home: fixture.codex_home(),
+                agents_home: expected_agents_home,
+                project_agents_home: None,
+                agents_context_entries: Vec::new(),
+                agents_tools: Vec::new(),
+                agents_context_prompt: None,
+                agents_context_prompt_tokens: 0,
+                agents_context_prompt_truncated: false,
+                agents_context_warning_tokens: AGENTS_CONTEXT_WARNING_TOKENS,
+                agents_context_include: Vec::new(),
+                agents_context_exclude: Vec::new(),
                 history: History::default(),
                 file_opener: UriBasedFileOpener::VsCode,
                 codex_linux_sandbox_exe: None,
@@ -2409,16 +5429,20 @@ model_verbosity = "high"
                 model_verbosity: None,
                 chatgpt_base_url: "https://chatgpt.com/backend-api/".to_string(),
                 base_instructions: None,
-                include_plan_tool: false,
+                forced_chatgpt_workspace_id: None,
+                forced_login_method: None,
                 include_apply_patch_tool: false,
                 tools_web_search_request: false,
+                experimental_sandbox_command_assessment: false,
                 use_experimental_streamable_shell_tool: false,
-                use_unified_exec_tool: true,
+                use_experimental_unified_exec_tool: false,
                 use_experimental_use_rmcp_client: false,
                 include_view_image_tool: true,
                 features: Features::with_defaults(),
                 active_profile: Some("o3".to_string()),
+                active_project: ProjectConfig { trust_level: None },
                 windows_wsl_setup_acknowledged: false,
+                notices: Default::default(),
                 disable_paste_burst: false,
                 tui_notifications: Default::default(),
                 otel: OtelConfig::default(),
@@ -2442,30 +5466,44 @@ model_verbosity = "high"
             gpt3_profile_overrides,
             fixture.codex_home(),
         )?;
+        let expected_agents_home = default_agents_home_for(&fixture.codex_home());
         let expected_gpt3_profile_config = Config {
             model: "gpt-3.5-turbo".to_string(),
             review_model: OPENAI_DEFAULT_REVIEW_MODEL.to_string(),
             model_family: find_family_for_model("gpt-3.5-turbo").expect("known model slug"),
             model_context_window: Some(16_385),
             model_max_output_tokens: Some(4_096),
-            model_auto_compact_token_limit: None,
+            model_auto_compact_token_limit: Some(14_746),
             model_provider_id: "openai-chat-completions".to_string(),
             model_provider: fixture.openai_chat_completions_provider.clone(),
             approval_policy: AskForApproval::UnlessTrusted,
             sandbox_policy: SandboxPolicy::new_read_only_policy(),
+            did_user_set_custom_approval_policy_or_sandbox_mode: true,
+            forced_auto_mode_downgraded_on_windows: false,
             shell_environment_policy: ShellEnvironmentPolicy::default(),
             user_instructions: None,
             notify: None,
             cwd: fixture.cwd(),
+            cli_auth_credentials_store_mode: Default::default(),
             mcp_servers: HashMap::new(),
             mcp_templates: HashMap::new(),
-            mcp_schema_version: None,
+            mcp_schema_version: Some(CURRENT_SCHEMA_VERSION),
             experimental_mcp_overhaul: false,
             mcp_oauth_credentials_store_mode: Default::default(),
             model_providers: fixture.model_provider_map.clone(),
             project_doc_max_bytes: PROJECT_DOC_MAX_BYTES,
             project_doc_fallback_filenames: Vec::new(),
             codex_home: fixture.codex_home(),
+            agents_home: expected_agents_home,
+            project_agents_home: None,
+            agents_context_entries: Vec::new(),
+            agents_tools: Vec::new(),
+            agents_context_prompt: None,
+            agents_context_prompt_tokens: 0,
+            agents_context_prompt_truncated: false,
+            agents_context_warning_tokens: AGENTS_CONTEXT_WARNING_TOKENS,
+            agents_context_include: Vec::new(),
+            agents_context_exclude: Vec::new(),
             history: History::default(),
             file_opener: UriBasedFileOpener::VsCode,
             codex_linux_sandbox_exe: None,
@@ -2476,16 +5514,20 @@ model_verbosity = "high"
             model_verbosity: None,
             chatgpt_base_url: "https://chatgpt.com/backend-api/".to_string(),
             base_instructions: None,
-            include_plan_tool: false,
+            forced_chatgpt_workspace_id: None,
+            forced_login_method: None,
             include_apply_patch_tool: false,
             tools_web_search_request: false,
+            experimental_sandbox_command_assessment: false,
             use_experimental_streamable_shell_tool: false,
-            use_unified_exec_tool: true,
+            use_experimental_unified_exec_tool: false,
             use_experimental_use_rmcp_client: false,
             include_view_image_tool: true,
             features: Features::with_defaults(),
             active_profile: Some("gpt3".to_string()),
+            active_project: ProjectConfig { trust_level: None },
             windows_wsl_setup_acknowledged: false,
+            notices: Default::default(),
             disable_paste_burst: false,
             tui_notifications: Default::default(),
             otel: OtelConfig::default(),
@@ -2524,30 +5566,44 @@ model_verbosity = "high"
             zdr_profile_overrides,
             fixture.codex_home(),
         )?;
+        let expected_agents_home = default_agents_home_for(&fixture.codex_home());
         let expected_zdr_profile_config = Config {
             model: "o3".to_string(),
             review_model: OPENAI_DEFAULT_REVIEW_MODEL.to_string(),
             model_family: find_family_for_model("o3").expect("known model slug"),
             model_context_window: Some(200_000),
             model_max_output_tokens: Some(100_000),
-            model_auto_compact_token_limit: None,
+            model_auto_compact_token_limit: Some(180_000),
             model_provider_id: "openai".to_string(),
             model_provider: fixture.openai_provider.clone(),
             approval_policy: AskForApproval::OnFailure,
             sandbox_policy: SandboxPolicy::new_read_only_policy(),
+            did_user_set_custom_approval_policy_or_sandbox_mode: true,
+            forced_auto_mode_downgraded_on_windows: false,
             shell_environment_policy: ShellEnvironmentPolicy::default(),
             user_instructions: None,
             notify: None,
             cwd: fixture.cwd(),
+            cli_auth_credentials_store_mode: Default::default(),
             mcp_servers: HashMap::new(),
             mcp_templates: HashMap::new(),
-            mcp_schema_version: None,
+            mcp_schema_version: Some(CURRENT_SCHEMA_VERSION),
             experimental_mcp_overhaul: false,
             mcp_oauth_credentials_store_mode: Default::default(),
             model_providers: fixture.model_provider_map.clone(),
             project_doc_max_bytes: PROJECT_DOC_MAX_BYTES,
             project_doc_fallback_filenames: Vec::new(),
             codex_home: fixture.codex_home(),
+            agents_home: expected_agents_home,
+            project_agents_home: None,
+            agents_context_entries: Vec::new(),
+            agents_tools: Vec::new(),
+            agents_context_prompt: None,
+            agents_context_prompt_tokens: 0,
+            agents_context_prompt_truncated: false,
+            agents_context_warning_tokens: AGENTS_CONTEXT_WARNING_TOKENS,
+            agents_context_include: Vec::new(),
+            agents_context_exclude: Vec::new(),
             history: History::default(),
             file_opener: UriBasedFileOpener::VsCode,
             codex_linux_sandbox_exe: None,
@@ -2558,16 +5614,20 @@ model_verbosity = "high"
             model_verbosity: None,
             chatgpt_base_url: "https://chatgpt.com/backend-api/".to_string(),
             base_instructions: None,
-            include_plan_tool: false,
+            forced_chatgpt_workspace_id: None,
+            forced_login_method: None,
             include_apply_patch_tool: false,
             tools_web_search_request: false,
+            experimental_sandbox_command_assessment: false,
             use_experimental_streamable_shell_tool: false,
-            use_unified_exec_tool: true,
+            use_experimental_unified_exec_tool: false,
             use_experimental_use_rmcp_client: false,
             include_view_image_tool: true,
             features: Features::with_defaults(),
             active_profile: Some("zdr".to_string()),
+            active_project: ProjectConfig { trust_level: None },
             windows_wsl_setup_acknowledged: false,
+            notices: Default::default(),
             disable_paste_burst: false,
             tui_notifications: Default::default(),
             otel: OtelConfig::default(),
@@ -2592,30 +5652,44 @@ model_verbosity = "high"
             gpt5_profile_overrides,
             fixture.codex_home(),
         )?;
+        let expected_agents_home = default_agents_home_for(&fixture.codex_home());
         let expected_gpt5_profile_config = Config {
             model: "gpt-5".to_string(),
             review_model: OPENAI_DEFAULT_REVIEW_MODEL.to_string(),
             model_family: find_family_for_model("gpt-5").expect("known model slug"),
             model_context_window: Some(272_000),
             model_max_output_tokens: Some(128_000),
-            model_auto_compact_token_limit: None,
+            model_auto_compact_token_limit: Some(244_800),
             model_provider_id: "openai".to_string(),
             model_provider: fixture.openai_provider.clone(),
             approval_policy: AskForApproval::OnFailure,
             sandbox_policy: SandboxPolicy::new_read_only_policy(),
+            did_user_set_custom_approval_policy_or_sandbox_mode: true,
+            forced_auto_mode_downgraded_on_windows: false,
             shell_environment_policy: ShellEnvironmentPolicy::default(),
             user_instructions: None,
             notify: None,
             cwd: fixture.cwd(),
+            cli_auth_credentials_store_mode: Default::default(),
             mcp_servers: HashMap::new(),
             mcp_templates: HashMap::new(),
-            mcp_schema_version: None,
+            mcp_schema_version: Some(CURRENT_SCHEMA_VERSION),
             experimental_mcp_overhaul: false,
             mcp_oauth_credentials_store_mode: Default::default(),
             model_providers: fixture.model_provider_map.clone(),
             project_doc_max_bytes: PROJECT_DOC_MAX_BYTES,
             project_doc_fallback_filenames: Vec::new(),
             codex_home: fixture.codex_home(),
+            agents_home: expected_agents_home,
+            project_agents_home: None,
+            agents_context_entries: Vec::new(),
+            agents_tools: Vec::new(),
+            agents_context_prompt: None,
+            agents_context_prompt_tokens: 0,
+            agents_context_prompt_truncated: false,
+            agents_context_warning_tokens: AGENTS_CONTEXT_WARNING_TOKENS,
+            agents_context_include: Vec::new(),
+            agents_context_exclude: Vec::new(),
             history: History::default(),
             file_opener: UriBasedFileOpener::VsCode,
             codex_linux_sandbox_exe: None,
@@ -2626,22 +5700,44 @@ model_verbosity = "high"
             model_verbosity: Some(Verbosity::High),
             chatgpt_base_url: "https://chatgpt.com/backend-api/".to_string(),
             base_instructions: None,
-            include_plan_tool: false,
+            forced_chatgpt_workspace_id: None,
+            forced_login_method: None,
             include_apply_patch_tool: false,
             tools_web_search_request: false,
+            experimental_sandbox_command_assessment: false,
             use_experimental_streamable_shell_tool: false,
-            use_unified_exec_tool: true,
+            use_experimental_unified_exec_tool: false,
             use_experimental_use_rmcp_client: false,
             include_view_image_tool: true,
             features: Features::with_defaults(),
             active_profile: Some("gpt5".to_string()),
+            active_project: ProjectConfig { trust_level: None },
             windows_wsl_setup_acknowledged: false,
+            notices: Default::default(),
             disable_paste_burst: false,
             tui_notifications: Default::default(),
             otel: OtelConfig::default(),
         };
 
         assert_eq!(expected_gpt5_profile_config, gpt5_profile_config);
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_did_user_set_custom_approval_policy_or_sandbox_mode_defaults_no() -> anyhow::Result<()>
+    {
+        let fixture = create_test_fixture()?;
+
+        let config = Config::load_from_base_config_with_overrides(
+            fixture.cfg.clone(),
+            ConfigOverrides {
+                ..Default::default()
+            },
+            fixture.codex_home(),
+        )?;
+
+        assert!(config.did_user_set_custom_approval_policy_or_sandbox_mode);
 
         Ok(())
     }

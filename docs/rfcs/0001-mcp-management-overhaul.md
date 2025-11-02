@@ -179,6 +179,7 @@ Default cadence: no background checks unless enabled via template; when enabled,
 
 - Ship built-in templates under `resources/mcp_templates/` (YAML/JSON) with metadata.
 - CLI/TUI wizard fetches template list, renders summary, applies defaults.
+- Config loader merges template defaults into `mcp_servers` at load time so that downstream consumers always see fully hydrated entries.
 - Remote catalog support: signed JSON index (Ed25519 signatures). CLI caches downloads, verifies signatures, supports `codex mcp template pull`.
 
 Remote catalog policy: require `templates.remote.enabled=true` and `templates.remote.trust_anchor=<path to public key>`. Unsigned or mismatched signatures abort fetch with actionable error.
@@ -194,6 +195,7 @@ Remote catalog policy: require `templates.remote.enabled=true` and `templates.re
   6. Persist via registry (auto backup).
 - Additional commands: `ls`, `show`, `edit`, `test`, `import`, `export`, `migrate`, `rollback`, `template list/show/pull`, `secret set/get`.
 - Support `--json` output for automation and `--non-interactive --template foo --set key=value` for scripting.
+- List and detail commands surface template provenance (id, summary, metadata) in both table and JSON modes.
 - Update shell completion to surface template IDs and server names.
 
 ### 7.8 TUI Integration

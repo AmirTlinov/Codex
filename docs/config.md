@@ -1235,13 +1235,21 @@ Should be represented as follows in `~/.codex/config.toml`:
 [mcp_servers.server-name]
 display_name = "Docs Toolkit"
 category = "docs"
+template_id = "docs/local@1"
 command = "npx"
 args = ["-y", "mcp-server"]
 env = { "API_KEY" = "value" }
+metadata = { "region" = "us-west" }
+
+[mcp_templates."docs/local@1"]
+summary = "Docs Toolkit defaults"
+version = "1.0"
+metadata = { "owner" = "team-mcp" }
+
+[mcp_templates."docs/local@1".defaults]
 startup_timeout_sec = 20
 tool_timeout_sec = 45
 tags = ["search", "internal"]
-metadata = { "owner" = "team-mcp" }
 ```
 
 You can also manage these entries from the CLI [experimental]:
@@ -1274,7 +1282,11 @@ codex mcp remove docs
 
 ### MCP templates and schema version
 
-Codex can seed new server entries from the `mcp_templates` map. Each template may define defaults for transports, auth, health checks, tags, and metadata. Templates are referenced by `mcp_servers.<id>.template_id` and surfaced in the CLI/TUI. The optional `mcp_schema_version` field tracks on-disk schema migrations (currently `2`). Keep it in sync by running `codex mcp migrate` whenever upgrading Codex.
+Codex seeds new server entries from the `mcp_templates` map. A template provides descriptive metadata (`summary`, `category`, `metadata`) and an optional `defaults` block that can prefill transport, auth, health checks, tool filters, tags, and timeouts. When a server references a template via `mcp_servers.<id>.template_id`, those defaults are merged at load time—explicit values on the server override anything supplied by the template.
+
+The CLI reflects this information automatically. `codex mcp list` shows a **Template** column containing the template identifier (plus the summary when available), and the `--json` output for `list`/`get` includes a `template` object with the resolved id, version, summary, category, and metadata. These fields make it easy to audit template provenance from scripts or the TUI.
+
+The optional `mcp_schema_version` field tracks on-disk schema migrations (currently `2`). Fresh configs default to the latest schema; legacy configs without an explicit version are treated as schema `1`. Run `codex mcp migrate` whenever upgrading Codex to apply pending migrations and persist the new version.
 
 ## shell_environment_policy
 

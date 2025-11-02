@@ -1,0 +1,2 @@
+{"source":"codex-rs/core/src/config/mcp_registry.rs","summary":["resolve_registry validates mcp_schema_version and merges built-in/user templates","template defaults (auth, health, tags, timeouts) hydrate servers at load time"],"citation":"local"}
+{"source":"codex-rs/cli/src/mcp_cmd.rs","summary":["CLI list/get surface template provenance including summary, metadata, and JSON \"template\" payload","table output adds a Template column aligned with config.mcp_templates"],"citation":"local"}
