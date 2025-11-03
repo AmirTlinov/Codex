@@ -58,6 +58,7 @@ impl Prompt {
             ToolSpec::Freeform(f) => f.name == "apply_patch",
             _ => false,
         });
+
         if self.base_instructions_override.is_none()
             && model.needs_special_apply_patch_instructions
             && !is_apply_patch_tool_present
@@ -281,7 +282,7 @@ pub(crate) struct ResponsesApiRequest<'a> {
 }
 
 pub(crate) mod tools {
-    use crate::openai_tools::JsonSchema;
+    use crate::tools::spec::JsonSchema;
     use serde::Deserialize;
     use serde::Serialize;
 
@@ -437,7 +438,7 @@ mod tests {
                 format!(
                     "{}\n{}",
                     model_family.clone().base_instructions,
-                    APPLY_PATCH_TOOL_INSTRUCTIONS
+                    APPLY_PATCH_TOOL_INSTRUCTIONS,
                 )
             } else {
                 model_family.clone().base_instructions

@@ -1,0 +1,1 @@
+{"source":"codex-rs/core/src/config.rs","summary":["Config::load_instructions снова итерирует AGENTS.override.md и AGENTS.md, поэтому корневые инструкции проекта больше не пропускаются"],"citation":"codex-rs/core/src/config.rs:36,163,1939"}
