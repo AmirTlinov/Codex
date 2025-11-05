@@ -25,6 +25,7 @@ use codex_core::config::Config;
 use codex_core::config::persist_model_selection;
 use codex_core::config::set_hide_full_access_warning;
 use codex_core::model_family::find_family_for_model;
+use codex_core::protocol::Op;
 use codex_core::protocol::SessionSource;
 use codex_core::protocol::TokenUsage;
 use codex_core::protocol_config_types::ReasoningEffort as ReasoningEffortConfig;
@@ -47,6 +48,7 @@ use std::thread;
 use std::time::Duration;
 use tokio::select;
 use tokio::sync::mpsc::unbounded_channel;
+use tokio::task::JoinHandle;
 
 #[cfg(not(debug_assertions))]
 use crate::history_cell::UpdateAvailableHistoryCell;
@@ -56,6 +58,14 @@ pub struct AppExitInfo {
     pub token_usage: TokenUsage,
     pub conversation_id: Option<ConversationId>,
     pub update_action: Option<UpdateAction>,
+}
+
+const LIVE_EXEC_POLL_INTERVAL: Duration = Duration::from_millis(350);
+
+#[derive(Debug, Default)]
+struct LiveExecPollState {
+    active: bool,
+    task: Option<JoinHandle<()>>,
 }
 
 pub(crate) struct App {
@@ -89,6 +99,7 @@ pub(crate) struct App {
     pub(crate) feedback: codex_feedback::CodexFeedback,
     /// Set when the user confirms an update; propagated on exit.
     pub(crate) pending_update_action: Option<UpdateAction>,
+    live_exec_poll: LiveExecPollState,
 }
 
 impl App {
@@ -180,6 +191,7 @@ impl App {
             backtrack: BacktrackState::default(),
             feedback: feedback.clone(),
             pending_update_action: None,
+            live_exec_poll: LiveExecPollState::default(),
         };
 
         #[cfg(not(debug_assertions))]
@@ -315,6 +327,7 @@ impl App {
                 if matches!(self.overlay, Some(Overlay::LiveExec(_))) {
                     tui.frame_requester().schedule_frame();
                 }
+                self.enable_live_exec_polling(tui);
             }
             AppEvent::LiveExecOutputChunk { call_id, chunk } => {
                 let updated = {
@@ -346,6 +359,31 @@ impl App {
                 if matches!(self.overlay, Some(Overlay::LiveExec(_))) {
                     tui.frame_requester().schedule_frame();
                 }
+                self.enable_live_exec_polling(tui);
+            }
+            AppEvent::LiveExecPromoted {
+                call_id,
+                shell_id,
+                initial_output,
+                ..
+            } => {
+                {
+                    let mut state = self.live_exec.borrow_mut();
+                    state.promote(&call_id, shell_id, initial_output);
+                }
+                if let Some(overlay) = &mut self.overlay {
+                    overlay.on_live_exec_state_updated();
+                }
+                if matches!(self.overlay, Some(Overlay::LiveExec(_))) {
+                    tui.frame_requester().schedule_frame();
+                }
+                self.enable_live_exec_polling(tui);
+            }
+            AppEvent::LiveExecPollTick => {
+                self.maybe_poll_live_exec(tui);
+            }
+            AppEvent::EnsureLiveExecPolling => {
+                self.enable_live_exec_polling(tui);
             }
             AppEvent::StartCommitAnimation => {
                 if self
@@ -384,6 +422,7 @@ impl App {
                 self.chat_widget.on_diff_complete();
                 // Enter alternate screen using TUI helper and build pager lines
                 let _ = tui.enter_alt_screen();
+                self.disable_live_exec_polling();
                 let pager_lines: Vec<ratatui::text::Line<'static>> = if text.trim().is_empty() {
                     vec!["No changes detected.".italic().into()]
                 } else {
@@ -472,32 +511,28 @@ impl App {
                                     .set_agents_context_include_mode(include_mode);
                                 let count = self.config.agents_context_entries.len();
                                 let tokens = self.config.agents_context_prompt_tokens;
-                                if count > 0 {
-                                    self.chat_widget.set_pending_context_prompt(
-                                        self.config.agents_context_prompt.clone(),
-                                    );
+                                if count > 0 && self.config.agents_context_prompt.is_some() {
+                                    self.chat_widget.set_agents_context_active(true);
                                     let message = if count == 1 {
                                         format!(
-                                            "Attached 1 agents context file (~{} tokens) to your next message.",
+                                            "Attached 1 agents context file (~{} tokens) to all future messages.",
                                             format_token_count(tokens)
                                         )
                                     } else {
                                         format!(
-                                            "Attached {count} agents context files (~{} tokens) to your next message.",
+                                            "Attached {count} agents context files (~{} tokens) to all future messages.",
                                             format_token_count(tokens)
                                         )
                                     };
                                     self.chat_widget.add_info_message(
                                         message,
                                         Some(
-                                            "Send your message to include this context."
+                                            "Use `/context off` to stop including these files."
                                                 .to_string(),
                                         ),
                                     );
                                 } else {
-                                    self.chat_widget.set_pending_context_prompt(None);
-                                    self.chat_widget
-                                        .set_agents_context_include_mode(include_mode);
+                                    self.chat_widget.set_agents_context_active(false);
                                     self.chat_widget.add_info_message(
                                         "Agents context disabled for upcoming messages."
                                             .to_string(),
@@ -514,15 +549,6 @@ impl App {
                         }
                     }
                 }
-            }
-            AppEvent::ClearAgentsContextSelection => {
-                let include_mode = self.chat_widget.agents_context_include_mode();
-                crate::disable_agents_context_for_run(&mut self.config);
-                self.chat_widget
-                    .apply_agents_context_from_config(&self.config);
-                self.chat_widget
-                    .set_agents_context_include_mode(include_mode);
-                self.chat_widget.set_pending_context_prompt(None);
             }
             AppEvent::ShowWindowsAutoModeInstructions => {
                 self.chat_widget.open_windows_auto_mode_instructions();
@@ -601,6 +627,7 @@ impl App {
             AppEvent::FullScreenApprovalRequest(request) => match request {
                 ApprovalRequest::ApplyPatch { cwd, changes, .. } => {
                     let _ = tui.enter_alt_screen();
+                    self.disable_live_exec_polling();
                     let diff_summary = DiffSummary::new(changes, cwd);
                     self.overlay = Some(Overlay::new_static_with_renderables(
                         vec![diff_summary.into()],
@@ -609,6 +636,7 @@ impl App {
                 }
                 ApprovalRequest::Exec { command, .. } => {
                     let _ = tui.enter_alt_screen();
+                    self.disable_live_exec_polling();
                     let full_cmd = strip_bash_lc_and_escape(&command);
                     let full_cmd_lines = highlight_bash_to_lines(&full_cmd);
                     self.overlay = Some(Overlay::new_static_with_lines(
@@ -619,6 +647,60 @@ impl App {
             },
         }
         Ok(true)
+    }
+
+    fn enable_live_exec_polling(&mut self, tui: &mut tui::Tui) {
+        if !self.live_exec_poll.active {
+            self.live_exec_poll.active = true;
+            if self.live_exec_poll.task.is_none() {
+                let tx = self.app_event_tx.clone();
+                self.live_exec_poll.task = Some(tokio::spawn(async move {
+                    loop {
+                        tokio::time::sleep(LIVE_EXEC_POLL_INTERVAL).await;
+                        if tx.app_event_tx.is_closed() {
+                            break;
+                        }
+                        tx.send(AppEvent::LiveExecPollTick);
+                    }
+                }));
+            }
+        }
+
+        let _ = self.app_event_tx.send(AppEvent::LiveExecPollTick);
+        if matches!(self.overlay, Some(Overlay::LiveExec(_))) {
+            tui.frame_requester().schedule_frame();
+        }
+    }
+
+    pub(crate) fn disable_live_exec_polling(&mut self) {
+        if !self.chat_widget.active_background_shell_ids().is_empty() {
+            return;
+        }
+        self.live_exec_poll.active = false;
+        if let Some(task) = self.live_exec_poll.task.take() {
+            task.abort();
+        }
+    }
+
+    pub(crate) fn maybe_poll_live_exec(&mut self, tui: &mut tui::Tui) {
+        if !self.live_exec_poll.active {
+            return;
+        }
+
+        let shell_ids = self.chat_widget.active_background_shell_ids();
+        if shell_ids.is_empty() {
+            self.disable_live_exec_polling();
+            return;
+        }
+
+        for shell_id in shell_ids {
+            self.chat_widget
+                .submit_op(Op::PollBackgroundShell { shell_id });
+        }
+
+        if matches!(self.overlay, Some(Overlay::LiveExec(_))) {
+            tui.frame_requester().schedule_frame();
+        }
     }
 
     pub(crate) fn token_usage(&self) -> codex_core::protocol::TokenUsage {
@@ -646,7 +728,22 @@ impl App {
                     if let Some(overlay) = &mut self.overlay {
                         overlay.on_live_exec_opened();
                     }
+                    self.enable_live_exec_polling(tui);
                     tui.frame_requester().schedule_frame();
+                }
+            }
+            KeyEvent {
+                code: KeyCode::Char('b'),
+                modifiers: crossterm::event::KeyModifiers::CONTROL,
+                kind: KeyEventKind::Press,
+                ..
+            } => {
+                if let Some((call_id, description)) = self.chat_widget.prepare_promotion_request() {
+                    self.app_event_tx.send(AppEvent::CodexOp(Op::PromoteShell {
+                        call_id,
+                        description,
+                    }));
+                    self.enable_live_exec_polling(tui);
                 }
             }
             KeyEvent {
@@ -657,6 +754,7 @@ impl App {
             } => {
                 // Enter alternate screen and set viewport to full size.
                 let _ = tui.enter_alt_screen();
+                self.disable_live_exec_polling();
                 self.overlay = Some(Overlay::new_transcript(self.transcript_cells.clone()));
                 tui.frame_requester().schedule_frame();
             }
@@ -760,6 +858,7 @@ mod tests {
             backtrack: BacktrackState::default(),
             feedback: codex_feedback::CodexFeedback::new(),
             pending_update_action: None,
+            live_exec_poll: LiveExecPollState::default(),
         }
     }
 

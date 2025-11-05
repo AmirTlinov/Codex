@@ -16,6 +16,7 @@ use codex_core::protocol::AgentMessageEvent;
 use codex_core::protocol::AgentReasoningDeltaEvent;
 use codex_core::protocol::AgentReasoningEvent;
 use codex_core::protocol::ApplyPatchApprovalRequestEvent;
+use codex_core::protocol::BackgroundEventEvent;
 use codex_core::protocol::Event;
 use codex_core::protocol::EventMsg;
 use codex_core::protocol::ExecApprovalRequestEvent;
@@ -285,6 +286,8 @@ fn make_chatwidget_manual() -> (
         stream_controller: None,
         running_commands: HashMap::new(),
         running_command_order: VecDeque::new(),
+        background_tasks: HashMap::new(),
+        background_order: VecDeque::new(),
         task_complete_pending: false,
         interrupts: InterruptManager::new(),
         reasoning_buffer: String::new(),
@@ -303,8 +306,8 @@ fn make_chatwidget_manual() -> (
         last_rendered_width: std::cell::Cell::new(None),
         feedback: codex_feedback::CodexFeedback::new(),
         current_rollout_path: None,
-        pending_context_prompt: None,
         agents_context_include_mode: false,
+        agents_context_active: cfg.agents_context_prompt.is_some(),
     };
     widget.base_status_header = widget.compose_base_status_header();
     widget.current_status_header = widget.base_status_header.clone();
@@ -350,10 +353,12 @@ fn lines_to_single_string(lines: &[ratatui::text::Line<'static>]) -> String {
 }
 
 #[test]
-fn pending_context_is_attached_to_next_message() {
+fn active_context_is_attached_to_every_message() {
     let (mut chat, mut rx, mut ops) = make_chatwidget_manual();
 
-    chat.set_pending_context_prompt(Some("<agents_context>ctx</agents_context>".to_string()));
+    chat.config.agents_context_prompt = Some("<agents_context>ctx</agents_context>".to_string());
+    chat.config.agents_context_prompt_tokens = 3;
+    chat.set_agents_context_active(true);
     chat.submit_user_message("Please review".to_string().into());
 
     // Drain history side effects to keep channel clean for later assertions.
@@ -381,8 +386,57 @@ fn pending_context_is_attached_to_next_message() {
         }
     );
 
-    // Subsequent messages should not include the context again.
+    // Subsequent messages should continue to include the context.
     chat.submit_user_message("Second message".to_string().into());
+    let _ = drain_insert_history(&mut rx);
+    let items = loop {
+        match ops.try_recv() {
+            Ok(Op::UserInput { items }) => break items,
+            Ok(Op::AddToHistory { .. }) => continue,
+            Ok(other) => panic!("expected Op::UserInput, got {other:?}"),
+            Err(err) => panic!("expected Op::UserInput, channel empty: {err}"),
+        }
+    };
+    assert_eq!(items.len(), 2);
+    assert_eq!(
+        items[0],
+        UserInput::Text {
+            text: "<agents_context>ctx</agents_context>".to_string()
+        }
+    );
+    assert_eq!(
+        items[1],
+        UserInput::Text {
+            text: "Second message".to_string()
+        }
+    );
+
+    while let Ok(op) = ops.try_recv() {
+        match op {
+            Op::AddToHistory { .. } => continue,
+            other => panic!("unexpected trailing op {other:?}"),
+        }
+    }
+}
+
+#[test]
+fn context_off_command_disables_persistent_context() {
+    let (mut chat, mut rx, mut ops) = make_chatwidget_manual();
+
+    chat.config.agents_context_prompt = Some("<agents_context>ctx</agents_context>".to_string());
+    chat.config.agents_context_prompt_tokens = 3;
+    chat.set_agents_context_active(true);
+
+    chat.submit_user_message("/context off".to_string().into());
+    let _ = drain_insert_history(&mut rx);
+    while let Ok(op) = ops.try_recv() {
+        match op {
+            Op::AddToHistory { .. } => continue,
+            other => panic!("unexpected op after /context off {other:?}"),
+        }
+    }
+
+    chat.submit_user_message("Hello".to_string().into());
     let _ = drain_insert_history(&mut rx);
     let items = loop {
         match ops.try_recv() {
@@ -396,16 +450,9 @@ fn pending_context_is_attached_to_next_message() {
     assert_eq!(
         items[0],
         UserInput::Text {
-            text: "Second message".to_string()
+            text: "Hello".to_string()
         }
     );
-
-    while let Ok(op) = ops.try_recv() {
-        match op {
-            Op::AddToHistory { .. } => continue,
-            other => panic!("unexpected trailing op {other:?}"),
-        }
-    }
 }
 
 #[test]
@@ -996,6 +1043,141 @@ fn undo_failure_events_render_error_message() {
     assert!(
         completed.contains("Failed to restore workspace state."),
         "expected failure message, got {completed:?}"
+    );
+}
+
+#[test]
+fn prepare_promotion_request_hides_status_indicator_and_sets_shell_id() {
+    let (mut chat, mut rx, _op_rx) = make_chatwidget_manual();
+
+    let call_id = "call-1";
+    let begin_event = ExecCommandBeginEvent {
+        call_id: call_id.to_string(),
+        command: vec!["/bin/sh".into(), "-c".into(), "printf 'kickoff'".into()],
+        cwd: chat.config.cwd.clone(),
+        parsed_cmd: Vec::new(),
+    };
+
+    chat.handle_codex_event(Event {
+        id: "turn-1".to_string(),
+        msg: EventMsg::ExecCommandBegin(begin_event),
+    });
+
+    while rx.try_recv().is_ok() {}
+
+    assert!(
+        chat.bottom_pane.status_indicator_visible(),
+        "status indicator should be visible while the foreground command runs"
+    );
+
+    let (selected_call, description) = chat
+        .prepare_promotion_request()
+        .expect("expected a running foreground command");
+    assert_eq!(selected_call, call_id);
+    let description = description.expect("description must be present for running command");
+    assert!(description.contains("printf"));
+
+    assert!(
+        !chat.bottom_pane.status_indicator_visible(),
+        "status indicator should be hidden after initiating promotion"
+    );
+    assert_eq!(
+        chat.running_commands
+            .get(call_id)
+            .and_then(|cmd| cmd.shell_id.clone()),
+        Some(String::new())
+    );
+
+    match rx.try_recv() {
+        Err(TryRecvError::Empty) => {}
+        other => panic!("expected no pending app events, got {other:?}"),
+    }
+
+    chat.handle_codex_event(Event {
+        id: "promoted".to_string(),
+        msg: EventMsg::ShellPromoted {
+            call_id: call_id.to_string(),
+            shell_id: "shell_42".to_string(),
+            initial_output: "kickoff\n".to_string(),
+            description: Some("trimmed description".to_string()),
+        },
+    });
+
+    let event = rx.try_recv().expect("LiveExecPromoted should be enqueued");
+    match event {
+        AppEvent::LiveExecPromoted {
+            call_id: event_call_id,
+            shell_id,
+            initial_output,
+            description,
+        } => {
+            assert_eq!(event_call_id, call_id);
+            assert_eq!(shell_id, "shell_42");
+            assert_eq!(description.as_deref(), Some("trimmed description"));
+            assert!(initial_output.contains("kickoff"));
+        }
+        other => panic!("unexpected app event {other:?}"),
+    }
+
+    assert_eq!(
+        chat.running_commands
+            .get(call_id)
+            .and_then(|cmd| cmd.shell_id.clone())
+            .as_deref(),
+        Some("shell_42")
+    );
+}
+
+#[test]
+fn background_events_emit_live_exec_poll_notifications() {
+    let (mut chat, mut rx, _op_rx) = make_chatwidget_manual();
+
+    chat.handle_codex_event(Event {
+        id: "bg-start".to_string(),
+        msg: EventMsg::BackgroundEvent(BackgroundEventEvent {
+            message: "Background shell shell_7 started (promoted from foreground: npm run dev)"
+                .to_string(),
+        }),
+    });
+
+    let mut saw_ensure = false;
+    while let Ok(ev) = rx.try_recv() {
+        if matches!(ev, AppEvent::EnsureLiveExecPolling) {
+            saw_ensure = true;
+        }
+    }
+    assert!(
+        saw_ensure,
+        "background start should trigger EnsureLiveExecPolling"
+    );
+    assert_eq!(
+        chat.background_tasks
+            .get("shell_7")
+            .and_then(|info| info.description.clone())
+            .as_deref(),
+        Some("npm run dev")
+    );
+
+    chat.handle_codex_event(Event {
+        id: "bg-end".to_string(),
+        msg: EventMsg::BackgroundEvent(BackgroundEventEvent {
+            message: "Background shell shell_7 terminated with exit code 0".to_string(),
+        }),
+    });
+
+    let mut saw_tick = false;
+    while let Ok(ev) = rx.try_recv() {
+        if matches!(ev, AppEvent::LiveExecPollTick) {
+            saw_tick = true;
+        }
+    }
+    assert!(
+        saw_tick,
+        "background termination should trigger LiveExecPollTick"
+    );
+    assert!(
+        !chat.background_tasks.contains_key("shell_7"),
+        "background task should be cleared after termination"
     );
 }
 
