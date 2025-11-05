@@ -1,0 +1,3 @@
+{"source":"codex-rs/apply-patch/src/lib.rs","summary":["ApplyPatchConfig хранит `symbol_fallback_mode` и прокидывает его в plan_hunks/ReportOptions, позволяя выбирать ast/fuzzy/disabled режимы."],"citation":"codex-rs/apply-patch/src/lib.rs:1303-1594"}
+{"source":"codex-rs/apply-patch/src/fallback.rs","summary":["TokenScanner ищет идентификаторы, оценивает кандидатов по сигнатурам и родительским скоупам и возвращает `SymbolFallbackStrategy` с reason/excerpt."],"citation":"codex-rs/apply-patch/src/fallback.rs:1-167"}
+{"source":"codex-rs/apply-patch/src/fallback.rs","summary":["При fuzzy-режиме есть запасной путь: простое substring совпадение обеспечивает минимальную точность вместо отдельного CLI флага."],"citation":"codex-rs/apply-patch/src/fallback.rs:67-88"}

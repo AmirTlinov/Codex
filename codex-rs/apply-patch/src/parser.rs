@@ -288,7 +288,6 @@ fn parse_patch_text(patch: &str, mode: ParseMode) -> Result<ApplyPatchArgs, Pars
     })
 }
 
-
 /// Checks the start and end lines of the patch text for `apply_patch`,
 /// returning an error if they do not match the expected markers.
 fn check_patch_boundaries_strict(lines: &[&str]) -> Result<(), ParseError> {

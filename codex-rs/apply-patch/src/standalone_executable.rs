@@ -1,5 +1,4 @@
 use clap::Parser;
-use std::fs;
 use std::io::IsTerminal;
 use std::io::Read;
 use std::io::Write;
@@ -36,28 +35,6 @@ enum Mode {
 struct ApplyArgs {
     #[command(subcommand)]
     command: Option<Command>,
-
-    /// Read patch content from the specified file instead of the command argument or STDIN. (Legacy)
-    #[arg(short = 'f', long = "patch-file", value_name = "PATH", hide = true)]
-    patch_file: Option<PathBuf>,
-
-    /// Treat file paths as relative to this directory (default: current directory). (Legacy)
-    #[arg(
-        short = 'C',
-        long = "root",
-        value_name = "PATH",
-        default_value = ".",
-        hide = true
-    )]
-    root: PathBuf,
-
-    /// Validate the patch and show the summary without writing changes. (Legacy)
-    #[arg(long = "dry-run", hide = true)]
-    dry_run_flag: bool,
-
-    /// Inline patch payload. If omitted, read from --patch-file or STDIN. (Legacy)
-    #[arg(value_name = "PATCH", hide = true)]
-    patch: Option<String>,
 }
 
 #[derive(clap::Subcommand, Debug, Clone, Copy, PartialEq, Eq)]
@@ -97,20 +74,16 @@ pub fn run_main() -> i32 {
 }
 
 fn run(cli: ApplyArgs) -> Result<(), String> {
-    let patch = load_patch(&cli).map_err(|err| err.to_string())?;
-    let mut config = build_config(&cli);
+    let patch = load_patch().map_err(|err| err.to_string())?;
+    let mut config = build_config();
     let operation_blocks = extract_operation_blocks(&patch);
 
-    let mut mode = match cli.command {
+    let mode = match cli.command {
         Some(Command::DryRun) => Mode::DryRun,
         Some(Command::Explain) => Mode::Explain,
         Some(Command::Amend) => Mode::Amend,
         None => Mode::Apply,
     };
-
-    if cli.dry_run_flag {
-        mode = Mode::DryRun;
-    }
 
     if matches!(mode, Mode::DryRun | Mode::Explain) {
         config.mode = PatchReportMode::DryRun;
@@ -149,15 +122,12 @@ fn run(cli: ApplyArgs) -> Result<(), String> {
     }
 }
 
-fn build_config(cli: &ApplyArgs) -> ApplyPatchConfig {
-    let mut config = ApplyPatchConfig {
-        root: cli.root.clone(),
+fn build_config() -> ApplyPatchConfig {
+    let root = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    ApplyPatchConfig {
+        root,
         ..ApplyPatchConfig::default()
-    };
-    if cli.dry_run_flag {
-        config.mode = PatchReportMode::DryRun;
     }
-    config
 }
 
 struct EmitOutputsOptions {
@@ -342,21 +312,13 @@ fn build_amendment_template(blocks: &[String], report: &PatchReport) -> Option<S
     Some(template)
 }
 
-fn load_patch(cli: &ApplyArgs) -> io::Result<String> {
-    if let Some(inline) = &cli.patch {
-        return Ok(inline.to_string());
-    }
-
-    if let Some(path) = &cli.patch_file {
-        return fs::read_to_string(path);
-    }
-
+fn load_patch() -> io::Result<String> {
     let mut buf = String::new();
     io::stdin().read_to_string(&mut buf)?;
     if buf.trim().is_empty() {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
-            "No patch content provided. Supply via STDIN or --patch-file.",
+            "No patch content provided. Supply a *** Begin Patch block via STDIN.",
         ));
     }
     Ok(buf)

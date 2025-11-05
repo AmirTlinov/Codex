@@ -1,0 +1,3 @@
+{"source":"codex-rs/apply-patch/src/lib.rs","summary":["summarize_conflict формирует человекочитаемые подсказки для разных типов конфликтов (context, unexpected content, symbol not found)."],"citation":"codex-rs/apply-patch/src/lib.rs:2600-2623"}
+{"source":"codex-rs/apply-patch/src/lib.rs","summary":["При ошибке `ApplyPatchError::Execution` собирает diagnostics и добавляет сообщения `unapplied` в отчёт вместо записи файлов."],"citation":"codex-rs/apply-patch/src/lib.rs:2660-2733"}
+{"source":"codex-rs/apply-patch/tests/suite/cli.rs","summary":["Интеграционный тест `test_apply_patch_cli_writes_conflict_hint_on_failure` проверяет, что stderr содержит сводку конфликта, а stdout не создаёт reports/logs."],"citation":"codex-rs/apply-patch/tests/suite/cli.rs:223-248"}

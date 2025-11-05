@@ -3505,7 +3505,6 @@ mod tests {
         )
     }
 
-
     fn heredoc_script_ps(prefix: &str, suffix: &str) -> String {
         format!(
             "{prefix}apply_patch <<'PATCH'\n*** Begin Patch\n*** Add File: foo\n+hi\n*** End Patch\nPATCH{suffix}"

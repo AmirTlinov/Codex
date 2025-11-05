@@ -1,0 +1,85 @@
+# TODO — apply_patch Lux Upgrade
+- [!] apply_patch — внутренний инструмент для Codex CLI (GPT-5-Codex); никаких внешних API/юзерских интерфейсов.
+
+- [x] Архитектура и подготовка
+  - [x] Спроектировать интерфейс `SymbolLocator` и модуль `src/ast`
+  - [x] Обновить `Cargo.toml` (tree-sitter и грамматики)
+- [x] Расширение парсера патчей (`src/parser.rs`)
+  - [x] Добавить хедеры `Insert Before/After Symbol`, `Replace Symbol Body`
+  - [x] Обновить `Hunk`/`ParseError` и тесты
+- [x] Планировщик и пайплайн (`src/lib.rs`)
+  - [x] Поддержать новые `Hunk` в `plan_hunks`
+  - [x] Расширить `OperationSummary` и конфигурацию fallback
+- [x] Реализация AST-локаторов (`src/ast/*`)
+  - [x] Rust локатор
+  - [x] TypeScript/JavaScript локатор
+  - [x] C++ локатор
+  - [x] Go локатор
+  - [x] Python локатор
+  - [x] Обобщённый интерфейс и кэш парсеров
+- [ ] Применение изменений (`compute_replacements` и др.)
+  - [x] Обработать новые `PlannedChangeKind`
+  - [x] Реализовать отчёт о «неприменённых» операциях + сохранение контента
+  - [x] Научить `SymbolLocator` учитывать всю иерархию `SymbolPath` (модули/классы, а не только последний сегмент)
+  - [x] Усовершенствовать `fallback_symbol_edit`: сохранять отступы и работать с телами без фигурных скобок (Python, Go)
+  - [x] Стабилизировать конфликтные диагностики для символов (показывать точный контекст, обновить сценарии `ConflictKind`)
+  - [x] Частичный retry (`apply_patch amend`)
+    - **Что делать**: добавить режим, который принимает исправленный блок для конкретной операции и применяет его без полного перезапуска команды.
+    - **Критерий**: после провала основной команды повтор с `apply_patch amend` позволяет дозалить один хунк/файл, а интеграционные тесты фиксируют успешный сценарий без пересылки всего патча.
+- [ ] Отчётность и CLI (`emit_report`, JSON, instructions)
+  - [x] Добавить новые действия и поля символов
+  - [x] Обновить `apply_patch_tool_instructions.md`
+  - [x] Расширить человекочитаемый вывод: явно подсвечивать символные правки и fallback в CLI
+  - [x] Обновить README/документацию по флагам `--conflict-dir`, `--unapplied-dir`, `--no-unapplied`
+  - [x] Убрать файловые артефакты, печатать diagnostics + amendment template в stdout/JSON
+- [x] Fallback-режим
+  - [x] Настроить конфигурацию `allow_symbol_fallback`
+  - [x] Реализовать строковый резерв с пометкой `fallback_used`
+- [ ] Тестирование
+  - [x] Интеграционные CLI-тесты для символов
+  - [x] Юнит-тесты AST-локаторов и парсера
+  - [x] Проверка логов/JSON-отчётов
+  - [x] Добавить интеграционные тесты для многоуровневых путей (`module::Type::method`) и fallback-сценариев
+- [ ] Финальная валидация
+  - [x] `cargo fmt`, `cargo clippy`, `cargo test`
+  - [x] Обновить документацию/CHANGELOG (README, CHANGELOG, инструкции в `docs/`)
+- [ ] Flagship+++ расширения
+  - [ ] AST-локаторы (Java, C#, Swift, PHP)
+    - [ ] Добавить зависимости `tree-sitter-*` в `Cargo.toml`
+    - [ ] Реализовать `java.rs` с поддержкой пакетов/классов/методов/overload
+    - [ ] Реализовать `csharp.rs` (namespaces, partial классы, методы)
+    - [ ] Реализовать `swift.rs` (struct/class/enum, extensions)
+    - [ ] Реализовать `php.rs` (namespaces, traits, functions)
+    - [ ] Обновить `mod.rs`, unit-тесты и CLI-тесты для каждого языка
+  - [x] Продвинутый fallback
+    - [x] Создать модуль `fallback` с токенизацией и scope-aware fuzzy matching
+    - [x] Настроить уровни агрессивности (`--fallback=ast|fuzzy|disabled`)
+    - [x] Логировать причину fallback в отчёте/JSON
+    - [x] Тесты на корректность/ложные совпадения
+  - [x] Автоформатирование и пост-проверки
+    - [x] Добавить флаг `--auto-format` (Rust via cargo fmt)
+    - [x] Добавить флаг `--post-check`
+    - [x] Детектировать форматтеры (cargo fmt, gofmt, prettier, swift-format, php-cs-fixer)
+    - [x] Интегрировать запуск форматтера с rollback при ошибке
+    - [x] Реализовать запуск пост-проверок с опциями abort/warn
+    - [x] Обновить отчёты (раздел formatting/post_checks)
+    - [x] Тесты с отсутствием форматтера и успешным запуском
+  - [x] Диагностика и отчётность
+    - [x] Расширить `ConflictDiagnostic` (root_cause, suggested_actions)
+    - [x] Команда `apply_patch conflicts --show/--list`
+  - [x] Расширить JSON-отчёт (`diagnostics`, `formatting`)
+  - [x] CLI-тесты конфликтных подсказок и отображения советов
+  - [x] Включить `amendment_template` в JSON и шаблон в stdout
+  - [ ] CLI/API расширения
+    - [x] Команда `apply_patch explain`
+    - [x] Batch-режим (`--batch <file>`, транзакционный rollback)
+    - [x] Документация новых команд
+    - [x] Тесты: batch, explain
+  - [ ] Документация и инструкции
+    - [ ] Переписать `apply_patch_tool_instructions.md` (единый гайд, новая CLI UX)
+    - [ ] Обновить README (Flagship-возможности, примеры)
+    - [ ] Синхронизировать `core/src/tools/handlers/apply_patch.rs` и тесты промптов
+  - [ ] Тестирование/QA
+    - [ ] CLI-тесты для новых языков/fallback/форматирования/batch
+    - [ ] Unit-тесты fallback/tokenization
+    - [ ] Golden-файлы для конфликтных подсказок и отчётов

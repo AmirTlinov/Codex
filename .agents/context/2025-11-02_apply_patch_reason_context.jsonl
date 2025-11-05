@@ -1,0 +1,3 @@
+{"source":"codex-rs/apply-patch/apply_patch_tool_instructions.md","summary":["Грамматика больше не требует заголовка `*** Reason:` — патч состоит из операций внутри `*** Begin/End Patch`."],"citation":"codex-rs/apply-patch/apply_patch_tool_instructions.md:3-34"}
+{"source":"codex-rs/apply-patch/src/parser.rs","summary":["Парсер `parse_patch` принимает список операций без Reason, проверяет заголовки Add/Delete/Update/Insert/Replace и завершает блок на `*** End Patch`."],"citation":"codex-rs/apply-patch/src/parser.rs:1-200"}
+{"source":"codex-rs/apply-patch/tests/suite/cli.rs","summary":["Интеграционные тесты используют патчи без Reason и убеждаются, что CLI успешно добавляет/обновляет/удаляет файлы."],"citation":"codex-rs/apply-patch/tests/suite/cli.rs:53-190"}

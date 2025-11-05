@@ -1,0 +1,3 @@
+{"source":"codex-rs/apply-patch/src/lib.rs","summary":["emit_report печатает заголовок `Applied/Attempted/Planned operations` и финальный статус (`✔` либо `✘`)."],"citation":"codex-rs/apply-patch/src/lib.rs:3029-3050"}
+{"source":"codex-rs/apply-patch/src/lib.rs","summary":["report_to_json сериализует операции, символные метаданные, formatting, post_checks и diagnostics в JSON `apply_patch/v2`."],"citation":"codex-rs/apply-patch/src/lib.rs:3053-3160"}
+{"source":"codex-rs/apply-patch/tests/suite/cli.rs","summary":["Тест `test_apply_patch_cli_add_and_update` проверяет, что stdout содержит `Applied operations` и `✔ Patch applied successfully.`"],"citation":"codex-rs/apply-patch/tests/suite/cli.rs:53-115"}
