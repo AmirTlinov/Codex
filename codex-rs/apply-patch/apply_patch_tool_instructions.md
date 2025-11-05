@@ -1,6 +1,7 @@
 ## `apply_patch`
 
 Use the `apply_patch` shell command to edit files.
+This binary exists exclusively for Codex CLI’s GPT-5 agent – it is not a human-facing tool, REST API, or general-purpose service.
 Your patch language is a stripped‑down, file‑oriented diff format designed to be easy to parse and safe to apply. You can think of it as a high‑level envelope:
 
 *** Begin Patch
@@ -9,11 +10,17 @@ Your patch language is a stripped‑down, file‑oriented diff format designed t
 
 Within that envelope, you get a sequence of file operations.
 You MUST include a header to specify the action you are taking.
-Each operation starts with one of three headers:
+Each operation starts with one of six headers:
 
 *** Add File: <path> - create a new file. Every following line is a + line (the initial contents).
 *** Delete File: <path> - remove an existing file. Nothing follows.
 *** Update File: <path> - patch an existing file in place (optionally with a rename).
+
+Symbol-aware edits let you work relative to AST declarations instead of raw text:
+
+*** Insert Before Symbol: <path::SymbolPath> - insert the provided `+` lines immediately before the symbol definition.
+*** Insert After Symbol: <path::SymbolPath> - insert the lines right after the symbol (after its body when available).
+*** Replace Symbol Body: <path::SymbolPath> - replace the body/content of the symbol with the provided lines.
 
 May be immediately followed by *** Move to: <new path> if you want to rename the file.
 Then one or more “hunks”, each introduced by @@ (optionally followed by a hunk header).
@@ -41,13 +48,19 @@ The full grammar definition is below:
 Patch := Begin { FileOp } End
 Begin := "*** Begin Patch" NEWLINE
 End := "*** End Patch" NEWLINE
-FileOp := AddFile | DeleteFile | UpdateFile
+FileOp := AddFile | DeleteFile | UpdateFile | InsertBeforeSymbol | InsertAfterSymbol | ReplaceSymbolBody
 AddFile := "*** Add File: " path NEWLINE { "+" line NEWLINE }
 DeleteFile := "*** Delete File: " path NEWLINE
 UpdateFile := "*** Update File: " path NEWLINE [ MoveTo ] { Hunk }
 MoveTo := "*** Move to: " newPath NEWLINE
 Hunk := "@@" [ header ] NEWLINE { HunkLine } [ "*** End of File" NEWLINE ]
 HunkLine := (" " | "-" | "+") text NEWLINE
+InsertBeforeSymbol := "*** Insert Before Symbol: " target NEWLINE { "+" line NEWLINE }
+InsertAfterSymbol := "*** Insert After Symbol: " target NEWLINE { "+" line NEWLINE }
+ReplaceSymbolBody := "*** Replace Symbol Body: " target NEWLINE { "+" line NEWLINE }
+target := path "::" symbol_path
+symbol_path := segment { "::" segment }
+segment := trimmed_identifier
 
 A full patch can combine several operations:
 
@@ -64,9 +77,11 @@ A full patch can combine several operations:
 
 It is important to remember:
 
-- You must include a header with your intended action (Add/Delete/Update)
-- You must prefix new lines with `+` even when creating a new file
+- You must include a header with your intended action (Add/Delete/Update/Insert Before Symbol/Insert After Symbol/Replace Symbol Body)
+- You must prefix new lines with `+` even when creating a new file or supplying symbol edits
 - File references can only be relative, NEVER ABSOLUTE.
+- Symbol-aware edits support Rust, TypeScript/JavaScript, Go, C++, and Python via precise AST matching with a fuzzy fallback when the AST locator cannot find the declaration. They fail fast if the symbol cannot be located.
+- Operation summaries list symbol edits explicitly (e.g. `symbol(replace-body): path :: Symbol (+N, -M)`) with strategy details so downstream automation can reason about the changes without re-parsing code.
 
 You can invoke apply_patch like:
 
@@ -83,6 +98,10 @@ Applied operations:
 - add: hello.txt (+1)
 - update: src/main.rs (+3, -1)
 ✔ Patch applied successfully.
+Formatting:
+- cargo fmt (workspace) ✔ 480 ms
+Post-checks:
+- cargo test -p codex-apply-patch ✔ 3.2 s
 ```
 
 Each bullet lists the action (`add`, `update`, `move`, or `delete`) plus the per-file line deltas.
@@ -92,21 +111,44 @@ Move operations appear as `- move: source -> dest (+added, -removed)` and combin
 If patch verification fails, `apply_patch` prints the diagnostic to stderr and leaves the filesystem unchanged.
 
 On success, any touched files are automatically staged in git (when run inside a repository), so your workspace is ready for a commit without additional `git add` commands.
-### CLI options
 
-The `apply_patch` binary accepts several quality-of-life flags:
+### Configuration defaults
 
-- `-f/--patch-file <path>` – load the patch from disk instead of argv/STDIN.
-- `-C/--root <dir>` – execute all file operations relative to the provided root.
-- `--dry-run` – plan the operations without writing to disk (the summary shows `planned` statuses).
-- `--output-format {human|json|both}` – control whether to emit JSON, the human summary, or both (`human` by default).
-- `--json-path <path>` – write the JSON report to a file regardless of the chosen output format.
-- `--no-summary` – suppress the human summary when `human` output is enabled.
-- `--machine` – emit a single-line JSON object following the `apply_patch/v2` schema (no human summary, ignores `--output-format`).
-- `--log-dir <path>` – write structured JSON logs to the given directory (default: `reports/logs`).
-- `--log-retention-days <days>` – prune log files older than the given number of days (default: 14).
-- `--log-keep <count>` – keep at most this many log files after pruning (default: 200).
-- `--no-logs` – skip writing per-run logs.
-- `--conflict-dir <path>` – write conflict diff hints to this directory when a patch fails (default: `reports/conflicts`).
+### CLI usage
 
-The JSON report mirrors begin_patch’s schema (`status`, `mode`, `duration_ms`, per-file operations, and `errors`).
+- `apply_patch` — применяет патч, автоматически определяя рабочий корень и источники данных.
+- `apply_patch dry-run` — выполняет валидацию без записи на диск, вывод совпадает с успешным запуском, но `mode` помечен как `dry-run`.
+- `apply_patch explain` — аналог `dry-run`, предназначен для сценариев, где нужно только описание применения.
+- `apply_patch amend` — повторно применяет только изменённую часть патча после сбоя (используй `Amendment template`, который выводит CLI).
+
+Никакие дополнительные флаги не требуются: бинарь сразу печатает сводку, JSON-отчёт и диагностику, если что-то пошло не так — без сохранения служебных файлов на диск.
+
+Чтобы запускать без heredoc, достаточно вызвать `apply_patch`, вставить блок `*** Begin Patch` … `*** End Patch`, затем завершить ввод (`Ctrl+D` на Unix, `Ctrl+Z` и Enter на Windows).
+
+#### Conflict hints and batches
+
+При конфликте или других ошибках CLI выводит диагностический блок: путь файла, контекст и diff hint помогают быстро увидеть расхождение, а не применённые содержимое печатается прямо в терминал. Сразу ниже появляется `Amendment template` с готовым `*** Begin Patch` блоком только для проблемных операций — достаточно подправить строки и заново запустить `apply_patch`.
+
+Inline patches may contain multiple `*** Begin Patch` blocks back-to-back. The CLI applies them atomically: if any block fails, no filesystem changes are committed. The human summary and JSON envelope enumerate the operations in order so downstream automation can attribute successes and failures without scraping free-form text.
+
+The machine-readable output printed to stdout always looks like:
+
+```
+{"schema":"apply_patch/v2","report":{...}}
+```
+
+The `report` object contains:
+
+- `status` — `success` or `failed`.
+- `mode` — `apply` or `dry-run`.
+- `duration_ms` — end-to-end latency for the run.
+- `operations[]` — per-file summaries with fields `action`, `path`, optional `renamed_to`, line deltas (`added`/`removed`), `status` (`applied`/`failed`/`planned`), and optional `message`.
+- `formatting[]` — auto-run formatter outcomes with fields `tool`, `scope`, `status`, `duration_ms`, `files[]`, and optional `note`.
+- `post_checks[]` — verification commands that ran after the patch, including `name`, `command[]`, `cwd`, `status`, `duration_ms`, optional `note`, `stdout`, and `stderr`.
+- `diagnostics[]` — high-level warnings such as skipped formatters or failed post-checks (empty on success).
+- `artifacts` — зарезервированный объект для будущих артефактов (по умолчанию пустой).
+- `amendment_template` — строка с готовым `*** Begin Patch` блоком для повторного применения проблемных операций (заполняется только при ошибках).
+- `errors[]` — high-level errors collected during the run (empty on success).
+- `options` — the normalization/preservation settings that were in effect.
+
+When an operation fails, its entry in `operations[]` is marked `failed`, the error message is echoed in `errors[]`, and a conflict hint is written so you can inspect the expectations and actual file contents offline.

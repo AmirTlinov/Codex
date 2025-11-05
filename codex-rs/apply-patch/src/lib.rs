@@ -1,4 +1,9 @@
+mod artifacts;
+mod ast;
+mod fallback;
+mod formatting;
 mod parser;
+mod post_checks;
 mod seek_sequence;
 mod standalone_executable;
 
@@ -6,6 +11,7 @@ use std::collections::HashMap;
 use std::collections::HashSet;
 use std::fmt;
 use std::fs;
+use std::io::ErrorKind;
 use std::io::Write as _;
 use std::path::Component;
 use std::path::Path;
@@ -18,9 +24,23 @@ use std::time::Instant;
 use std::time::SystemTime;
 use std::time::UNIX_EPOCH;
 
+use artifacts::ArtifactSummary;
+use artifacts::UnappliedEntry;
+use artifacts::UnappliedKind;
+use artifacts::summarize_unapplied;
+use formatting::FormattingOutcome;
+use post_checks::PostCheckOutcome;
+
 use anyhow::Context;
 use anyhow::Result;
+use ast::LineColumnRange;
+use ast::SymbolPath;
+use ast::SymbolResolution;
+use ast::SymbolTarget;
+use ast::byte_range_to_line_col;
+use ast::resolve_locator;
 use encoding_rs::Encoding;
+use fallback::FallbackMatch;
 use filetime::FileTime;
 pub use parser::Hunk;
 pub use parser::ParseError;
@@ -72,6 +92,89 @@ pub enum ApplyPatchError {
     EncodingError(String),
 }
 
+fn update_symbol_change(
+    changes: &mut HashMap<PathBuf, ApplyPatchFileChange>,
+    path: PathBuf,
+    symbol: &SymbolPath,
+    new_lines: &[String],
+    kind: SymbolEditKind,
+) -> Result<(), ApplyPatchError> {
+    let (mut original_disk, disk_missing) = match fs::read(&path) {
+        Ok(bytes) => (decode_content(&bytes, "utf-8")?, false),
+        Err(err) => {
+            if err.kind() == ErrorKind::NotFound {
+                (String::new(), true)
+            } else {
+                return Err(ApplyPatchError::IoError(IoError {
+                    context: format!("Failed to read {}", path.display()),
+                    source: err,
+                }));
+            }
+        }
+    };
+
+    let mut move_path = None;
+    let current_content = if let Some(existing) = changes.get(&path) {
+        match existing {
+            ApplyPatchFileChange::Update {
+                new_content,
+                move_path: existing_move,
+                ..
+            } => {
+                move_path = existing_move.clone();
+                new_content.clone()
+            }
+            ApplyPatchFileChange::Add { .. } => {
+                return Err(ApplyPatchError::ParseError(InvalidPatchError(format!(
+                    "Cannot apply symbol-directed edit to newly added file {}",
+                    path.display()
+                ))));
+            }
+            ApplyPatchFileChange::Delete { .. } => {
+                return Err(ApplyPatchError::ParseError(InvalidPatchError(format!(
+                    "Cannot apply symbol-directed edit to deleted file {}",
+                    path.display()
+                ))));
+            }
+        }
+    } else {
+        if disk_missing {
+            return Err(ApplyPatchError::IoError(IoError {
+                context: format!("Cannot edit {} because it does not exist", path.display()),
+                source: std::io::Error::other("missing file"),
+            }));
+        }
+        original_disk.clone()
+    };
+
+    let (updated_content, _) = compute_symbol_edit(
+        &current_content,
+        &path,
+        symbol,
+        new_lines,
+        kind,
+        SymbolFallbackMode::Fuzzy,
+    )?;
+
+    if disk_missing {
+        original_disk = current_content;
+    }
+
+    let diff = TextDiff::from_lines(&original_disk, &updated_content);
+    let unified_diff = diff.unified_diff().context_radius(3).to_string();
+
+    changes.insert(
+        path,
+        ApplyPatchFileChange::Update {
+            unified_diff,
+            move_path,
+            new_content: updated_content,
+        },
+    );
+
+    Ok(())
+}
+
 impl ApplyPatchError {
     pub fn conflict(&self) -> Option<&ConflictDiagnostic> {
         match self {
@@ -120,6 +223,111 @@ pub enum MaybeApplyPatch {
     ShellParseError(ExtractHeredocError),
     PatchParseError(ParseError),
     NotApplyPatch,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum SymbolFallbackMode {
+    Ast,
+    #[default]
+    Fuzzy,
+    Disabled,
+}
+
+impl SymbolFallbackMode {
+    fn as_str(&self) -> &'static str {
+        match self {
+            SymbolFallbackMode::Ast => "ast",
+            SymbolFallbackMode::Fuzzy => "fuzzy",
+            SymbolFallbackMode::Disabled => "disabled",
+        }
+    }
+}
+
+impl fmt::Display for SymbolFallbackMode {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SymbolFallbackStrategy {
+    Ast,
+    Scoped,
+    Identifier,
+    Substring,
+}
+
+impl SymbolFallbackStrategy {
+    fn as_str(&self) -> &'static str {
+        match self {
+            SymbolFallbackStrategy::Ast => "ast",
+            SymbolFallbackStrategy::Scoped => "scoped",
+            SymbolFallbackStrategy::Identifier => "identifier",
+            SymbolFallbackStrategy::Substring => "substring",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SymbolEditKind {
+    InsertBefore,
+    InsertAfter,
+    ReplaceBody,
+}
+
+impl SymbolEditKind {
+    fn as_str(&self) -> &'static str {
+        match self {
+            SymbolEditKind::InsertBefore => "insert-before",
+            SymbolEditKind::InsertAfter => "insert-after",
+            SymbolEditKind::ReplaceBody => "replace-body",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SymbolLocation {
+    pub start_line: usize,
+    pub start_col: usize,
+    pub end_line: usize,
+    pub end_col: usize,
+}
+
+impl From<LineColumnRange> for SymbolLocation {
+    fn from(range: LineColumnRange) -> Self {
+        Self {
+            start_line: range.start_line,
+            start_col: range.start_col,
+            end_line: range.end_line,
+            end_col: range.end_col,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SymbolOperationSummary {
+    pub kind: SymbolEditKind,
+    pub symbol: SymbolPath,
+    pub strategy: SymbolFallbackStrategy,
+    pub location: SymbolLocation,
+    pub reason: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+struct SymbolEditPlanResult {
+    original_contents: String,
+    new_contents: String,
+    summary: SymbolOperationSummary,
+}
+
+#[derive(Debug, Clone)]
+struct SymbolMatchContext {
+    body_range: Option<std::ops::Range<usize>>,
+    insert_before: usize,
+    insert_after: usize,
+    strategy: SymbolFallbackStrategy,
+    location: LineColumnRange,
+    reason: Option<String>,
 }
 
 /// Both the raw PATCH argument to `apply_patch` as well as the PATCH argument
@@ -739,10 +947,11 @@ fn maybe_extract_begin_patch_args(
                     if other == "--stdout-schema" {
                         idx += 1;
                     }
-                } else if matches!(other, "--dry-run" | "--plan" | "--no-summary" | "--no-logs") {
+                } else if matches!(
+                    other,
+                    "--dry-run" | "--plan" | "--no-summary" | "--no-logs" | "--machine"
+                ) {
                     // handled at the begin_patch layer
-                } else if other == "--machine" {
-                    apply_command.push(other.to_string());
                 } else if other == "--preset" {
                     idx += 1;
                     if idx >= argv.len() {
@@ -851,6 +1060,51 @@ fn build_apply_patch_action(
                         new_content: contents,
                     },
                 );
+            }
+            Hunk::InsertBeforeSymbol {
+                path: rel_path,
+                symbol,
+                new_lines,
+            } => {
+                let path = resolve_path(&effective_cwd, &rel_path)
+                    .map_err(map_anyhow_to_apply_patch_error)?;
+                update_symbol_change(
+                    &mut changes,
+                    path,
+                    &symbol,
+                    new_lines.as_slice(),
+                    SymbolEditKind::InsertBefore,
+                )?;
+            }
+            Hunk::InsertAfterSymbol {
+                path: rel_path,
+                symbol,
+                new_lines,
+            } => {
+                let path = resolve_path(&effective_cwd, &rel_path)
+                    .map_err(map_anyhow_to_apply_patch_error)?;
+                update_symbol_change(
+                    &mut changes,
+                    path,
+                    &symbol,
+                    new_lines.as_slice(),
+                    SymbolEditKind::InsertAfter,
+                )?;
+            }
+            Hunk::ReplaceSymbolBody {
+                path: rel_path,
+                symbol,
+                new_lines,
+            } => {
+                let path = resolve_path(&effective_cwd, &rel_path)
+                    .map_err(map_anyhow_to_apply_patch_error)?;
+                update_symbol_change(
+                    &mut changes,
+                    path,
+                    &symbol,
+                    new_lines.as_slice(),
+                    SymbolEditKind::ReplaceBody,
+                )?;
             }
         }
     }
@@ -1006,6 +1260,7 @@ pub struct OperationSummary {
     pub lines_removed: usize,
     pub status: OperationStatus,
     pub message: Option<String>,
+    pub symbol: Option<SymbolOperationSummary>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1027,6 +1282,12 @@ pub struct PatchReport {
     pub duration_ms: u128,
     pub operations: Vec<OperationSummary>,
     pub options: ReportOptions,
+    pub formatting: Vec<FormattingOutcome>,
+    pub post_checks: Vec<PostCheckOutcome>,
+    pub diagnostics: Vec<DiagnosticItem>,
+    pub batch: Option<BatchSummary>,
+    pub artifacts: ArtifactSummary,
+    pub amendment_template: Option<String>,
     pub errors: Vec<String>,
 }
 
@@ -1039,6 +1300,7 @@ pub struct ApplyPatchConfig {
     pub preserve_mode: bool,
     pub preserve_times: bool,
     pub new_file_mode: Option<u32>,
+    pub symbol_fallback_mode: SymbolFallbackMode,
 }
 
 impl Default for ApplyPatchConfig {
@@ -1051,6 +1313,7 @@ impl Default for ApplyPatchConfig {
             preserve_mode: true,
             preserve_times: true,
             new_file_mode: None,
+            symbol_fallback_mode: SymbolFallbackMode::default(),
         }
     }
 }
@@ -1065,6 +1328,7 @@ impl OperationSummary {
             lines_removed: 0,
             status: OperationStatus::Applied,
             message: None,
+            symbol: None,
         }
     }
 
@@ -1085,6 +1349,11 @@ impl OperationSummary {
 
     fn with_status(mut self, status: OperationStatus) -> Self {
         self.status = status;
+        self
+    }
+
+    fn with_symbol(mut self, symbol: SymbolOperationSummary) -> Self {
+        self.symbol = Some(symbol);
         self
     }
 }
@@ -1202,6 +1471,37 @@ pub struct ReportOptions {
     pub preserve_mode: bool,
     pub preserve_times: bool,
     pub new_file_mode: Option<u32>,
+    pub symbol_fallback_mode: SymbolFallbackMode,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TaskStatus {
+    Applied,
+    Skipped,
+    Failed,
+}
+
+impl TaskStatus {
+    fn as_str(&self) -> &'static str {
+        match self {
+            TaskStatus::Applied => "applied",
+            TaskStatus::Skipped => "skipped",
+            TaskStatus::Failed => "failed",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct DiagnosticItem {
+    pub code: String,
+    pub message: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BatchSummary {
+    pub blocks: usize,
+    pub applied: usize,
+    pub failed: usize,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1251,6 +1551,7 @@ impl fmt::Display for ConflictDiagnostic {
 pub enum ConflictKind {
     ContextNotFound,
     UnexpectedContent,
+    SymbolNotFound,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1290,6 +1591,7 @@ impl From<&ApplyPatchConfig> for ReportOptions {
             preserve_mode: config.preserve_mode,
             preserve_times: config.preserve_times,
             new_file_mode: config.new_file_mode,
+            symbol_fallback_mode: config.symbol_fallback_mode,
         }
     }
 }
@@ -1351,9 +1653,466 @@ fn resolve_path(root: &Path, relative: &Path) -> anyhow::Result<PathBuf> {
     Ok(root.join(relative))
 }
 
+fn schedule_symbol_edit(
+    relative_path: &PathBuf,
+    symbol: &SymbolPath,
+    new_lines: &[String],
+    kind: SymbolEditKind,
+    config: &ApplyPatchConfig,
+    summaries: &mut Vec<OperationSummary>,
+    planned: &mut Vec<PlannedChange>,
+) -> anyhow::Result<()> {
+    let absolute = resolve_path(&config.root, relative_path)?;
+    if !absolute.exists() {
+        anyhow::bail!(
+            "Cannot edit {} because it does not exist",
+            relative_path.display()
+        );
+    }
+
+    let plan = plan_symbol_edit_for_path(&absolute, symbol, new_lines, kind, config)
+        .map_err(anyhow::Error::new)?;
+
+    let SymbolEditPlanResult {
+        original_contents,
+        new_contents,
+        summary: symbol_summary,
+    } = plan;
+
+    let (added, removed) = diff_line_counts(&original_contents, &new_contents);
+    let line_ending = LineEnding::detected(&original_contents).unwrap_or_else(LineEnding::native);
+    let reference_had_final_newline = has_trailing_newline(&original_contents);
+    let metadata = FileMetadataSnapshot::from_path(&absolute)?;
+
+    let summary_index = summaries.len();
+    let operation_summary = OperationSummary::new(OperationAction::Update, relative_path.clone())
+        .with_added(added)
+        .with_removed(removed)
+        .with_status(OperationStatus::Planned)
+        .with_symbol(symbol_summary);
+    summaries.push(operation_summary);
+
+    planned.push(PlannedChange {
+        summary_index,
+        kind: PlannedChangeKind::Update {
+            original: absolute.clone(),
+            dest: absolute,
+            new_content: new_contents,
+            line_ending,
+            metadata,
+            reference_had_final_newline,
+        },
+    });
+
+    Ok(())
+}
+
 fn read_file_with_encoding(path: &Path, encoding: &str) -> anyhow::Result<String> {
     let bytes = fs::read(path).with_context(|| format!("Failed to read {}", path.display()))?;
     decode_content(&bytes, encoding).map_err(anyhow::Error::new)
+}
+
+fn plan_symbol_edit_for_path(
+    absolute: &Path,
+    symbol: &SymbolPath,
+    new_lines: &[String],
+    kind: SymbolEditKind,
+    config: &ApplyPatchConfig,
+) -> Result<SymbolEditPlanResult, ApplyPatchError> {
+    let original_contents = read_file_with_encoding(absolute, &config.encoding)
+        .map_err(map_anyhow_to_apply_patch_error)?;
+    let (new_contents, summary) = compute_symbol_edit(
+        &original_contents,
+        absolute,
+        symbol,
+        new_lines,
+        kind,
+        config.symbol_fallback_mode,
+    )?;
+    Ok(SymbolEditPlanResult {
+        original_contents,
+        new_contents,
+        summary,
+    })
+}
+
+fn compute_symbol_edit(
+    original: &str,
+    path: &Path,
+    symbol: &SymbolPath,
+    new_lines: &[String],
+    kind: SymbolEditKind,
+    fallback_mode: SymbolFallbackMode,
+) -> Result<(String, SymbolOperationSummary), ApplyPatchError> {
+    let context = locate_symbol_match(path, original, symbol, kind, fallback_mode, new_lines)?;
+    let newline = LineEnding::detected(original)
+        .unwrap_or_else(LineEnding::native)
+        .as_str();
+    let insertion_text = join_symbol_lines(new_lines, newline);
+
+    let mut updated = String::with_capacity(original.len() + insertion_text.len());
+    match kind {
+        SymbolEditKind::InsertBefore => {
+            let insert_idx = context.insert_before.min(original.len());
+            updated.push_str(&original[..insert_idx]);
+            updated.push_str(&insertion_text);
+            updated.push_str(&original[insert_idx..]);
+        }
+        SymbolEditKind::InsertAfter => {
+            let insert_idx = context.insert_after.min(original.len());
+            updated.push_str(&original[..insert_idx]);
+            updated.push_str(&insertion_text);
+            updated.push_str(&original[insert_idx..]);
+        }
+        SymbolEditKind::ReplaceBody => {
+            let body_range = context.body_range.clone().ok_or_else(|| {
+                symbol_conflict_error(
+                    path,
+                    symbol,
+                    new_lines,
+                    kind,
+                    "symbol body is unavailable for replacement",
+                    None,
+                    None,
+                    context.reason.clone(),
+                )
+            })?;
+            let start = body_range.start.min(original.len());
+            let end = body_range.end.min(original.len());
+            updated.push_str(&original[..start]);
+            updated.push_str(&insertion_text);
+            updated.push_str(&original[end..]);
+        }
+    }
+
+    let summary = SymbolOperationSummary {
+        kind,
+        symbol: symbol.clone(),
+        strategy: context.strategy,
+        location: context.location.into(),
+        reason: context.reason,
+    };
+
+    Ok((updated, summary))
+}
+
+fn locate_symbol_match(
+    path: &Path,
+    source: &str,
+    symbol: &SymbolPath,
+    kind: SymbolEditKind,
+    fallback_mode: SymbolFallbackMode,
+    new_lines: &[String],
+) -> Result<SymbolMatchContext, ApplyPatchError> {
+    let ast_failure = match resolve_locator(path) {
+        Some(locator) => match locator.locate(source, symbol) {
+            SymbolResolution::Match(target) => {
+                return Ok(convert_ast_match(target, source));
+            }
+            SymbolResolution::Unsupported { reason } => Some(reason),
+            SymbolResolution::NotFound { reason } => Some(reason),
+        },
+        None => Some("no symbol locator available for file".to_string()),
+    };
+
+    match fallback_mode {
+        SymbolFallbackMode::Ast => {
+            let reason =
+                ast_failure.unwrap_or_else(|| "symbol locator did not find a match".to_string());
+            return Err(symbol_conflict_error(
+                path, symbol, new_lines, kind, &reason, None, None, None,
+            ));
+        }
+        SymbolFallbackMode::Disabled => {
+            return Err(symbol_conflict_error(
+                path,
+                symbol,
+                new_lines,
+                kind,
+                "symbol fallback is disabled",
+                None,
+                None,
+                None,
+            ));
+        }
+        SymbolFallbackMode::Fuzzy => {}
+    }
+
+    match fallback::locate_symbol(source, symbol, fallback_mode) {
+        Ok(fallback_match) => convert_fallback_match(
+            source,
+            fallback_match,
+            path,
+            symbol,
+            kind,
+            new_lines,
+            ast_failure,
+        ),
+        Err(failure) => Err(symbol_conflict_error(
+            path,
+            symbol,
+            new_lines,
+            kind,
+            &failure.reason,
+            Some(&failure.excerpt),
+            failure.location,
+            ast_failure,
+        )),
+    }
+}
+
+fn convert_ast_match(target: SymbolTarget, source: &str) -> SymbolMatchContext {
+    let body_range = target.body_range.clone();
+    let insert_before = target.header_range.start;
+    let insert_after = body_range
+        .as_ref()
+        .map(|r| r.end)
+        .unwrap_or(target.header_range.end);
+    let location = byte_range_to_line_col(target.header_range.clone(), source);
+    SymbolMatchContext {
+        body_range,
+        insert_before,
+        insert_after,
+        strategy: SymbolFallbackStrategy::Ast,
+        location,
+        reason: Some(format!("matched via {} AST", target.language)),
+    }
+}
+
+fn convert_fallback_match(
+    source: &str,
+    mut fallback_match: FallbackMatch,
+    path: &Path,
+    symbol: &SymbolPath,
+    kind: SymbolEditKind,
+    new_lines: &[String],
+    ast_reason: Option<String>,
+) -> Result<SymbolMatchContext, ApplyPatchError> {
+    let line_start = find_line_start(source, fallback_match.match_index);
+    let line_end = find_line_end(source, fallback_match.match_index);
+    let mut insert_after = line_end.min(source.len());
+    let mut body_range = None;
+
+    // Try to detect block boundaries for insert-after / replace-body.
+    if let Some(block) = detect_brace_block(source, line_end) {
+        insert_after = block.end.min(source.len());
+        body_range = Some(block);
+    } else {
+        let header_line = &source[line_start..line_end];
+        if header_line.trim_end().ends_with(':') {
+            let header_indent = count_indent(header_line);
+            if let Some(block) = detect_indented_block(source, line_end, header_indent) {
+                insert_after = block.end.min(source.len());
+                body_range = Some(block);
+            }
+        }
+    }
+
+    if matches!(kind, SymbolEditKind::ReplaceBody) && body_range.is_none() {
+        return Err(symbol_conflict_error(
+            path,
+            symbol,
+            new_lines,
+            kind,
+            "unable to determine symbol body without AST match",
+            Some(&fallback_match.excerpt),
+            Some(fallback_match.location),
+            Some(fallback_match.reason.clone()),
+        ));
+    }
+
+    if let Some(ast) = ast_reason {
+        if fallback_match.reason.is_empty() {
+            fallback_match.reason = format!("AST locator reported: {ast}");
+        } else {
+            fallback_match.reason = format!("{}; AST locator: {ast}", fallback_match.reason);
+        }
+    }
+
+    Ok(SymbolMatchContext {
+        body_range,
+        insert_before: line_start,
+        insert_after,
+        strategy: fallback_match.strategy,
+        location: fallback_match.location,
+        reason: Some(fallback_match.reason),
+    })
+}
+
+fn join_symbol_lines(new_lines: &[String], newline: &str) -> String {
+    if new_lines.is_empty() {
+        return String::new();
+    }
+    let mut text = String::new();
+    for line in new_lines {
+        text.push_str(line);
+        text.push_str(newline);
+    }
+    text
+}
+
+fn find_line_start(source: &str, idx: usize) -> usize {
+    let mut cursor = idx.min(source.len());
+    while cursor > 0 {
+        let byte = source.as_bytes()[cursor - 1];
+        if byte == b'\n' {
+            break;
+        }
+        cursor -= 1;
+    }
+    cursor
+}
+
+fn find_line_end(source: &str, idx: usize) -> usize {
+    let mut cursor = idx.min(source.len());
+    while cursor < source.len() {
+        let byte = source.as_bytes()[cursor];
+        cursor += 1;
+        if byte == b'\n' {
+            break;
+        }
+    }
+    cursor
+}
+
+fn detect_brace_block(source: &str, mut idx: usize) -> Option<std::ops::Range<usize>> {
+    let bytes = source.as_bytes();
+    while idx < bytes.len() {
+        let ch = bytes[idx] as char;
+        if ch == '{' {
+            let start = idx;
+            idx += 1;
+            let mut depth = 1usize;
+            while idx < bytes.len() {
+                let ch = bytes[idx] as char;
+                match ch {
+                    '{' => depth += 1,
+                    '}' => {
+                        depth -= 1;
+                        if depth == 0 {
+                            return Some(start..(idx + 1));
+                        }
+                    }
+                    '"' | '\'' => {
+                        let quote = ch;
+                        idx += 1;
+                        while idx < bytes.len() {
+                            let c = bytes[idx] as char;
+                            if c == '\\' {
+                                idx += 2;
+                                continue;
+                            }
+                            if c == quote {
+                                idx += 1;
+                                break;
+                            }
+                            idx += 1;
+                        }
+                        continue;
+                    }
+                    _ => {}
+                }
+                idx += 1;
+            }
+            break;
+        } else if ch == ';' {
+            break;
+        }
+        idx += 1;
+    }
+    None
+}
+
+fn detect_indented_block(
+    source: &str,
+    mut idx: usize,
+    header_indent: usize,
+) -> Option<std::ops::Range<usize>> {
+    let bytes = source.as_bytes();
+    let mut start: Option<usize> = None;
+    let mut end = idx;
+
+    while idx < bytes.len() {
+        let line_start = idx;
+        while idx < bytes.len() && bytes[idx] != b'\n' {
+            idx += 1;
+        }
+        let mut line_end = idx.min(bytes.len());
+        if idx < bytes.len() {
+            idx += 1;
+            line_end = idx.min(bytes.len());
+        }
+        let line = &source[line_start..line_end];
+        let trimmed = line.trim_end_matches(['\r', '\n']);
+        let content = trimmed.trim_start();
+        if content.is_empty() {
+            if start.is_some() {
+                end = line_end;
+            }
+            continue;
+        }
+        let indent = count_indent(trimmed);
+        if indent <= header_indent {
+            break;
+        }
+        if start.is_none() {
+            start = Some(line_start);
+        }
+        end = line_end;
+    }
+
+    start.map(|s| s..end)
+}
+
+fn count_indent(line: &str) -> usize {
+    line.chars()
+        .take_while(|c| *c == ' ' || *c == '\t')
+        .map(|c| if c == '\t' { 4 } else { 1 })
+        .sum()
+}
+
+fn symbol_conflict_error(
+    path: &Path,
+    symbol: &SymbolPath,
+    new_lines: &[String],
+    kind: SymbolEditKind,
+    reason: &str,
+    excerpt: Option<&[String]>,
+    location: Option<LineColumnRange>,
+    fallback_reason: Option<String>,
+) -> ApplyPatchError {
+    let expected = new_lines.to_vec();
+    let actual = excerpt
+        .map(<[std::string::String]>::to_vec)
+        .unwrap_or_default();
+    let mut message = format!(
+        "Failed to apply {} for symbol '{}' in {}",
+        kind.as_str(),
+        symbol,
+        path.display()
+    );
+    if !reason.is_empty() {
+        message.push_str(": ");
+        message.push_str(reason);
+    }
+    if let Some(extra) = &fallback_reason
+        && !extra.is_empty()
+        && extra != reason
+    {
+        message.push_str(" — ");
+        message.push_str(extra);
+    }
+    let hunk_context = location.map(|loc| format!("{}:{}", loc.start_line, symbol));
+    let diagnostic = ConflictDiagnostic::new(
+        message,
+        path.to_path_buf(),
+        ConflictKind::SymbolNotFound,
+        hunk_context,
+        expected,
+        actual,
+        Vec::new(),
+    );
+    ApplyPatchError::ComputeReplacements(Box::new(diagnostic))
 }
 
 fn normalize_content(
@@ -1650,6 +2409,51 @@ fn plan_hunks(
                     },
                 });
             }
+            Hunk::InsertBeforeSymbol {
+                path,
+                symbol,
+                new_lines,
+            } => {
+                schedule_symbol_edit(
+                    path,
+                    symbol,
+                    new_lines,
+                    SymbolEditKind::InsertBefore,
+                    config,
+                    &mut summaries,
+                    &mut planned,
+                )?;
+            }
+            Hunk::InsertAfterSymbol {
+                path,
+                symbol,
+                new_lines,
+            } => {
+                schedule_symbol_edit(
+                    path,
+                    symbol,
+                    new_lines,
+                    SymbolEditKind::InsertAfter,
+                    config,
+                    &mut summaries,
+                    &mut planned,
+                )?;
+            }
+            Hunk::ReplaceSymbolBody {
+                path,
+                symbol,
+                new_lines,
+            } => {
+                schedule_symbol_edit(
+                    path,
+                    symbol,
+                    new_lines,
+                    SymbolEditKind::ReplaceBody,
+                    config,
+                    &mut summaries,
+                    &mut planned,
+                )?;
+            }
         }
     }
 
@@ -1747,6 +2551,79 @@ fn apply_planned_changes(
     Ok(())
 }
 
+fn collect_unapplied_entries(
+    planned: &[PlannedChange],
+    summaries: &[OperationSummary],
+) -> Vec<UnappliedEntry> {
+    let mut entries = Vec::new();
+    for change in planned {
+        let summary = &summaries[change.summary_index];
+        if summary.status == OperationStatus::Applied {
+            continue;
+        }
+
+        match &change.kind {
+            PlannedChangeKind::Add { path, content, .. } => {
+                entries.push(UnappliedEntry {
+                    path: path.clone(),
+                    kind: UnappliedKind::Add,
+                    contents: content.clone(),
+                });
+            }
+            PlannedChangeKind::Update {
+                dest, new_content, ..
+            } => {
+                entries.push(UnappliedEntry {
+                    path: dest.clone(),
+                    kind: UnappliedKind::Update,
+                    contents: new_content.clone(),
+                });
+            }
+            PlannedChangeKind::Delete { path } => match fs::read(path) {
+                Ok(bytes) => entries.push(UnappliedEntry {
+                    path: path.clone(),
+                    kind: UnappliedKind::Delete,
+                    contents: String::from_utf8_lossy(&bytes).into_owned(),
+                }),
+                Err(_) => {}
+            },
+        }
+    }
+
+    entries
+}
+
+fn summarize_conflict(conflict: &ConflictDiagnostic) -> String {
+    let mut parts = Vec::new();
+    parts.push(format!(
+        "Conflict in {}: {}",
+        conflict.path.display(),
+        conflict.message()
+    ));
+    if let Some(context) = conflict.hunk_context.as_ref() {
+        parts.push(format!("Context: {context}"));
+    }
+    if !conflict.diff_hint().is_empty() {
+        parts.push("Diff hint:".to_string());
+        parts.extend(conflict.diff_hint().iter().cloned());
+    }
+    match conflict.kind {
+        ConflictKind::ContextNotFound => parts.push(
+            "Hint: обнови патч по актуальному контексту (перечитай файл и перестрой @@ блок)."
+                .to_string(),
+        ),
+        ConflictKind::UnexpectedContent => parts.push(
+            "Hint: файл изменён иначе, чем ожидалось — синхронизируй изменения и обнови hunks."
+                .to_string(),
+        ),
+        ConflictKind::SymbolNotFound => parts.push(
+            "Hint: символ не найден — проверь правильность пути и имени, либо добавь его в файл."
+                .to_string(),
+        ),
+    }
+    parts.join("\n")
+}
+
 fn map_anyhow_to_apply_patch_error(err: anyhow::Error) -> ApplyPatchError {
     match err.downcast::<ApplyPatchError>() {
         Ok(patch_err) => patch_err,
@@ -1787,14 +2664,24 @@ fn apply_hunks_with_config(
             let apply_err = map_anyhow_to_apply_patch_error(err);
             if let Some(conflict) = apply_err.conflict().cloned() {
                 let message = apply_err.to_string();
-                let report = PatchReport {
+                let mut report = PatchReport {
                     mode: config.mode,
                     status: PatchReportStatus::Failed,
                     duration_ms: 0,
                     operations: Vec::new(),
                     options: ReportOptions::from(config),
+                    formatting: Vec::new(),
+                    post_checks: Vec::new(),
+                    diagnostics: Vec::new(),
+                    batch: None,
+                    artifacts: ArtifactSummary::default(),
+                    amendment_template: None,
                     errors: vec![message.clone()],
                 };
+                report.diagnostics.push(DiagnosticItem {
+                    code: "conflict".to_string(),
+                    message: summarize_conflict(&conflict),
+                });
                 return Err(ApplyPatchError::Execution(Box::new(PatchExecutionError {
                     message,
                     report,
@@ -1812,14 +2699,33 @@ fn apply_hunks_with_config(
     {
         let duration_ms = start_time.elapsed().as_millis();
         let message = err.to_string();
-        let report = PatchReport {
+        let entries = collect_unapplied_entries(&planned, &summaries);
+        let mut report = PatchReport {
             mode: config.mode,
             status: PatchReportStatus::Failed,
             duration_ms,
             operations: summaries.clone(),
             options: ReportOptions::from(config),
+            formatting: Vec::new(),
+            post_checks: Vec::new(),
+            diagnostics: Vec::new(),
+            batch: None,
+            artifacts: ArtifactSummary::default(),
+            amendment_template: None,
             errors: vec![message.clone()],
         };
+        if let Some(conflict) = err.conflict() {
+            report.diagnostics.push(DiagnosticItem {
+                code: "conflict".to_string(),
+                message: summarize_conflict(conflict),
+            });
+        }
+        for message in summarize_unapplied(&entries) {
+            report.diagnostics.push(DiagnosticItem {
+                code: "unapplied".to_string(),
+                message,
+            });
+        }
         return Err(ApplyPatchError::Execution(Box::new(PatchExecutionError {
             message,
             report,
@@ -1833,20 +2739,71 @@ fn apply_hunks_with_config(
         0
     };
 
-    let report = PatchReport {
+    let mut report = PatchReport {
         mode: config.mode,
         status: PatchReportStatus::Success,
         duration_ms,
         operations: summaries,
         options: ReportOptions::from(config),
+        formatting: Vec::new(),
+        post_checks: Vec::new(),
+        diagnostics: Vec::new(),
+        batch: None,
+        artifacts: ArtifactSummary::default(),
+        amendment_template: None,
         errors: Vec::new(),
     };
 
     if matches!(report.mode, PatchReportMode::Apply)
         && matches!(report.status, PatchReportStatus::Success)
-        && let Err(err) = stage_git_changes(&config.root, &report.operations)
     {
-        eprintln!("Warning: failed to stage changes in git: {err}");
+        report.formatting = formatting::run_auto_formatters(&config.root, &report.operations);
+        if let Err(err) = stage_git_changes(&config.root, &report.operations) {
+            eprintln!("Warning: failed to stage changes in git: {err}");
+        }
+        report.post_checks = post_checks::run_post_checks(&config.root, &report.operations);
+
+        if report
+            .formatting
+            .iter()
+            .any(|outcome| outcome.status == TaskStatus::Failed)
+        {
+            report.diagnostics.push(DiagnosticItem {
+                code: "formatting_failed".to_string(),
+                message: "One or more formatters exited with an error".to_string(),
+            });
+        } else if report
+            .formatting
+            .iter()
+            .any(|outcome| outcome.status == TaskStatus::Skipped)
+        {
+            report.diagnostics.push(DiagnosticItem {
+                code: "formatting_skipped".to_string(),
+                message: "Some formatters were skipped because the tool was unavailable"
+                    .to_string(),
+            });
+        }
+
+        if report
+            .post_checks
+            .iter()
+            .any(|outcome| outcome.status == TaskStatus::Failed)
+        {
+            report.diagnostics.push(DiagnosticItem {
+                code: "post_checks_failed".to_string(),
+                message: "Post-check command reported a failure".to_string(),
+            });
+        } else if report
+            .post_checks
+            .iter()
+            .any(|outcome| outcome.status == TaskStatus::Skipped)
+        {
+            report.diagnostics.push(DiagnosticItem {
+                code: "post_checks_skipped".to_string(),
+                message: "Some post-checks were skipped because the command was unavailable"
+                    .to_string(),
+            });
+        }
     }
 
     Ok(report)
@@ -2019,6 +2976,24 @@ fn print_operations_summary(
     for op in operations {
         let added = op.lines_added;
         let removed = op.lines_removed;
+        if let Some(symbol) = op.symbol.as_ref() {
+            writeln!(
+                out,
+                "- symbol({}): {} :: {} (+{}, -{}) [{}]",
+                symbol.kind.as_str(),
+                op.path.display(),
+                symbol.symbol,
+                added,
+                removed,
+                symbol.strategy.as_str()
+            )?;
+            if let Some(reason) = &symbol.reason
+                && !reason.is_empty()
+            {
+                writeln!(out, "  -> {reason}")?;
+            }
+            continue;
+        }
         match op.action {
             OperationAction::Add => {
                 writeln!(out, "- add: {} (+{})", op.path.display(), added)?;
@@ -2080,6 +3055,20 @@ pub(crate) fn report_to_json(report: &PatchReport) -> serde_json::Value {
         .operations
         .iter()
         .map(|op| {
+            let symbol = op.symbol.as_ref().map(|info| {
+                json!({
+                    "kind": info.kind.as_str(),
+                    "symbol": info.symbol.to_string(),
+                    "strategy": info.strategy.as_str(),
+                    "location": {
+                        "start_line": info.location.start_line,
+                        "start_col": info.location.start_col,
+                        "end_line": info.location.end_line,
+                        "end_col": info.location.end_col,
+                    },
+                    "reason": info.reason.clone(),
+                })
+            });
             json!({
                 "action": match op.action {
                     OperationAction::Add => "add",
@@ -2100,9 +3089,80 @@ pub(crate) fn report_to_json(report: &PatchReport) -> serde_json::Value {
                     OperationStatus::Failed => "failed",
                 },
                 "message": op.message.clone(),
+                "symbol": symbol,
             })
         })
         .collect::<Vec<_>>();
+
+    let formatting = report
+        .formatting
+        .iter()
+        .map(|item| {
+            json!({
+                "tool": item.tool,
+                "scope": item.scope,
+                "status": item.status.as_str(),
+                "duration_ms": item.duration_ms,
+                "files": item
+                    .files
+                    .iter()
+                    .map(|path| path.display().to_string())
+                    .collect::<Vec<_>>(),
+                "note": item.note,
+            })
+        })
+        .collect::<Vec<_>>();
+
+    let post_checks = report
+        .post_checks
+        .iter()
+        .map(|item| {
+            json!({
+                "name": item.name,
+                "command": item.command,
+                "cwd": item.cwd.display().to_string(),
+                "status": item.status.as_str(),
+                "duration_ms": item.duration_ms,
+                "note": item.note,
+                "stdout": item.stdout,
+                "stderr": item.stderr,
+            })
+        })
+        .collect::<Vec<_>>();
+
+    let diagnostics = report
+        .diagnostics
+        .iter()
+        .map(|item| json!({ "code": item.code, "message": item.message }))
+        .collect::<Vec<_>>();
+
+    let artifacts = json!({
+        "log": report
+            .artifacts
+            .log
+            .as_ref()
+            .map(|path| path.display().to_string()),
+        "conflicts": report
+            .artifacts
+            .conflicts
+            .iter()
+            .map(|path| path.display().to_string())
+            .collect::<Vec<_>>(),
+        "unapplied": report
+            .artifacts
+            .unapplied
+            .iter()
+            .map(|path| path.display().to_string())
+            .collect::<Vec<_>>(),
+    });
+
+    let batch = report.batch.as_ref().map(|batch| {
+        json!({
+            "blocks": batch.blocks,
+            "applied": batch.applied,
+            "failed": batch.failed,
+        })
+    });
 
     json!({
         "status": match report.status {
@@ -2124,7 +3184,14 @@ pub(crate) fn report_to_json(report: &PatchReport) -> serde_json::Value {
             "preserve_mode": report.options.preserve_mode,
             "preserve_times": report.options.preserve_times,
             "new_file_mode": report.options.new_file_mode,
+            "symbol_fallback_mode": report.options.symbol_fallback_mode.as_str(),
         },
+        "formatting": formatting,
+        "post_checks": post_checks,
+        "diagnostics": diagnostics,
+        "batch": batch,
+        "artifacts": artifacts,
+        "amendment_template": report.amendment_template,
     })
 }
 
@@ -2437,6 +3504,7 @@ mod tests {
             "{prefix}apply_patch <<'PATCH'\n*** Begin Patch\n*** Add File: foo\n+hi\n*** End Patch\nPATCH"
         )
     }
+
 
     fn heredoc_script_ps(prefix: &str, suffix: &str) -> String {
         format!(
@@ -2781,6 +3849,32 @@ PATCH"#,
         assert_eq!(stderr_str, "");
         let contents = fs::read_to_string(&path).unwrap();
         assert_eq!(contents, "foo\nbaz\n");
+    }
+
+    #[test]
+    fn test_replace_symbol_body_updates_function() {
+        let dir = tempdir().unwrap();
+        let file = dir.path().join("lib.rs");
+        fs::write(&file, "fn greet() {\n    println!(\"hi\");\n}\n").unwrap();
+
+        let patch = format!(
+            "*** Begin Patch\n*** Replace Symbol Body: {}::greet\n+{{\n+    println!(\"hello\");\n+}}\n*** End Patch",
+            file.display()
+        );
+
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+        apply_patch(&patch, &mut stdout, &mut stderr).unwrap();
+
+        let updated = fs::read_to_string(&file).unwrap();
+        assert_eq!(
+            updated.trim_end(),
+            "fn greet() {\n    println!(\"hello\");\n}"
+        );
+
+        let summary = String::from_utf8(stdout).unwrap();
+        assert!(summary.contains("symbol(replace-body):"));
+        assert!(stderr.is_empty());
     }
 
     #[test]
@@ -3518,6 +4612,7 @@ g
             "begin_patch".to_string(),
             "--dry-run".to_string(),
             "--no-logs".to_string(),
+            "--machine".to_string(),
             "--output-format".to_string(),
             "json".to_string(),
             "--stdout-schema".to_string(),
@@ -3537,5 +4632,97 @@ g
             }
             other => panic!("expected Body, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn collect_unapplied_entries_captures_failed_changes() {
+        let tmp = tempdir().expect("tmp");
+        let root = tmp.path();
+
+        let add_path = root.join("add.txt");
+        let update_path = root.join("update.txt");
+        let delete_path = root.join("delete.txt");
+
+        fs::write(&update_path, "old\n").expect("write update");
+        fs::write(&delete_path, "remove\n").expect("write delete");
+
+        let planned = vec![
+            PlannedChange {
+                summary_index: 0,
+                kind: PlannedChangeKind::Add {
+                    path: add_path.clone(),
+                    content: "new file\n".to_string(),
+                    line_ending: LineEnding::default(),
+                },
+            },
+            PlannedChange {
+                summary_index: 1,
+                kind: PlannedChangeKind::Update {
+                    original: update_path.clone(),
+                    dest: update_path.clone(),
+                    new_content: "updated\n".to_string(),
+                    line_ending: LineEnding::default(),
+                    metadata: FileMetadataSnapshot {
+                        permissions: None,
+                        accessed: None,
+                        modified: None,
+                    },
+                    reference_had_final_newline: true,
+                },
+            },
+            PlannedChange {
+                summary_index: 2,
+                kind: PlannedChangeKind::Delete {
+                    path: delete_path.clone(),
+                },
+            },
+        ];
+
+        let summaries = vec![
+            OperationSummary::new(OperationAction::Add, add_path.clone())
+                .with_status(OperationStatus::Planned),
+            OperationSummary::new(OperationAction::Update, update_path.clone())
+                .with_status(OperationStatus::Failed),
+            OperationSummary::new(OperationAction::Delete, delete_path.clone())
+                .with_status(OperationStatus::Failed),
+        ];
+
+        let entries = collect_unapplied_entries(&planned, &summaries);
+        assert_eq!(entries.len(), 3);
+
+        let add_entry = entries
+            .iter()
+            .find(|entry| entry.path == add_path)
+            .expect("add entry");
+        assert_eq!(add_entry.kind, UnappliedKind::Add);
+        assert_eq!(add_entry.contents, "new file\n");
+
+        let update_entry = entries
+            .iter()
+            .find(|entry| entry.path == update_path)
+            .expect("update entry");
+        assert_eq!(update_entry.kind, UnappliedKind::Update);
+        assert_eq!(update_entry.contents, "updated\n");
+
+        let delete_entry = entries
+            .iter()
+            .find(|entry| entry.path == delete_path)
+            .expect("delete entry");
+        assert_eq!(delete_entry.kind, UnappliedKind::Delete);
+        assert_eq!(delete_entry.contents, "remove\n");
+    }
+
+    #[test]
+    fn summarize_unapplied_produces_messages() {
+        let entry = UnappliedEntry {
+            path: PathBuf::from("foo.rs"),
+            kind: UnappliedKind::Update,
+            contents: "fn main() {}\n".to_string(),
+        };
+
+        let summaries = summarize_unapplied(&[entry]);
+        assert_eq!(summaries.len(), 1);
+        assert!(summaries[0].contains("foo.rs"));
+        assert!(summaries[0].contains("fn main() {}"));
     }
 }

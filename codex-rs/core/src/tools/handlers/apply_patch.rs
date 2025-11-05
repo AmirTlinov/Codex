@@ -1,21 +1,26 @@
 use std::collections::BTreeMap;
-use std::collections::HashMap;
-use std::sync::Arc;
 
+use crate::apply_patch;
+use crate::apply_patch::InternalApplyPatchInvocation;
+use crate::apply_patch::convert_apply_patch_to_protocol;
 use crate::client_common::tools::FreeformTool;
 use crate::client_common::tools::FreeformToolFormat;
 use crate::client_common::tools::ResponsesApiTool;
 use crate::client_common::tools::ToolSpec;
-use crate::exec::ExecParams;
 use crate::function_tool::FunctionCallError;
-use crate::openai_tools::JsonSchema;
 use crate::tools::context::ToolInvocation;
 use crate::tools::context::ToolOutput;
 use crate::tools::context::ToolPayload;
-use crate::tools::handle_container_exec_with_params;
+use crate::tools::events::ToolEmitter;
+use crate::tools::events::ToolEventCtx;
+use crate::tools::orchestrator::ToolOrchestrator;
 use crate::tools::registry::ToolHandler;
 use crate::tools::registry::ToolKind;
+use crate::tools::runtimes::apply_patch::ApplyPatchRequest;
+use crate::tools::runtimes::apply_patch::ApplyPatchRuntime;
+use crate::tools::sandboxing::ToolCtx;
 use crate::tools::spec::ApplyPatchToolArgs;
+use crate::tools::spec::JsonSchema;
 use async_trait::async_trait;
 use serde::Deserialize;
 use serde::Serialize;
@@ -42,7 +47,6 @@ impl ToolHandler for ApplyPatchHandler {
             session,
             turn,
             tracker,
-            sub_id,
             call_id,
             tool_name,
             payload,
@@ -65,30 +69,88 @@ impl ToolHandler for ApplyPatchHandler {
             }
         };
 
-        let exec_params = ExecParams {
-            command: vec!["apply_patch".to_string(), patch_input.clone()],
-            cwd: turn.cwd.clone(),
-            timeout_ms: None,
-            env: HashMap::new(),
-            with_escalated_permissions: None,
-            justification: None,
-        };
+        // Re-parse and verify the patch so we can compute changes and approval.
+        // Avoid building temporary ExecParams/command vectors; derive directly from inputs.
+        let cwd = turn.cwd.clone();
+        let command = vec!["apply_patch".to_string(), patch_input.clone()];
+        match codex_apply_patch::maybe_parse_apply_patch_verified(&command, &cwd) {
+            codex_apply_patch::MaybeApplyPatchVerified::Body(changes) => {
+                match apply_patch::apply_patch(session.as_ref(), turn.as_ref(), &call_id, changes)
+                    .await
+                {
+                    InternalApplyPatchInvocation::Output(item) => {
+                        let content = item?;
+                        Ok(ToolOutput::Function {
+                            content,
+                            content_items: None,
+                            success: Some(true),
+                        })
+                    }
+                    InternalApplyPatchInvocation::DelegateToExec(apply) => {
+                        let emitter = ToolEmitter::apply_patch(
+                            convert_apply_patch_to_protocol(&apply.action),
+                            !apply.user_explicitly_approved_this_action,
+                            None,
+                        );
+                        let event_ctx = ToolEventCtx::new(
+                            session.as_ref(),
+                            turn.as_ref(),
+                            &call_id,
+                            Some(&tracker),
+                        );
+                        emitter.begin(event_ctx).await;
 
-        let content = handle_container_exec_with_params(
-            tool_name.as_str(),
-            exec_params,
-            Arc::clone(&session),
-            Arc::clone(&turn),
-            Arc::clone(&tracker),
-            sub_id.clone(),
-            call_id.clone(),
-        )
-        .await?;
+                        let req = ApplyPatchRequest {
+                            patch: apply.action.patch.clone(),
+                            cwd: apply.action.cwd.clone(),
+                            timeout_ms: None,
+                            user_explicitly_approved: apply.user_explicitly_approved_this_action,
+                            codex_exe: turn.codex_linux_sandbox_exe.clone(),
+                        };
 
-        Ok(ToolOutput::Function {
-            content,
-            success: Some(true),
-        })
+                        let mut orchestrator = ToolOrchestrator::new();
+                        let mut runtime = ApplyPatchRuntime::new();
+                        let tool_ctx = ToolCtx {
+                            session: session.as_ref(),
+                            turn: turn.as_ref(),
+                            call_id: call_id.clone(),
+                            tool_name: tool_name.to_string(),
+                        };
+                        let out = orchestrator
+                            .run(&mut runtime, &req, &tool_ctx, &turn, turn.approval_policy)
+                            .await;
+                        let event_ctx = ToolEventCtx::new(
+                            session.as_ref(),
+                            turn.as_ref(),
+                            &call_id,
+                            Some(&tracker),
+                        );
+                        let content = emitter.finish(event_ctx, out).await?;
+                        Ok(ToolOutput::Function {
+                            content,
+                            content_items: None,
+                            success: Some(true),
+                        })
+                    }
+                }
+            }
+            codex_apply_patch::MaybeApplyPatchVerified::CorrectnessError(parse_error) => {
+                Err(FunctionCallError::RespondToModel(format!(
+                    "apply_patch verification failed: {parse_error}"
+                )))
+            }
+            codex_apply_patch::MaybeApplyPatchVerified::ShellParseError(error) => {
+                tracing::trace!("Failed to parse apply_patch input, {error:?}");
+                Err(FunctionCallError::RespondToModel(
+                    "apply_patch handler received invalid patch input".to_string(),
+                ))
+            }
+            codex_apply_patch::MaybeApplyPatchVerified::NotApplyPatch => {
+                Err(FunctionCallError::RespondToModel(
+                    "apply_patch handler received non-apply_patch input".to_string(),
+                ))
+            }
+        }
     }
 }
 
@@ -104,7 +166,52 @@ pub enum ApplyPatchToolType {
 pub(crate) fn create_apply_patch_freeform_tool() -> ToolSpec {
     ToolSpec::Freeform(FreeformTool {
         name: "apply_patch".to_string(),
-        description: "Use the `apply_patch` tool to edit files. This is a FREEFORM tool, so do not wrap the patch in JSON.".to_string(),
+        description: r#"`apply_patch` drives Codex CLI file edits for GPT-5-class agents. Feed it a raw `*** Begin Patch` … `*** End Patch` block; the CLI auto-detects modes and never needs extra flags or config.
+
+Patch envelope:
+*** Begin Patch
+[one or more operations]
+*** End Patch
+
+Operations (mix as needed):
+
+File edits
+*** Add File: <path> - create a new file (every line must start with `+`)
+*** Delete File: <path> - remove a file
+*** Update File: <path> - apply diff hunks to an existing file
+
+Symbol edits
+*** Insert Before Symbol: <path::SymbolPath> - insert lines before the declaration
+*** Insert After Symbol: <path::SymbolPath> - insert lines after the declaration
+*** Replace Symbol Body: <path::SymbolPath> - replace the body; provide only `+` lines
+
+Optional headers
+*** Move to: <new path> - place immediately after an Add/Update/Delete to rename the file
+
+Example:
+
+*** Begin Patch
+*** Replace Symbol Body: src/lib.rs::greet
++{
++    println!("Hello, world!");
++}
+*** End Patch
+
+Failure handling:
+- On errors the CLI prints diagnostics plus an amendment template you can edit and reapply.
+- `apply_patch amend` reapplies only the corrected hunks from that template.
+- `apply_patch dry-run` and `apply_patch explain` validate without touching the filesystem.
+
+Output:
+- Human-readable summary of operations, formatting, and checks.
+- Trailing single-line JSON report (`{"schema":"apply_patch/v2",...}`) keeps machine consumers in sync.
+
+Guidelines:
+- Use workspace-relative paths only.
+- Prefix new or inserted content with `+`.
+- Prefer symbol directives over wide diff chunks whenever possible.
+- No on-disk logs are written; everything you need is printed to stdout."#
+            .to_string(),
         format: FreeformToolFormat {
             r#type: "grammar".to_string(),
             syntax: "lark".to_string(),
@@ -125,74 +232,51 @@ pub(crate) fn create_apply_patch_json_tool() -> ToolSpec {
 
     ToolSpec::Function(ResponsesApiTool {
         name: "apply_patch".to_string(),
-        description: r#"Use the `apply_patch` tool to edit files.
-Your patch language is a stripped‑down, file‑oriented diff format designed to be easy to parse and safe to apply. You can think of it as a high‑level envelope:
+        description: r#"`apply_patch` drives Codex CLI file edits for GPT-5-class agents. Feed it a raw `*** Begin Patch` … `*** End Patch` block; the CLI auto-detects modes and never needs extra flags or config.
 
+Patch envelope:
 *** Begin Patch
-[ one or more file sections ]
+[one or more operations]
 *** End Patch
 
-Within that envelope, you get a sequence of file operations.
-You MUST include a header to specify the action you are taking.
-Each operation starts with one of three headers:
+Operations (mix as needed):
 
-*** Add File: <path> - create a new file. Every following line is a + line (the initial contents).
-*** Delete File: <path> - remove an existing file. Nothing follows.
-*** Update File: <path> - patch an existing file in place (optionally with a rename).
+File edits
+*** Add File: <path> - create a new file (every line must start with `+`)
+*** Delete File: <path> - remove a file
+*** Update File: <path> - apply diff hunks to an existing file
 
-May be immediately followed by *** Move to: <new path> if you want to rename the file.
-Then one or more “hunks”, each introduced by @@ (optionally followed by a hunk header).
-Within a hunk each line starts with:
+Symbol edits
+*** Insert Before Symbol: <path::SymbolPath> - insert lines before the declaration
+*** Insert After Symbol: <path::SymbolPath> - insert lines after the declaration
+*** Replace Symbol Body: <path::SymbolPath> - replace the body; provide only `+` lines
 
-For instructions on [context_before] and [context_after]:
-- By default, show 3 lines of code immediately above and 3 lines immediately below each change. If a change is within 3 lines of a previous change, do NOT duplicate the first change’s [context_after] lines in the second change’s [context_before] lines.
-- If 3 lines of context is insufficient to uniquely identify the snippet of code within the file, use the @@ operator to indicate the class or function to which the snippet belongs. For instance, we might have:
-@@ class BaseClass
-[3 lines of pre-context]
-- [old_code]
-+ [new_code]
-[3 lines of post-context]
+Optional headers
+*** Move to: <new path> - place immediately after an Add/Update/Delete to rename the file
 
-- If a code block is repeated so many times in a class or function such that even a single `@@` statement and 3 lines of context cannot uniquely identify the snippet of code, you can use multiple `@@` statements to jump to the right context. For instance:
-
-@@ class BaseClass
-@@ 	 def method():
-[3 lines of pre-context]
-- [old_code]
-+ [new_code]
-[3 lines of post-context]
-
-The full grammar definition is below:
-Patch := Begin { FileOp } End
-Begin := "*** Begin Patch" NEWLINE
-End := "*** End Patch" NEWLINE
-FileOp := AddFile | DeleteFile | UpdateFile
-AddFile := "*** Add File: " path NEWLINE { "+" line NEWLINE }
-DeleteFile := "*** Delete File: " path NEWLINE
-UpdateFile := "*** Update File: " path NEWLINE [ MoveTo ] { Hunk }
-MoveTo := "*** Move to: " newPath NEWLINE
-Hunk := "@@" [ header ] NEWLINE { HunkLine } [ "*** End of File" NEWLINE ]
-HunkLine := (" " | "-" | "+") text NEWLINE
-
-A full patch can combine several operations:
+Example:
 
 *** Begin Patch
-*** Add File: hello.txt
-+Hello world
-*** Update File: src/app.py
-*** Move to: src/main.py
-@@ def greet():
--print("Hi")
-+print("Hello, world!")
-*** Delete File: obsolete.txt
+*** Replace Symbol Body: src/lib.rs::greet
++{
++    println!("Hello, world!");
++}
 *** End Patch
 
-It is important to remember:
+Failure handling:
+- On errors the CLI prints diagnostics plus an amendment template you can edit and reapply.
+- `apply_patch amend` reapplies only the corrected hunks from that template.
+- `apply_patch dry-run` and `apply_patch explain` validate without touching the filesystem.
 
-- You must include a header with your intended action (Add/Delete/Update)
-- You must prefix new lines with `+` even when creating a new file
-- File references can only be relative, NEVER ABSOLUTE.
-"#
+Output:
+- Human-readable summary of operations, formatting, and checks.
+- Trailing single-line JSON report (`{"schema":"apply_patch/v2",...}`) keeps machine consumers in sync.
+
+Guidelines:
+- Use workspace-relative paths only.
+- Prefix new or inserted content with `+`.
+- Prefer symbol directives over wide diff chunks whenever possible.
+- No on-disk logs are written; everything you need is printed to stdout."#
             .to_string(),
         strict: false,
         parameters: JsonSchema::Object {
