@@ -1,10 +1,12 @@
 use std::borrow::Cow;
+use std::convert::TryFrom;
 use std::fmt::Debug;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::AtomicU64;
 
 use crate::AuthManager;
+use crate::background_shell::BackgroundShellManager;
 use crate::client_common::REVIEW_PROMPT;
 use crate::event_mapping::map_response_item_to_event_messages;
 use crate::function_tool::FunctionCallError;
@@ -20,6 +22,7 @@ use codex_protocol::protocol::ExitedReviewModeEvent;
 use codex_protocol::protocol::McpAuthStatus;
 use codex_protocol::protocol::ReviewRequest;
 use codex_protocol::protocol::RolloutItem;
+use codex_protocol::protocol::SandboxCommandAssessment;
 use codex_protocol::protocol::SessionSource;
 use codex_protocol::protocol::TaskStartedEvent;
 use codex_protocol::protocol::TurnAbortReason;
@@ -58,6 +61,7 @@ use crate::exec_command::WriteStdinParams;
 use crate::executor::Executor;
 use crate::executor::ExecutorConfig;
 use crate::executor::normalize_exec_result;
+use crate::foreground_shell::ForegroundShellRegistry;
 use crate::mcp::auth::compute_auth_statuses;
 use crate::mcp_connection_manager::McpConnectionManager;
 use crate::model_family::find_family_for_model;
@@ -109,6 +113,7 @@ use crate::tools::ToolRouter;
 use crate::tools::context::SharedTurnDiffTracker;
 use crate::tools::format_exec_output_str;
 use crate::tools::parallel::ToolCallRuntime;
+use crate::tools::sandboxing::ApprovalStore;
 use crate::turn_diff_tracker::TurnDiffTracker;
 use crate::unified_exec::UnifiedExecError;
 use crate::unified_exec::UnifiedExecOutputWindow;
@@ -309,6 +314,7 @@ pub(crate) struct Session {
 #[derive(Debug)]
 pub(crate) struct TurnContext {
     pub(crate) client: ModelClient,
+    pub(crate) sub_id: String,
     /// The session's current working directory. All relative paths provided by
     /// the model as well as sandbox policies are resolved against this path
     /// instead of `std::env::current_dir()`.
@@ -321,6 +327,7 @@ pub(crate) struct TurnContext {
     pub(crate) tools_config: ToolsConfig,
     pub(crate) is_review_mode: bool,
     pub(crate) final_output_json_schema: Option<Value>,
+    pub(crate) codex_linux_sandbox_exe: Option<PathBuf>,
 }
 
 impl TurnContext {
@@ -507,12 +514,19 @@ impl Session {
             terminal::user_agent(),
         );
 
+        let model_context_window_u64 = config
+            .model_context_window
+            .and_then(|value| u64::try_from(value).ok());
+        let model_max_output_tokens_u64 = config
+            .model_max_output_tokens
+            .and_then(|value| u64::try_from(value).ok());
+
         otel_event_manager.conversation_starts(
             config.model_provider.name.as_str(),
             config.model_reasoning_effort,
             config.model_reasoning_summary,
-            config.model_context_window,
-            config.model_max_output_tokens,
+            model_context_window_u64,
+            model_max_output_tokens_u64,
             config.model_auto_compact_token_limit,
             config.approval_policy,
             config.sandbox_policy.clone(),
@@ -533,6 +547,7 @@ impl Session {
         );
         let turn_context = TurnContext {
             client,
+            sub_id: INITIAL_SUBMIT_ID.to_string(),
             tools_config: ToolsConfig::new(&ToolsConfigParams {
                 model_family: &config.model_family,
                 features: &config.features,
@@ -545,6 +560,7 @@ impl Session {
             cwd,
             is_review_mode: false,
             final_output_json_schema: None,
+            codex_linux_sandbox_exe: config.codex_linux_sandbox_exe.clone(),
         };
         let services = SessionServices {
             mcp_connection_manager,
@@ -559,6 +575,9 @@ impl Session {
                 turn_context.cwd.clone(),
                 config.codex_linux_sandbox_exe.clone(),
             )),
+            background_shell: BackgroundShellManager::new(),
+            foreground_shell: ForegroundShellRegistry::new(),
+            tool_approvals: Mutex::new(ApprovalStore::default()),
         };
 
         let sess = Arc::new(Session {
@@ -600,7 +619,7 @@ impl Session {
         self.tx_event.clone()
     }
 
-    fn next_internal_sub_id(&self) -> String {
+    pub(crate) fn next_internal_sub_id(&self) -> String {
         let id = self
             .next_internal_sub_id
             .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
@@ -659,6 +678,7 @@ impl Session {
         command: Vec<String>,
         cwd: PathBuf,
         reason: Option<String>,
+        risk: Option<SandboxCommandAssessment>,
     ) -> ReviewDecision {
         // Add the tx_approve callback to the map before sending the request.
         let (tx_approve, rx_approve) = oneshot::channel();
@@ -685,6 +705,7 @@ impl Session {
                 command,
                 cwd,
                 reason,
+                risk,
                 parsed_cmd,
             }),
         };
@@ -753,7 +774,7 @@ impl Session {
 
     /// Records input items: always append to conversation history and
     /// persist these response items to rollout.
-    async fn record_conversation_items(&self, items: &[ResponseItem]) {
+    pub(crate) async fn record_conversation_items(&self, items: &[ResponseItem]) {
         self.record_into_history(items).await;
         self.persist_rollout_response_items(items).await;
     }
@@ -1313,7 +1334,8 @@ async fn submission_loop(
                 updated_config.model = effective_model.clone();
                 updated_config.model_family = effective_family.clone();
                 if let Some(model_info) = get_model_info(&effective_family) {
-                    updated_config.model_context_window = Some(model_info.context_window);
+                    updated_config.model_context_window =
+                        i64::try_from(model_info.context_window).ok();
                 }
 
                 let otel_event_manager = prev.client.get_otel_event_manager().with_model(
@@ -1344,6 +1366,7 @@ async fn submission_loop(
 
                 let new_turn_context = TurnContext {
                     client,
+                    sub_id: prev.sub_id.clone(),
                     tools_config,
                     user_instructions: prev.user_instructions.clone(),
                     base_instructions: prev.base_instructions.clone(),
@@ -1353,6 +1376,7 @@ async fn submission_loop(
                     cwd: new_cwd.clone(),
                     is_review_mode: false,
                     final_output_json_schema: None,
+                    codex_linux_sandbox_exe: config.codex_linux_sandbox_exe.clone(),
                 };
 
                 // Install the new persistent context for subsequent tasks/turns.
@@ -1411,7 +1435,8 @@ async fn submission_loop(
                     per_turn_config.model = model.clone();
                     per_turn_config.model_family = model_family.clone();
                     if let Some(model_info) = get_model_info(&model_family) {
-                        per_turn_config.model_context_window = Some(model_info.context_window);
+                        per_turn_config.model_context_window =
+                            i64::try_from(model_info.context_window).ok();
                     }
 
                     let otel_event_manager =
@@ -1434,6 +1459,7 @@ async fn submission_loop(
 
                     let fresh_turn_context = TurnContext {
                         client,
+                        sub_id: sub.id.clone(),
                         tools_config: ToolsConfig::new(&ToolsConfigParams {
                             model_family: &model_family,
                             features: &config.features,
@@ -1446,6 +1472,7 @@ async fn submission_loop(
                         cwd,
                         is_review_mode: false,
                         final_output_json_schema,
+                        codex_linux_sandbox_exe: config.codex_linux_sandbox_exe.clone(),
                     };
 
                     // if the environment context has changed, record it in the conversation history
@@ -1692,7 +1719,7 @@ async fn spawn_review_thread(
     per_turn_config.model_reasoning_effort = Some(ReasoningEffortConfig::Low);
     per_turn_config.model_reasoning_summary = ReasoningSummaryConfig::Detailed;
     if let Some(model_info) = get_model_info(&model_family) {
-        per_turn_config.model_context_window = Some(model_info.context_window);
+        per_turn_config.model_context_window = i64::try_from(model_info.context_window).ok();
     }
 
     let otel_event_manager = parent_turn_context
@@ -1716,6 +1743,7 @@ async fn spawn_review_thread(
 
     let review_turn_context = TurnContext {
         client,
+        sub_id: sub_id.clone(),
         tools_config,
         user_instructions: None,
         base_instructions: Some(base_instructions.clone()),
@@ -1725,6 +1753,7 @@ async fn spawn_review_thread(
         cwd: parent_turn_context.cwd.clone(),
         is_review_mode: true,
         final_output_json_schema: None,
+        codex_linux_sandbox_exe: parent_turn_context.codex_linux_sandbox_exe.clone(),
     };
 
     // Seed the child task with the review prompt as the initial user message.
@@ -2491,7 +2520,7 @@ pub(super) fn get_last_assistant_message_from_turn(responses: &[ResponseItem]) -
         }
     })
 }
-fn convert_call_tool_result_to_function_call_output_payload(
+pub(crate) fn convert_call_tool_result_to_function_call_output_payload(
     call_tool_result: &CallToolResult,
 ) -> FunctionCallOutputPayload {
     let CallToolResult {
@@ -2896,6 +2925,7 @@ mod tests {
         });
         let turn_context = TurnContext {
             client,
+            sub_id: INITIAL_SUBMIT_ID.to_string(),
             cwd: config.cwd.clone(),
             base_instructions: config.base_instructions.clone(),
             user_instructions: config.user_instructions.clone(),
@@ -2905,6 +2935,7 @@ mod tests {
             tools_config,
             is_review_mode: false,
             final_output_json_schema: None,
+            codex_linux_sandbox_exe: config.codex_linux_sandbox_exe.clone(),
         };
         let services = SessionServices {
             mcp_connection_manager: McpConnectionManager::default(),
@@ -2919,6 +2950,9 @@ mod tests {
                 turn_context.cwd.clone(),
                 None,
             )),
+            background_shell: BackgroundShellManager::new(),
+            foreground_shell: ForegroundShellRegistry::new(),
+            tool_approvals: Mutex::new(ApprovalStore::default()),
         };
         let session = Session {
             conversation_id,
@@ -2964,6 +2998,7 @@ mod tests {
         });
         let turn_context = Arc::new(TurnContext {
             client,
+            sub_id: INITIAL_SUBMIT_ID.to_string(),
             cwd: config.cwd.clone(),
             base_instructions: config.base_instructions.clone(),
             user_instructions: config.user_instructions.clone(),
@@ -2973,6 +3008,7 @@ mod tests {
             tools_config,
             is_review_mode: false,
             final_output_json_schema: None,
+            codex_linux_sandbox_exe: config.codex_linux_sandbox_exe.clone(),
         });
         let services = SessionServices {
             mcp_connection_manager: McpConnectionManager::default(),
@@ -2987,6 +3023,9 @@ mod tests {
                 config.cwd.clone(),
                 None,
             )),
+            background_shell: BackgroundShellManager::new(),
+            foreground_shell: ForegroundShellRegistry::new(),
+            tool_approvals: Mutex::new(ApprovalStore::default()),
         };
         let session = Arc::new(Session {
             conversation_id,

@@ -45,6 +45,7 @@ async fn compute_auth_status(
         McpServerTransportConfig::StreamableHttp {
             url,
             bearer_token_env_var,
+            ..
         } => {
             determine_streamable_http_auth_status(
                 server_name,

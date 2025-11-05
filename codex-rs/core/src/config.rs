@@ -11,7 +11,6 @@ use crate::config_types::History;
 use crate::config_types::McpServerConfig;
 use crate::config_types::McpServerTransportConfig;
 use crate::config_types::McpTemplate;
-use crate::config_types::Notice;
 use crate::config_types::Notifications;
 use crate::config_types::OtelConfig;
 use crate::config_types::OtelConfigToml;
@@ -41,6 +40,7 @@ use anyhow::Context;
 use codex_app_server_protocol::Tools;
 use codex_app_server_protocol::UserSavedConfig;
 use codex_protocol::config_types::ForcedLoginMethod;
+use codex_protocol::config_types::Notice;
 use codex_protocol::config_types::ReasoningEffort;
 use codex_protocol::config_types::ReasoningSummary;
 use codex_protocol::config_types::SandboxMode;
@@ -58,6 +58,7 @@ use similar::DiffableStr;
 use std::cmp::max;
 use std::collections::BTreeMap;
 use std::collections::HashMap;
+use std::convert::TryFrom;
 use std::fs;
 use std::io::BufReader;
 use std::io::ErrorKind;
@@ -548,6 +549,20 @@ pub async fn load_global_mcp_servers(
     )?;
 
     Ok(config.mcp_servers.into_iter().collect())
+}
+
+pub fn load_global_mcp_servers_blocking(
+    codex_home: &Path,
+) -> std::io::Result<BTreeMap<String, McpServerConfig>> {
+    if let Ok(handle) = tokio::runtime::Handle::try_current() {
+        handle.block_on(load_global_mcp_servers(codex_home))
+    } else {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .map_err(|err| std::io::Error::new(std::io::ErrorKind::Other, err))?;
+        runtime.block_on(load_global_mcp_servers(codex_home))
+    }
 }
 
 /// We briefly allowed plain text bearer_token fields in MCP server configs.
@@ -1598,6 +1613,7 @@ impl Config {
         };
 
         let feature_overrides = FeatureOverrides {
+            include_plan_tool: None,
             include_apply_patch_tool: include_apply_patch_tool_override,
             include_view_image_tool: include_view_image_tool_override,
             web_search_request: override_tools_web_search_request,
@@ -1766,13 +1782,15 @@ impl Config {
         }
 
         let openai_model_info = get_model_info(&model_family);
-        let model_context_window = cfg
-            .model_context_window
-            .or_else(|| openai_model_info.as_ref().map(|info| info.context_window));
+        let model_context_window = cfg.model_context_window.or_else(|| {
+            openai_model_info
+                .as_ref()
+                .and_then(|info| i64::try_from(info.context_window).ok())
+        });
         let model_max_output_tokens = cfg.model_max_output_tokens.or_else(|| {
             openai_model_info
                 .as_ref()
-                .map(|info| info.max_output_tokens)
+                .and_then(|info| i64::try_from(info.max_output_tokens).ok())
         });
         let model_auto_compact_token_limit = cfg.model_auto_compact_token_limit.or_else(|| {
             openai_model_info

@@ -4,6 +4,7 @@ use std::path::PathBuf;
 use crate::protocol::AskForApproval;
 use codex_protocol::config_types::ReasoningEffort;
 use codex_protocol::config_types::ReasoningSummary;
+use codex_protocol::config_types::SandboxMode;
 use codex_protocol::config_types::Verbosity;
 
 /// Collection of common configuration options that a user can define as a unit
@@ -19,6 +20,7 @@ pub struct ConfigProfile {
     pub model_reasoning_summary: Option<ReasoningSummary>,
     pub model_verbosity: Option<Verbosity>,
     pub chatgpt_base_url: Option<String>,
+    pub sandbox_mode: Option<SandboxMode>,
     pub experimental_instructions_file: Option<PathBuf>,
     pub include_plan_tool: Option<bool>,
     pub include_apply_patch_tool: Option<bool>,
@@ -28,6 +30,7 @@ pub struct ConfigProfile {
     pub experimental_use_exec_command_tool: Option<bool>,
     pub experimental_use_rmcp_client: Option<bool>,
     pub experimental_use_freeform_apply_patch: Option<bool>,
+    pub experimental_sandbox_command_assessment: Option<bool>,
     pub tools_web_search: Option<bool>,
     pub tools_view_image: Option<bool>,
     /// Optional feature toggles scoped to this profile.
@@ -45,6 +48,7 @@ impl From<ConfigProfile> for codex_app_server_protocol::Profile {
             model_reasoning_summary: config_profile.model_reasoning_summary,
             model_verbosity: config_profile.model_verbosity,
             chatgpt_base_url: config_profile.chatgpt_base_url,
+            sandbox_mode: config_profile.sandbox_mode,
         }
     }
 }

@@ -250,7 +250,11 @@ impl CodexMessageProcessor {
             }
         }
 
-        match login_with_api_key(&self.config.codex_home, &params.api_key) {
+        match login_with_api_key(
+            &self.config.codex_home,
+            self.config.cli_auth_credentials_store_mode,
+            &params.api_key,
+        ) {
             Ok(()) => {
                 self.auth_manager.reload();
                 self.outgoing

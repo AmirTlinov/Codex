@@ -38,7 +38,11 @@ pub async fn run_main(opts: ProtoCli) -> anyhow::Result<()> {
 
     let config = Config::load_with_cli_overrides(overrides_vec, ConfigOverrides::default()).await?;
     let conversation_manager = ConversationManager::new(
-        AuthManager::shared(config.codex_home.clone(), true),
+        AuthManager::shared(
+            config.codex_home.clone(),
+            config.cli_auth_credentials_store_mode,
+            true,
+        ),
         SessionSource::Cli,
     );
     let NewConversation {

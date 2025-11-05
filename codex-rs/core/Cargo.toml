@@ -27,6 +27,9 @@ codex-otel = { workspace = true, features = ["otel"] }
 codex-protocol = { workspace = true }
 codex-rmcp-client = { workspace = true }
 codex-utils-string = { workspace = true }
+codex-utils-tokenizer = { workspace = true }
+codex-utils-pty = { workspace = true }
+codex-keyring-store = { workspace = true }
 dirs = { workspace = true }
 dunce = { workspace = true }
 env-flags = { workspace = true }
@@ -43,6 +46,7 @@ reqwest = { workspace = true, features = ["json", "stream"] }
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
 sha1 = { workspace = true }
+sha2 = { workspace = true }
 shlex = { workspace = true }
 similar = { workspace = true }
 strum_macros = { workspace = true }
@@ -70,6 +74,7 @@ tree-sitter-bash = { workspace = true }
 uuid = { workspace = true, features = ["serde", "v4"] }
 which = { workspace = true }
 wildmatch = { workspace = true }
+walkdir = { workspace = true }
 
 
 [target.'cfg(target_os = "linux")'.dependencies]

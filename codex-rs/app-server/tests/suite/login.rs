@@ -11,6 +11,7 @@ use codex_app_server_protocol::JSONRPCResponse;
 use codex_app_server_protocol::LoginChatGptResponse;
 use codex_app_server_protocol::LogoutChatGptResponse;
 use codex_app_server_protocol::RequestId;
+use codex_core::auth::AuthCredentialsStoreMode;
 use codex_login::login_with_api_key;
 use tempfile::TempDir;
 use tokio::time::timeout;
@@ -43,7 +44,12 @@ stream_max_retries = 0
 async fn logout_chatgpt_removes_auth() {
     let codex_home = TempDir::new().unwrap_or_else(|e| panic!("create tempdir: {e}"));
     create_config_toml(codex_home.path()).expect("write config.toml");
-    login_with_api_key(codex_home.path(), "sk-test-key").expect("seed api key");
+    login_with_api_key(
+        codex_home.path(),
+        AuthCredentialsStoreMode::File,
+        "sk-test-key",
+    )
+    .expect("seed api key");
     assert!(codex_home.path().join("auth.json").exists());
 
     let mut mcp = McpProcess::new_with_env(codex_home.path(), &[("OPENAI_API_KEY", None)])

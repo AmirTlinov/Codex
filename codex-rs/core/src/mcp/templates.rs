@@ -2,12 +2,14 @@ use std::collections::HashMap;
 use std::fs;
 use std::path::Path;
 use std::path::PathBuf;
+use std::time::Duration;
 
 use anyhow::Context;
 use anyhow::Result;
 use serde_json::Value as JsonValue;
 
 use crate::config_types::McpServerConfig;
+use crate::config_types::McpServerTransportConfig;
 use crate::config_types::McpTemplate;
 use crate::config_types::McpTemplateDefaults;
 
@@ -117,6 +119,47 @@ impl McpTemplateDefaults {
                 };
             }
         }
+
+        if !self.env_vars.is_empty()
+            || self.cwd.is_some()
+            || self.command.is_some()
+            || !self.args.is_empty()
+            || self.env.is_some()
+        {
+            if let McpServerTransportConfig::Stdio { env_vars, cwd, .. } = &mut config.transport {
+                if !self.env_vars.is_empty() {
+                    *env_vars = self.env_vars.clone();
+                }
+                if let Some(default_cwd) = &self.cwd {
+                    *cwd = Some(default_cwd.clone());
+                }
+            }
+        }
+
+        if self.http_headers.is_some() || self.env_http_headers.is_some() {
+            if let McpServerTransportConfig::StreamableHttp {
+                http_headers,
+                env_http_headers,
+                ..
+            } = &mut config.transport
+            {
+                if let Some(headers) = &self.http_headers {
+                    *http_headers = if headers.is_empty() {
+                        None
+                    } else {
+                        Some(headers.clone())
+                    };
+                }
+                if let Some(headers) = &self.env_http_headers {
+                    *env_http_headers = if headers.is_empty() {
+                        None
+                    } else {
+                        Some(headers.clone())
+                    };
+                }
+            }
+        }
+
         if let Some(auth) = &self.auth {
             config.auth = Some(auth.clone());
         }
@@ -126,10 +169,18 @@ impl McpTemplateDefaults {
         if !self.tags.is_empty() {
             config.tags = self.tags.clone();
         }
-        if let Some(timeout) = self.startup_timeout_ms {
-            config.set_startup_timeout_ms(Some(timeout));
+        if let Some(timeout_sec) = self.startup_timeout_sec {
+            config.startup_timeout_sec = Duration::try_from_secs_f64(timeout_sec)
+                .ok()
+                .or(config.startup_timeout_sec);
+        } else if let Some(timeout_ms) = self.startup_timeout_ms {
+            config.set_startup_timeout_ms(Some(timeout_ms));
         }
-        if let Some(tool_timeout_ms) = self.tool_timeout_ms {
+        if let Some(tool_timeout_sec) = self.tool_timeout_sec {
+            config.tool_timeout_sec = Duration::try_from_secs_f64(tool_timeout_sec)
+                .ok()
+                .or(config.tool_timeout_sec);
+        } else if let Some(tool_timeout_ms) = self.tool_timeout_ms {
             config.set_tool_timeout_ms(Some(tool_timeout_ms));
         }
         if let Some(description) = &self.description {
@@ -141,6 +192,12 @@ impl McpTemplateDefaults {
             } else {
                 Some(metadata.clone())
             };
+        }
+        if let Some(enabled_tools) = &self.enabled_tools {
+            config.enabled_tools = Some(enabled_tools.clone());
+        }
+        if let Some(disabled_tools) = &self.disabled_tools {
+            config.disabled_tools = Some(disabled_tools.clone());
         }
     }
 }

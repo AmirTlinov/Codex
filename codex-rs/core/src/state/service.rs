@@ -1,7 +1,10 @@
 use crate::RolloutRecorder;
+use crate::background_shell::BackgroundShellManager;
 use crate::exec_command::ExecSessionManager;
 use crate::executor::Executor;
+use crate::foreground_shell::ForegroundShellRegistry;
 use crate::mcp_connection_manager::McpConnectionManager;
+use crate::tools::sandboxing::ApprovalStore;
 use crate::unified_exec::UnifiedExecSessionManager;
 use crate::user_notification::UserNotifier;
 use tokio::sync::Mutex;
@@ -15,4 +18,7 @@ pub(crate) struct SessionServices {
     pub(crate) user_shell: crate::shell::Shell,
     pub(crate) show_raw_agent_reasoning: bool,
     pub(crate) executor: Executor,
+    pub(crate) background_shell: BackgroundShellManager,
+    pub(crate) foreground_shell: ForegroundShellRegistry,
+    pub(crate) tool_approvals: Mutex<ApprovalStore>,
 }

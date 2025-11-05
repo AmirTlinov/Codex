@@ -5,6 +5,7 @@ use crate::JSONRPCNotification;
 use crate::JSONRPCRequest;
 use crate::RequestId;
 use codex_protocol::ConversationId;
+use codex_protocol::config_types::ForcedLoginMethod;
 use codex_protocol::config_types::ReasoningEffort;
 use codex_protocol::config_types::ReasoningSummary;
 use codex_protocol::config_types::SandboxMode;
@@ -482,6 +483,10 @@ pub struct UserSavedConfig {
     pub model_reasoning_summary: Option<ReasoningSummary>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub model_verbosity: Option<Verbosity>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub forced_chatgpt_workspace_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub forced_login_method: Option<ForcedLoginMethod>,
 
     /// Tools
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -507,6 +512,8 @@ pub struct Profile {
     pub model_reasoning_summary: Option<ReasoningSummary>,
     pub model_verbosity: Option<Verbosity>,
     pub chatgpt_base_url: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sandbox_mode: Option<SandboxMode>,
 }
 /// MCP representation of a [`codex_core::config::ToolsToml`].
 #[derive(Deserialize, Debug, Clone, PartialEq, Serialize, TS)]

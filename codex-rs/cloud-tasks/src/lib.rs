@@ -8,6 +8,7 @@ pub mod util;
 pub use cli::Cli;
 
 use anyhow::anyhow;
+use codex_core::auth::AuthCredentialsStoreMode;
 use std::io::IsTerminal;
 use std::io::Read;
 use std::path::PathBuf;
@@ -58,7 +59,7 @@ async fn init_backend(user_agent_suffix: &str) -> anyhow::Result<BackendContext>
 
     let auth = match codex_core::config::find_codex_home()
         .ok()
-        .map(|home| codex_login::AuthManager::new(home, false))
+        .map(|home| codex_login::AuthManager::new(home, AuthCredentialsStoreMode::File, false))
         .and_then(|am| am.auth())
     {
         Some(auth) => auth,

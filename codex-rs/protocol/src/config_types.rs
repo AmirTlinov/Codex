@@ -59,3 +59,21 @@ pub enum SandboxMode {
     #[serde(rename = "danger-full-access")]
     DangerFullAccess,
 }
+
+#[derive(Debug, Serialize, Deserialize, Clone, Copy, PartialEq, Eq, Display, TS)]
+#[serde(rename_all = "kebab-case")]
+#[strum(serialize_all = "kebab-case")]
+pub enum ForcedLoginMethod {
+    ApiKey,
+    Chatgpt,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq, Default, TS)]
+pub struct Notice {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hide_full_access_warning: Option<bool>,
+}
+
+impl Notice {
+    pub const TABLE_KEY: &'static str = "notices";
+}

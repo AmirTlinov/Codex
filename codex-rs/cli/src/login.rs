@@ -46,7 +46,11 @@ pub async fn run_login_with_api_key(
 ) -> ! {
     let config = load_config_or_exit(cli_config_overrides).await;
 
-    match login_with_api_key(&config.codex_home, &api_key) {
+    match login_with_api_key(
+        &config.codex_home,
+        config.cli_auth_credentials_store_mode,
+        &api_key,
+    ) {
         Ok(_) => {
             eprintln!("Successfully logged in");
             std::process::exit(0);
@@ -114,7 +118,7 @@ pub async fn run_login_with_device_code(
 pub async fn run_login_status(cli_config_overrides: CliConfigOverrides) -> ! {
     let config = load_config_or_exit(cli_config_overrides).await;
 
-    match CodexAuth::from_codex_home(&config.codex_home) {
+    match CodexAuth::from_codex_home(&config.codex_home, config.cli_auth_credentials_store_mode) {
         Ok(Some(auth)) => match auth.mode {
             AuthMode::ApiKey => match auth.get_token().await {
                 Ok(api_key) => {
@@ -145,7 +149,7 @@ pub async fn run_login_status(cli_config_overrides: CliConfigOverrides) -> ! {
 pub async fn run_logout(cli_config_overrides: CliConfigOverrides) -> ! {
     let config = load_config_or_exit(cli_config_overrides).await;
 
-    match logout(&config.codex_home) {
+    match logout(&config.codex_home, config.cli_auth_credentials_store_mode) {
         Ok(true) => {
             eprintln!("Successfully logged out");
             std::process::exit(0);

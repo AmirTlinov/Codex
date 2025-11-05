@@ -51,6 +51,12 @@ pub struct McpServerConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub metadata: Option<HashMap<String, String>>,
 
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub enabled_tools: Option<Vec<String>>,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub disabled_tools: Option<Vec<String>>,
+
     /// When `false`, Codex skips initializing this MCP server.
     #[serde(default = "default_enabled")]
     pub enabled: bool,
@@ -75,6 +81,8 @@ impl Default for McpServerConfig {
                 command: String::new(),
                 args: Vec::new(),
                 env: None,
+                env_vars: Vec::new(),
+                cwd: None,
             },
             display_name: None,
             category: None,
@@ -86,6 +94,8 @@ impl Default for McpServerConfig {
             last_verified_at: None,
             tags: Vec::new(),
             metadata: None,
+            enabled_tools: None,
+            disabled_tools: None,
             enabled: true,
             startup_timeout_sec: None,
             tool_timeout_sec: None,
@@ -104,9 +114,9 @@ impl McpServerConfig {
     /// Return stdio transport details (command, args, env) if configured.
     pub fn stdio_details(&self) -> Option<McpStdioDetails<'_>> {
         match &self.transport {
-            McpServerTransportConfig::Stdio { command, args, env } => {
-                Some((command, args, env.as_ref()))
-            }
+            McpServerTransportConfig::Stdio {
+                command, args, env, ..
+            } => Some((command, args, env.as_ref())),
             _ => None,
         }
     }
@@ -124,11 +134,15 @@ impl McpServerConfig {
                 command: String::new(),
                 args: Vec::new(),
                 env: None,
+                env_vars: Vec::new(),
+                cwd: None,
             };
         }
 
         match &mut self.transport {
-            McpServerTransportConfig::Stdio { command, args, env } => (command, args, env),
+            McpServerTransportConfig::Stdio {
+                command, args, env, ..
+            } => (command, args, env),
             _ => unreachable!(),
         }
     }
@@ -139,7 +153,13 @@ impl McpServerConfig {
         args: Vec<String>,
         env: Option<HashMap<String, String>>,
     ) {
-        self.transport = McpServerTransportConfig::Stdio { command, args, env };
+        self.transport = McpServerTransportConfig::Stdio {
+            command,
+            args,
+            env,
+            env_vars: Vec::new(),
+            cwd: None,
+        };
     }
 
     pub fn streamable_http_details(&self) -> Option<(&String, Option<&String>)> {
@@ -147,6 +167,7 @@ impl McpServerConfig {
             McpServerTransportConfig::StreamableHttp {
                 url,
                 bearer_token_env_var,
+                ..
             } => Some((url, bearer_token_env_var.as_ref())),
             _ => None,
         }
@@ -160,6 +181,8 @@ impl McpServerConfig {
         self.transport = McpServerTransportConfig::StreamableHttp {
             url,
             bearer_token_env_var,
+            http_headers: None,
+            env_http_headers: None,
         };
     }
 
@@ -196,10 +219,18 @@ impl<'de> Deserialize<'de> for McpServerConfig {
             args: Option<Vec<String>>,
             #[serde(default)]
             env: Option<HashMap<String, String>>,
+            #[serde(default)]
+            env_vars: Option<Vec<String>>,
+            #[serde(default)]
+            cwd: Option<PathBuf>,
 
             url: Option<String>,
             bearer_token: Option<String>,
             bearer_token_env_var: Option<String>,
+            #[serde(default)]
+            http_headers: Option<HashMap<String, String>>,
+            #[serde(default)]
+            env_http_headers: Option<HashMap<String, String>>,
 
             #[serde(default)]
             startup_timeout_sec: Option<f64>,
@@ -224,13 +255,17 @@ impl<'de> Deserialize<'de> for McpServerConfig {
             #[serde(default)]
             healthcheck: Option<McpHealthcheckConfig>,
             #[serde(default)]
-            tags: Option<Vec<String>>,
-            #[serde(default)]
             created_at: Option<String>,
             #[serde(default)]
             last_verified_at: Option<String>,
             #[serde(default)]
             metadata: Option<HashMap<String, String>>,
+            #[serde(default)]
+            tags: Option<Vec<String>>,
+            #[serde(default)]
+            enabled_tools: Option<Vec<String>>,
+            #[serde(default)]
+            disabled_tools: Option<Vec<String>>,
         }
 
         let raw = RawMcpServerConfig::deserialize(deserializer)?;
@@ -261,8 +296,12 @@ impl<'de> Deserialize<'de> for McpServerConfig {
                 command: Some(command),
                 args,
                 env,
+                env_vars,
+                cwd,
                 url,
                 bearer_token_env_var,
+                http_headers,
+                env_http_headers,
                 ..
             } => {
                 throw_if_set("stdio", "url", url.as_ref())?;
@@ -271,10 +310,14 @@ impl<'de> Deserialize<'de> for McpServerConfig {
                     "bearer_token_env_var",
                     bearer_token_env_var.as_ref(),
                 )?;
+                throw_if_set("stdio", "http_headers", http_headers.as_ref())?;
+                throw_if_set("stdio", "env_http_headers", env_http_headers.as_ref())?;
                 McpServerTransportConfig::Stdio {
                     command,
                     args: args.unwrap_or_default(),
                     env,
+                    env_vars: env_vars.unwrap_or_default(),
+                    cwd,
                 }
             }
             RawMcpServerConfig {
@@ -284,15 +327,23 @@ impl<'de> Deserialize<'de> for McpServerConfig {
                 command,
                 args,
                 env,
+                env_vars,
+                cwd,
+                http_headers,
+                env_http_headers,
                 ..
             } => {
                 throw_if_set("streamable_http", "command", command.as_ref())?;
                 throw_if_set("streamable_http", "args", args.as_ref())?;
                 throw_if_set("streamable_http", "env", env.as_ref())?;
+                throw_if_set("streamable_http", "env_vars", env_vars.as_ref())?;
+                throw_if_set("streamable_http", "cwd", cwd.as_ref())?;
                 throw_if_set("streamable_http", "bearer_token", bearer_token.as_ref())?;
                 McpServerTransportConfig::StreamableHttp {
                     url,
                     bearer_token_env_var,
+                    http_headers,
+                    env_http_headers,
                 }
             }
             _ => return Err(SerdeError::custom("invalid transport")),
@@ -316,6 +367,8 @@ impl<'de> Deserialize<'de> for McpServerConfig {
             last_verified_at: raw.last_verified_at,
             tags: raw.tags.unwrap_or_default(),
             metadata: raw.metadata,
+            enabled_tools: raw.enabled_tools,
+            disabled_tools: raw.disabled_tools,
             enabled: raw.enabled.unwrap_or_else(default_enabled),
             startup_timeout_sec,
             tool_timeout_sec,
@@ -337,6 +390,10 @@ pub enum McpServerTransportConfig {
         args: Vec<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         env: Option<HashMap<String, String>>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        env_vars: Vec<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        cwd: Option<PathBuf>,
     },
     /// https://modelcontextprotocol.io/specification/2025-06-18/basic/transports#streamable-http
     StreamableHttp {
@@ -346,6 +403,10 @@ pub enum McpServerTransportConfig {
         /// The actual secret value must be provided via the environment.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         bearer_token_env_var: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        http_headers: Option<HashMap<String, String>>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        env_http_headers: Option<HashMap<String, String>>,
     },
 }
 
@@ -414,6 +475,12 @@ pub struct McpTemplateDefaults {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub env: Option<HashMap<String, String>>,
 
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub env_vars: Vec<String>,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cwd: Option<PathBuf>,
+
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub auth: Option<McpAuthConfig>,
 
@@ -424,7 +491,19 @@ pub struct McpTemplateDefaults {
     pub tags: Vec<String>,
 
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub http_headers: Option<HashMap<String, String>>,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub env_http_headers: Option<HashMap<String, String>>,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub startup_timeout_sec: Option<f64>,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub startup_timeout_ms: Option<u64>,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_timeout_sec: Option<f64>,
 
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tool_timeout_ms: Option<u64>,
@@ -434,6 +513,12 @@ pub struct McpTemplateDefaults {
 
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub metadata: Option<HashMap<String, String>>,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub enabled_tools: Option<Vec<String>>,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub disabled_tools: Option<Vec<String>>,
 }
 
 mod option_duration_secs {

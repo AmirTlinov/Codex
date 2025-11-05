@@ -1,3 +1,4 @@
+use std::convert::TryFrom;
 use std::io::BufRead;
 use std::path::Path;
 use std::sync::OnceLock;
@@ -111,6 +112,7 @@ impl ModelClient {
     pub fn get_model_context_window(&self) -> Option<u64> {
         self.config
             .model_context_window
+            .and_then(|value| u64::try_from(value).ok())
             .or_else(|| get_model_info(&self.config.model_family).map(|info| info.context_window))
     }
 

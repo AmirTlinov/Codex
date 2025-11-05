@@ -28,7 +28,9 @@ async fn add_and_remove_server_updates_global_config() -> Result<()> {
     assert_eq!(servers.len(), 1);
     let docs = servers.get("docs").expect("server should exist");
     match &docs.transport {
-        McpServerTransportConfig::Stdio { command, args, env } => {
+        McpServerTransportConfig::Stdio {
+            command, args, env, ..
+        } => {
             assert_eq!(command, "echo");
             assert_eq!(args, &vec!["hello".to_string()]);
             assert!(env.is_none());
@@ -112,6 +114,7 @@ async fn add_streamable_http_without_manual_token() -> Result<()> {
         McpServerTransportConfig::StreamableHttp {
             url,
             bearer_token_env_var,
+            ..
         } => {
             assert_eq!(url, "https://example.com/mcp");
             assert!(bearer_token_env_var.is_none());
@@ -150,6 +153,7 @@ async fn add_streamable_http_with_custom_env_var() -> Result<()> {
         McpServerTransportConfig::StreamableHttp {
             url,
             bearer_token_env_var,
+            ..
         } => {
             assert_eq!(url, "https://example.com/issues");
             assert_eq!(bearer_token_env_var.as_deref(), Some("GITHUB_TOKEN"));
