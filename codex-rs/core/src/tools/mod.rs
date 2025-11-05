@@ -1,8 +1,12 @@
 pub mod context;
+pub mod events;
 pub(crate) mod handlers;
+pub mod orchestrator;
 pub mod parallel;
 pub mod registry;
 pub mod router;
+pub mod runtimes;
+pub mod sandboxing;
 pub mod spec;
 
 use crate::apply_patch;
@@ -70,14 +74,8 @@ pub(crate) async fn handle_container_exec_with_params(
     // check if this was a patch, and apply it if so
     let apply_patch_exec = match maybe_parse_apply_patch_verified(&params.command, &params.cwd) {
         MaybeApplyPatchVerified::Body(changes) => {
-            match apply_patch::apply_patch(
-                sess.as_ref(),
-                turn_context.as_ref(),
-                &sub_id,
-                &call_id,
-                changes,
-            )
-            .await
+            match apply_patch::apply_patch(sess.as_ref(), turn_context.as_ref(), &call_id, changes)
+                .await
             {
                 InternalApplyPatchInvocation::Output(item) => return item,
                 InternalApplyPatchInvocation::DelegateToExec(apply_patch_exec) => {

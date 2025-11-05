@@ -180,6 +180,7 @@ impl Executor {
                 request.approval_command.clone(),
                 request.params.cwd.clone(),
                 Some("command failed; retry without sandbox?".to_string()),
+                None,
             )
             .await;
 

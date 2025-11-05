@@ -1,3 +1,4 @@
+use crate::exec::ExecToolCallOutput;
 use thiserror::Error;
 
 #[derive(Debug, Error)]
@@ -23,6 +24,13 @@ pub enum UnifiedExecError {
         #[source]
         error: std::io::Error,
     },
+    #[error("failed to kill unified exec session: {message}")]
+    KillFailed { message: String },
+    #[error("sandbox denied command: {message}")]
+    SandboxDenied {
+        message: String,
+        output: ExecToolCallOutput,
+    },
 }
 
 impl UnifiedExecError {
@@ -36,5 +44,13 @@ impl UnifiedExecError {
 
     pub(crate) fn export_log(error: std::io::Error) -> Self {
         Self::ExportLog { error }
+    }
+
+    pub(crate) fn kill_failed(message: String) -> Self {
+        Self::KillFailed { message }
+    }
+
+    pub(crate) fn sandbox_denied(message: String, output: ExecToolCallOutput) -> Self {
+        Self::SandboxDenied { message, output }
     }
 }

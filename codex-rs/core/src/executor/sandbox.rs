@@ -136,6 +136,7 @@ async fn select_shell_sandbox(
                     request.approval_command.clone(),
                     request.params.cwd.clone(),
                     request.params.justification.clone(),
+                    None,
                 )
                 .await;
 

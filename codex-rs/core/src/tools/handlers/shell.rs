@@ -2,7 +2,8 @@ use async_trait::async_trait;
 use codex_protocol::models::ShellToolCallParams;
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::time::Instant;
+use std::time::Instant as StdInstant;
+use tokio::time::Instant as TokioInstant;
 
 use crate::apply_patch;
 use crate::apply_patch::InternalApplyPatchInvocation;
@@ -44,7 +45,6 @@ impl ShellHandler {
             env: create_env(&turn_context.shell_environment_policy),
             with_escalated_permissions: params.with_escalated_permissions,
             justification: params.justification.clone(),
-            arg0: None,
         }
     }
 
@@ -78,6 +78,7 @@ impl ToolHandler for ShellHandler {
             session,
             turn,
             tracker,
+            sub_id: _sub_id,
             call_id,
             tool_name,
             payload,
@@ -144,7 +145,6 @@ impl ShellHandler {
                         let content = item?;
                         return Ok(ToolOutput::Function {
                             content,
-                            content_items: None,
                             success: Some(true),
                         });
                     }
@@ -189,7 +189,6 @@ impl ShellHandler {
                         let content = emitter.finish(event_ctx, out).await?;
                         return Ok(ToolOutput::Function {
                             content,
-                            content_items: None,
                             success: Some(true),
                         });
                     }
@@ -209,31 +208,6 @@ impl ShellHandler {
             }
         }
 
-        if params.run_in_background {
-            let response = session
-                .services
-                .background_shell
-                .start(
-                    shell_request.clone(),
-                    session.clone(),
-                    turn.clone(),
-                    &tracker,
-                    call_id.clone(),
-                    params.description.clone(),
-                )
-                .await?;
-            let content = serde_json::to_string(&response).map_err(|err| {
-                FunctionCallError::RespondToModel(format!(
-                    "failed to serialize background shell response: {err:?}"
-                ))
-            })?;
-            return Ok(ToolOutput::Function {
-                content,
-                content_items: None,
-                success: Some(true),
-            });
-        }
-
         // Foreground shell execution path using unified exec infrastructure.
         let emitter = ToolEmitter::shell(exec_params.command.clone(), exec_params.cwd.clone());
         let event_ctx =
@@ -250,7 +224,8 @@ impl ShellHandler {
             tool_name: tool_name.to_string(),
         };
 
-        let start_instant = Instant::now();
+        let start_instant = TokioInstant::now();
+        let start_wall = StdInstant::now();
         let unified_session = orchestrator
             .run(
                 &mut runtime,
@@ -278,7 +253,7 @@ impl ShellHandler {
 
         if unified_session.has_exited() {
             let exit_code = unified_session.exit_code().unwrap_or(-1);
-            let duration = Instant::now().saturating_duration_since(start_instant);
+            let duration = StdInstant::now().saturating_duration_since(start_wall);
             let exec_output = ExecToolCallOutput {
                 exit_code,
                 stdout: crate::exec::StreamOutput::new(initial_output.clone()),
@@ -295,7 +270,6 @@ impl ShellHandler {
                 .map_err(FunctionCallError::from)?;
             return Ok(ToolOutput::Function {
                 content,
-                content_items: None,
                 success: Some(true),
             });
         }
@@ -303,7 +277,7 @@ impl ShellHandler {
         let context = UnifiedExecContext::new(session.clone(), turn.clone(), call_id.clone());
         let command_label = exec_params.command.join(" ");
         let session_id = manager
-            .store_session(unified_session, &context, &command_label, start_instant)
+            .store_session(unified_session, &context, &command_label, start_wall)
             .await;
 
         let (state, promotion_rx, promotion_result_rx) = ForegroundShellState::new(session_id);
@@ -319,7 +293,7 @@ impl ShellHandler {
             promotion_rx,
             promotion_result_rx,
             session.clone(),
-            call_id.clone(),
+            turn.clone(),
             command_label.clone(),
             initial_output,
         )
@@ -350,19 +324,13 @@ impl ShellHandler {
                     .map_err(FunctionCallError::from)?;
                 Ok(ToolOutput::Function {
                     content,
-                    content_items: None,
                     success: Some(true),
                 })
             }
             ForegroundCompletion::Promoted(result) => {
                 session.services.foreground_shell.remove(&call_id).await;
 
-                let description = params
-                    .description
-                    .as_ref()
-                    .map(|value| value.trim())
-                    .filter(|value| !value.is_empty())
-                    .map(|value| value.to_string());
+                let description: Option<String> = None;
 
                 let message = match description.as_deref() {
                     Some(desc) => format!(
@@ -403,7 +371,6 @@ impl ShellHandler {
                 })?;
                 Ok(ToolOutput::Function {
                     content,
-                    content_items: None,
                     success: Some(true),
                 })
             }
@@ -418,7 +385,6 @@ impl ShellHandler {
                     .map_err(FunctionCallError::from)?;
                 Ok(ToolOutput::Function {
                     content,
-                    content_items: None,
                     success: Some(false),
                 })
             }

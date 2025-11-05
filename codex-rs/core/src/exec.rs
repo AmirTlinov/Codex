@@ -27,6 +27,7 @@ use crate::protocol::EventMsg;
 use crate::protocol::ExecCommandOutputDeltaEvent;
 use crate::protocol::ExecOutputStream;
 use crate::protocol::SandboxPolicy;
+use crate::sandboxing::ExecEnv;
 use crate::seatbelt::spawn_command_under_seatbelt;
 use crate::spawn::StdioPolicy;
 use crate::spawn::spawn_child_async;
@@ -142,52 +143,7 @@ pub async fn process_exec_tool_call(
     };
     let duration = start.elapsed();
     match raw_output_result {
-        Ok(raw_output) => {
-            #[allow(unused_mut)]
-            let mut timed_out = raw_output.timed_out;
-
-            #[cfg(target_family = "unix")]
-            {
-                if let Some(signal) = raw_output.exit_status.signal() {
-                    if signal == TIMEOUT_CODE {
-                        timed_out = true;
-                    } else {
-                        return Err(CodexErr::Sandbox(SandboxErr::Signal(signal)));
-                    }
-                }
-            }
-
-            let mut exit_code = raw_output.exit_status.code().unwrap_or(-1);
-            if timed_out {
-                exit_code = EXEC_TIMEOUT_EXIT_CODE;
-            }
-
-            let stdout = raw_output.stdout.from_utf8_lossy();
-            let stderr = raw_output.stderr.from_utf8_lossy();
-            let aggregated_output = raw_output.aggregated_output.from_utf8_lossy();
-            let exec_output = ExecToolCallOutput {
-                exit_code,
-                stdout,
-                stderr,
-                aggregated_output,
-                duration,
-                timed_out,
-            };
-
-            if timed_out {
-                return Err(CodexErr::Sandbox(SandboxErr::Timeout {
-                    output: Box::new(exec_output),
-                }));
-            }
-
-            if is_likely_sandbox_denied(sandbox_type, &exec_output) {
-                return Err(CodexErr::Sandbox(SandboxErr::Denied {
-                    output: Box::new(exec_output),
-                }));
-            }
-
-            Ok(exec_output)
-        }
+        Ok(raw_output) => raw_exec_output_to_tool_output(raw_output, sandbox_type, duration),
         Err(err) => {
             tracing::error!("exec error: {err}");
             Err(err)
@@ -200,7 +156,10 @@ pub async fn process_exec_tool_call(
 /// error, but the command itself might fail or succeed for other reasons.
 /// For now, we conservatively check for well known command failure exit codes and
 /// also look for common sandbox denial keywords in the command output.
-fn is_likely_sandbox_denied(sandbox_type: SandboxType, exec_output: &ExecToolCallOutput) -> bool {
+pub(crate) fn is_likely_sandbox_denied(
+    sandbox_type: SandboxType,
+    exec_output: &ExecToolCallOutput,
+) -> bool {
     if sandbox_type == SandboxType::None || exec_output.exit_code == 0 {
         return false;
     }
@@ -298,6 +257,46 @@ pub struct ExecToolCallOutput {
     pub timed_out: bool,
 }
 
+pub async fn execute_exec_env(
+    env: ExecEnv,
+    sandbox_policy: &SandboxPolicy,
+    stdout_stream: Option<StdoutStream>,
+) -> Result<ExecToolCallOutput> {
+    let ExecEnv {
+        command,
+        cwd,
+        env: mut_vars,
+        timeout_ms,
+        sandbox,
+        with_escalated_permissions: _,
+        justification: _,
+        arg0,
+    } = env;
+
+    let (program, args) = command.split_first().ok_or_else(|| {
+        CodexErr::Io(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "command args are empty",
+        ))
+    })?;
+
+    let timeout = Duration::from_millis(timeout_ms.unwrap_or(DEFAULT_TIMEOUT_MS));
+    let start = Instant::now();
+    let child = spawn_child_async(
+        PathBuf::from(program),
+        args.to_vec(),
+        arg0.as_deref(),
+        cwd.clone(),
+        sandbox_policy,
+        StdioPolicy::RedirectForShellTool,
+        mut_vars,
+    )
+    .await?;
+
+    let raw_output = consume_truncated_output(child, timeout, stdout_stream).await?;
+    raw_exec_output_to_tool_output(raw_output, sandbox, start.elapsed())
+}
+
 async fn exec(
     params: ExecParams,
     sandbox_policy: &SandboxPolicy,
@@ -326,6 +325,57 @@ async fn exec(
     )
     .await?;
     consume_truncated_output(child, timeout, stdout_stream).await
+}
+
+fn raw_exec_output_to_tool_output(
+    raw_output: RawExecToolCallOutput,
+    sandbox_type: SandboxType,
+    duration: Duration,
+) -> Result<ExecToolCallOutput> {
+    #[allow(unused_mut)]
+    let mut timed_out = raw_output.timed_out;
+
+    #[cfg(target_family = "unix")]
+    {
+        if let Some(signal) = raw_output.exit_status.signal() {
+            if signal == TIMEOUT_CODE {
+                timed_out = true;
+            } else {
+                return Err(CodexErr::Sandbox(SandboxErr::Signal(signal)));
+            }
+        }
+    }
+
+    let mut exit_code = raw_output.exit_status.code().unwrap_or(-1);
+    if timed_out {
+        exit_code = EXEC_TIMEOUT_EXIT_CODE;
+    }
+
+    let stdout = raw_output.stdout.from_utf8_lossy();
+    let stderr = raw_output.stderr.from_utf8_lossy();
+    let aggregated_output = raw_output.aggregated_output.from_utf8_lossy();
+    let exec_output = ExecToolCallOutput {
+        exit_code,
+        stdout,
+        stderr,
+        aggregated_output,
+        duration,
+        timed_out,
+    };
+
+    if timed_out {
+        return Err(CodexErr::Sandbox(SandboxErr::Timeout {
+            output: Box::new(exec_output),
+        }));
+    }
+
+    if is_likely_sandbox_denied(sandbox_type, &exec_output) {
+        return Err(CodexErr::Sandbox(SandboxErr::Denied {
+            output: Box::new(exec_output),
+        }));
+    }
+
+    Ok(exec_output)
 }
 
 /// Consumes the output of a child process, truncating it so it is suitable for

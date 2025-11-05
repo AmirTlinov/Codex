@@ -45,6 +45,10 @@ const ALIASES: &[Alias] = &[
         legacy_key: "web_search",
         feature: Feature::WebSearchRequest,
     },
+    Alias {
+        legacy_key: "experimental_sandbox_command_assessment",
+        feature: Feature::SandboxCommandAssessment,
+    },
 ];
 
 pub(crate) fn feature_for_key(key: &str) -> Option<Feature> {
@@ -69,6 +73,7 @@ pub struct LegacyFeatureToggles {
     pub experimental_use_rmcp_client: Option<bool>,
     pub tools_web_search: Option<bool>,
     pub tools_view_image: Option<bool>,
+    pub experimental_sandbox_command_assessment: Option<bool>,
 }
 
 impl LegacyFeatureToggles {
@@ -132,6 +137,12 @@ impl LegacyFeatureToggles {
             Feature::ViewImageTool,
             self.tools_view_image,
             "tools.view_image",
+        );
+        set_if_some(
+            features,
+            Feature::SandboxCommandAssessment,
+            self.experimental_sandbox_command_assessment,
+            "experimental_sandbox_command_assessment",
         );
     }
 }

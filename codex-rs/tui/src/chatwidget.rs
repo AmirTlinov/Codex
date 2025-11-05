@@ -1743,7 +1743,6 @@ impl ChatWidget {
             self.add_to_history(history_cell::new_user_prompt(text));
         }
         self.needs_final_message_separator = false;
-
     }
 
     /// Replay a subset of initial events into the UI to seed the transcript when
