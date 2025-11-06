@@ -1685,11 +1685,12 @@ fn schedule_symbol_edit(
     let metadata = FileMetadataSnapshot::from_path(&absolute)?;
 
     let summary_index = summaries.len();
-    let operation_summary = OperationSummary::new(OperationAction::Update, relative_path.to_path_buf())
-        .with_added(added)
-        .with_removed(removed)
-        .with_status(OperationStatus::Planned)
-        .with_symbol(symbol_summary);
+    let operation_summary =
+        OperationSummary::new(OperationAction::Update, relative_path.to_path_buf())
+            .with_added(added)
+            .with_removed(removed)
+            .with_status(OperationStatus::Planned)
+            .with_symbol(symbol_summary);
     summaries.push(operation_summary);
 
     planned.push(PlannedChange {
@@ -1766,16 +1767,16 @@ fn compute_symbol_edit(
         }
         SymbolEditKind::ReplaceBody => {
             let body_range = context.body_range.clone().ok_or_else(|| {
-                symbol_conflict_error(
+                symbol_conflict_error(SymbolConflictParams {
                     path,
                     symbol,
                     new_lines,
                     kind,
-                    "symbol body is unavailable for replacement",
-                    None,
-                    None,
-                    context.reason.clone(),
-                )
+                    reason: "symbol body is unavailable for replacement",
+                    excerpt: None,
+                    location: None,
+                    fallback_reason: context.reason.clone(),
+                })
             })?;
             let start = body_range.start.min(original.len());
             let end = body_range.end.min(original.len());
@@ -1819,21 +1820,28 @@ fn locate_symbol_match(
         SymbolFallbackMode::Ast => {
             let reason =
                 ast_failure.unwrap_or_else(|| "symbol locator did not find a match".to_string());
-            return Err(symbol_conflict_error(
-                path, symbol, new_lines, kind, &reason, None, None, None,
-            ));
-        }
-        SymbolFallbackMode::Disabled => {
-            return Err(symbol_conflict_error(
+            return Err(symbol_conflict_error(SymbolConflictParams {
                 path,
                 symbol,
                 new_lines,
                 kind,
-                "symbol fallback is disabled",
-                None,
-                None,
-                None,
-            ));
+                reason: &reason,
+                excerpt: None,
+                location: None,
+                fallback_reason: None,
+            }));
+        }
+        SymbolFallbackMode::Disabled => {
+            return Err(symbol_conflict_error(SymbolConflictParams {
+                path,
+                symbol,
+                new_lines,
+                kind,
+                reason: "symbol fallback is disabled",
+                excerpt: None,
+                location: None,
+                fallback_reason: None,
+            }));
         }
         SymbolFallbackMode::Fuzzy => {}
     }
@@ -1848,16 +1856,16 @@ fn locate_symbol_match(
             new_lines,
             ast_failure,
         ),
-        Err(failure) => Err(symbol_conflict_error(
+        Err(failure) => Err(symbol_conflict_error(SymbolConflictParams {
             path,
             symbol,
             new_lines,
             kind,
-            &failure.reason,
-            Some(&failure.excerpt),
-            failure.location,
-            ast_failure,
-        )),
+            reason: &failure.reason,
+            excerpt: Some(&failure.excerpt),
+            location: failure.location,
+            fallback_reason: ast_failure,
+        })),
     }
 }
 
@@ -1909,16 +1917,16 @@ fn convert_fallback_match(
     }
 
     if matches!(kind, SymbolEditKind::ReplaceBody) && body_range.is_none() {
-        return Err(symbol_conflict_error(
+        return Err(symbol_conflict_error(SymbolConflictParams {
             path,
             symbol,
             new_lines,
             kind,
-            "unable to determine symbol body without AST match",
-            Some(&fallback_match.excerpt),
-            Some(fallback_match.location),
-            Some(fallback_match.reason.clone()),
-        ));
+            reason: "unable to determine symbol body without AST match",
+            excerpt: Some(&fallback_match.excerpt),
+            location: Some(fallback_match.location),
+            fallback_reason: Some(fallback_match.reason.clone()),
+        }));
     }
 
     if let Some(ast) = ast_reason {
@@ -2071,16 +2079,28 @@ fn count_indent(line: &str) -> usize {
         .sum()
 }
 
-fn symbol_conflict_error(
-    path: &Path,
-    symbol: &SymbolPath,
-    new_lines: &[String],
+struct SymbolConflictParams<'a> {
+    path: &'a Path,
+    symbol: &'a SymbolPath,
+    new_lines: &'a [String],
     kind: SymbolEditKind,
-    reason: &str,
-    excerpt: Option<&[String]>,
+    reason: &'a str,
+    excerpt: Option<&'a [String]>,
     location: Option<LineColumnRange>,
     fallback_reason: Option<String>,
-) -> ApplyPatchError {
+}
+
+fn symbol_conflict_error(params: SymbolConflictParams<'_>) -> ApplyPatchError {
+    let SymbolConflictParams {
+        path,
+        symbol,
+        new_lines,
+        kind,
+        reason,
+        excerpt,
+        location,
+        fallback_reason,
+    } = params;
     let expected = new_lines.to_vec();
     let actual = excerpt
         .map(<[std::string::String]>::to_vec)
@@ -2579,8 +2599,7 @@ fn collect_unapplied_entries(
                     contents: new_content.clone(),
                 });
             }
-            PlannedChangeKind::Delete { path } =>
-            {
+            PlannedChangeKind::Delete { path } => {
                 if let Ok(bytes) = fs::read(path) {
                     entries.push(UnappliedEntry {
                         path: path.clone(),
@@ -2588,7 +2607,7 @@ fn collect_unapplied_entries(
                         contents: String::from_utf8_lossy(&bytes).into_owned(),
                     });
                 }
-            },
+            }
         }
     }
 

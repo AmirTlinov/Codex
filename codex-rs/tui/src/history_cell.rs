@@ -1490,6 +1490,16 @@ mod tests {
         .expect("config")
     }
 
+    fn empty_command_output() -> CommandOutput {
+        CommandOutput {
+            exit_code: 0,
+            stdout: String::new(),
+            stderr: String::new(),
+            aggregated_output: String::new(),
+            formatted_output: String::new(),
+        }
+    }
+
     fn render_lines(lines: &[Line<'static>]) -> Vec<String> {
         lines
             .iter()
@@ -1521,7 +1531,7 @@ mod tests {
             duration: None,
         });
 
-        cell.complete_call(&call_id, CommandOutput::default(), Duration::from_millis(1));
+        cell.complete_call(&call_id, empty_command_output(), Duration::from_millis(1));
 
         let rendered = render_lines(&cell.display_lines(80)).join("\n");
         assert!(rendered.contains("Write"));
@@ -1550,7 +1560,7 @@ mod tests {
             duration: None,
         });
 
-        cell.complete_call(&call_id, CommandOutput::default(), Duration::from_millis(1));
+        cell.complete_call(&call_id, empty_command_output(), Duration::from_millis(1));
 
         let rendered = render_lines(&cell.display_lines(80)).join("\n");
         assert!(rendered.contains("Append"));
@@ -1578,7 +1588,7 @@ mod tests {
             duration: None,
         });
 
-        cell.complete_call(&call_id, CommandOutput::default(), Duration::from_millis(1));
+        cell.complete_call(&call_id, empty_command_output(), Duration::from_millis(1));
 
         let rendered = render_lines(&cell.display_lines(80)).join("\n");
         assert!(rendered.contains("Run"));
@@ -1608,7 +1618,7 @@ mod tests {
             duration: None,
         });
 
-        cell.complete_call(&call_id, CommandOutput::default(), Duration::from_millis(1));
+        cell.complete_call(&call_id, empty_command_output(), Duration::from_millis(1));
 
         let rendered = render_lines(&cell.display_lines(80)).join("\n");
         assert!(rendered.contains("Write"));
@@ -1961,14 +1971,12 @@ mod tests {
                     cmd: "rg shimmer_spans".into(),
                 },
                 ParsedCommand::Read {
-                    name: "shimmer.rs".into(),
                     cmd: "cat shimmer.rs".into(),
-                    path: "shimmer.rs".into(),
+                    name: "shimmer.rs".into(),
                 },
                 ParsedCommand::Read {
-                    name: "status_indicator_widget.rs".into(),
                     cmd: "cat status_indicator_widget.rs".into(),
-                    path: "status_indicator_widget.rs".into(),
+                    name: "status_indicator_widget.rs".into(),
                 },
             ],
             output: None,
@@ -1976,7 +1984,7 @@ mod tests {
             duration: None,
         });
         // Mark call complete so markers are ✓
-        cell.complete_call(&call_id, CommandOutput::default(), Duration::from_millis(1));
+        cell.complete_call(&call_id, empty_command_output(), Duration::from_millis(1));
 
         let lines = cell.display_lines(80);
         let rendered = render_lines(&lines).join("\n");
@@ -1998,33 +2006,31 @@ mod tests {
             duration: None,
         });
         // Call 1: Search only
-        cell.complete_call("c1", CommandOutput::default(), Duration::from_millis(1));
+        cell.complete_call("c1", empty_command_output(), Duration::from_millis(1));
         // Call 2: Read A
         cell = cell
             .with_added_call(
                 "c2".into(),
                 vec!["bash".into(), "-lc".into(), "echo".into()],
                 vec![ParsedCommand::Read {
-                    name: "shimmer.rs".into(),
                     cmd: "cat shimmer.rs".into(),
-                    path: "shimmer.rs".into(),
+                    name: "shimmer.rs".into(),
                 }],
             )
             .unwrap();
-        cell.complete_call("c2", CommandOutput::default(), Duration::from_millis(1));
+        cell.complete_call("c2", empty_command_output(), Duration::from_millis(1));
         // Call 3: Read B
         cell = cell
             .with_added_call(
                 "c3".into(),
                 vec!["bash".into(), "-lc".into(), "echo".into()],
                 vec![ParsedCommand::Read {
-                    name: "status_indicator_widget.rs".into(),
                     cmd: "cat status_indicator_widget.rs".into(),
-                    path: "status_indicator_widget.rs".into(),
+                    name: "status_indicator_widget.rs".into(),
                 }],
             )
             .unwrap();
-        cell.complete_call("c3", CommandOutput::default(), Duration::from_millis(1));
+        cell.complete_call("c3", empty_command_output(), Duration::from_millis(1));
 
         let lines = cell.display_lines(80);
         let rendered = render_lines(&lines).join("\n");
@@ -2038,26 +2044,23 @@ mod tests {
             command: vec!["bash".into(), "-lc".into(), "echo".into()],
             parsed: vec![
                 ParsedCommand::Read {
-                    name: "auth.rs".into(),
                     cmd: "cat auth.rs".into(),
-                    path: "auth.rs".into(),
+                    name: "auth.rs".into(),
                 },
                 ParsedCommand::Read {
-                    name: "auth.rs".into(),
                     cmd: "cat auth.rs".into(),
-                    path: "auth.rs".into(),
+                    name: "auth.rs".into(),
                 },
                 ParsedCommand::Read {
-                    name: "shimmer.rs".into(),
                     cmd: "cat shimmer.rs".into(),
-                    path: "shimmer.rs".into(),
+                    name: "shimmer.rs".into(),
                 },
             ],
             output: None,
             start_time: Some(Instant::now()),
             duration: None,
         });
-        cell.complete_call("c1", CommandOutput::default(), Duration::from_millis(1));
+        cell.complete_call("c1", empty_command_output(), Duration::from_millis(1));
         let lines = cell.display_lines(80);
         let rendered = render_lines(&lines).join("\n");
         insta::assert_snapshot!(rendered);
@@ -2077,7 +2080,7 @@ mod tests {
             duration: None,
         });
         // Mark call complete so it renders as "Ran"
-        cell.complete_call(&call_id, CommandOutput::default(), Duration::from_millis(1));
+        cell.complete_call(&call_id, empty_command_output(), Duration::from_millis(1));
 
         // Small width to force wrapping on both lines
         let width: u16 = 28;
@@ -2097,7 +2100,7 @@ mod tests {
             start_time: Some(Instant::now()),
             duration: None,
         });
-        cell.complete_call(&call_id, CommandOutput::default(), Duration::from_millis(1));
+        cell.complete_call(&call_id, empty_command_output(), Duration::from_millis(1));
         // Wide enough that it fits inline
         let lines = cell.display_lines(80);
         let rendered = render_lines(&lines).join("\n");
@@ -2116,7 +2119,7 @@ mod tests {
             start_time: Some(Instant::now()),
             duration: None,
         });
-        cell.complete_call(&call_id, CommandOutput::default(), Duration::from_millis(1));
+        cell.complete_call(&call_id, empty_command_output(), Duration::from_millis(1));
         let lines = cell.display_lines(24);
         let rendered = render_lines(&lines).join("\n");
         insta::assert_snapshot!(rendered);
@@ -2134,7 +2137,7 @@ mod tests {
             start_time: Some(Instant::now()),
             duration: None,
         });
-        cell.complete_call(&call_id, CommandOutput::default(), Duration::from_millis(1));
+        cell.complete_call(&call_id, empty_command_output(), Duration::from_millis(1));
         let lines = cell.display_lines(80);
         let rendered = render_lines(&lines).join("\n");
         insta::assert_snapshot!(rendered);
@@ -2153,7 +2156,7 @@ mod tests {
             start_time: Some(Instant::now()),
             duration: None,
         });
-        cell.complete_call(&call_id, CommandOutput::default(), Duration::from_millis(1));
+        cell.complete_call(&call_id, empty_command_output(), Duration::from_millis(1));
         let lines = cell.display_lines(28);
         let rendered = render_lines(&lines).join("\n");
         insta::assert_snapshot!(rendered);

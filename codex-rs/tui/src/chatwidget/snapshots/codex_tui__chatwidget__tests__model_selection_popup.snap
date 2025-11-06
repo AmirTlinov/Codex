@@ -5,8 +5,7 @@ expression: popup
   Select Model and Effort
   Switch the model for this and future Codex CLI sessions
 
-› 1. gpt-5-codex (current)  Optimized for coding tasks with many tools.
-  2. gpt-5                  Broad world knowledge with strong general
-                            reasoning.
+  1. gpt-5                  Available efforts: minimal, low, medium, high
+› 2. gpt-5-codex (current)  Available efforts: low, medium, high
 
   Press enter to select reasoning effort, or esc to dismiss.

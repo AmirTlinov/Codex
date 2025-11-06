@@ -1,6 +1,5 @@
 ---
 source: tui/src/history_cell.rs
-assertion_line: 1540
 expression: rendered
 ---
 /mcp
@@ -13,8 +12,6 @@ expression: rendered
     • Command: docs-server
     • Env: TOKEN=*****, APP_TOKEN=*****
     • Tools: list
-    • Resources: (none)
-    • Resource templates: (none)
 
   • http
     • Status: enabled
@@ -23,5 +20,3 @@ expression: rendered
     • HTTP headers: Authorization=*****
     • Env HTTP headers: X-API-Key=API_KEY_ENV
     • Tools: ping
-    • Resources: (none)
-    • Resource templates: (none)

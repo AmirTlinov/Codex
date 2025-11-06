@@ -1084,6 +1084,7 @@ dependencies = [
  "eventsource-stream",
  "futures",
  "indexmap 2.11.4",
+ "keyring",
  "landlock",
  "libc",
  "maplit",

@@ -125,6 +125,10 @@ impl BottomPane {
         }
     }
 
+    pub(crate) fn status_indicator_visible(&self) -> bool {
+        self.status.is_some()
+    }
+
     pub fn status_widget(&self) -> Option<&StatusIndicatorWidget> {
         self.status.as_ref()
     }

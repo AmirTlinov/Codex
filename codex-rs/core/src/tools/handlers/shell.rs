@@ -264,10 +264,7 @@ impl ShellHandler {
             };
             let event_ctx =
                 ToolEventCtx::new(session.as_ref(), turn.as_ref(), &call_id, Some(&tracker));
-            let content = emitter
-                .finish(event_ctx, Ok(exec_output))
-                .await
-                .map_err(FunctionCallError::from)?;
+            let content = emitter.finish(event_ctx, Ok(exec_output)).await?;
             return Ok(ToolOutput::Function {
                 content,
                 success: Some(true),
@@ -319,10 +316,7 @@ impl ShellHandler {
                 };
                 let event_ctx =
                     ToolEventCtx::new(session.as_ref(), turn.as_ref(), &call_id, Some(&tracker));
-                let content = emitter
-                    .finish(event_ctx, Ok(exec_output))
-                    .await
-                    .map_err(FunctionCallError::from)?;
+                let content = emitter.finish(event_ctx, Ok(exec_output)).await?;
                 Ok(ToolOutput::Function {
                     content,
                     success: Some(true),
@@ -353,10 +347,7 @@ impl ShellHandler {
                 };
                 let event_ctx =
                     ToolEventCtx::new(session.as_ref(), turn.as_ref(), &call_id, Some(&tracker));
-                emitter
-                    .finish(event_ctx, Ok(exec_output))
-                    .await
-                    .map_err(FunctionCallError::from)?;
+                emitter.finish(event_ctx, Ok(exec_output)).await?;
 
                 let response = BackgroundStartResponse {
                     shell_id: result.shell_id,
@@ -380,10 +371,7 @@ impl ShellHandler {
                 let event_ctx =
                     ToolEventCtx::new(session.as_ref(), turn.as_ref(), &call_id, Some(&tracker));
                 let tool_err = crate::tools::sandboxing::ToolError::Rejected(err);
-                let content = emitter
-                    .finish(event_ctx, Err(tool_err))
-                    .await
-                    .map_err(FunctionCallError::from)?;
+                let content = emitter.finish(event_ctx, Err(tool_err)).await?;
                 Ok(ToolOutput::Function {
                     content,
                     success: Some(false),

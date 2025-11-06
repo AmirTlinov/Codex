@@ -265,8 +265,7 @@ pub(crate) async fn drive_foreground_shell(
                     Err(err) => {
                         state.set_session_id(session_id).await;
                         return ForegroundCompletion::Failed(format!(
-                            "failed to poll shell output for {command}: {err:?}",
-                            command = command_label
+                            "failed to poll shell output for {command_label}: {err:?}"
                         ));
                     }
                 }

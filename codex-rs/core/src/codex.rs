@@ -1177,7 +1177,7 @@ impl Session {
             };
 
             self.send_event(Event {
-                id: format!("{}:promotion", sub_id),
+                id: format!("{sub_id}:promotion"),
                 msg: EventMsg::BackgroundEvent(BackgroundEventEvent {
                     message: promotion_message,
                 }),

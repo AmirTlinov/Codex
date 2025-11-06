@@ -255,7 +255,7 @@ async fn unified_exec_streams_after_lagged_output() -> Result<()> {
     let server = start_mock_server().await;
 
     let mut builder = test_codex().with_config(|config| {
-        config.use_unified_exec_tool = true;
+        config.use_experimental_unified_exec_tool = true;
         config.features.enable(Feature::UnifiedExec);
     });
     let TestCodex {

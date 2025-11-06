@@ -120,43 +120,34 @@ impl McpTemplateDefaults {
             }
         }
 
-        if !self.env_vars.is_empty()
-            || self.cwd.is_some()
-            || self.command.is_some()
-            || !self.args.is_empty()
-            || self.env.is_some()
-        {
-            if let McpServerTransportConfig::Stdio { env_vars, cwd, .. } = &mut config.transport {
-                if !self.env_vars.is_empty() {
-                    *env_vars = self.env_vars.clone();
-                }
-                if let Some(default_cwd) = &self.cwd {
-                    *cwd = Some(default_cwd.clone());
-                }
+        if let McpServerTransportConfig::Stdio { env_vars, cwd, .. } = &mut config.transport {
+            if !self.env_vars.is_empty() {
+                *env_vars = self.env_vars.clone();
+            }
+            if let Some(default_cwd) = &self.cwd {
+                *cwd = Some(default_cwd.clone());
             }
         }
 
-        if self.http_headers.is_some() || self.env_http_headers.is_some() {
-            if let McpServerTransportConfig::StreamableHttp {
-                http_headers,
-                env_http_headers,
-                ..
-            } = &mut config.transport
-            {
-                if let Some(headers) = &self.http_headers {
-                    *http_headers = if headers.is_empty() {
-                        None
-                    } else {
-                        Some(headers.clone())
-                    };
-                }
-                if let Some(headers) = &self.env_http_headers {
-                    *env_http_headers = if headers.is_empty() {
-                        None
-                    } else {
-                        Some(headers.clone())
-                    };
-                }
+        if let McpServerTransportConfig::StreamableHttp {
+            http_headers,
+            env_http_headers,
+            ..
+        } = &mut config.transport
+        {
+            if let Some(headers) = &self.http_headers {
+                *http_headers = if headers.is_empty() {
+                    None
+                } else {
+                    Some(headers.clone())
+                };
+            }
+            if let Some(headers) = &self.env_http_headers {
+                *env_http_headers = if headers.is_empty() {
+                    None
+                } else {
+                    Some(headers.clone())
+                };
             }
         }
 

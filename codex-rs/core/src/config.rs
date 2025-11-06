@@ -560,7 +560,7 @@ pub fn load_global_mcp_servers_blocking(
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
-            .map_err(|err| std::io::Error::new(std::io::ErrorKind::Other, err))?;
+            .map_err(std::io::Error::other)?;
         runtime.block_on(load_global_mcp_servers(codex_home))
     }
 }
@@ -3058,13 +3058,21 @@ mod tests {
 
     use super::*;
     use core_test_support::load_default_config_for_test;
-    use core_test_support::seed_global_agents_context;
     use pretty_assertions::assert_eq;
 
     use std::collections::HashMap;
     use std::path::PathBuf;
     use std::time::Duration;
     use tempfile::TempDir;
+
+    fn seed_global_agents_context(home: &TempDir, relative_path: &str, contents: &str) {
+        let root = home.path().join("agents");
+        let path = root.join(relative_path);
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).expect("create agents context directory");
+        }
+        std::fs::write(&path, contents).expect("write agents context file");
+    }
 
     use super::mcp_registry::CURRENT_SCHEMA_VERSION;
 

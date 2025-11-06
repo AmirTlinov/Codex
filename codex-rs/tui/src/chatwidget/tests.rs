@@ -115,6 +115,7 @@ fn resumed_initial_messages_render_history() {
         initial_messages: Some(vec![
             EventMsg::UserMessage(UserMessageEvent {
                 message: "hello from user".to_string(),
+                kind: None,
                 images: None,
             }),
             EventMsg::AgentMessage(AgentMessageEvent {
@@ -449,7 +450,7 @@ fn context_off_command_disables_persistent_context() {
     assert_eq!(items.len(), 1);
     assert_eq!(
         items[0],
-        UserInput::Text {
+        InputItem::Text {
             text: "Hello".to_string()
         }
     );
@@ -1190,12 +1191,8 @@ fn undo_started_hides_interrupt_hint() {
         msg: EventMsg::UndoStarted(UndoStartedEvent { message: None }),
     });
 
-    let status = chat
-        .bottom_pane
-        .status_widget()
-        .expect("status indicator should be active");
     assert!(
-        !status.interrupt_hint_visible(),
+        !chat.bottom_pane.ctrl_c_quit_hint_visible(),
         "undo should hide the interrupt hint because the operation cannot be cancelled"
     );
 }
@@ -2228,7 +2225,6 @@ fn apply_patch_events_emit_history_cells() {
     let begin = PatchApplyBeginEvent {
         call_id: "c1".into(),
         auto_approved: true,
-        reason: None,
         changes: changes2,
     };
     chat.handle_codex_event(Event {
@@ -2295,7 +2291,6 @@ fn apply_patch_manual_approval_adjusts_header() {
         msg: EventMsg::PatchApplyBegin(PatchApplyBeginEvent {
             call_id: "c1".into(),
             auto_approved: false,
-            reason: None,
             changes: apply_changes,
         }),
     });
@@ -2347,7 +2342,6 @@ fn apply_patch_manual_flow_snapshot() {
         msg: EventMsg::PatchApplyBegin(PatchApplyBeginEvent {
             call_id: "c1".into(),
             auto_approved: false,
-            reason: None,
             changes: apply_changes,
         }),
     });
@@ -2454,7 +2448,6 @@ fn apply_patch_full_flow_integration_like() {
         msg: EventMsg::PatchApplyBegin(PatchApplyBeginEvent {
             call_id: "call-1".into(),
             auto_approved: false,
-            reason: None,
             changes: changes2,
         }),
     });
@@ -2804,9 +2797,8 @@ fn chatwidget_exec_and_status_layout_vt100_snapshot() {
                     cmd: "rg \"Change Approved\"".into(),
                 },
                 ParsedCommand::Read {
-                    name: "diff_render.rs".into(),
                     cmd: "cat diff_render.rs".into(),
-                    path: "diff_render.rs".into(),
+                    name: "diff_render.rs".into(),
                 },
             ],
         }),

@@ -155,7 +155,7 @@ pub(crate) fn truncate_output_to_tokens(
     };
 
     if limit == 0 {
-        let approx_tokens = (text.len() + 3) / 4;
+        let approx_tokens = text.len().div_ceil(4);
         let message = format!("…{approx_tokens} tokens truncated…");
         return (message, Some(approx_tokens));
     }
@@ -220,7 +220,7 @@ pub(crate) fn truncate_output_to_tokens(
             let (output, estimate) = truncate_middle(text, approx_bytes);
             let approx_tokens = estimate
                 .and_then(|value| usize::try_from(value).ok())
-                .or_else(|| Some((text.len() + 3) / 4));
+                .or_else(|| Some(text.len().div_ceil(4)));
             (output, approx_tokens)
         }
     }
