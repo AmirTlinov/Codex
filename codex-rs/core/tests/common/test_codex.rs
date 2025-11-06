@@ -97,9 +97,9 @@ impl TestCodexBuilder {
         let mut config = load_default_config_for_test(home);
         config.cwd = cwd.path().to_path_buf();
         config.model_provider = model_provider;
-        if let Ok(cmd) = assert_cmd::Command::cargo_bin("codex") {
-            config.codex_linux_sandbox_exe = Some(PathBuf::from(cmd.get_program().to_os_string()));
-        }
+        let codex_bin = assert_cmd::Command::cargo_bin("codex")?;
+        config.codex_linux_sandbox_exe =
+            Some(PathBuf::from(codex_bin.get_program().to_os_string()));
 
         let mut mutators = vec![];
         swap(&mut self.config_mutators, &mut mutators);
