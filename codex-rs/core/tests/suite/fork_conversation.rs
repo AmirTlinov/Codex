@@ -1,15 +1,18 @@
 use codex_core::CodexAuth;
+use codex_core::ContentItem;
 use codex_core::ConversationManager;
 use codex_core::ModelProviderInfo;
 use codex_core::NewConversation;
+use codex_core::ResponseItem;
 use codex_core::built_in_model_providers;
-use codex_core::parse_turn_item;
+use codex_core::content_items_to_text;
+use codex_core::is_session_prefix_message;
+use codex_core::protocol::ConversationPathResponseEvent;
 use codex_core::protocol::EventMsg;
+use codex_core::protocol::InputItem;
 use codex_core::protocol::Op;
 use codex_core::protocol::RolloutItem;
 use codex_core::protocol::RolloutLine;
-use codex_protocol::items::TurnItem;
-use codex_protocol::user_input::UserInput;
 use core_test_support::load_default_config_for_test;
 use core_test_support::skip_if_no_network;
 use core_test_support::wait_for_event;
@@ -68,7 +71,7 @@ async fn fork_conversation_twice_drops_to_first_message() {
     for text in ["first", "second", "third"] {
         codex
             .submit(Op::UserInput {
-                items: vec![UserInput::Text {
+                items: vec![InputItem::Text {
                     text: text.to_string(),
                 }],
             })
@@ -78,7 +81,13 @@ async fn fork_conversation_twice_drops_to_first_message() {
     }
 
     // Request history from the base conversation to obtain rollout path.
-    let base_path = codex.rollout_path();
+    codex.submit(Op::GetPath).await.unwrap();
+    let base_history =
+        wait_for_event(&codex, |ev| matches!(ev, EventMsg::ConversationPath(_))).await;
+    let base_path = match &base_history {
+        EventMsg::ConversationPath(ConversationPathResponseEvent { path, .. }) => path.clone(),
+        _ => panic!("expected ConversationHistory event"),
+    };
 
     // GetHistory flushes before returning the path; no wait needed.
 
@@ -106,12 +115,19 @@ async fn fork_conversation_twice_drops_to_first_message() {
     let find_user_input_positions = |items: &[RolloutItem]| -> Vec<usize> {
         let mut pos = Vec::new();
         for (i, it) in items.iter().enumerate() {
-            if let RolloutItem::ResponseItem(response_item) = it
-                && let Some(TurnItem::UserMessage(_)) = parse_turn_item(response_item)
+            if let RolloutItem::ResponseItem(ResponseItem::Message { role, content, .. }) = it
+                && role == "user"
+                && content_items_to_text(content)
+                    .is_some_and(|text| !is_session_prefix_message(&text))
             {
                 // Consider any user message as an input boundary; recorder stores both EventMsg and ResponseItem.
                 // We specifically look for input items, which are represented as ContentItem::InputText.
-                pos.push(i);
+                if content
+                    .iter()
+                    .any(|c| matches!(c, ContentItem::InputText { .. }))
+                {
+                    pos.push(i);
+                }
             }
         }
         pos
@@ -133,7 +149,15 @@ async fn fork_conversation_twice_drops_to_first_message() {
         .await
         .expect("fork 1");
 
-    let fork1_path = codex_fork1.rollout_path();
+    codex_fork1.submit(Op::GetPath).await.unwrap();
+    let fork1_history = wait_for_event(&codex_fork1, |ev| {
+        matches!(ev, EventMsg::ConversationPath(_))
+    })
+    .await;
+    let fork1_path = match &fork1_history {
+        EventMsg::ConversationPath(ConversationPathResponseEvent { path, .. }) => path.clone(),
+        _ => panic!("expected ConversationHistory event after first fork"),
+    };
 
     // GetHistory on fork1 flushed; the file is ready.
     let fork1_items = read_items(&fork1_path);
@@ -151,7 +175,15 @@ async fn fork_conversation_twice_drops_to_first_message() {
         .await
         .expect("fork 2");
 
-    let fork2_path = codex_fork2.rollout_path();
+    codex_fork2.submit(Op::GetPath).await.unwrap();
+    let fork2_history = wait_for_event(&codex_fork2, |ev| {
+        matches!(ev, EventMsg::ConversationPath(_))
+    })
+    .await;
+    let fork2_path = match &fork2_history {
+        EventMsg::ConversationPath(ConversationPathResponseEvent { path, .. }) => path.clone(),
+        _ => panic!("expected ConversationHistory event after second fork"),
+    };
     // GetHistory on fork2 flushed; the file is ready.
     let fork1_items = read_items(&fork1_path);
     let fork1_user_inputs = find_user_input_positions(&fork1_items);

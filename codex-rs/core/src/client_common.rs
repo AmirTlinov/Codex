@@ -23,11 +23,6 @@ use tokio::sync::mpsc;
 /// Review thread system prompt. Edit `core/src/review_prompt.md` to customize.
 pub const REVIEW_PROMPT: &str = include_str!("../review_prompt.md");
 
-// Centralized templates for review-related user messages
-pub const REVIEW_EXIT_SUCCESS_TMPL: &str = include_str!("../templates/review/exit_success.xml");
-pub const REVIEW_EXIT_INTERRUPTED_TMPL: &str =
-    include_str!("../templates/review/exit_interrupted.xml");
-
 /// API request payload for a single model turn
 #[derive(Default, Debug, Clone)]
 pub struct Prompt {
@@ -63,6 +58,7 @@ impl Prompt {
             ToolSpec::Freeform(f) => f.name == "apply_patch",
             _ => false,
         });
+
         if self.base_instructions_override.is_none()
             && model.needs_special_apply_patch_instructions
             && !is_apply_patch_tool_present
@@ -197,7 +193,6 @@ fn strip_total_output_header(output: &str) -> Option<&str> {
 pub enum ResponseEvent {
     Created,
     OutputItemDone(ResponseItem),
-    OutputItemAdded(ResponseItem),
     Completed {
         response_id: String,
         token_usage: Option<TokenUsage>,
@@ -206,6 +201,9 @@ pub enum ResponseEvent {
     ReasoningSummaryDelta(String),
     ReasoningContentDelta(String),
     ReasoningSummaryPartAdded,
+    WebSearchCallBegin {
+        call_id: String,
+    },
     RateLimits(RateLimitSnapshot),
 }
 
@@ -440,7 +438,7 @@ mod tests {
                 format!(
                     "{}\n{}",
                     model_family.clone().base_instructions,
-                    APPLY_PATCH_TOOL_INSTRUCTIONS
+                    APPLY_PATCH_TOOL_INSTRUCTIONS,
                 )
             } else {
                 model_family.clone().base_instructions

@@ -1,0 +1,16 @@
+---
+source: tui/src/process_manager.rs
+expression: "buffer_lines(&buf).join(\"\\n\")"
+---
+┌Session 7─────────────────────────────────────────────────────────────────────┐
+│Command: npm run build                                                        │
+│Status: Running                                                               │
+│Started: 2m ago                                                               │
+│Last output: 5s ago                                                           │
+│Window: 0B – 19B of 19B (19B window)                                          │
+│Window cap: 2.0MiB — use e to export the full log.                            │
+└──────────────────────────────────────────────────────────────────────────────┘
+┌Output────────────────────────────────────────────────────────────────────────┐
+│Compiling...                                                                  │
+└──────────────────────────────────────────────────────────────────────────────┘
+↑/↓ scroll  •  PgUp/PgDn page  •  g/G top/bottom  •  Alt+PgUp older  •  Alt+PgDn

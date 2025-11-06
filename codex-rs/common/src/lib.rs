@@ -13,9 +13,6 @@ mod sandbox_mode_cli_arg;
 #[cfg(feature = "cli")]
 pub use sandbox_mode_cli_arg::SandboxModeCliArg;
 
-#[cfg(feature = "cli")]
-pub mod format_env_display;
-
 #[cfg(any(feature = "cli", test))]
 mod config_override;
 
@@ -37,3 +34,4 @@ pub mod model_presets;
 // Shared approval presets (AskForApproval + Sandbox) used by TUI and MCP server
 // Not to be confused with AskForApproval, which we should probably rename to EscalationPolicy.
 pub mod approval_presets;
+pub mod format_env_display;

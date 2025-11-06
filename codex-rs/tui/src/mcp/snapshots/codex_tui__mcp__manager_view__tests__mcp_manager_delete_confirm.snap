@@ -1,0 +1,20 @@
+---
+source: tui/src/mcp/manager_view.rs
+expression: render_view(&view)
+---
+┌Configured MCP Servers────────────────────────────────────────────────┐
+│Name               Transport        Details                 Status    │
+│perplexity         stdio            perplexity-mcp --serve  failing   │
+│                                                                      │
+│                                                                      │
+│                                                                      │
+│                                                                      │
+│                                                                      │
+│                                                                      │
+└──────────────────────────────────────────────────────────────────────┘
+┌Details───────────────────────────────────────────────────────────────┐
+│Name: perplexity                                                      │
+│Transport: stdio  Command: perplexity-mcp                             │
+│Args: --serve                                                         │
+│Env:                                                                  │
+└──────────────────────────────────────────────────────────────────────┘

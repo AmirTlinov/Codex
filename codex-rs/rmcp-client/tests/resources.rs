@@ -49,8 +49,6 @@ async fn rmcp_client_can_list_and_read_resources() -> anyhow::Result<()> {
         stdio_server_bin()?.into(),
         Vec::<OsString>::new(),
         None,
-        &[],
-        None,
     )
     .await?;
 

@@ -10,7 +10,7 @@ use codex_core::protocol::Op;
 use codex_core::protocol::SandboxPolicy;
 use codex_protocol::config_types::ReasoningSummary;
 use codex_protocol::protocol::ReviewDecision;
-use codex_protocol::user_input::UserInput;
+use codex_core::protocol::InputItem as UserInput;
 use core_test_support::responses::ev_apply_patch_function_call;
 use core_test_support::responses::ev_assistant_message;
 use core_test_support::responses::ev_completed;
@@ -155,7 +155,10 @@ impl ActionKind {
 }
 
 fn build_add_file_patch(patch_path: &str, content: &str) -> String {
-    format!("*** Begin Patch\n*** Add File: {patch_path}\n+{content}\n*** End Patch\n")
+    format!(
+        "*** Begin Patch
+*** Add File: {patch_path}\n+{content}\n*** End Patch\n"
+    )
 }
 
 fn shell_apply_patch_command(patch: &str) -> Vec<String> {
@@ -268,22 +271,11 @@ impl Expectation {
                     "expected non-zero exit for {path:?}"
                 );
                 for needle in *message_contains {
-                    if needle.contains('|') {
-                        let options: Vec<&str> = needle.split('|').collect();
-                        let matches_any =
-                            options.iter().any(|option| result.stdout.contains(option));
-                        assert!(
-                            matches_any,
-                            "stdout missing one of {options:?}: {}",
-                            result.stdout
-                        );
-                    } else {
-                        assert!(
-                            result.stdout.contains(needle),
-                            "stdout missing {needle:?}: {}",
-                            result.stdout
-                        );
-                    }
+                    assert!(
+                        result.stdout.contains(needle),
+                        "stdout missing {needle:?}: {}",
+                        result.stdout
+                    );
                 }
                 assert!(
                     !path.exists(),
@@ -912,7 +904,7 @@ fn scenarios() -> Vec<ScenarioSpec> {
                 message_contains: if cfg!(target_os = "linux") {
                     &["Permission denied"]
                 } else {
-                    &["Permission denied|Operation not permitted|Read-only file system"]
+                    &["failed in sandbox"]
                 },
             },
         },
@@ -1056,7 +1048,7 @@ fn scenarios() -> Vec<ScenarioSpec> {
                 message_contains: if cfg!(target_os = "linux") {
                     &["Permission denied"]
                 } else {
-                    &["Permission denied|Operation not permitted|Read-only file system"]
+                    &["failed in sandbox"]
                 },
             },
         },

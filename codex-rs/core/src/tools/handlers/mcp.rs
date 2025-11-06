@@ -19,7 +19,7 @@ impl ToolHandler for McpHandler {
     async fn handle(&self, invocation: ToolInvocation) -> Result<ToolOutput, FunctionCallError> {
         let ToolInvocation {
             session,
-            turn,
+            sub_id,
             call_id,
             payload,
             ..
@@ -43,7 +43,7 @@ impl ToolHandler for McpHandler {
 
         let response = handle_mcp_tool_call(
             session.as_ref(),
-            turn.as_ref(),
+            &sub_id,
             call_id.clone(),
             server,
             tool,
@@ -56,16 +56,8 @@ impl ToolHandler for McpHandler {
                 Ok(ToolOutput::Mcp { result })
             }
             codex_protocol::models::ResponseInputItem::FunctionCallOutput { output, .. } => {
-                let codex_protocol::models::FunctionCallOutputPayload {
-                    content,
-                    content_items,
-                    success,
-                } = output;
-                Ok(ToolOutput::Function {
-                    content,
-                    content_items,
-                    success,
-                })
+                let codex_protocol::models::FunctionCallOutputPayload { content, success } = output;
+                Ok(ToolOutput::Function { content, success })
             }
             _ => Err(FunctionCallError::RespondToModel(
                 "mcp handler received unexpected response variant".to_string(),

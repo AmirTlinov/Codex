@@ -1,0 +1,16 @@
+---
+source: tui/src/process_manager.rs
+expression: render_snapshot(&view)
+---
+┌Unified Exec Sessions─────────────────────────────────────────────────────────┐
+│Session    Status     Command                Started          Last output     │
+│                      (no active sessions)                                    │
+└──────────────────────────────────────────────────────────────────────────────┘
+┌Output preview────────────────────────────────────────────────────────────────┐
+│Select a session to view recent output.                                       │
+│                                                                              │
+│                                                                              │
+│                                                                              │
+│                                                                              │
+└──────────────────────────────────────────────────────────────────────────────┘
+↑/↓ navigate  •  Open log (o)  •  Input (i)  •  Kill (k)  •  Remove (d)  •  Refr

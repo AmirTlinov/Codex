@@ -11,13 +11,14 @@ use ratatui::text::Span;
 use ratatui::widgets::Paragraph;
 use ratatui::widgets::Widget;
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Debug)]
 pub(crate) struct FooterProps {
     pub(crate) mode: FooterMode,
     pub(crate) esc_backtrack_hint: bool,
     pub(crate) use_shift_enter_hint: bool,
     pub(crate) is_task_running: bool,
-    pub(crate) context_window_percent: Option<i64>,
+    pub(crate) context_window_percent: Option<u8>,
+    pub(crate) process_summary: Option<String>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -58,11 +59,11 @@ pub(crate) fn reset_mode_after_activity(current: FooterMode) -> FooterMode {
     }
 }
 
-pub(crate) fn footer_height(props: FooterProps) -> u16 {
+pub(crate) fn footer_height(props: &FooterProps) -> u16 {
     footer_lines(props).len() as u16
 }
 
-pub(crate) fn render_footer(area: Rect, buf: &mut Buffer, props: FooterProps) {
+pub(crate) fn render_footer(area: Rect, buf: &mut Buffer, props: &FooterProps) {
     Paragraph::new(prefix_lines(
         footer_lines(props),
         " ".repeat(FOOTER_INDENT_COLS).into(),
@@ -71,7 +72,7 @@ pub(crate) fn render_footer(area: Rect, buf: &mut Buffer, props: FooterProps) {
     .render(area, buf);
 }
 
-fn footer_lines(props: FooterProps) -> Vec<Line<'static>> {
+fn footer_lines(props: &FooterProps) -> Vec<Line<'static>> {
     // Show the context indicator on the left, appended after the primary hint
     // (e.g., "? for shortcuts"). Keep it visible even when typing (i.e., when
     // the shortcut hint is hidden). Hide it only for the multi-line
@@ -82,6 +83,7 @@ fn footer_lines(props: FooterProps) -> Vec<Line<'static>> {
         })],
         FooterMode::ShortcutSummary => {
             let mut line = context_window_line(props.context_window_percent);
+            append_process_summary(&mut line, props.process_summary.as_deref());
             line.push_span(" · ".dim());
             line.extend(vec![
                 key_hint::plain(KeyCode::Char('?')).into(),
@@ -94,7 +96,24 @@ fn footer_lines(props: FooterProps) -> Vec<Line<'static>> {
             esc_backtrack_hint: props.esc_backtrack_hint,
         }),
         FooterMode::EscHint => vec![esc_hint_line(props.esc_backtrack_hint)],
-        FooterMode::ContextOnly => vec![context_window_line(props.context_window_percent)],
+        FooterMode::ContextOnly => {
+            let mut line = context_window_line(props.context_window_percent);
+            append_process_summary(&mut line, props.process_summary.as_deref());
+            vec![line]
+        }
+    }
+}
+
+fn append_process_summary(line: &mut Line<'static>, summary: Option<&str>) {
+    if let Some(summary) = summary {
+        let summary = summary.trim();
+        if summary.is_empty() {
+            return;
+        }
+        if !line.spans.is_empty() {
+            line.push_span(" · ".dim());
+        }
+        line.push_span(Span::from(summary.to_string()).dim());
     }
 }
 
@@ -221,8 +240,8 @@ fn build_columns(entries: Vec<Line<'static>>) -> Vec<Line<'static>> {
         .collect()
 }
 
-fn context_window_line(percent: Option<i64>) -> Line<'static> {
-    let percent = percent.unwrap_or(100).clamp(0, 100);
+fn context_window_line(percent: Option<u8>) -> Line<'static> {
+    let percent = percent.unwrap_or(100);
     Line::from(vec![Span::from(format!("{percent}% context left")).dim()])
 }
 
@@ -379,12 +398,12 @@ mod tests {
     use ratatui::backend::TestBackend;
 
     fn snapshot_footer(name: &str, props: FooterProps) {
-        let height = footer_height(props).max(1);
+        let height = footer_height(&props).max(1);
         let mut terminal = Terminal::new(TestBackend::new(80, height)).unwrap();
         terminal
             .draw(|f| {
                 let area = Rect::new(0, 0, f.area().width, height);
-                render_footer(area, f.buffer_mut(), props);
+                render_footer(area, f.buffer_mut(), &props);
             })
             .unwrap();
         assert_snapshot!(name, terminal.backend());
@@ -400,6 +419,7 @@ mod tests {
                 use_shift_enter_hint: false,
                 is_task_running: false,
                 context_window_percent: None,
+                process_summary: None,
             },
         );
 
@@ -411,6 +431,7 @@ mod tests {
                 use_shift_enter_hint: true,
                 is_task_running: false,
                 context_window_percent: None,
+                process_summary: None,
             },
         );
 
@@ -422,6 +443,7 @@ mod tests {
                 use_shift_enter_hint: false,
                 is_task_running: false,
                 context_window_percent: None,
+                process_summary: None,
             },
         );
 
@@ -433,6 +455,7 @@ mod tests {
                 use_shift_enter_hint: false,
                 is_task_running: true,
                 context_window_percent: None,
+                process_summary: None,
             },
         );
 
@@ -444,6 +467,7 @@ mod tests {
                 use_shift_enter_hint: false,
                 is_task_running: false,
                 context_window_percent: None,
+                process_summary: None,
             },
         );
 
@@ -455,6 +479,7 @@ mod tests {
                 use_shift_enter_hint: false,
                 is_task_running: false,
                 context_window_percent: None,
+                process_summary: None,
             },
         );
 
@@ -466,6 +491,7 @@ mod tests {
                 use_shift_enter_hint: false,
                 is_task_running: true,
                 context_window_percent: Some(72),
+                process_summary: Some("● build".to_string()),
             },
         );
     }

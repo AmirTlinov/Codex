@@ -35,9 +35,6 @@ use crate::bottom_pane::prompt_args::parse_slash_name;
 use crate::bottom_pane::prompt_args::prompt_argument_names;
 use crate::bottom_pane::prompt_args::prompt_command_with_arg_placeholders;
 use crate::bottom_pane::prompt_args::prompt_has_numeric_placeholders;
-use crate::render::Insets;
-use crate::render::RectExt;
-use crate::render::renderable::Renderable;
 use crate::slash_command::SlashCommand;
 use crate::slash_command::built_in_slash_commands;
 use crate::style::user_message_style;
@@ -111,7 +108,8 @@ pub(crate) struct ChatComposer {
     custom_prompts: Vec<CustomPrompt>,
     footer_mode: FooterMode,
     footer_hint_override: Option<Vec<(String, String)>>,
-    context_window_percent: Option<i64>,
+    context_window_percent: Option<u8>,
+    process_summary: Option<String>,
 }
 
 /// Popup state – at most one can be visible at any time.
@@ -155,17 +153,36 @@ impl ChatComposer {
             footer_mode: FooterMode::ShortcutSummary,
             footer_hint_override: None,
             context_window_percent: None,
+            process_summary: None,
         };
         // Apply configuration via the setter to keep side-effects centralized.
         this.set_disable_paste_burst(disable_paste_burst);
         this
     }
 
+    pub fn desired_height(&self, width: u16) -> u16 {
+        let footer_props = self.footer_props();
+        let footer_hint_height = self
+            .custom_footer_height()
+            .unwrap_or_else(|| footer_height(&footer_props));
+        let footer_spacing = Self::footer_spacing(footer_hint_height);
+        let footer_total_height = footer_hint_height + footer_spacing;
+        const COLS_WITH_MARGIN: u16 = LIVE_PREFIX_COLS + 1;
+        self.textarea
+            .desired_height(width.saturating_sub(COLS_WITH_MARGIN))
+            + 2
+            + match &self.active_popup {
+                ActivePopup::None => footer_total_height,
+                ActivePopup::Command(c) => c.calculate_required_height(width),
+                ActivePopup::File(c) => c.calculate_required_height(),
+            }
+    }
+
     fn layout_areas(&self, area: Rect) -> [Rect; 3] {
         let footer_props = self.footer_props();
         let footer_hint_height = self
             .custom_footer_height()
-            .unwrap_or_else(|| footer_height(footer_props));
+            .unwrap_or_else(|| footer_height(&footer_props));
         let footer_spacing = Self::footer_spacing(footer_hint_height);
         let footer_total_height = footer_hint_height + footer_spacing;
         let popup_constraint = match &self.active_popup {
@@ -175,9 +192,18 @@ impl ChatComposer {
             ActivePopup::File(popup) => Constraint::Max(popup.calculate_required_height()),
             ActivePopup::None => Constraint::Max(footer_total_height),
         };
+        let mut area = area;
+        if area.height > 1 {
+            area.height -= 1;
+            area.y += 1;
+        }
         let [composer_rect, popup_rect] =
-            Layout::vertical([Constraint::Min(3), popup_constraint]).areas(area);
-        let textarea_rect = composer_rect.inset(Insets::tlbr(1, LIVE_PREFIX_COLS, 1, 1));
+            Layout::vertical([Constraint::Min(1), popup_constraint]).areas(area);
+        let mut textarea_rect = composer_rect;
+        textarea_rect.width = textarea_rect.width.saturating_sub(
+            LIVE_PREFIX_COLS + 1, /* keep a one-column right margin for wrapping */
+        );
+        textarea_rect.x = textarea_rect.x.saturating_add(LIVE_PREFIX_COLS);
         [composer_rect, textarea_rect, popup_rect]
     }
 
@@ -187,6 +213,12 @@ impl ChatComposer {
         } else {
             FOOTER_SPACING_HEIGHT
         }
+    }
+
+    pub fn cursor_pos(&self, area: Rect) -> Option<(u16, u16)> {
+        let [_, textarea_rect, _] = self.layout_areas(area);
+        let state = *self.textarea_state.borrow();
+        self.textarea.cursor_pos_with_state(textarea_rect, state)
     }
 
     /// Returns true if the composer currently contains no user input.
@@ -212,7 +244,8 @@ impl ChatComposer {
         let Some(text) = self.history.on_entry_response(log_id, offset, entry) else {
             return false;
         };
-        self.set_text_content(text);
+        self.textarea.set_text(&text);
+        self.textarea.set_cursor(0);
         true
     }
 
@@ -285,15 +318,9 @@ impl ChatComposer {
         self.sync_file_search_popup();
     }
 
-    pub(crate) fn clear_for_ctrl_c(&mut self) -> Option<String> {
-        if self.is_empty() {
-            return None;
-        }
-        let previous = self.current_text();
+    pub(crate) fn clear_for_ctrl_c(&mut self) {
         self.set_text_content(String::new());
         self.history.reset_navigation();
-        self.history.record_local_submission(&previous);
-        Some(previous)
     }
 
     /// Get the current composer text.
@@ -543,16 +570,6 @@ impl ChatComposer {
 
     #[inline]
     fn handle_non_ascii_char(&mut self, input: KeyEvent) -> (InputResult, bool) {
-        if let KeyEvent {
-            code: KeyCode::Char(ch),
-            ..
-        } = input
-        {
-            let now = Instant::now();
-            if self.paste_burst.try_append_char_if_active(ch, now) {
-                return (InputResult::None, true);
-            }
-        }
         if let Some(pasted) = self.paste_burst.flush_before_modified_input() {
             self.handle_paste(pasted);
         }
@@ -881,7 +898,8 @@ impl ChatComposer {
                         _ => unreachable!(),
                     };
                     if let Some(text) = replace_text {
-                        self.set_text_content(text);
+                        self.textarea.set_text(&text);
+                        self.textarea.set_cursor(0);
                         return (InputResult::None, true);
                     }
                 }
@@ -1365,6 +1383,7 @@ impl ChatComposer {
             use_shift_enter_hint: self.use_shift_enter_hint,
             is_task_running: self.is_task_running,
             context_window_percent: self.context_window_percent,
+            process_summary: self.process_summary.clone(),
         }
     }
 
@@ -1495,9 +1514,15 @@ impl ChatComposer {
         self.is_task_running = running;
     }
 
-    pub(crate) fn set_context_window_percent(&mut self, percent: Option<i64>) {
+    pub(crate) fn set_context_window_percent(&mut self, percent: Option<u8>) {
         if self.context_window_percent != percent {
             self.context_window_percent = percent;
+        }
+    }
+
+    pub(crate) fn set_process_overview_summary(&mut self, summary: Option<String>) {
+        if self.process_summary != summary {
+            self.process_summary = summary;
         }
     }
 
@@ -1511,32 +1536,8 @@ impl ChatComposer {
     }
 }
 
-impl Renderable for ChatComposer {
-    fn cursor_pos(&self, area: Rect) -> Option<(u16, u16)> {
-        let [_, textarea_rect, _] = self.layout_areas(area);
-        let state = *self.textarea_state.borrow();
-        self.textarea.cursor_pos_with_state(textarea_rect, state)
-    }
-
-    fn desired_height(&self, width: u16) -> u16 {
-        let footer_props = self.footer_props();
-        let footer_hint_height = self
-            .custom_footer_height()
-            .unwrap_or_else(|| footer_height(footer_props));
-        let footer_spacing = Self::footer_spacing(footer_hint_height);
-        let footer_total_height = footer_hint_height + footer_spacing;
-        const COLS_WITH_MARGIN: u16 = LIVE_PREFIX_COLS + 1;
-        self.textarea
-            .desired_height(width.saturating_sub(COLS_WITH_MARGIN))
-            + 2
-            + match &self.active_popup {
-                ActivePopup::None => footer_total_height,
-                ActivePopup::Command(c) => c.calculate_required_height(width),
-                ActivePopup::File(c) => c.calculate_required_height(),
-            }
-    }
-
-    fn render(&self, area: Rect, buf: &mut Buffer) {
+impl WidgetRef for ChatComposer {
+    fn render_ref(&self, area: Rect, buf: &mut Buffer) {
         let [composer_rect, textarea_rect, popup_rect] = self.layout_areas(area);
         match &self.active_popup {
             ActivePopup::Command(popup) => {
@@ -1549,7 +1550,7 @@ impl Renderable for ChatComposer {
                 let footer_props = self.footer_props();
                 let custom_height = self.custom_footer_height();
                 let footer_hint_height =
-                    custom_height.unwrap_or_else(|| footer_height(footer_props));
+                    custom_height.unwrap_or_else(|| footer_height(&footer_props));
                 let footer_spacing = Self::footer_spacing(footer_hint_height);
                 let hint_rect = if footer_spacing > 0 && footer_hint_height > 0 {
                     let [_, hint_rect] = Layout::vertical([
@@ -1580,20 +1581,21 @@ impl Renderable for ChatComposer {
                         Line::from(spans).render_ref(custom_rect, buf);
                     }
                 } else {
-                    render_footer(hint_rect, buf, footer_props);
+                    render_footer(hint_rect, buf, &footer_props);
                 }
             }
         }
         let style = user_message_style();
-        Block::default().style(style).render_ref(composer_rect, buf);
-        if !textarea_rect.is_empty() {
-            buf.set_span(
-                textarea_rect.x - LIVE_PREFIX_COLS,
-                textarea_rect.y,
-                &"›".bold(),
-                textarea_rect.width,
-            );
-        }
+        let mut block_rect = composer_rect;
+        block_rect.y = composer_rect.y.saturating_sub(1);
+        block_rect.height = composer_rect.height.saturating_add(1);
+        Block::default().style(style).render_ref(block_rect, buf);
+        buf.set_span(
+            composer_rect.x,
+            composer_rect.y,
+            &"›".bold(),
+            composer_rect.width,
+        );
 
         let mut state = self.textarea_state.borrow_mut();
         StatefulWidgetRef::render_ref(&(&self.textarea), textarea_rect, buf, &mut state);
@@ -1685,7 +1687,7 @@ mod tests {
 
         let area = Rect::new(0, 0, 40, 6);
         let mut buf = Buffer::empty(area);
-        composer.render(area, &mut buf);
+        composer.render_ref(area, &mut buf);
 
         let row_to_string = |y: u16| {
             let mut row = String::new();
@@ -1744,12 +1746,12 @@ mod tests {
         );
         setup(&mut composer);
         let footer_props = composer.footer_props();
-        let footer_lines = footer_height(footer_props);
+        let footer_lines = footer_height(&footer_props);
         let footer_spacing = ChatComposer::footer_spacing(footer_lines);
         let height = footer_lines + footer_spacing + 8;
         let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
         terminal
-            .draw(|f| composer.render(f.area(), f.buffer_mut()))
+            .draw(|f| f.render_widget_ref(composer, f.area()))
             .unwrap();
         insta::assert_snapshot!(name, terminal.backend());
     }
@@ -1833,28 +1835,6 @@ mod tests {
 
         assert_eq!(composer.footer_mode, FooterMode::ShortcutSummary);
         assert!(!composer.esc_backtrack_hint);
-    }
-
-    #[test]
-    fn clear_for_ctrl_c_records_cleared_draft() {
-        let (tx, _rx) = unbounded_channel::<AppEvent>();
-        let sender = AppEventSender::new(tx);
-        let mut composer = ChatComposer::new(
-            true,
-            sender,
-            false,
-            "Ask Codex to do anything".to_string(),
-            false,
-        );
-
-        composer.set_text_content("draft text".to_string());
-        assert_eq!(composer.clear_for_ctrl_c(), Some("draft text".to_string()));
-        assert!(composer.is_empty());
-
-        assert_eq!(
-            composer.history.navigate_up(&composer.app_event_tx),
-            Some("draft text".to_string())
-        );
     }
 
     #[test]
@@ -2073,35 +2053,6 @@ mod tests {
     }
 
     #[test]
-    fn ascii_prefix_survives_non_ascii_followup() {
-        use crossterm::event::KeyCode;
-        use crossterm::event::KeyEvent;
-        use crossterm::event::KeyModifiers;
-
-        let (tx, _rx) = unbounded_channel::<AppEvent>();
-        let sender = AppEventSender::new(tx);
-        let mut composer = ChatComposer::new(
-            true,
-            sender,
-            false,
-            "Ask Codex to do anything".to_string(),
-            false,
-        );
-
-        let _ = composer.handle_key_event(KeyEvent::new(KeyCode::Char('1'), KeyModifiers::NONE));
-        assert!(composer.is_in_paste_burst());
-
-        let _ = composer.handle_key_event(KeyEvent::new(KeyCode::Char('あ'), KeyModifiers::NONE));
-
-        let (result, _) =
-            composer.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
-        match result {
-            InputResult::Submitted(text) => assert_eq!(text, "1あ"),
-            _ => panic!("expected Submitted"),
-        }
-    }
-
-    #[test]
     fn handle_paste_small_inserts_text() {
         use crossterm::event::KeyCode;
         use crossterm::event::KeyEvent;
@@ -2269,7 +2220,7 @@ mod tests {
             }
 
             terminal
-                .draw(|f| composer.render(f.area(), f.buffer_mut()))
+                .draw(|f| f.render_widget_ref(composer, f.area()))
                 .unwrap_or_else(|e| panic!("Failed to draw {name} composer: {e}"));
 
             insta::assert_snapshot!(name, terminal.backend());
@@ -2295,12 +2246,12 @@ mod tests {
         // Type "/mo" humanlike so paste-burst doesn’t interfere.
         type_chars_humanlike(&mut composer, &['/', 'm', 'o']);
 
-        let mut terminal = match Terminal::new(TestBackend::new(60, 5)) {
+        let mut terminal = match Terminal::new(TestBackend::new(60, 4)) {
             Ok(t) => t,
             Err(e) => panic!("Failed to create terminal: {e}"),
         };
         terminal
-            .draw(|f| composer.render(f.area(), f.buffer_mut()))
+            .draw(|f| f.render_widget_ref(composer, f.area()))
             .unwrap_or_else(|e| panic!("Failed to draw composer: {e}"));
 
         // Visual snapshot should show the slash popup with /model as the first entry.

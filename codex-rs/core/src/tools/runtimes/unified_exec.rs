@@ -100,7 +100,14 @@ impl Approvable<UnifiedExecRequest> for UnifiedExecRuntime<'_> {
         Box::pin(async move {
             with_cached_approval(&session.services, key, || async move {
                 session
-                    .request_command_approval(turn, call_id, command, cwd, reason, risk)
+                    .request_command_approval(
+                        turn.sub_id.clone(),
+                        call_id,
+                        command,
+                        cwd,
+                        reason,
+                        risk,
+                    )
                     .await
             })
             .await
@@ -119,7 +126,7 @@ impl<'a> ToolRuntime<UnifiedExecRequest, UnifiedExecSession> for UnifiedExecRunt
             .map_err(|_| ToolError::Rejected("missing command line for PTY".to_string()))?;
         let exec_env = attempt
             .env_for(&spec)
-            .map_err(|err| ToolError::Codex(err.into()))?;
+            .map_err(|err| ToolError::Rejected(err.to_string()))?;
         self.manager
             .open_session_with_exec_env(&exec_env)
             .await

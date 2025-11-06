@@ -10,11 +10,11 @@ struct Alias {
 
 const ALIASES: &[Alias] = &[
     Alias {
-        legacy_key: "experimental_sandbox_command_assessment",
-        feature: Feature::SandboxCommandAssessment,
+        legacy_key: "experimental_use_unified_exec_tool",
+        feature: Feature::UnifiedExec,
     },
     Alias {
-        legacy_key: "experimental_use_unified_exec_tool",
+        legacy_key: "use_unified_exec_tool",
         feature: Feature::UnifiedExec,
     },
     Alias {
@@ -34,8 +34,20 @@ const ALIASES: &[Alias] = &[
         feature: Feature::ApplyPatchFreeform,
     },
     Alias {
+        legacy_key: "include_plan_tool",
+        feature: Feature::PlanTool,
+    },
+    Alias {
+        legacy_key: "include_view_image_tool",
+        feature: Feature::ViewImageTool,
+    },
+    Alias {
         legacy_key: "web_search",
         feature: Feature::WebSearchRequest,
+    },
+    Alias {
+        legacy_key: "experimental_sandbox_command_assessment",
+        feature: Feature::SandboxCommandAssessment,
     },
 ];
 
@@ -51,29 +63,32 @@ pub(crate) fn feature_for_key(key: &str) -> Option<Feature> {
 
 #[derive(Debug, Default)]
 pub struct LegacyFeatureToggles {
+    pub include_plan_tool: Option<bool>,
     pub include_apply_patch_tool: Option<bool>,
-    pub experimental_sandbox_command_assessment: Option<bool>,
+    pub include_view_image_tool: Option<bool>,
     pub experimental_use_freeform_apply_patch: Option<bool>,
     pub experimental_use_exec_command_tool: Option<bool>,
     pub experimental_use_unified_exec_tool: Option<bool>,
+    pub use_unified_exec_tool: Option<bool>,
     pub experimental_use_rmcp_client: Option<bool>,
     pub tools_web_search: Option<bool>,
     pub tools_view_image: Option<bool>,
+    pub experimental_sandbox_command_assessment: Option<bool>,
 }
 
 impl LegacyFeatureToggles {
     pub fn apply(self, features: &mut Features) {
         set_if_some(
             features,
-            Feature::ApplyPatchFreeform,
-            self.include_apply_patch_tool,
-            "include_apply_patch_tool",
+            Feature::PlanTool,
+            self.include_plan_tool,
+            "include_plan_tool",
         );
         set_if_some(
             features,
-            Feature::SandboxCommandAssessment,
-            self.experimental_sandbox_command_assessment,
-            "experimental_sandbox_command_assessment",
+            Feature::ApplyPatchFreeform,
+            self.include_apply_patch_tool,
+            "include_apply_patch_tool",
         );
         set_if_some(
             features,
@@ -95,6 +110,12 @@ impl LegacyFeatureToggles {
         );
         set_if_some(
             features,
+            Feature::UnifiedExec,
+            self.use_unified_exec_tool,
+            "use_unified_exec_tool",
+        );
+        set_if_some(
+            features,
             Feature::RmcpClient,
             self.experimental_use_rmcp_client,
             "experimental_use_rmcp_client",
@@ -108,8 +129,20 @@ impl LegacyFeatureToggles {
         set_if_some(
             features,
             Feature::ViewImageTool,
+            self.include_view_image_tool,
+            "include_view_image_tool",
+        );
+        set_if_some(
+            features,
+            Feature::ViewImageTool,
             self.tools_view_image,
             "tools.view_image",
+        );
+        set_if_some(
+            features,
+            Feature::SandboxCommandAssessment,
+            self.experimental_sandbox_command_assessment,
+            "experimental_sandbox_command_assessment",
         );
     }
 }
@@ -123,7 +156,6 @@ fn set_if_some(
     if let Some(enabled) = maybe_value {
         set_feature(features, feature, enabled);
         log_alias(alias_key, feature);
-        features.record_legacy_usage(alias_key, feature);
     }
 }
 

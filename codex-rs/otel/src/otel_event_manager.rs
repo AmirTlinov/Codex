@@ -6,10 +6,9 @@ use codex_protocol::config_types::ReasoningEffort;
 use codex_protocol::config_types::ReasoningSummary;
 use codex_protocol::models::ResponseItem;
 use codex_protocol::protocol::AskForApproval;
+use codex_protocol::protocol::InputItem;
 use codex_protocol::protocol::ReviewDecision;
 use codex_protocol::protocol::SandboxPolicy;
-use codex_protocol::protocol::SandboxRiskLevel;
-use codex_protocol::user_input::UserInput;
 use eventsource_stream::Event as StreamEvent;
 use eventsource_stream::EventStreamError as StreamError;
 use reqwest::Error;
@@ -87,8 +86,8 @@ impl OtelEventManager {
         provider_name: &str,
         reasoning_effort: Option<ReasoningEffort>,
         reasoning_summary: ReasoningSummary,
-        context_window: Option<i64>,
-        max_output_tokens: Option<i64>,
+        context_window: Option<u64>,
+        max_output_tokens: Option<u64>,
         auto_compact_token_limit: Option<i64>,
         approval_policy: AskForApproval,
         sandbox_policy: SandboxPolicy,
@@ -282,11 +281,11 @@ impl OtelEventManager {
 
     pub fn sse_event_completed(
         &self,
-        input_token_count: i64,
-        output_token_count: i64,
-        cached_token_count: Option<i64>,
-        reasoning_token_count: Option<i64>,
-        tool_token_count: i64,
+        input_token_count: u64,
+        output_token_count: u64,
+        cached_token_count: Option<u64>,
+        reasoning_token_count: Option<u64>,
+        tool_token_count: u64,
     ) {
         tracing::event!(
             tracing::Level::INFO,
@@ -309,11 +308,11 @@ impl OtelEventManager {
         );
     }
 
-    pub fn user_prompt(&self, items: &[UserInput]) {
+    pub fn user_prompt(&self, items: &[InputItem]) {
         let prompt = items
             .iter()
             .flat_map(|item| match item {
-                UserInput::Text { text } => Some(text.as_str()),
+                InputItem::Text { text } => Some(text.as_str()),
                 _ => None,
             })
             .collect::<String>();
@@ -364,52 +363,6 @@ impl OtelEventManager {
             call_id = %call_id,
             decision = %decision.to_string().to_lowercase(),
             source = %source.to_string(),
-        );
-    }
-
-    pub fn sandbox_assessment(
-        &self,
-        call_id: &str,
-        status: &str,
-        risk_level: Option<SandboxRiskLevel>,
-        duration: Duration,
-    ) {
-        let level = risk_level.map(|level| level.as_str());
-
-        tracing::event!(
-            tracing::Level::INFO,
-            event.name = "codex.sandbox_assessment",
-            event.timestamp = %timestamp(),
-            conversation.id = %self.metadata.conversation_id,
-            app.version = %self.metadata.app_version,
-            auth_mode = self.metadata.auth_mode,
-            user.account_id = self.metadata.account_id,
-            user.email = self.metadata.account_email,
-            terminal.type = %self.metadata.terminal_type,
-            model = %self.metadata.model,
-            slug = %self.metadata.slug,
-            call_id = %call_id,
-            status = %status,
-            risk_level = level,
-            duration_ms = %duration.as_millis(),
-        );
-    }
-
-    pub fn sandbox_assessment_latency(&self, call_id: &str, duration: Duration) {
-        tracing::event!(
-            tracing::Level::INFO,
-            event.name = "codex.sandbox_assessment_latency",
-            event.timestamp = %timestamp(),
-            conversation.id = %self.metadata.conversation_id,
-            app.version = %self.metadata.app_version,
-            auth_mode = self.metadata.auth_mode,
-            user.account_id = self.metadata.account_id,
-            user.email = self.metadata.account_email,
-            terminal.type = %self.metadata.terminal_type,
-            model = %self.metadata.model,
-            slug = %self.metadata.slug,
-            call_id = %call_id,
-            duration_ms = %duration.as_millis(),
         );
     }
 

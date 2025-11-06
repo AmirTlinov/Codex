@@ -3,11 +3,11 @@ use crate::state::TaskKind;
 use crate::tasks::SessionTask;
 use crate::tasks::SessionTaskContext;
 use async_trait::async_trait;
-use codex_git::CreateGhostCommitOptions;
-use codex_git::GitToolingError;
-use codex_git::create_ghost_commit;
+use codex_git_tooling::CreateGhostCommitOptions;
+use codex_git_tooling::GitToolingError;
+use codex_git_tooling::create_ghost_commit;
 use codex_protocol::models::ResponseItem;
-use codex_protocol::user_input::UserInput;
+use codex_core::protocol::InputItem as UserInput;
 use codex_utils_readiness::Readiness;
 use codex_utils_readiness::Token;
 use std::sync::Arc;
@@ -48,11 +48,13 @@ impl SessionTask for GhostSnapshotTask {
                     {
                         Ok(Ok(ghost_commit)) => {
                             info!("ghost snapshot blocking task finished");
+                            let snapshot_item = ResponseItem::GhostSnapshot {
+                                id: ghost_commit.id().to_string(),
+                                parent: ghost_commit.parent().map(str::to_string),
+                            };
                             session
                                 .session
-                                .record_conversation_items(&ctx, &[ResponseItem::GhostSnapshot {
-                                    ghost_commit: ghost_commit.clone(),
-                                }])
+                                .record_conversation_items(&ctx, &[snapshot_item])
                                 .await;
                             info!("ghost commit captured: {}", ghost_commit.id());
                         }
@@ -70,7 +72,7 @@ impl SessionTask for GhostSnapshotTask {
                             };
                             session
                                 .session
-                                .notify_background_event(&ctx_for_task, message)
+                                .notify_background_event(&ctx_for_task.sub_id, message)
                                 .await;
                         }
                         Err(err) => {
@@ -82,7 +84,7 @@ impl SessionTask for GhostSnapshotTask {
                                 format!("Snapshots disabled after ghost snapshot panic: {err}.");
                             session
                                 .session
-                                .notify_background_event(&ctx_for_task, message)
+                                .notify_background_event(&ctx_for_task.sub_id, message)
                                 .await;
                         }
                     }

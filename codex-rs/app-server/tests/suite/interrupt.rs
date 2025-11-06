@@ -88,10 +88,7 @@ async fn shell_command_interruption() -> anyhow::Result<()> {
 
     // 2) addConversationListener
     let add_listener_id = mcp
-        .send_add_conversation_listener_request(AddConversationListenerParams {
-            conversation_id,
-            experimental_raw_events: false,
-        })
+        .send_add_conversation_listener_request(AddConversationListenerParams { conversation_id })
         .await?;
     let _add_listener_resp: JSONRPCResponse = timeout(
         DEFAULT_READ_TIMEOUT,

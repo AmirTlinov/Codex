@@ -12,7 +12,7 @@ use codex_core::protocol::EventMsg;
 use codex_core::protocol::Op;
 use codex_core::protocol::SandboxPolicy;
 use codex_protocol::config_types::ReasoningSummary;
-use codex_protocol::user_input::UserInput;
+use codex_core::protocol::InputItem as UserInput;
 use core_test_support::assert_regex_match;
 use core_test_support::responses::ev_apply_patch_function_call;
 use core_test_support::responses::ev_assistant_message;
@@ -83,7 +83,8 @@ async fn apply_patch_cli_multiple_operations_integration() -> Result<()> {
     fs::write(&modify_path, "line1\nline2\n")?;
     fs::write(&delete_path, "obsolete\n")?;
 
-    let patch = "*** Begin Patch\n*** Add File: nested/new.txt\n+created\n*** Delete File: delete.txt\n*** Update File: modify.txt\n@@\n-line2\n+changed\n*** End Patch";
+    let patch = "*** Begin Patch
+*** Add File: nested/new.txt\n+created\n*** Delete File: delete.txt\n*** Update File: modify.txt\n@@\n-line2\n+changed\n*** End Patch";
 
     let call_id = "apply-multi-ops";
     mount_apply_patch(&harness, call_id, patch, "done").await;
@@ -95,11 +96,11 @@ async fn apply_patch_cli_multiple_operations_integration() -> Result<()> {
     let expected = r"(?s)^Exit code: 0
 Wall time: [0-9]+(?:\.[0-9]+)? seconds
 Output:
-Success. Updated the following files:
-A nested/new.txt
-M modify.txt
-D delete.txt
-?$";
+Applied operations:
+- add: nested/new\.txt \(\+1\)
+- delete: delete\.txt \(-1\)
+- update: modify\.txt \(\+1, -1\)
+✔ Patch applied successfully\.\n$";
     assert_regex_match(expected, &out);
 
     assert_eq!(
@@ -121,7 +122,8 @@ async fn apply_patch_cli_multiple_chunks() -> Result<()> {
     let target = harness.path("multi.txt");
     fs::write(&target, "line1\nline2\nline3\nline4\n")?;
 
-    let patch = "*** Begin Patch\n*** Update File: multi.txt\n@@\n-line2\n+changed2\n@@\n-line4\n+changed4\n*** End Patch";
+    let patch = "*** Begin Patch
+*** Update File: multi.txt\n@@\n-line2\n+changed2\n@@\n-line4\n+changed4\n*** End Patch";
     let call_id = "apply-multi-chunks";
     mount_apply_patch(&harness, call_id, patch, "ok").await;
 
@@ -145,7 +147,8 @@ async fn apply_patch_cli_moves_file_to_new_directory() -> Result<()> {
     fs::create_dir_all(original.parent().expect("parent"))?;
     fs::write(&original, "old content\n")?;
 
-    let patch = "*** Begin Patch\n*** Update File: old/name.txt\n*** Move to: renamed/dir/name.txt\n@@\n-old content\n+new content\n*** End Patch";
+    let patch = "*** Begin Patch
+*** Update File: old/name.txt\n*** Move to: renamed/dir/name.txt\n@@\n-old content\n+new content\n*** End Patch";
     let call_id = "apply-move";
     mount_apply_patch(&harness, call_id, patch, "ok").await;
 
@@ -157,7 +160,7 @@ async fn apply_patch_cli_moves_file_to_new_directory() -> Result<()> {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn apply_patch_cli_updates_file_appends_trailing_newline() -> Result<()> {
+async fn apply_patch_cli_updates_file_preserves_trailing_newline_state() -> Result<()> {
     skip_if_no_network!(Ok(()));
 
     let harness = apply_patch_harness().await?;
@@ -165,15 +168,16 @@ async fn apply_patch_cli_updates_file_appends_trailing_newline() -> Result<()> {
     let target = harness.path("no_newline.txt");
     fs::write(&target, "no newline at end")?;
 
-    let patch = "*** Begin Patch\n*** Update File: no_newline.txt\n@@\n-no newline at end\n+first line\n+second line\n*** End Patch";
+    let patch = "*** Begin Patch
+*** Update File: no_newline.txt\n@@\n-no newline at end\n+first line\n+second line\n*** End Patch";
     let call_id = "apply-append-nl";
     mount_apply_patch(&harness, call_id, patch, "ok").await;
 
     harness.submit("apply newline patch").await?;
 
     let contents = fs::read_to_string(&target)?;
-    assert!(contents.ends_with('\n'));
-    assert_eq!(contents, "first line\nsecond line\n");
+    assert_eq!(contents, "first line\nsecond line");
+    assert!(!contents.ends_with('\n'));
     Ok(())
 }
 
@@ -186,7 +190,8 @@ async fn apply_patch_cli_insert_only_hunk_modifies_file() -> Result<()> {
     let target = harness.path("insert_only.txt");
     fs::write(&target, "alpha\nomega\n")?;
 
-    let patch = "*** Begin Patch\n*** Update File: insert_only.txt\n@@\n alpha\n+beta\n omega\n*** End Patch";
+    let patch = "*** Begin Patch
+*** Update File: insert_only.txt\n@@\n alpha\n+beta\n omega\n*** End Patch";
     let call_id = "apply-insert-only";
     mount_apply_patch(&harness, call_id, patch, "ok").await;
 
@@ -209,14 +214,20 @@ async fn apply_patch_cli_move_overwrites_existing_destination() -> Result<()> {
     fs::write(&original, "from\n")?;
     fs::write(&destination, "existing\n")?;
 
-    let patch = "*** Begin Patch\n*** Update File: old/name.txt\n*** Move to: renamed/dir/name.txt\n@@\n-from\n+new\n*** End Patch";
+    let patch = "*** Begin Patch
+*** Update File: old/name.txt\n*** Move to: renamed/dir/name.txt\n@@\n-from\n+new\n*** End Patch";
     let call_id = "apply-move-overwrite";
     mount_apply_patch(&harness, call_id, patch, "ok").await;
 
     harness.submit("apply move overwrite patch").await?;
 
-    assert!(!original.exists());
-    assert_eq!(fs::read_to_string(&destination)?, "new\n");
+    let out = harness.function_call_stdout(call_id).await;
+    assert!(
+        out.contains("destination already exists"),
+        "expected overwrite rejection, actual: {out}"
+    );
+    assert!(original.exists());
+    assert_eq!(fs::read_to_string(&destination)?, "existing\n");
     Ok(())
 }
 
@@ -234,7 +245,8 @@ async fn apply_patch_cli_move_without_content_change_has_no_turn_diff() -> Resul
     fs::create_dir_all(original.parent().expect("parent should exist"))?;
     fs::write(&original, "same\n")?;
 
-    let patch = "*** Begin Patch\n*** Update File: old/name.txt\n*** Move to: renamed/name.txt\n@@\n same\n*** End Patch";
+    let patch = "*** Begin Patch
+*** Update File: old/name.txt\n*** Move to: renamed/name.txt\n@@\n same\n*** End Patch";
     let call_id = "apply-move-no-change";
     mount_apply_patch(&harness, call_id, patch, "ok").await;
 
@@ -280,7 +292,8 @@ async fn apply_patch_cli_add_overwrites_existing_file() -> Result<()> {
     let path = harness.path("duplicate.txt");
     fs::write(&path, "old content\n")?;
 
-    let patch = "*** Begin Patch\n*** Add File: duplicate.txt\n+new content\n*** End Patch";
+    let patch = "*** Begin Patch
+*** Add File: duplicate.txt\n+new content\n*** End Patch";
     let call_id = "apply-add-overwrite";
     mount_apply_patch(&harness, call_id, patch, "ok").await;
 
@@ -296,7 +309,8 @@ async fn apply_patch_cli_rejects_invalid_hunk_header() -> Result<()> {
 
     let harness = apply_patch_harness().await?;
 
-    let patch = "*** Begin Patch\n*** Frobnicate File: foo\n*** End Patch";
+    let patch = "*** Begin Patch
+*** Frobnicate File: foo\n*** End Patch";
     let call_id = "apply-invalid-header";
     mount_apply_patch(&harness, call_id, patch, "ok").await;
 
@@ -324,8 +338,8 @@ async fn apply_patch_cli_reports_missing_context() -> Result<()> {
     let target = harness.path("modify.txt");
     fs::write(&target, "line1\nline2\n")?;
 
-    let patch =
-        "*** Begin Patch\n*** Update File: modify.txt\n@@\n-missing\n+changed\n*** End Patch";
+    let patch = "*** Begin Patch
+*** Update File: modify.txt\n@@\n-missing\n+changed\n*** End Patch";
     let call_id = "apply-missing-context";
     mount_apply_patch(&harness, call_id, patch, "ok").await;
 
@@ -348,7 +362,8 @@ async fn apply_patch_cli_reports_missing_target_file() -> Result<()> {
 
     let harness = apply_patch_harness().await?;
 
-    let patch = "*** Begin Patch\n*** Update File: missing.txt\n@@\n-nope\n+better\n*** End Patch";
+    let patch = "*** Begin Patch
+*** Update File: missing.txt\n@@\n-nope\n+better\n*** End Patch";
     let call_id = "apply-missing-file";
     mount_apply_patch(&harness, call_id, patch, "fail").await;
 
@@ -377,7 +392,8 @@ async fn apply_patch_cli_delete_missing_file_reports_error() -> Result<()> {
 
     let harness = apply_patch_harness().await?;
 
-    let patch = "*** Begin Patch\n*** Delete File: missing.txt\n*** End Patch";
+    let patch = "*** Begin Patch
+*** Delete File: missing.txt\n*** End Patch";
     let call_id = "apply-delete-missing";
     mount_apply_patch(&harness, call_id, patch, "fail").await;
 
@@ -407,7 +423,8 @@ async fn apply_patch_cli_rejects_empty_patch() -> Result<()> {
 
     let harness = apply_patch_harness().await?;
 
-    let patch = "*** Begin Patch\n*** End Patch";
+    let patch = "*** Begin Patch
+*** End Patch";
     let call_id = "apply-empty";
     mount_apply_patch(&harness, call_id, patch, "ok").await;
 
@@ -429,7 +446,8 @@ async fn apply_patch_cli_delete_directory_reports_verification_error() -> Result
 
     fs::create_dir(harness.path("dir"))?;
 
-    let patch = "*** Begin Patch\n*** Delete File: dir\n*** End Patch";
+    let patch = "*** Begin Patch
+*** Delete File: dir\n*** End Patch";
     let call_id = "apply-delete-dir";
     mount_apply_patch(&harness, call_id, patch, "ok").await;
 
@@ -456,7 +474,8 @@ async fn apply_patch_cli_rejects_path_traversal_outside_workspace() -> Result<()
         .join("escape.txt");
     let _ = fs::remove_file(&escape_path);
 
-    let patch = "*** Begin Patch\n*** Add File: ../escape.txt\n+outside\n*** End Patch";
+    let patch = "*** Begin Patch
+*** Add File: ../escape.txt\n+outside\n*** End Patch";
     let call_id = "apply-path-traversal";
     mount_apply_patch(&harness, call_id, patch, "fail").await;
 
@@ -505,7 +524,8 @@ async fn apply_patch_cli_rejects_move_path_traversal_outside_workspace() -> Resu
     let source = harness.path("stay.txt");
     fs::write(&source, "from\n")?;
 
-    let patch = "*** Begin Patch\n*** Update File: stay.txt\n*** Move to: ../escape-move.txt\n@@\n-from\n+to\n*** End Patch";
+    let patch = "*** Begin Patch
+*** Update File: stay.txt\n*** Move to: ../escape-move.txt\n@@\n-from\n+to\n*** End Patch";
     let call_id = "apply-move-traversal";
     mount_apply_patch(&harness, call_id, patch, "fail").await;
 
@@ -545,7 +565,8 @@ async fn apply_patch_cli_verification_failure_has_no_side_effects() -> Result<()
 
     // Compose a patch that would create a file, then fail verification on an update.
     let call_id = "apply-partial-no-side-effects";
-    let patch = "*** Begin Patch\n*** Add File: created.txt\n+hello\n*** Update File: missing.txt\n@@\n-old\n+new\n*** End Patch";
+    let patch = "*** Begin Patch
+*** Add File: created.txt\n+hello\n*** Update File: missing.txt\n@@\n-old\n+new\n*** End Patch";
 
     mount_apply_patch(&harness, call_id, patch, "failed").await;
 
@@ -575,7 +596,8 @@ async fn apply_patch_shell_heredoc_with_cd_updates_relative_workdir() -> Result<
     let target = sub.join("in_sub.txt");
     fs::write(&target, "before\n")?;
 
-    let script = "cd sub && apply_patch <<'EOF'\n*** Begin Patch\n*** Update File: in_sub.txt\n@@\n-before\n+after\n*** End Patch\nEOF\n";
+    let script = "cd sub && apply_patch <<'EOF'\n*** Begin Patch
+*** Update File: in_sub.txt\n@@\n-before\n+after\n*** End Patch\nEOF\n";
     let call_id = "shell-heredoc-cd";
     let args = json!({
         "command": ["bash", "-lc", script],
@@ -598,7 +620,7 @@ async fn apply_patch_shell_heredoc_with_cd_updates_relative_workdir() -> Result<
 
     let out = harness.function_call_stdout(call_id).await;
     assert!(
-        out.contains("Success."),
+        out.contains("✔ Patch applied successfully."),
         "expected successful apply_patch invocation via shell: {out}"
     );
     assert_eq!(fs::read_to_string(&target)?, "after\n");
@@ -621,7 +643,8 @@ async fn apply_patch_shell_failure_propagates_error_and_skips_diff() -> Result<(
     let target = cwd.path().join("invalid.txt");
     fs::write(&target, "ok\n")?;
 
-    let script = "apply_patch <<'EOF'\n*** Begin Patch\n*** Update File: invalid.txt\n@@\n-nope\n+changed\n*** End Patch\nEOF\n";
+    let script = "apply_patch <<'EOF'\n*** Begin Patch
+*** Update File: invalid.txt\n@@\n-nope\n+changed\n*** End Patch\nEOF\n";
     let call_id = "shell-apply-failure";
     let args = json!({
         "command": ["bash", "-lc", script],
@@ -696,8 +719,10 @@ async fn apply_patch_function_accepts_lenient_heredoc_wrapped_patch() -> Result<
     let harness = apply_patch_harness().await?;
 
     let file_name = "lenient.txt";
-    let patch_inner =
-        format!("*** Begin Patch\n*** Add File: {file_name}\n+lenient\n*** End Patch\n");
+    let patch_inner = format!(
+        "*** Begin Patch
+*** Add File: {file_name}\n+lenient\n*** End Patch\n"
+    );
     let wrapped = format!("<<'EOF'\n{patch_inner}EOF\n");
     let call_id = "apply-lenient";
     mount_apply_patch(&harness, call_id, &wrapped, "ok").await;
@@ -718,7 +743,8 @@ async fn apply_patch_cli_end_of_file_anchor() -> Result<()> {
     let target = harness.path("tail.txt");
     fs::write(&target, "alpha\nlast\n")?;
 
-    let patch = "*** Begin Patch\n*** Update File: tail.txt\n@@\n-last\n+end\n*** End of File\n*** End Patch";
+    let patch = "*** Begin Patch
+*** Update File: tail.txt\n@@\n-last\n+end\n*** End of File\n*** End Patch";
     let call_id = "apply-eof";
     mount_apply_patch(&harness, call_id, patch, "ok").await;
 
@@ -737,8 +763,8 @@ async fn apply_patch_cli_missing_second_chunk_context_rejected() -> Result<()> {
     fs::write(&target, "a\nb\nc\nd\n")?;
 
     // First chunk has @@, second chunk intentionally omits @@ to trigger parse error.
-    let patch =
-        "*** Begin Patch\n*** Update File: two_chunks.txt\n@@\n-b\n+B\n\n-d\n+D\n*** End Patch";
+    let patch = "*** Begin Patch
+*** Update File: two_chunks.txt\n@@\n-b\n+B\n\n-d\n+D\n*** End Patch";
     let call_id = "apply-missing-ctx-2nd";
     mount_apply_patch(&harness, call_id, patch, "fail").await;
 
@@ -766,7 +792,10 @@ async fn apply_patch_emits_turn_diff_event_with_unified_diff() -> Result<()> {
 
     let call_id = "apply-diff-event";
     let file = "udiff.txt";
-    let patch = format!("*** Begin Patch\n*** Add File: {file}\n+hello\n*** End Patch\n");
+    let patch = format!(
+        "*** Begin Patch
+*** Add File: {file}\n+hello\n*** End Patch\n"
+    );
     let first = sse(vec![
         ev_response_created("resp-1"),
         ev_apply_patch_function_call(call_id, &patch),
@@ -828,7 +857,8 @@ async fn apply_patch_turn_diff_for_rename_with_content_change() -> Result<()> {
 
     // Patch: update + move
     let call_id = "apply-rename-change";
-    let patch = "*** Begin Patch\n*** Update File: old.txt\n*** Move to: new.txt\n@@\n-old\n+new\n*** End Patch";
+    let patch = "*** Begin Patch
+*** Update File: old.txt\n*** Move to: new.txt\n@@\n-old\n+new\n*** End Patch";
     let first = sse(vec![
         ev_response_created("resp-1"),
         ev_apply_patch_function_call(call_id, patch),
@@ -889,8 +919,10 @@ async fn apply_patch_aggregates_diff_across_multiple_tool_calls() -> Result<()> 
 
     let call1 = "agg-1";
     let call2 = "agg-2";
-    let patch1 = "*** Begin Patch\n*** Add File: agg/a.txt\n+v1\n*** End Patch";
-    let patch2 = "*** Begin Patch\n*** Update File: agg/a.txt\n@@\n-v1\n+v2\n*** Add File: agg/b.txt\n+B\n*** End Patch";
+    let patch1 = "*** Begin Patch
+*** Add File: agg/a.txt\n+v1\n*** End Patch";
+    let patch2 = "*** Begin Patch
+*** Update File: agg/a.txt\n@@\n-v1\n+v2\n*** Add File: agg/b.txt\n+B\n*** End Patch";
 
     let s1 = sse(vec![
         ev_response_created("resp-1"),
@@ -954,9 +986,10 @@ async fn apply_patch_aggregates_diff_preserves_success_after_failure() -> Result
 
     let call_success = "agg-success";
     let call_failure = "agg-failure";
-    let patch_success = "*** Begin Patch\n*** Add File: partial/success.txt\n+ok\n*** End Patch";
-    let patch_failure =
-        "*** Begin Patch\n*** Update File: partial/success.txt\n@@\n-missing\n+new\n*** End Patch";
+    let patch_success = "*** Begin Patch
+*** Add File: partial/success.txt\n+ok\n*** End Patch";
+    let patch_failure = "*** Begin Patch
+*** Update File: partial/success.txt\n@@\n-missing\n+new\n*** End Patch";
 
     let responses = vec![
         sse(vec![
@@ -1039,8 +1072,8 @@ async fn apply_patch_change_context_disambiguates_target() -> Result<()> {
     let target = harness.path("multi_ctx.txt");
     fs::write(&target, "fn a\nx=10\ny=2\nfn b\nx=10\ny=20\n")?;
 
-    let patch =
-        "*** Begin Patch\n*** Update File: multi_ctx.txt\n@@ fn b\n-x=10\n+x=11\n*** End Patch";
+    let patch = "*** Begin Patch
+*** Update File: multi_ctx.txt\n@@ fn b\n-x=10\n+x=11\n*** End Patch";
     let call_id = "apply-ctx";
     mount_apply_patch(&harness, call_id, patch, "ok").await;
 

@@ -8,15 +8,12 @@ use crate::event_processor::handle_last_message;
 use crate::exec_events::AgentMessageItem;
 use crate::exec_events::CommandExecutionItem;
 use crate::exec_events::CommandExecutionStatus;
-use crate::exec_events::ErrorItem;
 use crate::exec_events::FileChangeItem;
 use crate::exec_events::FileUpdateChange;
 use crate::exec_events::ItemCompletedEvent;
 use crate::exec_events::ItemStartedEvent;
 use crate::exec_events::ItemUpdatedEvent;
 use crate::exec_events::McpToolCallItem;
-use crate::exec_events::McpToolCallItemError;
-use crate::exec_events::McpToolCallItemResult;
 use crate::exec_events::McpToolCallStatus;
 use crate::exec_events::PatchApplyStatus;
 use crate::exec_events::PatchChangeKind;
@@ -51,7 +48,6 @@ use codex_core::protocol::TaskStartedEvent;
 use codex_core::protocol::WebSearchEndEvent;
 use codex_protocol::plan_tool::StepStatus;
 use codex_protocol::plan_tool::UpdatePlanArgs;
-use serde_json::Value as JsonValue;
 use tracing::error;
 use tracing::warn;
 
@@ -85,7 +81,6 @@ struct RunningMcpToolCall {
     server: String,
     tool: String,
     item_id: String,
-    arguments: JsonValue,
 }
 
 impl EventProcessorWithJsonOutput {
@@ -129,15 +124,6 @@ impl EventProcessorWithJsonOutput {
                 };
                 self.last_critical_error = Some(error.clone());
                 vec![ThreadEvent::Error(error)]
-            }
-            EventMsg::Warning(ev) => {
-                let item = ThreadItem {
-                    id: self.get_next_item_id(),
-                    details: ThreadItemDetails::Error(ErrorItem {
-                        message: ev.message.clone(),
-                    }),
-                };
-                vec![ThreadEvent::ItemCompleted(ItemCompletedEvent { item })]
             }
             EventMsg::StreamError(ev) => vec![ThreadEvent::Error(ThreadErrorEvent {
                 message: ev.message.clone(),
@@ -234,7 +220,6 @@ impl EventProcessorWithJsonOutput {
         let item_id = self.get_next_item_id();
         let server = ev.invocation.server.clone();
         let tool = ev.invocation.tool.clone();
-        let arguments = ev.invocation.arguments.clone().unwrap_or(JsonValue::Null);
 
         self.running_mcp_tool_calls.insert(
             ev.call_id.clone(),
@@ -242,7 +227,6 @@ impl EventProcessorWithJsonOutput {
                 server: server.clone(),
                 tool: tool.clone(),
                 item_id: item_id.clone(),
-                arguments: arguments.clone(),
             },
         );
 
@@ -251,9 +235,6 @@ impl EventProcessorWithJsonOutput {
             details: ThreadItemDetails::McpToolCall(McpToolCallItem {
                 server,
                 tool,
-                arguments,
-                result: None,
-                error: None,
                 status: McpToolCallStatus::InProgress,
             }),
         };
@@ -268,42 +249,19 @@ impl EventProcessorWithJsonOutput {
             McpToolCallStatus::Failed
         };
 
-        let (server, tool, item_id, arguments) =
-            match self.running_mcp_tool_calls.remove(&ev.call_id) {
-                Some(running) => (
-                    running.server,
-                    running.tool,
-                    running.item_id,
-                    running.arguments,
-                ),
-                None => {
-                    warn!(
-                        call_id = ev.call_id,
-                        "Received McpToolCallEnd without begin; synthesizing new item"
-                    );
-                    (
-                        ev.invocation.server.clone(),
-                        ev.invocation.tool.clone(),
-                        self.get_next_item_id(),
-                        ev.invocation.arguments.clone().unwrap_or(JsonValue::Null),
-                    )
-                }
-            };
-
-        let (result, error) = match &ev.result {
-            Ok(value) => {
-                let result = McpToolCallItemResult {
-                    content: value.content.clone(),
-                    structured_content: value.structured_content.clone(),
-                };
-                (Some(result), None)
+        let (server, tool, item_id) = match self.running_mcp_tool_calls.remove(&ev.call_id) {
+            Some(running) => (running.server, running.tool, running.item_id),
+            None => {
+                warn!(
+                    call_id = ev.call_id,
+                    "Received McpToolCallEnd without begin; synthesizing new item"
+                );
+                (
+                    ev.invocation.server.clone(),
+                    ev.invocation.tool.clone(),
+                    self.get_next_item_id(),
+                )
             }
-            Err(message) => (
-                None,
-                Some(McpToolCallItemError {
-                    message: message.clone(),
-                }),
-            ),
         };
 
         let item = ThreadItem {
@@ -311,9 +269,6 @@ impl EventProcessorWithJsonOutput {
             details: ThreadItemDetails::McpToolCall(McpToolCallItem {
                 server,
                 tool,
-                arguments,
-                result,
-                error,
                 status,
             }),
         };

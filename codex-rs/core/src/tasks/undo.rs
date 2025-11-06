@@ -1,26 +1,32 @@
 use std::sync::Arc;
 
 use crate::codex::TurnContext;
+use crate::protocol::Event;
 use crate::protocol::EventMsg;
+use crate::protocol::InputItem;
 use crate::protocol::UndoCompletedEvent;
 use crate::protocol::UndoStartedEvent;
 use crate::state::TaskKind;
 use crate::tasks::SessionTask;
 use crate::tasks::SessionTaskContext;
 use async_trait::async_trait;
-use codex_git::restore_ghost_commit;
+use codex_git_tooling::GhostCommit;
+use codex_git_tooling::restore_ghost_commit;
 use codex_protocol::models::ResponseItem;
-use codex_protocol::user_input::UserInput;
 use tokio_util::sync::CancellationToken;
 use tracing::error;
 use tracing::info;
 use tracing::warn;
 
-pub(crate) struct UndoTask;
+pub(crate) struct UndoTask {
+    cancel: CancellationToken,
+}
 
 impl UndoTask {
     pub(crate) fn new() -> Self {
-        Self
+        Self {
+            cancel: CancellationToken::new(),
+        }
     }
 }
 
@@ -34,52 +40,69 @@ impl SessionTask for UndoTask {
         self: Arc<Self>,
         session: Arc<SessionTaskContext>,
         ctx: Arc<TurnContext>,
-        _input: Vec<UserInput>,
-        cancellation_token: CancellationToken,
+        _sub_id: String,
+        _input: Vec<InputItem>,
     ) -> Option<String> {
+        let cancellation_token = self.cancel.clone();
         let sess = session.clone_session();
-        sess.send_event(
-            ctx.as_ref(),
-            EventMsg::UndoStarted(UndoStartedEvent {
+        let sub_id = ctx.sub_id.clone();
+
+        sess.send_event(Event {
+            id: sub_id.clone(),
+            msg: EventMsg::UndoStarted(UndoStartedEvent {
                 message: Some("Undo in progress...".to_string()),
             }),
-        )
+        })
         .await;
 
         if cancellation_token.is_cancelled() {
-            sess.send_event(
-                ctx.as_ref(),
-                EventMsg::UndoCompleted(UndoCompletedEvent {
+            sess.send_event(Event {
+                id: sub_id,
+                msg: EventMsg::UndoCompleted(UndoCompletedEvent {
                     success: false,
                     message: Some("Undo cancelled.".to_string()),
                 }),
-            )
+            })
             .await;
             return None;
         }
 
-        let mut history = sess.clone_history().await;
-        let mut items = history.get_history();
+        let mut history_items = sess.history_snapshot().await;
+        if cancellation_token.is_cancelled() {
+            sess.send_event(Event {
+                id: ctx.sub_id.clone(),
+                msg: EventMsg::UndoCompleted(UndoCompletedEvent {
+                    success: false,
+                    message: Some("Undo cancelled.".to_string()),
+                }),
+            })
+            .await;
+            return None;
+        }
+
         let mut completed = UndoCompletedEvent {
             success: false,
             message: None,
         };
 
         let Some((idx, ghost_commit)) =
-            items
+            history_items
                 .iter()
                 .enumerate()
                 .rev()
                 .find_map(|(idx, item)| match item {
-                    ResponseItem::GhostSnapshot { ghost_commit } => {
-                        Some((idx, ghost_commit.clone()))
+                    ResponseItem::GhostSnapshot { id, parent } => {
+                        Some((idx, GhostCommit::new(id.clone(), parent.clone())))
                     }
                     _ => None,
                 })
         else {
             completed.message = Some("No ghost snapshot available to undo.".to_string());
-            sess.send_event(ctx.as_ref(), EventMsg::UndoCompleted(completed))
-                .await;
+            sess.send_event(Event {
+                id: ctx.sub_id.clone(),
+                msg: EventMsg::UndoCompleted(completed),
+            })
+            .await;
             return None;
         };
 
@@ -91,8 +114,8 @@ impl SessionTask for UndoTask {
 
         match restore_result {
             Ok(Ok(())) => {
-                items.remove(idx);
-                sess.replace_history(items).await;
+                history_items.remove(idx);
+                sess.overwrite_history(history_items).await;
                 let short_id: String = commit_id.chars().take(7).collect();
                 info!(commit_id = commit_id, "Undo restored ghost snapshot");
                 completed.success = true;
@@ -110,8 +133,15 @@ impl SessionTask for UndoTask {
             }
         }
 
-        sess.send_event(ctx.as_ref(), EventMsg::UndoCompleted(completed))
-            .await;
+        sess.send_event(Event {
+            id: ctx.sub_id.clone(),
+            msg: EventMsg::UndoCompleted(completed),
+        })
+        .await;
         None
+    }
+
+    async fn abort(&self, _session: Arc<SessionTaskContext>, _sub_id: &str) {
+        self.cancel.cancel();
     }
 }

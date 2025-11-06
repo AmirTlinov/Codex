@@ -1,13 +1,16 @@
 use std::path::PathBuf;
+use std::time::Duration;
 
 use codex_common::approval_presets::ApprovalPreset;
 use codex_common::model_presets::ModelPreset;
+use codex_core::UnifiedExecOutputWindow;
 use codex_core::protocol::ConversationPathResponseEvent;
 use codex_core::protocol::Event;
 use codex_file_search::FileMatch;
 
 use crate::bottom_pane::ApprovalRequest;
 use crate::history_cell::HistoryCell;
+use crate::mcp::McpWizardDraft;
 
 use codex_core::protocol::AskForApproval;
 use codex_core::protocol::SandboxPolicy;
@@ -45,6 +48,30 @@ pub(crate) enum AppEvent {
     DiffResult(String),
 
     InsertHistoryCell(Box<dyn HistoryCell>),
+
+    LiveExecCommandBegin {
+        call_id: String,
+        command: Vec<String>,
+        cwd: PathBuf,
+    },
+    LiveExecOutputChunk {
+        call_id: String,
+        chunk: String,
+    },
+    LiveExecCommandFinished {
+        call_id: String,
+        exit_code: i32,
+        duration: Duration,
+        aggregated_output: String,
+    },
+    LiveExecPromoted {
+        call_id: String,
+        shell_id: String,
+        initial_output: String,
+        description: Option<String>,
+    },
+    LiveExecPollTick,
+    EnsureLiveExecPolling,
 
     StartCommitAnimation,
     StopCommitAnimation,
@@ -114,6 +141,72 @@ pub(crate) enum AppEvent {
     /// Open the upload consent popup for feedback after selecting a category.
     OpenFeedbackConsent {
         category: FeedbackCategory,
+    },
+
+    /// Launch the agents context manager overlay to adjust included files.
+    OpenAgentsContextManager,
+
+    /// Clear any previously attached agents context selection after it has been consumed.
+    ClearAgentsContextSelection,
+
+    /// Open the process manager overlay showing background unified exec sessions.
+    OpenProcessManager,
+
+    /// Request to send input to a running unified exec session.
+    OpenUnifiedExecInputPrompt {
+        session_id: i32,
+    },
+
+    /// Request to display the full output of a unified exec session.
+    OpenUnifiedExecOutput {
+        session_id: i32,
+    },
+
+    /// Request to refresh the currently visible output chunk for a session.
+    RefreshUnifiedExecOutput {
+        session_id: i32,
+    },
+
+    /// Request to load a specific output window for the given session.
+    LoadUnifiedExecOutputWindow {
+        session_id: i32,
+        window: UnifiedExecOutputWindow,
+    },
+
+    /// Request to export buffered output for a session to disk.
+    OpenUnifiedExecExportPrompt {
+        session_id: i32,
+    },
+
+    /// Request the backend to terminate a running unified exec session.
+    KillUnifiedExecSession {
+        session_id: i32,
+    },
+
+    /// Remove a unified exec session from the manager after completion.
+    RemoveUnifiedExecSession {
+        session_id: i32,
+    },
+
+    /// Open the MCP wizard for creating or editing a server entry.
+    OpenMcpWizard {
+        template_id: Option<String>,
+        draft: Option<McpWizardDraft>,
+        existing_name: Option<String>,
+    },
+
+    /// Apply the MCP wizard draft to create or update a server entry.
+    ApplyMcpWizard {
+        draft: McpWizardDraft,
+        existing_name: Option<String>,
+    },
+
+    /// Request a refresh of configured MCP servers from disk.
+    ReloadMcpServers,
+
+    /// Remove an MCP server configuration by name.
+    RemoveMcpServer {
+        name: String,
     },
 }
 

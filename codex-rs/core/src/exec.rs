@@ -6,6 +6,9 @@ use std::io;
 use std::path::Path;
 use std::path::PathBuf;
 use std::process::ExitStatus;
+use std::sync::Arc;
+use std::sync::atomic::AtomicU64;
+use std::sync::atomic::Ordering;
 use std::time::Duration;
 use std::time::Instant;
 
@@ -18,14 +21,14 @@ use tokio::process::Child;
 use crate::error::CodexErr;
 use crate::error::Result;
 use crate::error::SandboxErr;
+use crate::landlock::spawn_command_under_linux_sandbox;
 use crate::protocol::Event;
 use crate::protocol::EventMsg;
 use crate::protocol::ExecCommandOutputDeltaEvent;
 use crate::protocol::ExecOutputStream;
 use crate::protocol::SandboxPolicy;
-use crate::sandboxing::CommandSpec;
 use crate::sandboxing::ExecEnv;
-use crate::sandboxing::SandboxManager;
+use crate::seatbelt::spawn_command_under_seatbelt;
 use crate::spawn::StdioPolicy;
 use crate::spawn::spawn_child_async;
 
@@ -54,7 +57,6 @@ pub struct ExecParams {
     pub env: HashMap<String, String>,
     pub with_escalated_permissions: Option<bool>,
     pub justification: Option<String>,
-    pub arg0: Option<String>,
 }
 
 impl ExecParams {
@@ -72,9 +74,6 @@ pub enum SandboxType {
 
     /// Only available on Linux.
     LinuxSeccomp,
-
-    /// Only available on Windows.
-    WindowsRestrictedToken,
 }
 
 #[derive(Clone)]
@@ -92,228 +91,62 @@ pub async fn process_exec_tool_call(
     codex_linux_sandbox_exe: &Option<PathBuf>,
     stdout_stream: Option<StdoutStream>,
 ) -> Result<ExecToolCallOutput> {
-    let ExecParams {
-        command,
-        cwd,
-        timeout_ms,
-        env,
-        with_escalated_permissions,
-        justification,
-        arg0: _,
-    } = params;
-
-    let (program, args) = command.split_first().ok_or_else(|| {
-        CodexErr::Io(io::Error::new(
-            io::ErrorKind::InvalidInput,
-            "command args are empty",
-        ))
-    })?;
-
-    let spec = CommandSpec {
-        program: program.clone(),
-        args: args.to_vec(),
-        cwd,
-        env,
-        timeout_ms,
-        with_escalated_permissions,
-        justification,
-    };
-
-    let manager = SandboxManager::new();
-    let exec_env = manager
-        .transform(
-            &spec,
-            sandbox_policy,
-            sandbox_type,
-            sandbox_cwd,
-            codex_linux_sandbox_exe.as_ref(),
-        )
-        .map_err(CodexErr::from)?;
-
-    // Route through the sandboxing module for a single, unified execution path.
-    crate::sandboxing::execute_env(&exec_env, sandbox_policy, stdout_stream).await
-}
-
-pub(crate) async fn execute_exec_env(
-    env: ExecEnv,
-    sandbox_policy: &SandboxPolicy,
-    stdout_stream: Option<StdoutStream>,
-) -> Result<ExecToolCallOutput> {
-    let ExecEnv {
-        command,
-        cwd,
-        env,
-        timeout_ms,
-        sandbox,
-        with_escalated_permissions,
-        justification,
-        arg0,
-    } = env;
-
-    let params = ExecParams {
-        command,
-        cwd,
-        timeout_ms,
-        env,
-        with_escalated_permissions,
-        justification,
-        arg0,
-    };
-
     let start = Instant::now();
-    let raw_output_result = exec(params, sandbox, sandbox_policy, stdout_stream).await;
+
+    let timeout_duration = params.timeout_duration();
+
+    let raw_output_result: std::result::Result<RawExecToolCallOutput, CodexErr> = match sandbox_type
+    {
+        SandboxType::None => exec(params, sandbox_policy, stdout_stream.clone()).await,
+        SandboxType::MacosSeatbelt => {
+            let ExecParams {
+                command,
+                cwd: command_cwd,
+                env,
+                ..
+            } = params;
+            let child = spawn_command_under_seatbelt(
+                command,
+                command_cwd,
+                sandbox_policy,
+                sandbox_cwd,
+                StdioPolicy::RedirectForShellTool,
+                env,
+            )
+            .await?;
+            consume_truncated_output(child, timeout_duration, stdout_stream.clone()).await
+        }
+        SandboxType::LinuxSeccomp => {
+            let ExecParams {
+                command,
+                cwd: command_cwd,
+                env,
+                ..
+            } = params;
+
+            let codex_linux_sandbox_exe = codex_linux_sandbox_exe
+                .as_ref()
+                .ok_or(CodexErr::LandlockSandboxExecutableNotProvided)?;
+            let child = spawn_command_under_linux_sandbox(
+                codex_linux_sandbox_exe,
+                command,
+                command_cwd,
+                sandbox_policy,
+                sandbox_cwd,
+                StdioPolicy::RedirectForShellTool,
+                env,
+            )
+            .await?;
+
+            consume_truncated_output(child, timeout_duration, stdout_stream).await
+        }
+    };
     let duration = start.elapsed();
-    finalize_exec_result(raw_output_result, sandbox, duration)
-}
-
-#[cfg(target_os = "windows")]
-async fn exec_windows_sandbox(
-    params: ExecParams,
-    sandbox_policy: &SandboxPolicy,
-) -> Result<RawExecToolCallOutput> {
-    use crate::config::find_codex_home;
-    use codex_windows_sandbox::run_windows_sandbox_capture;
-
-    let ExecParams {
-        command,
-        cwd,
-        env,
-        timeout_ms,
-        ..
-    } = params;
-
-    let policy_str = match sandbox_policy {
-        SandboxPolicy::DangerFullAccess => "workspace-write",
-        SandboxPolicy::ReadOnly => "read-only",
-        SandboxPolicy::WorkspaceWrite { .. } => "workspace-write",
-    };
-
-    let sandbox_cwd = cwd.clone();
-    let logs_base_dir = find_codex_home().ok();
-    let spawn_res = tokio::task::spawn_blocking(move || {
-        run_windows_sandbox_capture(
-            policy_str,
-            &sandbox_cwd,
-            command,
-            &cwd,
-            env,
-            timeout_ms,
-            logs_base_dir.as_deref(),
-        )
-    })
-    .await;
-
-    let capture = match spawn_res {
-        Ok(Ok(v)) => v,
-        Ok(Err(err)) => {
-            return Err(CodexErr::Io(io::Error::other(format!(
-                "windows sandbox: {err}"
-            ))));
-        }
-        Err(join_err) => {
-            return Err(CodexErr::Io(io::Error::other(format!(
-                "windows sandbox join error: {join_err}"
-            ))));
-        }
-    };
-
-    let exit_status = synthetic_exit_status(capture.exit_code);
-    let stdout = StreamOutput {
-        text: capture.stdout,
-        truncated_after_lines: None,
-    };
-    let stderr = StreamOutput {
-        text: capture.stderr,
-        truncated_after_lines: None,
-    };
-    // Best-effort aggregate: stdout then stderr
-    let mut aggregated = Vec::with_capacity(stdout.text.len() + stderr.text.len());
-    append_all(&mut aggregated, &stdout.text);
-    append_all(&mut aggregated, &stderr.text);
-    let aggregated_output = StreamOutput {
-        text: aggregated,
-        truncated_after_lines: None,
-    };
-
-    Ok(RawExecToolCallOutput {
-        exit_status,
-        stdout,
-        stderr,
-        aggregated_output,
-        timed_out: capture.timed_out,
-    })
-}
-
-fn finalize_exec_result(
-    raw_output_result: std::result::Result<RawExecToolCallOutput, CodexErr>,
-    sandbox_type: SandboxType,
-    duration: Duration,
-) -> Result<ExecToolCallOutput> {
     match raw_output_result {
-        Ok(raw_output) => {
-            #[allow(unused_mut)]
-            let mut timed_out = raw_output.timed_out;
-
-            #[cfg(target_family = "unix")]
-            {
-                if let Some(signal) = raw_output.exit_status.signal() {
-                    if signal == TIMEOUT_CODE {
-                        timed_out = true;
-                    } else {
-                        return Err(CodexErr::Sandbox(SandboxErr::Signal(signal)));
-                    }
-                }
-            }
-
-            let mut exit_code = raw_output.exit_status.code().unwrap_or(-1);
-            if timed_out {
-                exit_code = EXEC_TIMEOUT_EXIT_CODE;
-            }
-
-            let stdout = raw_output.stdout.from_utf8_lossy();
-            let stderr = raw_output.stderr.from_utf8_lossy();
-            let aggregated_output = raw_output.aggregated_output.from_utf8_lossy();
-            let exec_output = ExecToolCallOutput {
-                exit_code,
-                stdout,
-                stderr,
-                aggregated_output,
-                duration,
-                timed_out,
-            };
-
-            if timed_out {
-                return Err(CodexErr::Sandbox(SandboxErr::Timeout {
-                    output: Box::new(exec_output),
-                }));
-            }
-
-            if is_likely_sandbox_denied(sandbox_type, &exec_output) {
-                return Err(CodexErr::Sandbox(SandboxErr::Denied {
-                    output: Box::new(exec_output),
-                }));
-            }
-
-            Ok(exec_output)
-        }
+        Ok(raw_output) => raw_exec_output_to_tool_output(raw_output, sandbox_type, duration),
         Err(err) => {
             tracing::error!("exec error: {err}");
             Err(err)
-        }
-    }
-}
-
-pub(crate) mod errors {
-    use super::CodexErr;
-    use crate::sandboxing::SandboxTransformError;
-
-    impl From<SandboxTransformError> for CodexErr {
-        fn from(err: SandboxTransformError) -> Self {
-            match err {
-                SandboxTransformError::MissingLinuxSandboxExecutable => {
-                    CodexErr::LandlockSandboxExecutableNotProvided
-                }
-            }
         }
     }
 }
@@ -335,17 +168,21 @@ pub(crate) fn is_likely_sandbox_denied(
     // 2: misuse of shell builtins
     // 126: permission denied
     // 127: command not found
-    const SANDBOX_DENIED_KEYWORDS: [&str; 7] = [
+    const QUICK_REJECT_EXIT_CODES: [i32; 3] = [2, 126, 127];
+    if QUICK_REJECT_EXIT_CODES.contains(&exec_output.exit_code) {
+        return false;
+    }
+
+    const SANDBOX_DENIED_KEYWORDS: [&str; 6] = [
         "operation not permitted",
         "permission denied",
         "read-only file system",
         "seccomp",
         "sandbox",
         "landlock",
-        "failed to write file",
     ];
 
-    let has_sandbox_keyword = [
+    if [
         &exec_output.stderr.text,
         &exec_output.stdout.text,
         &exec_output.aggregated_output.text,
@@ -356,15 +193,8 @@ pub(crate) fn is_likely_sandbox_denied(
         SANDBOX_DENIED_KEYWORDS
             .iter()
             .any(|needle| lower.contains(needle))
-    });
-
-    if has_sandbox_keyword {
+    }) {
         return true;
-    }
-
-    const QUICK_REJECT_EXIT_CODES: [i32; 3] = [2, 126, 127];
-    if QUICK_REJECT_EXIT_CODES.contains(&exec_output.exit_code) {
-        return false;
     }
 
     #[cfg(unix)]
@@ -380,12 +210,11 @@ pub(crate) fn is_likely_sandbox_denied(
     false
 }
 
-#[derive(Debug, Clone)]
-pub struct StreamOutput<T: Clone> {
+#[derive(Debug)]
+pub struct StreamOutput<T> {
     pub text: T,
     pub truncated_after_lines: Option<u32>,
 }
-
 #[derive(Debug)]
 struct RawExecToolCallOutput {
     pub exit_status: ExitStatus,
@@ -418,7 +247,7 @@ fn append_all(dst: &mut Vec<u8>, src: &[u8]) {
     dst.extend_from_slice(src);
 }
 
-#[derive(Clone, Debug)]
+#[derive(Debug)]
 pub struct ExecToolCallOutput {
     pub exit_code: i32,
     pub stdout: StreamOutput<String>,
@@ -428,24 +257,54 @@ pub struct ExecToolCallOutput {
     pub timed_out: bool,
 }
 
-#[cfg_attr(not(target_os = "windows"), allow(unused_variables))]
+pub async fn execute_exec_env(
+    env: ExecEnv,
+    sandbox_policy: &SandboxPolicy,
+    stdout_stream: Option<StdoutStream>,
+) -> Result<ExecToolCallOutput> {
+    let ExecEnv {
+        command,
+        cwd,
+        env: mut_vars,
+        timeout_ms,
+        sandbox,
+        with_escalated_permissions: _,
+        justification: _,
+        arg0,
+    } = env;
+
+    let (program, args) = command.split_first().ok_or_else(|| {
+        CodexErr::Io(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "command args are empty",
+        ))
+    })?;
+
+    let timeout = Duration::from_millis(timeout_ms.unwrap_or(DEFAULT_TIMEOUT_MS));
+    let start = Instant::now();
+    let child = spawn_child_async(
+        PathBuf::from(program),
+        args.to_vec(),
+        arg0.as_deref(),
+        cwd.clone(),
+        sandbox_policy,
+        StdioPolicy::RedirectForShellTool,
+        mut_vars,
+    )
+    .await?;
+
+    let raw_output = consume_truncated_output(child, timeout, stdout_stream).await?;
+    raw_exec_output_to_tool_output(raw_output, sandbox, start.elapsed())
+}
+
 async fn exec(
     params: ExecParams,
-    sandbox: SandboxType,
     sandbox_policy: &SandboxPolicy,
     stdout_stream: Option<StdoutStream>,
 ) -> Result<RawExecToolCallOutput> {
-    #[cfg(target_os = "windows")]
-    if sandbox == SandboxType::WindowsRestrictedToken {
-        return exec_windows_sandbox(params, sandbox_policy).await;
-    }
     let timeout = params.timeout_duration();
     let ExecParams {
-        command,
-        cwd,
-        env,
-        arg0,
-        ..
+        command, cwd, env, ..
     } = params;
 
     let (program, args) = command.split_first().ok_or_else(|| {
@@ -454,11 +313,11 @@ async fn exec(
             "command args are empty",
         ))
     })?;
-    let arg0_ref = arg0.as_deref();
+    let arg0 = None;
     let child = spawn_child_async(
         PathBuf::from(program),
         args.into(),
-        arg0_ref,
+        arg0,
         cwd,
         sandbox_policy,
         StdioPolicy::RedirectForShellTool,
@@ -466,6 +325,57 @@ async fn exec(
     )
     .await?;
     consume_truncated_output(child, timeout, stdout_stream).await
+}
+
+fn raw_exec_output_to_tool_output(
+    raw_output: RawExecToolCallOutput,
+    sandbox_type: SandboxType,
+    duration: Duration,
+) -> Result<ExecToolCallOutput> {
+    #[allow(unused_mut)]
+    let mut timed_out = raw_output.timed_out;
+
+    #[cfg(target_family = "unix")]
+    {
+        if let Some(signal) = raw_output.exit_status.signal() {
+            if signal == TIMEOUT_CODE {
+                timed_out = true;
+            } else {
+                return Err(CodexErr::Sandbox(SandboxErr::Signal(signal)));
+            }
+        }
+    }
+
+    let mut exit_code = raw_output.exit_status.code().unwrap_or(-1);
+    if timed_out {
+        exit_code = EXEC_TIMEOUT_EXIT_CODE;
+    }
+
+    let stdout = raw_output.stdout.from_utf8_lossy();
+    let stderr = raw_output.stderr.from_utf8_lossy();
+    let aggregated_output = raw_output.aggregated_output.from_utf8_lossy();
+    let exec_output = ExecToolCallOutput {
+        exit_code,
+        stdout,
+        stderr,
+        aggregated_output,
+        duration,
+        timed_out,
+    };
+
+    if timed_out {
+        return Err(CodexErr::Sandbox(SandboxErr::Timeout {
+            output: Box::new(exec_output),
+        }));
+    }
+
+    if is_likely_sandbox_denied(sandbox_type, &exec_output) {
+        return Err(CodexErr::Sandbox(SandboxErr::Denied {
+            output: Box::new(exec_output),
+        }));
+    }
+
+    Ok(exec_output)
 }
 
 /// Consumes the output of a child process, truncating it so it is suitable for
@@ -490,19 +400,20 @@ async fn consume_truncated_output(
         ))
     })?;
 
-    let (agg_tx, agg_rx) = async_channel::unbounded::<Vec<u8>>();
+    let (agg_tx, agg_rx) = async_channel::unbounded::<StampedChunk>();
+    let sequence = Arc::new(AtomicU64::new(0));
 
     let stdout_handle = tokio::spawn(read_capped(
         BufReader::new(stdout_reader),
         stdout_stream.clone(),
         false,
-        Some(agg_tx.clone()),
+        Some((agg_tx.clone(), Arc::clone(&sequence))),
     ));
     let stderr_handle = tokio::spawn(read_capped(
         BufReader::new(stderr_reader),
         stdout_stream.clone(),
         true,
-        Some(agg_tx.clone()),
+        Some((agg_tx.clone(), Arc::clone(&sequence))),
     ));
 
     let (exit_status, timed_out) = tokio::select! {
@@ -531,9 +442,18 @@ async fn consume_truncated_output(
 
     drop(agg_tx);
 
-    let mut combined_buf = Vec::with_capacity(AGGREGATE_BUFFER_INITIAL_CAPACITY);
+    let mut combined_chunks = Vec::new();
     while let Ok(chunk) = agg_rx.recv().await {
-        append_all(&mut combined_buf, &chunk);
+        combined_chunks.push(chunk);
+    }
+    combined_chunks.sort_by(|a, b| {
+        a.instant
+            .cmp(&b.instant)
+            .then_with(|| a.sequence.cmp(&b.sequence))
+    });
+    let mut combined_buf = Vec::with_capacity(AGGREGATE_BUFFER_INITIAL_CAPACITY);
+    for chunk in combined_chunks {
+        append_all(&mut combined_buf, &chunk.chunk);
     }
     let aggregated_output = StreamOutput {
         text: combined_buf,
@@ -553,7 +473,7 @@ async fn read_capped<R: AsyncRead + Unpin + Send + 'static>(
     mut reader: R,
     stream: Option<StdoutStream>,
     is_stderr: bool,
-    aggregate_tx: Option<Sender<Vec<u8>>>,
+    aggregate_tx: Option<(Sender<StampedChunk>, Arc<AtomicU64>)>,
 ) -> io::Result<StreamOutput<Vec<u8>>> {
     let mut buf = Vec::with_capacity(AGGREGATE_BUFFER_INITIAL_CAPACITY);
     let mut tmp = [0u8; READ_CHUNK_SIZE];
@@ -589,8 +509,14 @@ async fn read_capped<R: AsyncRead + Unpin + Send + 'static>(
             emitted_deltas += 1;
         }
 
-        if let Some(tx) = &aggregate_tx {
-            let _ = tx.send(tmp[..n].to_vec()).await;
+        if let Some((tx, seq)) = &aggregate_tx {
+            let id = seq.fetch_add(1, Ordering::Relaxed);
+            let stamped = StampedChunk {
+                instant: Instant::now(),
+                sequence: id,
+                chunk: tmp[..n].to_vec(),
+            };
+            let _ = tx.send(stamped).await;
         }
 
         append_all(&mut buf, &tmp[..n]);
@@ -603,6 +529,13 @@ async fn read_capped<R: AsyncRead + Unpin + Send + 'static>(
     })
 }
 
+#[derive(Debug)]
+struct StampedChunk {
+    instant: Instant,
+    sequence: u64,
+    chunk: Vec<u8>,
+}
+
 #[cfg(unix)]
 fn synthetic_exit_status(code: i32) -> ExitStatus {
     use std::os::unix::process::ExitStatusExt;
@@ -612,9 +545,8 @@ fn synthetic_exit_status(code: i32) -> ExitStatus {
 #[cfg(windows)]
 fn synthetic_exit_status(code: i32) -> ExitStatus {
     use std::os::windows::process::ExitStatusExt;
-    // On Windows the raw status is a u32. Use a direct cast to avoid
-    // panicking on negative i32 values produced by prior narrowing casts.
-    std::process::ExitStatus::from_raw(code as u32)
+    #[expect(clippy::unwrap_used)]
+    std::process::ExitStatus::from_raw(code.try_into().unwrap())
 }
 
 #[cfg(test)]

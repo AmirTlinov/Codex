@@ -1,6 +1,6 @@
 use std::path::PathBuf;
 
-use codex_core::config::edit::ConfigEditsBuilder;
+use codex_core::config::set_windows_wsl_setup_acknowledged;
 use crossterm::event::KeyCode;
 use crossterm::event::KeyEvent;
 use crossterm::event::KeyEventKind;
@@ -19,25 +19,13 @@ use crate::onboarding::onboarding_screen::StepStateProvider;
 
 use super::onboarding_screen::StepState;
 
-pub(crate) const WSL_INSTRUCTIONS: &str = r#"Install WSL2 by opening PowerShell as Administrator and running:
-    # Install WSL using the default Linux distribution (Ubuntu).
-    # See https://learn.microsoft.com/en-us/windows/wsl/install for more info
+pub(crate) const WSL_INSTRUCTIONS: &str = r"Install WSL2 by opening PowerShell as Administrator and running:
+
     wsl --install
 
-    # Restart your computer, then start a shell inside of Windows Subsystem for Linux
-    wsl
+Instructions for how to install and run Codex in WSL:
 
-    # Install Node.js in WSL via nvm
-    # Documentation: https://learn.microsoft.com/en-us/windows/dev-environment/javascript/nodejs-on-wsl
-    curl -o- https://raw.githubusercontent.com/nvm-sh/nvm/master/install.sh | bash && export NVM_DIR="$HOME/.nvm" && \. "$NVM_DIR/nvm.sh"
-    nvm install 22
-
-    # Install and run Codex in WSL
-    npm install --global @openai/codex
-    codex
-
-    # Additional details and instructions for how to install and run Codex in WSL:
-    https://developers.openai.com/codex/windows"#;
+    https://developers.openai.com/codex/windows";
 
 pub(crate) struct WindowsSetupWidget {
     pub codex_home: PathBuf,
@@ -66,10 +54,7 @@ impl WindowsSetupWidget {
 
     fn handle_continue(&mut self) {
         self.highlighted = WindowsSetupSelection::Continue;
-        match ConfigEditsBuilder::new(&self.codex_home)
-            .set_windows_wsl_setup_acknowledged(true)
-            .apply_blocking()
-        {
+        match set_windows_wsl_setup_acknowledged(&self.codex_home, true) {
             Ok(()) => {
                 self.selection = Some(WindowsSetupSelection::Continue);
                 self.exit_requested = false;
@@ -99,10 +84,8 @@ impl WidgetRef for &WindowsSetupWidget {
         let mut lines: Vec<Line> = vec![
             Line::from(vec![
                 "> ".into(),
-                "To use all Codex features, we recommend running Codex in Windows Subsystem for Linux (WSL2)".bold(),
+                "For best performance, run Codex in Windows Subsystem for Linux (WSL2)".bold(),
             ]),
-            Line::from(vec!["  ".into(), "WSL allows Codex to run Agent mode in a sandboxed environment with better data protections in place.".into()]),
-            Line::from(vec!["  ".into(), "Learn more: https://developers.openai.com/codex/windows".into()]),
             Line::from(""),
         ];
 

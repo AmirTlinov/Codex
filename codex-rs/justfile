@@ -45,3 +45,9 @@ test:
 # Run the MCP server
 mcp-server-run *args:
     cargo run -p codex-mcp-server -- "$@"
+
+# Build release codex-tui and refresh the PATH symlink.
+install-tui:
+    cargo build -p codex-tui --release
+    mkdir -p "{{env_var("HOME")}}/.local/bin"
+    ln -sf "{{justfile_directory()}}/target/release/codex-tui" "{{env_var("HOME")}}/.local/bin/codex-tui"

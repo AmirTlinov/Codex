@@ -95,7 +95,6 @@ impl ToolHandler for TestSyncHandler {
 
         Ok(ToolOutput::Function {
             content: "ok".to_string(),
-            content_items: None,
             success: Some(true),
         })
     }

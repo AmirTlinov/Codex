@@ -1,9 +1,9 @@
 use codex_core::CodexAuth;
+use codex_core::auth::AuthCredentialsStoreMode;
 use std::path::Path;
 use std::sync::LazyLock;
 use std::sync::RwLock;
 
-use codex_core::auth::AuthCredentialsStoreMode;
 use codex_core::token_data::TokenData;
 
 static CHATGPT_TOKEN: LazyLock<RwLock<Option<TokenData>>> = LazyLock::new(|| RwLock::new(None));
@@ -21,9 +21,9 @@ pub fn set_chatgpt_token_data(value: TokenData) {
 /// Initialize the ChatGPT token from auth.json file
 pub async fn init_chatgpt_token_from_auth(
     codex_home: &Path,
-    auth_credentials_store_mode: AuthCredentialsStoreMode,
+    store_mode: AuthCredentialsStoreMode,
 ) -> std::io::Result<()> {
-    let auth = CodexAuth::from_auth_storage(codex_home, auth_credentials_store_mode)?;
+    let auth = CodexAuth::from_codex_home(codex_home, store_mode)?;
     if let Some(auth) = auth {
         let token_data = auth.get_token_data().await?;
         set_chatgpt_token_data(token_data);

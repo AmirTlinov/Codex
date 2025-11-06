@@ -7,11 +7,12 @@ use codex_core::features::Feature;
 use codex_core::model_family::find_family_for_model;
 use codex_core::protocol::AskForApproval;
 use codex_core::protocol::EventMsg;
+use codex_core::protocol::InputItem;
 use codex_core::protocol::Op;
 use codex_core::protocol::SandboxPolicy;
 use codex_protocol::config_types::ReasoningSummary;
 use codex_protocol::plan_tool::StepStatus;
-use codex_protocol::user_input::UserInput;
+use core_test_support::assert_exec_summary;
 use core_test_support::assert_regex_match;
 use core_test_support::responses;
 use core_test_support::responses::ev_apply_patch_function_call;
@@ -74,7 +75,7 @@ async fn shell_tool_executes_command_and_streams_output() -> anyhow::Result<()> 
 
     codex
         .submit(Op::UserTurn {
-            items: vec![UserInput::Text {
+            items: vec![InputItem::Text {
                 text: "please run the shell command".into(),
             }],
             final_output_json_schema: None,
@@ -106,7 +107,9 @@ async fn update_plan_tool_emits_plan_update_event() -> anyhow::Result<()> {
 
     let server = start_mock_server().await;
 
-    let mut builder = test_codex();
+    let mut builder = test_codex().with_config(|config| {
+        config.features.enable(Feature::PlanTool);
+    });
     let TestCodex {
         codex,
         cwd,
@@ -141,7 +144,7 @@ async fn update_plan_tool_emits_plan_update_event() -> anyhow::Result<()> {
 
     codex
         .submit(Op::UserTurn {
-            items: vec![UserInput::Text {
+            items: vec![InputItem::Text {
                 text: "please update the plan".into(),
             }],
             final_output_json_schema: None,
@@ -191,7 +194,9 @@ async fn update_plan_tool_rejects_malformed_payload() -> anyhow::Result<()> {
 
     let server = start_mock_server().await;
 
-    let mut builder = test_codex();
+    let mut builder = test_codex().with_config(|config| {
+        config.features.enable(Feature::PlanTool);
+    });
     let TestCodex {
         codex,
         cwd,
@@ -222,7 +227,7 @@ async fn update_plan_tool_rejects_malformed_payload() -> anyhow::Result<()> {
 
     codex
         .submit(Op::UserTurn {
-            items: vec![UserInput::Text {
+            items: vec![InputItem::Text {
                 text: "please update the plan".into(),
             }],
             final_output_json_schema: None,
@@ -320,7 +325,7 @@ async fn apply_patch_tool_executes_and_emits_patch_events() -> anyhow::Result<()
 
     codex
         .submit(Op::UserTurn {
-            items: vec![UserInput::Text {
+            items: vec![InputItem::Text {
                 text: "please apply a patch".into(),
             }],
             final_output_json_schema: None,
@@ -364,15 +369,15 @@ async fn apply_patch_tool_executes_and_emits_patch_events() -> anyhow::Result<()
     );
     let output_text = extract_output_text(&output_item).expect("output text present");
 
-    let expected_pattern = format!(
+    assert_regex_match(
         r"(?s)^Exit code: 0
 Wall time: [0-9]+(?:\.[0-9]+)? seconds
 Output:
-Success. Updated the following files:
-A {file_name}
-?$"
+",
+        output_text,
     );
-    assert_regex_match(&expected_pattern, output_text);
+    let expected_ops = vec![format!("- add: {file_name} (+1)")];
+    assert_exec_summary(output_text, &expected_ops);
 
     let updated_contents = fs::read_to_string(file_path)?;
     assert_eq!(
@@ -421,7 +426,7 @@ async fn apply_patch_reports_parse_diagnostics() -> anyhow::Result<()> {
 
     codex
         .submit(Op::UserTurn {
-            items: vec![UserInput::Text {
+            items: vec![InputItem::Text {
                 text: "please apply a patch".into(),
             }],
             final_output_json_schema: None,

@@ -4,9 +4,9 @@ use super::helpers::format_reset_timestamp;
 use chrono::DateTime;
 use chrono::Duration as ChronoDuration;
 use chrono::Local;
-use chrono::Utc;
 use codex_core::protocol::RateLimitSnapshot;
 use codex_core::protocol::RateLimitWindow;
+use std::convert::TryFrom;
 
 const STATUS_LIMIT_BAR_SEGMENTS: usize = 20;
 const STATUS_LIMIT_BAR_FILLED: &str = "█";
@@ -22,25 +22,22 @@ pub(crate) struct StatusRateLimitRow {
 #[derive(Debug, Clone)]
 pub(crate) enum StatusRateLimitData {
     Available(Vec<StatusRateLimitRow>),
-    Stale(Vec<StatusRateLimitRow>),
     Missing,
 }
-
-pub(crate) const RATE_LIMIT_STALE_THRESHOLD_MINUTES: i64 = 15;
 
 #[derive(Debug, Clone)]
 pub(crate) struct RateLimitWindowDisplay {
     pub used_percent: f64,
     pub resets_at: Option<String>,
-    pub window_minutes: Option<i64>,
+    pub window_minutes: Option<u64>,
 }
 
 impl RateLimitWindowDisplay {
     fn from_window(window: &RateLimitWindow, captured_at: DateTime<Local>) -> Self {
         let resets_at = window
-            .resets_at
-            .and_then(|seconds| DateTime::<Utc>::from_timestamp(seconds, 0))
-            .map(|dt| dt.with_timezone(&Local))
+            .resets_in_seconds
+            .and_then(|seconds| i64::try_from(seconds).ok())
+            .and_then(|secs| captured_at.checked_add_signed(ChronoDuration::seconds(secs)))
             .map(|dt| format_reset_timestamp(dt, captured_at));
 
         Self {
@@ -53,7 +50,6 @@ impl RateLimitWindowDisplay {
 
 #[derive(Debug, Clone)]
 pub(crate) struct RateLimitSnapshotDisplay {
-    pub captured_at: DateTime<Local>,
     pub primary: Option<RateLimitWindowDisplay>,
     pub secondary: Option<RateLimitWindowDisplay>,
 }
@@ -63,7 +59,6 @@ pub(crate) fn rate_limit_snapshot_display(
     captured_at: DateTime<Local>,
 ) -> RateLimitSnapshotDisplay {
     RateLimitSnapshotDisplay {
-        captured_at,
         primary: snapshot
             .primary
             .as_ref()
@@ -77,7 +72,6 @@ pub(crate) fn rate_limit_snapshot_display(
 
 pub(crate) fn compose_rate_limit_data(
     snapshot: Option<&RateLimitSnapshotDisplay>,
-    now: DateTime<Local>,
 ) -> StatusRateLimitData {
     match snapshot {
         Some(snapshot) => {
@@ -86,7 +80,7 @@ pub(crate) fn compose_rate_limit_data(
             if let Some(primary) = snapshot.primary.as_ref() {
                 let label: String = primary
                     .window_minutes
-                    .map(get_limits_duration)
+                    .map(|minutes| get_limits_duration(minutes as i64))
                     .unwrap_or_else(|| "5h".to_string());
                 let label = capitalize_first(&label);
                 rows.push(StatusRateLimitRow {
@@ -99,7 +93,7 @@ pub(crate) fn compose_rate_limit_data(
             if let Some(secondary) = snapshot.secondary.as_ref() {
                 let label: String = secondary
                     .window_minutes
-                    .map(get_limits_duration)
+                    .map(|minutes| get_limits_duration(minutes as i64))
                     .unwrap_or_else(|| "weekly".to_string());
                 let label = capitalize_first(&label);
                 rows.push(StatusRateLimitRow {
@@ -109,13 +103,8 @@ pub(crate) fn compose_rate_limit_data(
                 });
             }
 
-            let is_stale = now.signed_duration_since(snapshot.captured_at)
-                > ChronoDuration::minutes(RATE_LIMIT_STALE_THRESHOLD_MINUTES);
-
             if rows.is_empty() {
                 StatusRateLimitData::Available(vec![])
-            } else if is_stale {
-                StatusRateLimitData::Stale(rows)
             } else {
                 StatusRateLimitData::Available(rows)
             }

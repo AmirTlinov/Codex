@@ -5,6 +5,7 @@ use crate::error::SandboxErr;
 use crate::exec::ExecToolCallOutput;
 use crate::function_tool::FunctionCallError;
 use crate::parse_command::parse_command;
+use crate::protocol::Event;
 use crate::protocol::EventMsg;
 use crate::protocol::ExecCommandBeginEvent;
 use crate::protocol::ExecCommandEndEvent;
@@ -56,23 +57,17 @@ pub(crate) enum ToolEventFailure {
     Message(String),
 }
 
-pub(crate) async fn emit_exec_command_begin(
-    ctx: ToolEventCtx<'_>,
-    command: &[String],
-    cwd: &Path,
-    is_user_shell_command: bool,
-) {
+pub(crate) async fn emit_exec_command_begin(ctx: ToolEventCtx<'_>, command: &[String], cwd: &Path) {
     ctx.session
-        .send_event(
-            ctx.turn,
-            EventMsg::ExecCommandBegin(ExecCommandBeginEvent {
+        .send_event(Event {
+            id: ctx.turn.sub_id.clone(),
+            msg: EventMsg::ExecCommandBegin(ExecCommandBeginEvent {
                 call_id: ctx.call_id.to_string(),
                 command: command.to_vec(),
                 cwd: cwd.to_path_buf(),
                 parsed_cmd: parse_command(command),
-                is_user_shell_command,
             }),
-        )
+        })
         .await;
 }
 // Concrete, allocation-free emitter: avoid trait objects and boxed futures.
@@ -80,11 +75,11 @@ pub(crate) enum ToolEmitter {
     Shell {
         command: Vec<String>,
         cwd: PathBuf,
-        is_user_shell_command: bool,
     },
     ApplyPatch {
         changes: HashMap<PathBuf, FileChange>,
         auto_approved: bool,
+        _reason: Option<String>,
     },
     UnifiedExec {
         command: String,
@@ -96,18 +91,19 @@ pub(crate) enum ToolEmitter {
 }
 
 impl ToolEmitter {
-    pub fn shell(command: Vec<String>, cwd: PathBuf, is_user_shell_command: bool) -> Self {
-        Self::Shell {
-            command,
-            cwd,
-            is_user_shell_command,
-        }
+    pub fn shell(command: Vec<String>, cwd: PathBuf) -> Self {
+        Self::Shell { command, cwd }
     }
 
-    pub fn apply_patch(changes: HashMap<PathBuf, FileChange>, auto_approved: bool) -> Self {
+    pub fn apply_patch(
+        changes: HashMap<PathBuf, FileChange>,
+        auto_approved: bool,
+        reason: Option<String>,
+    ) -> Self {
         Self::ApplyPatch {
             changes,
             auto_approved,
+            _reason: reason,
         }
     }
 
@@ -121,15 +117,8 @@ impl ToolEmitter {
 
     pub async fn emit(&self, ctx: ToolEventCtx<'_>, stage: ToolEventStage) {
         match (self, stage) {
-            (
-                Self::Shell {
-                    command,
-                    cwd,
-                    is_user_shell_command,
-                },
-                ToolEventStage::Begin,
-            ) => {
-                emit_exec_command_begin(ctx, command, cwd.as_path(), *is_user_shell_command).await;
+            (Self::Shell { command, cwd }, ToolEventStage::Begin) => {
+                emit_exec_command_begin(ctx, command, cwd.as_path()).await;
             }
             (Self::Shell { .. }, ToolEventStage::Success(output)) => {
                 emit_exec_end(
@@ -172,6 +161,7 @@ impl ToolEmitter {
                 Self::ApplyPatch {
                     changes,
                     auto_approved,
+                    ..
                 },
                 ToolEventStage::Begin,
             ) => {
@@ -180,14 +170,14 @@ impl ToolEmitter {
                     guard.on_patch_begin(changes);
                 }
                 ctx.session
-                    .send_event(
-                        ctx.turn,
-                        EventMsg::PatchApplyBegin(PatchApplyBeginEvent {
+                    .send_event(Event {
+                        id: ctx.turn.sub_id.clone(),
+                        msg: EventMsg::PatchApplyBegin(PatchApplyBeginEvent {
                             call_id: ctx.call_id.to_string(),
                             auto_approved: *auto_approved,
                             changes: changes.clone(),
                         }),
-                    )
+                    })
                     .await;
             }
             (Self::ApplyPatch { .. }, ToolEventStage::Success(output)) => {
@@ -218,7 +208,7 @@ impl ToolEmitter {
                 emit_patch_end(ctx, String::new(), (*message).to_string(), false).await;
             }
             (Self::UnifiedExec { command, cwd, .. }, ToolEventStage::Begin) => {
-                emit_exec_command_begin(ctx, &[command.to_string()], cwd.as_path(), false).await;
+                emit_exec_command_begin(ctx, &[command.to_string()], cwd.as_path()).await;
             }
             (Self::UnifiedExec { .. }, ToolEventStage::Success(output)) => {
                 emit_exec_end(
@@ -274,32 +264,31 @@ impl ToolEmitter {
         ctx: ToolEventCtx<'_>,
         out: Result<ExecToolCallOutput, ToolError>,
     ) -> Result<String, FunctionCallError> {
-        let (event, result) = match out {
+        let event;
+        let result = match out {
             Ok(output) => {
-                let content = super::format_exec_output_for_model(&output);
+                let content = super::format_exec_output_str(&output);
                 let exit_code = output.exit_code;
-                let event = ToolEventStage::Success(output);
-                let result = if exit_code == 0 {
+                event = ToolEventStage::Success(output);
+                if exit_code == 0 {
                     Ok(content)
                 } else {
                     Err(FunctionCallError::RespondToModel(content))
-                };
-                (event, result)
+                }
             }
             Err(ToolError::Codex(CodexErr::Sandbox(SandboxErr::Timeout { output })))
             | Err(ToolError::Codex(CodexErr::Sandbox(SandboxErr::Denied { output }))) => {
-                let response = super::format_exec_output_for_model(&output);
-                let event = ToolEventStage::Failure(ToolEventFailure::Output(*output));
-                let result = Err(FunctionCallError::RespondToModel(response));
-                (event, result)
+                let response = super::format_exec_output_str(&output);
+                event = ToolEventStage::Failure(ToolEventFailure::Output(*output));
+                Err(FunctionCallError::RespondToModel(response))
             }
             Err(ToolError::Codex(err)) => {
                 let message = format!("execution error: {err:?}");
-                let event = ToolEventStage::Failure(ToolEventFailure::Message(message.clone()));
-                let result = Err(FunctionCallError::RespondToModel(message));
-                (event, result)
+                let response = message.clone();
+                event = ToolEventStage::Failure(ToolEventFailure::Message(message));
+                Err(FunctionCallError::RespondToModel(response))
             }
-            Err(ToolError::Rejected(msg)) => {
+            Err(ToolError::Rejected(msg)) | Err(ToolError::SandboxDenied(msg)) => {
                 // Normalize common rejection messages for exec tools so tests and
                 // users see a clear, consistent phrase.
                 let normalized = if msg == "rejected by user" {
@@ -307,9 +296,9 @@ impl ToolEmitter {
                 } else {
                     msg
                 };
-                let event = ToolEventStage::Failure(ToolEventFailure::Message(normalized.clone()));
-                let result = Err(FunctionCallError::RespondToModel(normalized));
-                (event, result)
+                let response = &normalized;
+                event = ToolEventStage::Failure(ToolEventFailure::Message(normalized.clone()));
+                Err(FunctionCallError::RespondToModel(response.clone()))
             }
         };
         self.emit(ctx, event).await;
@@ -327,9 +316,9 @@ async fn emit_exec_end(
     formatted_output: String,
 ) {
     ctx.session
-        .send_event(
-            ctx.turn,
-            EventMsg::ExecCommandEnd(ExecCommandEndEvent {
+        .send_event(Event {
+            id: ctx.turn.sub_id.clone(),
+            msg: EventMsg::ExecCommandEnd(ExecCommandEndEvent {
                 call_id: ctx.call_id.to_string(),
                 stdout,
                 stderr,
@@ -338,21 +327,21 @@ async fn emit_exec_end(
                 duration,
                 formatted_output,
             }),
-        )
+        })
         .await;
 }
 
 async fn emit_patch_end(ctx: ToolEventCtx<'_>, stdout: String, stderr: String, success: bool) {
     ctx.session
-        .send_event(
-            ctx.turn,
-            EventMsg::PatchApplyEnd(PatchApplyEndEvent {
+        .send_event(Event {
+            id: ctx.turn.sub_id.clone(),
+            msg: EventMsg::PatchApplyEnd(PatchApplyEndEvent {
                 call_id: ctx.call_id.to_string(),
                 stdout,
                 stderr,
                 success,
             }),
-        )
+        })
         .await;
 
     if let Some(tracker) = ctx.turn_diff_tracker {
@@ -362,7 +351,10 @@ async fn emit_patch_end(ctx: ToolEventCtx<'_>, stdout: String, stderr: String, s
         };
         if let Ok(Some(unified_diff)) = unified_diff {
             ctx.session
-                .send_event(ctx.turn, EventMsg::TurnDiff(TurnDiffEvent { unified_diff }))
+                .send_event(Event {
+                    id: ctx.turn.sub_id.clone(),
+                    msg: EventMsg::TurnDiff(TurnDiffEvent { unified_diff }),
+                })
                 .await;
         }
     }

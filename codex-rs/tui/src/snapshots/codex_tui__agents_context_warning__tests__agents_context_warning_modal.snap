@@ -1,0 +1,19 @@
+---
+source: tui/src/agents_context_warning.rs
+expression: terminal.backend()
+---
+Agents context warning
+
+Estimated usage: 96% (~72 000 tokens)                                           
+Context was truncated to fit the 1 MiB limit.                                   
+
+Global context (7 files): /home/user/.agents/context
+Project context (2 files): /work/project/.agents/context
+
+› 1. Continue with this context                                                 
+  2. Disable the context for this run
+  3. Show context directories and exit
+  4. Ask Codex to compress the context before continuing
+  5. Manage which context files are loaded
+
+  enter to confirm     ↑/↓ to choose     1-5 to jump

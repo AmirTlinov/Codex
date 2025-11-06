@@ -15,18 +15,19 @@ use codex_core::AuthManager;
 use codex_core::BUILT_IN_OSS_MODEL_PROVIDER_ID;
 use codex_core::ConversationManager;
 use codex_core::NewConversation;
-use codex_core::auth::enforce_login_restrictions;
 use codex_core::config::Config;
 use codex_core::config::ConfigOverrides;
+use codex_core::features::Feature;
 use codex_core::git_info::get_git_repo_root;
 use codex_core::protocol::AskForApproval;
 use codex_core::protocol::Event;
 use codex_core::protocol::EventMsg;
+use codex_core::protocol::InputItem;
 use codex_core::protocol::Op;
 use codex_core::protocol::SessionSource;
+use codex_core::protocol::TaskCompleteEvent;
 use codex_ollama::DEFAULT_OSS_MODEL;
 use codex_protocol::config_types::SandboxMode;
-use codex_protocol::user_input::UserInput;
 use event_processor_with_human_output::EventProcessorWithHumanOutput;
 use event_processor_with_jsonl_output::EventProcessorWithJsonOutput;
 use opentelemetry_appender_tracing::layer::OpenTelemetryTracingBridge;
@@ -68,6 +69,7 @@ pub async fn run_main(cli: Cli, codex_linux_sandbox_exe: Option<PathBuf>) -> any
         sandbox_mode: sandbox_mode_cli_arg,
         prompt,
         output_schema: output_schema_path,
+        include_plan_tool,
         config_overrides,
     } = cli;
 
@@ -173,10 +175,11 @@ pub async fn run_main(cli: Cli, codex_linux_sandbox_exe: Option<PathBuf>) -> any
         cwd: cwd.map(|p| p.canonicalize().unwrap_or(p)),
         model_provider,
         codex_linux_sandbox_exe,
+        agents_home: None,
         base_instructions: None,
-        developer_instructions: None,
-        compact_prompt: None,
+        include_plan_tool: Some(include_plan_tool),
         include_apply_patch_tool: None,
+        include_view_image_tool: None,
         show_raw_agent_reasoning: oss.then_some(true),
         tools_web_search_request: None,
         experimental_sandbox_command_assessment: None,
@@ -192,11 +195,7 @@ pub async fn run_main(cli: Cli, codex_linux_sandbox_exe: Option<PathBuf>) -> any
     };
 
     let config = Config::load_with_cli_overrides(cli_kv_overrides, overrides).await?;
-
-    if let Err(err) = enforce_login_restrictions(&config).await {
-        eprintln!("{err}");
-        std::process::exit(1);
-    }
+    let approve_all_enabled = config.features.enabled(Feature::ApproveAll);
 
     let otel = codex_core::otel_init::build_provider(&config, env!("CARGO_PKG_VERSION"));
 
@@ -251,8 +250,8 @@ pub async fn run_main(cli: Cli, codex_linux_sandbox_exe: Option<PathBuf>) -> any
 
     let auth_manager = AuthManager::shared(
         config.codex_home.clone(),
-        true,
         config.cli_auth_credentials_store_mode,
+        true,
     );
     let conversation_manager = ConversationManager::new(auth_manager.clone(), SessionSource::Exec);
 
@@ -323,12 +322,30 @@ pub async fn run_main(cli: Cli, codex_linux_sandbox_exe: Option<PathBuf>) -> any
         });
     }
 
-    // Package images and prompt into a single user input turn.
-    let mut items: Vec<UserInput> = images
-        .into_iter()
-        .map(|path| UserInput::LocalImage { path })
-        .collect();
-    items.push(UserInput::Text { text: prompt });
+    // Send images first, if any.
+    if !images.is_empty() {
+        let items: Vec<InputItem> = images
+            .into_iter()
+            .map(|path| InputItem::LocalImage { path })
+            .collect();
+        let initial_images_event_id = conversation.submit(Op::UserInput { items }).await?;
+        info!("Sent images with event ID: {initial_images_event_id}");
+        while let Ok(event) = conversation.next_event().await {
+            if event.id == initial_images_event_id
+                && matches!(
+                    event.msg,
+                    EventMsg::TaskComplete(TaskCompleteEvent {
+                        last_agent_message: _,
+                    })
+                )
+            {
+                break;
+            }
+        }
+    }
+
+    // Send the prompt.
+    let items: Vec<InputItem> = vec![InputItem::Text { text: prompt }];
     let initial_prompt_task_id = conversation
         .submit(Op::UserTurn {
             items,
@@ -350,6 +367,34 @@ pub async fn run_main(cli: Cli, codex_linux_sandbox_exe: Option<PathBuf>) -> any
     while let Some(event) = rx.recv().await {
         if matches!(event.msg, EventMsg::Error(_)) {
             error_seen = true;
+        }
+        // Auto-approve requests when the approve_all feature is enabled.
+        if approve_all_enabled {
+            match &event.msg {
+                EventMsg::ExecApprovalRequest(_) => {
+                    if let Err(e) = conversation
+                        .submit(Op::ExecApproval {
+                            id: event.id.clone(),
+                            decision: codex_core::protocol::ReviewDecision::Approved,
+                        })
+                        .await
+                    {
+                        error!("failed to auto-approve exec: {e}");
+                    }
+                }
+                EventMsg::ApplyPatchApprovalRequest(_) => {
+                    if let Err(e) = conversation
+                        .submit(Op::PatchApproval {
+                            id: event.id.clone(),
+                            decision: codex_core::protocol::ReviewDecision::Approved,
+                        })
+                        .await
+                    {
+                        error!("failed to auto-approve patch: {e}");
+                    }
+                }
+                _ => {}
+            }
         }
         let shutdown: CodexStatus = event_processor.process_event(event);
         match shutdown {
@@ -375,16 +420,8 @@ async fn resolve_resume_path(
     args: &crate::cli::ResumeArgs,
 ) -> anyhow::Result<Option<PathBuf>> {
     if args.last {
-        let default_provider_filter = vec![config.model_provider_id.clone()];
-        match codex_core::RolloutRecorder::list_conversations(
-            &config.codex_home,
-            1,
-            None,
-            &[],
-            Some(default_provider_filter.as_slice()),
-            &config.model_provider_id,
-        )
-        .await
+        match codex_core::RolloutRecorder::list_conversations(&config.codex_home, 1, None, &[])
+            .await
         {
             Ok(page) => Ok(page.items.first().map(|it| it.path.clone())),
             Err(e) => {

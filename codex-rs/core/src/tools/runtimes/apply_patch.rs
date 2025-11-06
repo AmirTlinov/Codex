@@ -121,7 +121,7 @@ impl Approvable<ApplyPatchRequest> for ApplyPatchRuntime {
                 if let Some(reason) = retry_reason {
                     session
                         .request_command_approval(
-                            turn,
+                            turn.sub_id.clone(),
                             call_id,
                             vec!["apply_patch".to_string()],
                             cwd,
@@ -154,7 +154,7 @@ impl ToolRuntime<ApplyPatchRequest, ExecToolCallOutput> for ApplyPatchRuntime {
         let spec = Self::build_command_spec(req)?;
         let env = attempt
             .env_for(&spec)
-            .map_err(|err| ToolError::Codex(err.into()))?;
+            .map_err(|err| ToolError::Rejected(err.to_string()))?;
         let out = execute_env(&env, attempt.policy, Self::stdout_stream(ctx))
             .await
             .map_err(ToolError::Codex)?;

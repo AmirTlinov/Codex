@@ -627,7 +627,6 @@ where
 
     Ok(ToolOutput::Function {
         content,
-        content_items: None,
         success: Some(true),
     })
 }

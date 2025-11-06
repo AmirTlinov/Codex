@@ -172,7 +172,6 @@ impl FileSearchManager {
                 NUM_FILE_SEARCH_THREADS,
                 cancellation_token.clone(),
                 compute_indices,
-                true,
             )
             .map(|res| res.matches)
             .unwrap_or_default();

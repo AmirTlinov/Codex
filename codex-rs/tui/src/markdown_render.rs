@@ -1,3 +1,4 @@
+use crate::citation_regex::CITATION_REGEX;
 use crate::render::line_utils::line_to_static;
 use crate::wrapping::RtOptions;
 use crate::wrapping::word_wrap_line;
@@ -14,6 +15,8 @@ use ratatui::style::Stylize;
 use ratatui::text::Line;
 use ratatui::text::Span;
 use ratatui::text::Text;
+use std::borrow::Cow;
+use std::path::Path;
 
 #[derive(Clone, Debug)]
 struct IndentContext {
@@ -33,14 +36,29 @@ impl IndentContext {
 }
 
 pub fn render_markdown_text(input: &str) -> Text<'static> {
-    render_markdown_text_with_width(input, None)
-}
-
-pub(crate) fn render_markdown_text_with_width(input: &str, width: Option<usize>) -> Text<'static> {
     let mut options = Options::empty();
     options.insert(Options::ENABLE_STRIKETHROUGH);
     let parser = Parser::new_ext(input, options);
-    let mut w = Writer::new(parser, width);
+    let mut w = Writer::new(parser, None, None, None);
+    w.run();
+    w.text
+}
+
+pub(crate) fn render_markdown_text_with_citations(
+    input: &str,
+    width: Option<usize>,
+    scheme: Option<&str>,
+    cwd: &Path,
+) -> Text<'static> {
+    let mut options = Options::empty();
+    options.insert(Options::ENABLE_STRIKETHROUGH);
+    let parser = Parser::new_ext(input, options);
+    let mut w = Writer::new(
+        parser,
+        scheme.map(str::to_string),
+        Some(cwd.to_path_buf()),
+        width,
+    );
     w.run();
     w.text
 }
@@ -58,6 +76,8 @@ where
     needs_newline: bool,
     pending_marker_line: bool,
     in_paragraph: bool,
+    scheme: Option<String>,
+    cwd: Option<std::path::PathBuf>,
     in_code_block: bool,
     wrap_width: Option<usize>,
     current_line_content: Option<Line<'static>>,
@@ -71,7 +91,12 @@ impl<'a, I> Writer<'a, I>
 where
     I: Iterator<Item = Event<'a>>,
 {
-    fn new(iter: I, wrap_width: Option<usize>) -> Self {
+    fn new(
+        iter: I,
+        scheme: Option<String>,
+        cwd: Option<std::path::PathBuf>,
+        wrap_width: Option<usize>,
+    ) -> Self {
         Self {
             iter,
             text: Text::default(),
@@ -82,6 +107,8 @@ where
             needs_newline: false,
             pending_marker_line: false,
             in_paragraph: false,
+            scheme,
+            cwd,
             in_code_block: false,
             wrap_width,
             current_line_content: None,
@@ -261,7 +288,15 @@ where
             if i > 0 {
                 self.push_line(Line::default());
             }
-            let content = line.to_string();
+            let mut content = line.to_string();
+            if !self.in_code_block
+                && let (Some(scheme), Some(cwd)) = (&self.scheme, &self.cwd)
+            {
+                let cow = rewrite_file_citations_with_scheme(&content, Some(scheme.as_str()), cwd);
+                if let std::borrow::Cow::Owned(s) = cow {
+                    content = s;
+                }
+            }
             let span = Span::styled(
                 content,
                 self.inline_styles.last().copied().unwrap_or_default(),
@@ -489,6 +524,44 @@ where
     }
 }
 
+pub(crate) fn rewrite_file_citations_with_scheme<'a>(
+    src: &'a str,
+    scheme_opt: Option<&str>,
+    cwd: &Path,
+) -> Cow<'a, str> {
+    let scheme: &str = match scheme_opt {
+        Some(s) => s,
+        None => return Cow::Borrowed(src),
+    };
+
+    CITATION_REGEX.replace_all(src, |caps: &regex_lite::Captures<'_>| {
+        let file = &caps[1];
+        let start_line = &caps[2];
+
+        // Resolve the path against `cwd` when it is relative.
+        let absolute_path = {
+            let p = Path::new(file);
+            let absolute_path = if p.is_absolute() {
+                path_clean::clean(p)
+            } else {
+                path_clean::clean(cwd.join(p))
+            };
+            // VS Code expects forward slashes even on Windows because URIs use
+            // `/` as the path separator.
+            absolute_path.to_string_lossy().replace('\\', "/")
+        };
+
+        // Render as a normal markdown link so the downstream renderer emits
+        // the hyperlink escape sequence (when supported by the terminal).
+        //
+        // In practice, sometimes multiple citations for the same file, but with a
+        // different line number, are shown sequentially, so we:
+        // - include the line number in the label to disambiguate them
+        // - add a space after the link to make it easier to read
+        format!("[{file}:{start_line}]({scheme}://file{absolute_path}:{start_line}) ")
+    })
+}
+
 #[cfg(test)]
 mod markdown_render_tests {
     include!("markdown_render_tests.rs");
@@ -513,9 +586,49 @@ mod tests {
     }
 
     #[test]
+    fn citation_is_rewritten_with_absolute_path() {
+        let markdown = "See 【F:/src/main.rs†L42-L50】 for details.";
+        let cwd = Path::new("/workspace");
+        let result = rewrite_file_citations_with_scheme(markdown, Some("vscode"), cwd);
+
+        assert_eq!(
+            "See [/src/main.rs:42](vscode://file/src/main.rs:42)  for details.",
+            result
+        );
+    }
+
+    #[test]
+    fn citation_followed_by_space_so_they_do_not_run_together() {
+        let markdown = "References on lines 【F:src/foo.rs†L24】【F:src/foo.rs†L42】";
+        let cwd = Path::new("/home/user/project");
+        let result = rewrite_file_citations_with_scheme(markdown, Some("vscode"), cwd);
+
+        assert_eq!(
+            "References on lines [src/foo.rs:24](vscode://file/home/user/project/src/foo.rs:24) [src/foo.rs:42](vscode://file/home/user/project/src/foo.rs:42) ",
+            result
+        );
+    }
+
+    #[test]
+    fn citation_unchanged_without_file_opener() {
+        let markdown = "Look at 【F:file.rs†L1】.";
+        let cwd = Path::new("/");
+        let unchanged = rewrite_file_citations_with_scheme(markdown, Some("vscode"), cwd);
+        // The helper itself always rewrites – this test validates behaviour of
+        // append_markdown when `file_opener` is None.
+        let rendered = render_markdown_text_with_citations(markdown, None, None, cwd);
+        // Convert lines back to string for comparison.
+        let rendered: String = lines_to_strings(&rendered).join("");
+        assert_eq!(markdown, rendered);
+        // Ensure helper rewrites.
+        assert_ne!(markdown, unchanged);
+    }
+
+    #[test]
     fn wraps_plain_text_when_width_provided() {
         let markdown = "This is a simple sentence that should wrap.";
-        let rendered = render_markdown_text_with_width(markdown, Some(16));
+        let cwd = Path::new("/");
+        let rendered = render_markdown_text_with_citations(markdown, Some(16), None, cwd);
         let lines = lines_to_strings(&rendered);
         assert_eq!(
             lines,
@@ -530,7 +643,8 @@ mod tests {
     #[test]
     fn wraps_list_items_preserving_indent() {
         let markdown = "- first second third fourth";
-        let rendered = render_markdown_text_with_width(markdown, Some(14));
+        let cwd = Path::new("/");
+        let rendered = render_markdown_text_with_citations(markdown, Some(14), None, cwd);
         let lines = lines_to_strings(&rendered);
         assert_eq!(
             lines,
@@ -542,7 +656,8 @@ mod tests {
     fn wraps_nested_lists() {
         let markdown =
             "- outer item with several words to wrap\n  - inner item that also needs wrapping";
-        let rendered = render_markdown_text_with_width(markdown, Some(20));
+        let cwd = Path::new("/");
+        let rendered = render_markdown_text_with_citations(markdown, Some(20), None, cwd);
         let lines = lines_to_strings(&rendered);
         assert_eq!(
             lines,
@@ -560,7 +675,8 @@ mod tests {
     #[test]
     fn wraps_ordered_lists() {
         let markdown = "1. ordered item contains many words for wrapping";
-        let rendered = render_markdown_text_with_width(markdown, Some(18));
+        let cwd = Path::new("/");
+        let rendered = render_markdown_text_with_citations(markdown, Some(18), None, cwd);
         let lines = lines_to_strings(&rendered);
         assert_eq!(
             lines,
@@ -576,7 +692,8 @@ mod tests {
     #[test]
     fn wraps_blockquotes() {
         let markdown = "> block quote with content that should wrap nicely";
-        let rendered = render_markdown_text_with_width(markdown, Some(22));
+        let cwd = Path::new("/");
+        let rendered = render_markdown_text_with_citations(markdown, Some(22), None, cwd);
         let lines = lines_to_strings(&rendered);
         assert_eq!(
             lines,
@@ -591,7 +708,8 @@ mod tests {
     #[test]
     fn wraps_blockquotes_inside_lists() {
         let markdown = "- list item\n  > block quote inside list that wraps";
-        let rendered = render_markdown_text_with_width(markdown, Some(24));
+        let cwd = Path::new("/");
+        let rendered = render_markdown_text_with_citations(markdown, Some(24), None, cwd);
         let lines = lines_to_strings(&rendered);
         assert_eq!(
             lines,
@@ -606,7 +724,8 @@ mod tests {
     #[test]
     fn wraps_list_items_containing_blockquotes() {
         let markdown = "1. item with quote\n   > quoted text that should wrap";
-        let rendered = render_markdown_text_with_width(markdown, Some(24));
+        let cwd = Path::new("/");
+        let rendered = render_markdown_text_with_citations(markdown, Some(24), None, cwd);
         let lines = lines_to_strings(&rendered);
         assert_eq!(
             lines,
@@ -621,7 +740,8 @@ mod tests {
     #[test]
     fn does_not_wrap_code_blocks() {
         let markdown = "````\nfn main() { println!(\"hi from a long line\"); }\n````";
-        let rendered = render_markdown_text_with_width(markdown, Some(10));
+        let cwd = Path::new("/");
+        let rendered = render_markdown_text_with_citations(markdown, Some(10), None, cwd);
         let lines = lines_to_strings(&rendered);
         assert_eq!(
             lines,

@@ -37,7 +37,9 @@ fn test_standalone_exec_cli_can_use_apply_patch() -> anyhow::Result<()> {
         .current_dir(tmp.path())
         .assert()
         .success()
-        .stdout("Success. Updated the following files:\nM source.txt\n")
+        .stdout(
+            "Applied operations:\n- update: source.txt (+1, -1)\n✔ Patch applied successfully.\n",
+        )
         .stderr(predicates::str::is_empty());
     assert_eq!(
         fs::read_to_string(absolute_path)?,
@@ -143,9 +145,13 @@ async fn test_apply_patch_freeform_tool() -> anyhow::Result<()> {
     let final_path = test.cwd_path().join("app.py");
     let contents = std::fs::read_to_string(&final_path)
         .unwrap_or_else(|e| panic!("failed reading {}: {e}", final_path.display()));
+    fn normalize_line_endings(s: &str) -> String {
+        s.replace("\r\n", "\n")
+    }
+
     assert_eq!(
-        contents,
-        include_str!("../fixtures/apply_patch_freeform_final.txt")
+        normalize_line_endings(&contents),
+        normalize_line_endings(include_str!("../fixtures/apply_patch_freeform_final.txt"))
     );
     Ok(())
 }

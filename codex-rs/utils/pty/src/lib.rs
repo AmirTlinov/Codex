@@ -6,6 +6,7 @@ use std::sync::Arc;
 use std::sync::Mutex as StdMutex;
 use std::time::Duration;
 
+use anyhow::anyhow;
 use anyhow::Result;
 use portable_pty::native_pty_system;
 use portable_pty::CommandBuilder;
@@ -70,6 +71,17 @@ impl ExecCommandSession {
 
     pub fn exit_code(&self) -> Option<i32> {
         self.exit_code.lock().ok().and_then(|guard| *guard)
+    }
+
+    pub fn kill(&self) -> Result<()> {
+        let mut killer_guard = self
+            .killer
+            .lock()
+            .map_err(|_| anyhow!("failed to lock child killer"))?;
+        if let Some(mut killer) = killer_guard.take() {
+            killer.kill().map_err(|err| anyhow!(err))?;
+        }
+        Ok(())
     }
 }
 

@@ -24,10 +24,7 @@ use ratatui::text::Span;
 
 /// Insert `lines` above the viewport using the terminal's backend writer
 /// (avoids direct stdout references).
-pub fn insert_history_lines<B>(
-    terminal: &mut crate::custom_terminal::Terminal<B>,
-    lines: Vec<Line>,
-) -> io::Result<()>
+pub fn insert_history_lines<B>(terminal: &mut crate::custom_terminal::Terminal<B>, lines: Vec<Line>)
 where
     B: Backend + Write,
 {
@@ -54,13 +51,13 @@ where
         //   3) Emitting Reverse Index (RI, ESC M) `scroll_amount` times
         //   4) Resetting the scroll region back to full screen
         let top_1based = area.top() + 1; // Convert 0-based row to 1-based for DECSTBM
-        queue!(writer, SetScrollRegion(top_1based..screen_size.height))?;
-        queue!(writer, MoveTo(0, area.top()))?;
+        queue!(writer, SetScrollRegion(top_1based..screen_size.height)).ok();
+        queue!(writer, MoveTo(0, area.top())).ok();
         for _ in 0..scroll_amount {
             // Reverse Index (RI): ESC M
-            queue!(writer, Print("\x1bM"))?;
+            queue!(writer, Print("\x1bM")).ok();
         }
-        queue!(writer, ResetScrollRegion)?;
+        queue!(writer, ResetScrollRegion).ok();
 
         let cursor_top = area.top().saturating_sub(1);
         area.y += scroll_amount;
@@ -85,15 +82,15 @@ where
     // ││                            ││
     // │╰────────────────────────────╯│
     // └──────────────────────────────┘
-    queue!(writer, SetScrollRegion(1..area.top()))?;
+    queue!(writer, SetScrollRegion(1..area.top())).ok();
 
     // NB: we are using MoveTo instead of set_cursor_position here to avoid messing with the
     // terminal's last_known_cursor_position, which hopefully will still be accurate after we
     // fetch/restore the cursor position. insert_history_lines should be cursor-position-neutral :)
-    queue!(writer, MoveTo(0, cursor_top))?;
+    queue!(writer, MoveTo(0, cursor_top)).ok();
 
     for line in wrapped {
-        queue!(writer, Print("\r\n"))?;
+        queue!(writer, Print("\r\n")).ok();
         queue!(
             writer,
             SetColors(Colors::new(
@@ -106,8 +103,9 @@ where
                     .map(std::convert::Into::into)
                     .unwrap_or(CColor::Reset)
             ))
-        )?;
-        queue!(writer, Clear(ClearType::UntilNewLine))?;
+        )
+        .ok();
+        queue!(writer, Clear(ClearType::UntilNewLine)).ok();
         // Merge line-level style into each span so that ANSI colors reflect
         // line styles (e.g., blockquotes with green fg).
         let merged_spans: Vec<Span> = line
@@ -118,20 +116,18 @@ where
                 content: s.content.clone(),
             })
             .collect();
-        write_spans(writer, merged_spans.iter())?;
+        write_spans(writer, merged_spans.iter()).ok();
     }
 
-    queue!(writer, ResetScrollRegion)?;
+    queue!(writer, ResetScrollRegion).ok();
 
     // Restore the cursor position to where it was before we started.
-    queue!(writer, MoveTo(last_cursor_pos.x, last_cursor_pos.y))?;
+    queue!(writer, MoveTo(last_cursor_pos.x, last_cursor_pos.y)).ok();
 
     let _ = writer;
     if should_update_area {
         terminal.set_viewport_area(area);
     }
-
-    Ok(())
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -332,8 +328,7 @@ mod tests {
         // Build a blockquote-like line: apply line-level green style and prefix "> "
         let mut line: Line<'static> = Line::from(vec!["> ".into(), "Hello world".into()]);
         line = line.style(Color::Green);
-        insert_history_lines(&mut term, vec![line])
-            .expect("Failed to insert history lines in test");
+        insert_history_lines(&mut term, vec![line]);
 
         let mut saw_colored = false;
         'outer: for row in 0..height {
@@ -371,8 +366,7 @@ mod tests {
         ]);
         line = line.style(Color::Green);
 
-        insert_history_lines(&mut term, vec![line])
-            .expect("Failed to insert history lines in test");
+        insert_history_lines(&mut term, vec![line]);
 
         // Parse and inspect the final screen buffer.
         let screen = term.backend().vt100().screen();
@@ -434,8 +428,7 @@ mod tests {
             Span::raw("Hello world"),
         ]);
 
-        insert_history_lines(&mut term, vec![line])
-            .expect("Failed to insert history lines in test");
+        insert_history_lines(&mut term, vec![line]);
 
         let screen = term.backend().vt100().screen();
 
@@ -491,7 +484,7 @@ mod tests {
         let viewport = ratatui::layout::Rect::new(0, height - 1, width, 1);
         term.set_viewport_area(viewport);
 
-        insert_history_lines(&mut term, lines).expect("Failed to insert history lines in test");
+        insert_history_lines(&mut term, lines);
 
         let screen = term.backend().vt100().screen();
 

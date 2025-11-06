@@ -25,6 +25,53 @@ pub fn assert_regex_match<'s>(pattern: &str, actual: &'s str) -> regex_lite::Cap
         .unwrap_or_else(|| panic!("regex {pattern:?} did not match {actual:?}"))
 }
 
+#[track_caller]
+pub fn assert_exec_summary<I, S>(output: &str, expected_ops: I)
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<str>,
+{
+    assert!(
+        output.starts_with("Exit code: 0\n"),
+        "unexpected exec header: {output}"
+    );
+
+    let summary_start = output
+        .find("Applied operations:")
+        .unwrap_or_else(|| panic!("missing apply_patch summary in {output:?}"));
+    let summary = &output[summary_start..];
+    let mut lines = summary.lines();
+
+    assert_eq!(
+        lines.next(),
+        Some("Applied operations:"),
+        "apply_patch summary missing header"
+    );
+
+    let expected_ops: Vec<String> = expected_ops
+        .into_iter()
+        .map(|op| op.as_ref().to_owned())
+        .collect();
+
+    for expected in &expected_ops {
+        assert_eq!(
+            lines.next(),
+            Some(expected.as_str()),
+            "apply_patch summary mismatch"
+        );
+    }
+
+    assert_eq!(
+        lines.next(),
+        Some("✔ Patch applied successfully."),
+        "apply_patch summary missing success line"
+    );
+
+    if let Some(extra) = lines.next() {
+        panic!("unexpected extra output in apply_patch summary: {extra:?}");
+    }
+}
+
 /// Returns a default `Config` whose on-disk state is confined to the provided
 /// temporary directory. Using a per-test directory keeps tests hermetic and
 /// avoids clobbering a developer’s real `~/.codex`.
@@ -134,14 +181,6 @@ where
     wait_for_event_with_timeout(codex, predicate, Duration::from_secs(1)).await
 }
 
-pub async fn wait_for_event_match<T, F>(codex: &CodexConversation, matcher: F) -> T
-where
-    F: Fn(&codex_core::protocol::EventMsg) -> Option<T>,
-{
-    let ev = wait_for_event(codex, |ev| matcher(ev).is_some()).await;
-    matcher(&ev).unwrap()
-}
-
 pub async fn wait_for_event_with_timeout<F>(
     codex: &CodexConversation,
     mut predicate: F,
@@ -244,7 +283,7 @@ pub mod fs_wait {
         if path.exists() {
             Ok(path)
         } else {
-            Err(anyhow!("timed out waiting for {path:?}"))
+            Err(anyhow!("timed out waiting for {:?}", path))
         }
     }
 
@@ -284,7 +323,7 @@ pub mod fs_wait {
         if let Some(found) = scan_for_match(&root, predicate) {
             Ok(found)
         } else {
-            Err(anyhow!("timed out waiting for matching file in {root:?}"))
+            Err(anyhow!("timed out waiting for matching file in {:?}", root))
         }
     }
 

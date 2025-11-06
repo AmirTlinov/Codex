@@ -1,4 +1,5 @@
-use anyhow::Result;
+use std::path::Path;
+
 use app_test_support::McpProcess;
 use app_test_support::create_final_assistant_message_sse_response;
 use app_test_support::create_mock_chat_completions_server;
@@ -29,29 +30,29 @@ use codex_protocol::config_types::SandboxMode;
 use codex_protocol::parse_command::ParsedCommand;
 use codex_protocol::protocol::Event;
 use codex_protocol::protocol::EventMsg;
+use codex_protocol::protocol::InputMessageKind;
 use pretty_assertions::assert_eq;
 use std::env;
-use std::path::Path;
 use tempfile::TempDir;
 use tokio::time::timeout;
 
 const DEFAULT_READ_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn test_codex_jsonrpc_conversation_flow() -> Result<()> {
+async fn test_codex_jsonrpc_conversation_flow() {
     if env::var(CODEX_SANDBOX_NETWORK_DISABLED_ENV_VAR).is_ok() {
         println!(
             "Skipping test because it cannot execute when network is disabled in a Codex sandbox."
         );
-        return Ok(());
+        return;
     }
 
-    let tmp = TempDir::new()?;
+    let tmp = TempDir::new().expect("tmp dir");
     // Temporary Codex home with config pointing at the mock server.
     let codex_home = tmp.path().join("codex_home");
-    std::fs::create_dir(&codex_home)?;
+    std::fs::create_dir(&codex_home).expect("create codex home dir");
     let working_directory = tmp.path().join("workdir");
-    std::fs::create_dir(&working_directory)?;
+    std::fs::create_dir(&working_directory).expect("create working directory");
 
     // Create a mock model server that immediately ends each turn.
     // Two turns are expected: initial session configure + one user message.
@@ -61,15 +62,20 @@ async fn test_codex_jsonrpc_conversation_flow() -> Result<()> {
             Some(&working_directory),
             Some(5000),
             "call1234",
-        )?,
-        create_final_assistant_message_sse_response("Enjoy your new git repo!")?,
+        )
+        .expect("create shell sse response"),
+        create_final_assistant_message_sse_response("Enjoy your new git repo!")
+            .expect("create final assistant message"),
     ];
     let server = create_mock_chat_completions_server(responses).await;
-    create_config_toml(&codex_home, &server.uri())?;
+    create_config_toml(&codex_home, &server.uri()).expect("write config");
 
     // Start MCP server and initialize.
-    let mut mcp = McpProcess::new(&codex_home).await?;
-    timeout(DEFAULT_READ_TIMEOUT, mcp.initialize()).await??;
+    let mut mcp = McpProcess::new(&codex_home).await.expect("spawn mcp");
+    timeout(DEFAULT_READ_TIMEOUT, mcp.initialize())
+        .await
+        .expect("init timeout")
+        .expect("init error");
 
     // 1) newConversation
     let new_conv_id = mcp
@@ -77,13 +83,17 @@ async fn test_codex_jsonrpc_conversation_flow() -> Result<()> {
             cwd: Some(working_directory.to_string_lossy().into_owned()),
             ..Default::default()
         })
-        .await?;
+        .await
+        .expect("send newConversation");
     let new_conv_resp: JSONRPCResponse = timeout(
         DEFAULT_READ_TIMEOUT,
         mcp.read_stream_until_response_message(RequestId::Integer(new_conv_id)),
     )
-    .await??;
-    let new_conv_resp = to_response::<NewConversationResponse>(new_conv_resp)?;
+    .await
+    .expect("newConversation timeout")
+    .expect("newConversation resp");
+    let new_conv_resp = to_response::<NewConversationResponse>(new_conv_resp)
+        .expect("deserialize newConversation response");
     let NewConversationResponse {
         conversation_id,
         model,
@@ -94,18 +104,19 @@ async fn test_codex_jsonrpc_conversation_flow() -> Result<()> {
 
     // 2) addConversationListener
     let add_listener_id = mcp
-        .send_add_conversation_listener_request(AddConversationListenerParams {
-            conversation_id,
-            experimental_raw_events: false,
-        })
-        .await?;
+        .send_add_conversation_listener_request(AddConversationListenerParams { conversation_id })
+        .await
+        .expect("send addConversationListener");
     let add_listener_resp: JSONRPCResponse = timeout(
         DEFAULT_READ_TIMEOUT,
         mcp.read_stream_until_response_message(RequestId::Integer(add_listener_id)),
     )
-    .await??;
+    .await
+    .expect("addConversationListener timeout")
+    .expect("addConversationListener resp");
     let AddConversationSubscriptionResponse { subscription_id } =
-        to_response::<AddConversationSubscriptionResponse>(add_listener_resp)?;
+        to_response::<AddConversationSubscriptionResponse>(add_listener_resp)
+            .expect("deserialize addConversationListener response");
 
     // 3) sendUserMessage (should trigger notifications; we only validate an OK response)
     let send_user_id = mcp
@@ -115,13 +126,17 @@ async fn test_codex_jsonrpc_conversation_flow() -> Result<()> {
                 text: "text".to_string(),
             }],
         })
-        .await?;
+        .await
+        .expect("send sendUserMessage");
     let send_user_resp: JSONRPCResponse = timeout(
         DEFAULT_READ_TIMEOUT,
         mcp.read_stream_until_response_message(RequestId::Integer(send_user_id)),
     )
-    .await??;
-    let SendUserMessageResponse {} = to_response::<SendUserMessageResponse>(send_user_resp)?;
+    .await
+    .expect("sendUserMessage timeout")
+    .expect("sendUserMessage resp");
+    let SendUserMessageResponse {} = to_response::<SendUserMessageResponse>(send_user_resp)
+        .expect("deserialize sendUserMessage response");
 
     // Verify the task_finished notification is received.
     // Note this also ensures that the final request to the server was made.
@@ -129,7 +144,9 @@ async fn test_codex_jsonrpc_conversation_flow() -> Result<()> {
         DEFAULT_READ_TIMEOUT,
         mcp.read_stream_until_notification_message("codex/event/task_complete"),
     )
-    .await??;
+    .await
+    .expect("task_finished_notification timeout")
+    .expect("task_finished_notification resp");
     let serde_json::Value::Object(map) = task_finished_notification
         .params
         .expect("notification should have params")
@@ -147,31 +164,33 @@ async fn test_codex_jsonrpc_conversation_flow() -> Result<()> {
         .send_remove_conversation_listener_request(RemoveConversationListenerParams {
             subscription_id,
         })
-        .await?;
+        .await
+        .expect("send removeConversationListener");
     let remove_listener_resp: JSONRPCResponse = timeout(
         DEFAULT_READ_TIMEOUT,
         mcp.read_stream_until_response_message(RequestId::Integer(remove_listener_id)),
     )
-    .await??;
-    let RemoveConversationSubscriptionResponse {} = to_response(remove_listener_resp)?;
-
-    Ok(())
+    .await
+    .expect("removeConversationListener timeout")
+    .expect("removeConversationListener resp");
+    let RemoveConversationSubscriptionResponse {} =
+        to_response(remove_listener_resp).expect("deserialize removeConversationListener response");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn test_send_user_turn_changes_approval_policy_behavior() -> Result<()> {
+async fn test_send_user_turn_changes_approval_policy_behavior() {
     if env::var(CODEX_SANDBOX_NETWORK_DISABLED_ENV_VAR).is_ok() {
         println!(
             "Skipping test because it cannot execute when network is disabled in a Codex sandbox."
         );
-        return Ok(());
+        return;
     }
 
-    let tmp = TempDir::new()?;
+    let tmp = TempDir::new().expect("tmp dir");
     let codex_home = tmp.path().join("codex_home");
-    std::fs::create_dir(&codex_home)?;
+    std::fs::create_dir(&codex_home).expect("create codex home dir");
     let working_directory = tmp.path().join("workdir");
-    std::fs::create_dir(&working_directory)?;
+    std::fs::create_dir(&working_directory).expect("create working directory");
 
     // Mock server will request a python shell call for the first and second turn, then finish.
     let responses = vec![
@@ -184,8 +203,10 @@ async fn test_send_user_turn_changes_approval_policy_behavior() -> Result<()> {
             Some(&working_directory),
             Some(5000),
             "call1",
-        )?,
-        create_final_assistant_message_sse_response("done 1")?,
+        )
+        .expect("create first shell sse response"),
+        create_final_assistant_message_sse_response("done 1")
+            .expect("create final assistant message 1"),
         create_shell_sse_response(
             vec![
                 "python3".to_string(),
@@ -195,15 +216,20 @@ async fn test_send_user_turn_changes_approval_policy_behavior() -> Result<()> {
             Some(&working_directory),
             Some(5000),
             "call2",
-        )?,
-        create_final_assistant_message_sse_response("done 2")?,
+        )
+        .expect("create second shell sse response"),
+        create_final_assistant_message_sse_response("done 2")
+            .expect("create final assistant message 2"),
     ];
     let server = create_mock_chat_completions_server(responses).await;
-    create_config_toml(&codex_home, &server.uri())?;
+    create_config_toml(&codex_home, &server.uri()).expect("write config");
 
     // Start MCP server and initialize.
-    let mut mcp = McpProcess::new(&codex_home).await?;
-    timeout(DEFAULT_READ_TIMEOUT, mcp.initialize()).await??;
+    let mut mcp = McpProcess::new(&codex_home).await.expect("spawn mcp");
+    timeout(DEFAULT_READ_TIMEOUT, mcp.initialize())
+        .await
+        .expect("init timeout")
+        .expect("init error");
 
     // 1) Start conversation with approval_policy=untrusted
     let new_conv_id = mcp
@@ -211,30 +237,36 @@ async fn test_send_user_turn_changes_approval_policy_behavior() -> Result<()> {
             cwd: Some(working_directory.to_string_lossy().into_owned()),
             ..Default::default()
         })
-        .await?;
+        .await
+        .expect("send newConversation");
     let new_conv_resp: JSONRPCResponse = timeout(
         DEFAULT_READ_TIMEOUT,
         mcp.read_stream_until_response_message(RequestId::Integer(new_conv_id)),
     )
-    .await??;
+    .await
+    .expect("newConversation timeout")
+    .expect("newConversation resp");
     let NewConversationResponse {
         conversation_id, ..
-    } = to_response::<NewConversationResponse>(new_conv_resp)?;
+    } = to_response::<NewConversationResponse>(new_conv_resp)
+        .expect("deserialize newConversation response");
 
     // 2) addConversationListener
     let add_listener_id = mcp
-        .send_add_conversation_listener_request(AddConversationListenerParams {
-            conversation_id,
-            experimental_raw_events: false,
-        })
-        .await?;
-    let _: AddConversationSubscriptionResponse = to_response::<AddConversationSubscriptionResponse>(
-        timeout(
-            DEFAULT_READ_TIMEOUT,
-            mcp.read_stream_until_response_message(RequestId::Integer(add_listener_id)),
+        .send_add_conversation_listener_request(AddConversationListenerParams { conversation_id })
+        .await
+        .expect("send addConversationListener");
+    let _: AddConversationSubscriptionResponse =
+        to_response::<AddConversationSubscriptionResponse>(
+            timeout(
+                DEFAULT_READ_TIMEOUT,
+                mcp.read_stream_until_response_message(RequestId::Integer(add_listener_id)),
+            )
+            .await
+            .expect("addConversationListener timeout")
+            .expect("addConversationListener resp"),
         )
-        .await??,
-    )?;
+        .expect("deserialize addConversationListener response");
 
     // 3) sendUserMessage triggers a shell call; approval policy is Untrusted so we should get an elicitation
     let send_user_id = mcp
@@ -244,21 +276,27 @@ async fn test_send_user_turn_changes_approval_policy_behavior() -> Result<()> {
                 text: "run python".to_string(),
             }],
         })
-        .await?;
+        .await
+        .expect("send sendUserMessage");
     let _send_user_resp: SendUserMessageResponse = to_response::<SendUserMessageResponse>(
         timeout(
             DEFAULT_READ_TIMEOUT,
             mcp.read_stream_until_response_message(RequestId::Integer(send_user_id)),
         )
-        .await??,
-    )?;
+        .await
+        .expect("sendUserMessage timeout")
+        .expect("sendUserMessage resp"),
+    )
+    .expect("deserialize sendUserMessage response");
 
     // Expect an ExecCommandApproval request (elicitation)
     let request = timeout(
         DEFAULT_READ_TIMEOUT,
         mcp.read_stream_until_request_message(),
     )
-    .await??;
+    .await
+    .expect("waiting for exec approval request timeout")
+    .expect("exec approval request");
     let ServerRequest::ExecCommandApproval { request_id, params } = request else {
         panic!("expected ExecCommandApproval request, got: {request:?}");
     };
@@ -274,10 +312,10 @@ async fn test_send_user_turn_changes_approval_policy_behavior() -> Result<()> {
             ],
             cwd: working_directory.clone(),
             reason: None,
-            risk: None,
             parsed_cmd: vec![ParsedCommand::Unknown {
                 cmd: "python3 -c 'print(42)'".to_string()
             }],
+            risk: None,
         },
         params
     );
@@ -287,14 +325,17 @@ async fn test_send_user_turn_changes_approval_policy_behavior() -> Result<()> {
         request_id,
         serde_json::json!({ "decision": codex_core::protocol::ReviewDecision::Approved }),
     )
-    .await?;
+    .await
+    .expect("send approval response");
 
     // Wait for first TaskComplete
     let _ = timeout(
         DEFAULT_READ_TIMEOUT,
         mcp.read_stream_until_notification_message("codex/event/task_complete"),
     )
-    .await??;
+    .await
+    .expect("task_complete 1 timeout")
+    .expect("task_complete 1 notification");
 
     // 4) sendUserTurn with approval_policy=never should run without elicitation
     let send_turn_id = mcp
@@ -310,15 +351,19 @@ async fn test_send_user_turn_changes_approval_policy_behavior() -> Result<()> {
             effort: Some(ReasoningEffort::Medium),
             summary: ReasoningSummary::Auto,
         })
-        .await?;
+        .await
+        .expect("send sendUserTurn");
     // Acknowledge sendUserTurn
     let _send_turn_resp: SendUserTurnResponse = to_response::<SendUserTurnResponse>(
         timeout(
             DEFAULT_READ_TIMEOUT,
             mcp.read_stream_until_response_message(RequestId::Integer(send_turn_id)),
         )
-        .await??,
-    )?;
+        .await
+        .expect("sendUserTurn timeout")
+        .expect("sendUserTurn resp"),
+    )
+    .expect("deserialize sendUserTurn response");
 
     // Ensure we do NOT receive an ExecCommandApproval request before the task completes.
     // If any Request is seen while waiting for task_complete, the helper will error and the test fails.
@@ -326,31 +371,31 @@ async fn test_send_user_turn_changes_approval_policy_behavior() -> Result<()> {
         DEFAULT_READ_TIMEOUT,
         mcp.read_stream_until_notification_message("codex/event/task_complete"),
     )
-    .await??;
-
-    Ok(())
+    .await
+    .expect("task_complete 2 timeout")
+    .expect("task_complete 2 notification");
 }
 
 // Helper: minimal config.toml pointing at mock provider.
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn test_send_user_turn_updates_sandbox_and_cwd_between_turns() -> Result<()> {
+async fn test_send_user_turn_updates_sandbox_and_cwd_between_turns() {
     if env::var(CODEX_SANDBOX_NETWORK_DISABLED_ENV_VAR).is_ok() {
         println!(
             "Skipping test because it cannot execute when network is disabled in a Codex sandbox."
         );
-        return Ok(());
+        return;
     }
 
-    let tmp = TempDir::new()?;
+    let tmp = TempDir::new().expect("tmp dir");
     let codex_home = tmp.path().join("codex_home");
-    std::fs::create_dir(&codex_home)?;
+    std::fs::create_dir(&codex_home).expect("create codex home dir");
     let workspace_root = tmp.path().join("workspace");
-    std::fs::create_dir(&workspace_root)?;
+    std::fs::create_dir(&workspace_root).expect("create workspace root");
     let first_cwd = workspace_root.join("turn1");
     let second_cwd = workspace_root.join("turn2");
-    std::fs::create_dir(&first_cwd)?;
-    std::fs::create_dir(&second_cwd)?;
+    std::fs::create_dir(&first_cwd).expect("create first cwd");
+    std::fs::create_dir(&second_cwd).expect("create second cwd");
 
     let responses = vec![
         create_shell_sse_response(
@@ -362,8 +407,10 @@ async fn test_send_user_turn_updates_sandbox_and_cwd_between_turns() -> Result<(
             None,
             Some(5000),
             "call-first",
-        )?,
-        create_final_assistant_message_sse_response("done first")?,
+        )
+        .expect("create first shell response"),
+        create_final_assistant_message_sse_response("done first")
+            .expect("create first final assistant message"),
         create_shell_sse_response(
             vec![
                 "bash".to_string(),
@@ -373,14 +420,21 @@ async fn test_send_user_turn_updates_sandbox_and_cwd_between_turns() -> Result<(
             None,
             Some(5000),
             "call-second",
-        )?,
-        create_final_assistant_message_sse_response("done second")?,
+        )
+        .expect("create second shell response"),
+        create_final_assistant_message_sse_response("done second")
+            .expect("create second final assistant message"),
     ];
     let server = create_mock_chat_completions_server(responses).await;
-    create_config_toml(&codex_home, &server.uri())?;
+    create_config_toml(&codex_home, &server.uri()).expect("write config");
 
-    let mut mcp = McpProcess::new(&codex_home).await?;
-    timeout(DEFAULT_READ_TIMEOUT, mcp.initialize()).await??;
+    let mut mcp = McpProcess::new(&codex_home)
+        .await
+        .expect("spawn mcp process");
+    timeout(DEFAULT_READ_TIMEOUT, mcp.initialize())
+        .await
+        .expect("init timeout")
+        .expect("init failed");
 
     let new_conv_id = mcp
         .send_new_conversation_request(NewConversationParams {
@@ -389,29 +443,33 @@ async fn test_send_user_turn_updates_sandbox_and_cwd_between_turns() -> Result<(
             sandbox: Some(SandboxMode::WorkspaceWrite),
             ..Default::default()
         })
-        .await?;
+        .await
+        .expect("send newConversation");
     let new_conv_resp: JSONRPCResponse = timeout(
         DEFAULT_READ_TIMEOUT,
         mcp.read_stream_until_response_message(RequestId::Integer(new_conv_id)),
     )
-    .await??;
+    .await
+    .expect("newConversation timeout")
+    .expect("newConversation resp");
     let NewConversationResponse {
         conversation_id,
         model,
         ..
-    } = to_response::<NewConversationResponse>(new_conv_resp)?;
+    } = to_response::<NewConversationResponse>(new_conv_resp)
+        .expect("deserialize newConversation response");
 
     let add_listener_id = mcp
-        .send_add_conversation_listener_request(AddConversationListenerParams {
-            conversation_id,
-            experimental_raw_events: false,
-        })
-        .await?;
+        .send_add_conversation_listener_request(AddConversationListenerParams { conversation_id })
+        .await
+        .expect("send addConversationListener");
     timeout(
         DEFAULT_READ_TIMEOUT,
         mcp.read_stream_until_response_message(RequestId::Integer(add_listener_id)),
     )
-    .await??;
+    .await
+    .expect("addConversationListener timeout")
+    .expect("addConversationListener resp");
 
     let first_turn_id = mcp
         .send_send_user_turn_request(SendUserTurnParams {
@@ -431,17 +489,22 @@ async fn test_send_user_turn_updates_sandbox_and_cwd_between_turns() -> Result<(
             effort: Some(ReasoningEffort::Medium),
             summary: ReasoningSummary::Auto,
         })
-        .await?;
+        .await
+        .expect("send first sendUserTurn");
     timeout(
         DEFAULT_READ_TIMEOUT,
         mcp.read_stream_until_response_message(RequestId::Integer(first_turn_id)),
     )
-    .await??;
+    .await
+    .expect("sendUserTurn 1 timeout")
+    .expect("sendUserTurn 1 resp");
     timeout(
         DEFAULT_READ_TIMEOUT,
         mcp.read_stream_until_notification_message("codex/event/task_complete"),
     )
-    .await??;
+    .await
+    .expect("task_complete 1 timeout")
+    .expect("task_complete 1 notification");
 
     let second_turn_id = mcp
         .send_send_user_turn_request(SendUserTurnParams {
@@ -456,18 +519,60 @@ async fn test_send_user_turn_updates_sandbox_and_cwd_between_turns() -> Result<(
             effort: Some(ReasoningEffort::Medium),
             summary: ReasoningSummary::Auto,
         })
-        .await?;
+        .await
+        .expect("send second sendUserTurn");
     timeout(
         DEFAULT_READ_TIMEOUT,
         mcp.read_stream_until_response_message(RequestId::Integer(second_turn_id)),
     )
-    .await??;
+    .await
+    .expect("sendUserTurn 2 timeout")
+    .expect("sendUserTurn 2 resp");
+
+    let mut env_message: Option<String> = None;
+    let second_cwd_str = second_cwd.to_string_lossy().into_owned();
+    for _ in 0..10 {
+        let notification = timeout(
+            DEFAULT_READ_TIMEOUT,
+            mcp.read_stream_until_notification_message("codex/event/user_message"),
+        )
+        .await
+        .expect("user_message timeout")
+        .expect("user_message notification");
+        let params = notification
+            .params
+            .clone()
+            .expect("user_message should include params");
+        let event: Event = serde_json::from_value(params).expect("deserialize user_message event");
+        if let EventMsg::UserMessage(user) = event.msg
+            && matches!(user.kind, Some(InputMessageKind::EnvironmentContext))
+            && user.message.contains(&second_cwd_str)
+        {
+            env_message = Some(user.message);
+            break;
+        }
+    }
+    let env_message = env_message.expect("expected environment context update");
+    assert!(
+        env_message.contains("<sandbox_mode>danger-full-access</sandbox_mode>"),
+        "env context should reflect new sandbox mode: {env_message}"
+    );
+    assert!(
+        env_message.contains("<network_access>enabled</network_access>"),
+        "env context should enable network access for danger-full-access policy: {env_message}"
+    );
+    assert!(
+        env_message.contains(&second_cwd_str),
+        "env context should include updated cwd: {env_message}"
+    );
 
     let exec_begin_notification = timeout(
         DEFAULT_READ_TIMEOUT,
         mcp.read_stream_until_notification_message("codex/event/exec_command_begin"),
     )
-    .await??;
+    .await
+    .expect("exec_command_begin timeout")
+    .expect("exec_command_begin notification");
     let params = exec_begin_notification
         .params
         .clone()
@@ -495,9 +600,9 @@ async fn test_send_user_turn_updates_sandbox_and_cwd_between_turns() -> Result<(
         DEFAULT_READ_TIMEOUT,
         mcp.read_stream_until_notification_message("codex/event/task_complete"),
     )
-    .await??;
-
-    Ok(())
+    .await
+    .expect("task_complete 2 timeout")
+    .expect("task_complete 2 notification");
 }
 
 fn create_config_toml(codex_home: &Path, server_uri: &str) -> std::io::Result<()> {

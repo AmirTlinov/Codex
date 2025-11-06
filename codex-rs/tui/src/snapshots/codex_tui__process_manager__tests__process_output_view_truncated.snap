@@ -1,0 +1,16 @@
+---
+source: tui/src/process_manager.rs
+expression: "buffer_lines(&buf).join(\"\\n\")"
+---
+┌Session 3─────────────────────────────────────────────────────────────────────┐
+│Command: cargo test                                                           │
+│Status: Exited                                                                │
+│Started: 1h ago                                                               │
+│Last output: 1m ago                                                           │
+│Window: 0B – 589B of 589B (589B window)                                       │
+│Older output available — Alt+PgUp extends the view backwards.                 │
+└──────────────────────────────────────────────────────────────────────────────┘
+┌Output────────────────────────────────────────────────────────────────────────┐
+│log line 0                                                                    │
+└──────────────────────────────────────────────────────────────────────────────┘
+↑/↓ scroll  •  PgUp/PgDn page  •  g/G top/bottom  •  Alt+PgUp older  •  Alt+PgDn

@@ -1,0 +1,6 @@
+---
+source: tui/src/bottom_pane/footer.rs
+assertion_line: 448
+expression: terminal.backend()
+---
+"  98% context left · ▶ shell_0 (build docs) +1 · ? for shortcuts                "

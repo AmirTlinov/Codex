@@ -1,3 +1,7 @@
+use crate::UpdateAction;
+use crate::agents_context_manager::AgentsContextManagerConfig;
+use crate::agents_context_manager::AgentsContextManagerOutcome;
+use crate::agents_context_manager::run_agents_context_manager;
 use crate::app_backtrack::BacktrackState;
 use crate::app_event::AppEvent;
 use crate::app_event_sender::AppEventSender;
@@ -6,20 +10,22 @@ use crate::chatwidget::ChatWidget;
 use crate::diff_render::DiffSummary;
 use crate::exec_command::strip_bash_lc_and_escape;
 use crate::file_search::FileSearchManager;
+use crate::format_token_count;
 use crate::history_cell::HistoryCell;
+use crate::live_exec::LiveExecState;
 use crate::pager_overlay::Overlay;
 use crate::render::highlight::highlight_bash_to_lines;
-use crate::render::renderable::Renderable;
 use crate::resume_picker::ResumeSelection;
 use crate::tui;
 use crate::tui::TuiEvent;
-use crate::updates::UpdateAction;
 use codex_ansi_escape::ansi_escape_line;
 use codex_core::AuthManager;
 use codex_core::ConversationManager;
 use codex_core::config::Config;
-use codex_core::config::edit::ConfigEditsBuilder;
+use codex_core::config::persist_model_selection;
+use codex_core::config::set_hide_full_access_warning;
 use codex_core::model_family::find_family_for_model;
+use codex_core::protocol::Op;
 use codex_core::protocol::SessionSource;
 use codex_core::protocol::TokenUsage;
 use codex_core::protocol_config_types::ReasoningEffort as ReasoningEffortConfig;
@@ -31,7 +37,10 @@ use crossterm::event::KeyEvent;
 use crossterm::event::KeyEventKind;
 use ratatui::style::Stylize;
 use ratatui::text::Line;
+use std::cell::RefCell;
+use std::collections::HashSet;
 use std::path::PathBuf;
+use std::rc::Rc;
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering;
@@ -39,6 +48,7 @@ use std::thread;
 use std::time::Duration;
 use tokio::select;
 use tokio::sync::mpsc::unbounded_channel;
+use tokio::task::JoinHandle;
 
 #[cfg(not(debug_assertions))]
 use crate::history_cell::UpdateAvailableHistoryCell;
@@ -48,6 +58,14 @@ pub struct AppExitInfo {
     pub token_usage: TokenUsage,
     pub conversation_id: Option<ConversationId>,
     pub update_action: Option<UpdateAction>,
+}
+
+const LIVE_EXEC_POLL_INTERVAL: Duration = Duration::from_millis(350);
+
+#[derive(Debug, Default)]
+struct LiveExecPollState {
+    active: bool,
+    task: Option<JoinHandle<()>>,
 }
 
 pub(crate) struct App {
@@ -64,6 +82,8 @@ pub(crate) struct App {
 
     pub(crate) transcript_cells: Vec<Arc<dyn HistoryCell>>,
 
+    pub(crate) live_exec: Rc<RefCell<LiveExecState>>,
+
     // Pager overlay state (Transcript or Static like Diff)
     pub(crate) overlay: Option<Overlay>,
     pub(crate) deferred_history_lines: Vec<Line<'static>>,
@@ -79,6 +99,7 @@ pub(crate) struct App {
     pub(crate) feedback: codex_feedback::CodexFeedback,
     /// Set when the user confirms an update; propagated on exit.
     pub(crate) pending_update_action: Option<UpdateAction>,
+    live_exec_poll: LiveExecPollState,
 }
 
 impl App {
@@ -148,6 +169,7 @@ impl App {
         };
 
         let file_search = FileSearchManager::new(config.cwd.clone(), app_event_tx.clone());
+        let live_exec_root = config.cwd.clone();
         #[cfg(not(debug_assertions))]
         let upgrade_version = crate::updates::get_upgrade_version(&config);
 
@@ -159,6 +181,7 @@ impl App {
             config,
             active_profile,
             file_search,
+            live_exec: Rc::new(RefCell::new(LiveExecState::new(live_exec_root))),
             enhanced_keys_supported,
             transcript_cells: Vec::new(),
             overlay: None,
@@ -168,6 +191,7 @@ impl App {
             backtrack: BacktrackState::default(),
             feedback: feedback.clone(),
             pending_update_action: None,
+            live_exec_poll: LiveExecPollState::default(),
         };
 
         #[cfg(not(debug_assertions))]
@@ -234,7 +258,7 @@ impl App {
                     tui.draw(
                         self.chat_widget.desired_height(tui.terminal.size()?.width),
                         |frame| {
-                            self.chat_widget.render(frame.area(), frame.buffer);
+                            frame.render_widget_ref(&self.chat_widget, frame.area());
                             if let Some((x, y)) = self.chat_widget.cursor_pos(frame.area()) {
                                 frame.set_cursor_position((x, y));
                             }
@@ -288,6 +312,79 @@ impl App {
                     }
                 }
             }
+            AppEvent::LiveExecCommandBegin {
+                call_id,
+                command,
+                cwd,
+            } => {
+                {
+                    let mut state = self.live_exec.borrow_mut();
+                    state.begin(call_id, command, cwd);
+                }
+                if let Some(overlay) = &mut self.overlay {
+                    overlay.on_live_exec_state_updated();
+                }
+                if matches!(self.overlay, Some(Overlay::LiveExec(_))) {
+                    tui.frame_requester().schedule_frame();
+                }
+                self.enable_live_exec_polling(tui);
+            }
+            AppEvent::LiveExecOutputChunk { call_id, chunk } => {
+                let updated = {
+                    let mut state = self.live_exec.borrow_mut();
+                    state.append_chunk(&call_id, &chunk)
+                };
+                if updated {
+                    if let Some(overlay) = &mut self.overlay {
+                        overlay.on_live_exec_state_updated();
+                    }
+                    if matches!(self.overlay, Some(Overlay::LiveExec(_))) {
+                        tui.frame_requester().schedule_frame();
+                    }
+                }
+            }
+            AppEvent::LiveExecCommandFinished {
+                call_id,
+                exit_code,
+                duration,
+                aggregated_output,
+            } => {
+                {
+                    let mut state = self.live_exec.borrow_mut();
+                    state.finish(&call_id, exit_code, duration, aggregated_output);
+                }
+                if let Some(overlay) = &mut self.overlay {
+                    overlay.on_live_exec_state_updated();
+                }
+                if matches!(self.overlay, Some(Overlay::LiveExec(_))) {
+                    tui.frame_requester().schedule_frame();
+                }
+                self.enable_live_exec_polling(tui);
+            }
+            AppEvent::LiveExecPromoted {
+                call_id,
+                shell_id,
+                initial_output,
+                ..
+            } => {
+                {
+                    let mut state = self.live_exec.borrow_mut();
+                    state.promote(&call_id, shell_id, initial_output);
+                }
+                if let Some(overlay) = &mut self.overlay {
+                    overlay.on_live_exec_state_updated();
+                }
+                if matches!(self.overlay, Some(Overlay::LiveExec(_))) {
+                    tui.frame_requester().schedule_frame();
+                }
+                self.enable_live_exec_polling(tui);
+            }
+            AppEvent::LiveExecPollTick => {
+                self.maybe_poll_live_exec(tui);
+            }
+            AppEvent::EnsureLiveExecPolling => {
+                self.enable_live_exec_polling(tui);
+            }
             AppEvent::StartCommitAnimation => {
                 if self
                     .commit_anim_running
@@ -325,6 +422,7 @@ impl App {
                 self.chat_widget.on_diff_complete();
                 // Enter alternate screen using TUI helper and build pager lines
                 let _ = tui.enter_alt_screen();
+                self.disable_live_exec_polling();
                 let pager_lines: Vec<ratatui::text::Line<'static>> = if text.trim().is_empty() {
                     vec!["No changes detected.".italic().into()]
                 } else {
@@ -369,15 +467,128 @@ impl App {
             AppEvent::OpenFeedbackConsent { category } => {
                 self.chat_widget.open_feedback_consent(category);
             }
+            AppEvent::OpenAgentsContextManager => {
+                let all_entries = match self.config.load_all_agents_context_entries() {
+                    Ok(entries) => entries,
+                    Err(err) => {
+                        tracing::error!("failed to load agents context entries: {err}");
+                        self.chat_widget.add_error_message(format!(
+                            "Failed to load agents context entries: {err}"
+                        ));
+                        return Ok(true);
+                    }
+                };
+                let enabled_paths: HashSet<String> = self
+                    .config
+                    .agents_context_entries
+                    .iter()
+                    .map(|entry| entry.relative_path.clone())
+                    .collect();
+                let hidden_paths = enabled_paths.clone();
+
+                let manager_config = AgentsContextManagerConfig {
+                    tools: self.config.agents_tools.clone(),
+                    warning_tokens: self.config.agents_context_warning_tokens,
+                    model_context_window: self.config.model_context_window,
+                    global_agents_home: self.config.agents_home.clone(),
+                    project_agents_home: self.config.project_agents_home.clone(),
+                    cwd: self.config.cwd.clone(),
+                    enabled_paths,
+                    hidden_paths,
+                    include_mode: self.chat_widget.agents_context_include_mode(),
+                    existing_include: &self.config.agents_context_include,
+                    existing_exclude: &self.config.agents_context_exclude,
+                };
+                match run_agents_context_manager(tui, all_entries, manager_config).await? {
+                    AgentsContextManagerOutcome::Cancelled => {}
+                    AgentsContextManagerOutcome::Applied { include, exclude } => {
+                        match self.config.refresh_agents_context_entries(include, exclude) {
+                            Ok(()) => {
+                                self.chat_widget
+                                    .apply_agents_context_from_config(&self.config);
+                                let include_mode = !self.config.agents_context_include.is_empty();
+                                self.chat_widget
+                                    .set_agents_context_include_mode(include_mode);
+                                let count = self.config.agents_context_entries.len();
+                                let tokens = self.config.agents_context_prompt_tokens as u64;
+                                if count > 0 && self.config.agents_context_prompt.is_some() {
+                                    self.chat_widget.set_agents_context_active(true);
+                                    let message = if count == 1 {
+                                        format!(
+                                            "Attached 1 agents context file (~{} tokens) to all future messages.",
+                                            format_token_count(tokens)
+                                        )
+                                    } else {
+                                        format!(
+                                            "Attached {count} agents context files (~{} tokens) to all future messages.",
+                                            format_token_count(tokens)
+                                        )
+                                    };
+                                    self.chat_widget.add_info_message(
+                                        message,
+                                        Some(
+                                            "Use `/context off` to stop including these files."
+                                                .to_string(),
+                                        ),
+                                    );
+                                } else {
+                                    self.chat_widget.set_agents_context_active(false);
+                                    self.chat_widget.add_info_message(
+                                        "Agents context disabled for upcoming messages."
+                                            .to_string(),
+                                        Some("Use `/context` to attach context again.".to_string()),
+                                    );
+                                }
+                            }
+                            Err(err) => {
+                                tracing::error!("failed to apply agents context filters: {err}");
+                                self.chat_widget.add_error_message(format!(
+                                    "Failed to apply agents context filters: {err}"
+                                ));
+                            }
+                        }
+                    }
+                }
+            }
+            AppEvent::ClearAgentsContextSelection => {
+                self.config.agents_context_entries.clear();
+                self.config.agents_context_include.clear();
+                self.config.agents_context_exclude.clear();
+                self.config.agents_context_prompt = None;
+                self.config.agents_context_prompt_tokens = 0;
+                self.config.agents_context_prompt_truncated = false;
+                self.chat_widget
+                    .apply_agents_context_from_config(&self.config);
+                self.chat_widget.set_agents_context_active(false);
+                tui.frame_requester().schedule_frame();
+            }
+            AppEvent::OpenProcessManager => {
+                self.chat_widget.add_info_message(
+                    "Process manager view is not yet available in this build.".to_string(),
+                    None,
+                );
+            }
+            AppEvent::OpenUnifiedExecInputPrompt { .. }
+            | AppEvent::OpenUnifiedExecOutput { .. }
+            | AppEvent::RefreshUnifiedExecOutput { .. }
+            | AppEvent::LoadUnifiedExecOutputWindow { .. }
+            | AppEvent::OpenUnifiedExecExportPrompt { .. }
+            | AppEvent::KillUnifiedExecSession { .. }
+            | AppEvent::RemoveUnifiedExecSession { .. } => {
+                tracing::warn!("Unified exec management event ignored in this build");
+            }
+            AppEvent::OpenMcpWizard { .. }
+            | AppEvent::ApplyMcpWizard { .. }
+            | AppEvent::ReloadMcpServers
+            | AppEvent::RemoveMcpServer { .. } => {
+                tracing::warn!("MCP management event ignored in this build");
+            }
             AppEvent::ShowWindowsAutoModeInstructions => {
                 self.chat_widget.open_windows_auto_mode_instructions();
             }
             AppEvent::PersistModelSelection { model, effort } => {
                 let profile = self.active_profile.as_deref();
-                match ConfigEditsBuilder::new(&self.config.codex_home)
-                    .with_profile(profile)
-                    .set_model(Some(model.as_str()), effort)
-                    .apply()
+                match persist_model_selection(&self.config.codex_home, profile, &model, effort)
                     .await
                 {
                     Ok(()) => {
@@ -424,11 +635,7 @@ impl App {
                 self.chat_widget.set_full_access_warning_acknowledged(ack);
             }
             AppEvent::PersistFullAccessWarningAcknowledged => {
-                if let Err(err) = ConfigEditsBuilder::new(&self.config.codex_home)
-                    .set_hide_full_access_warning(true)
-                    .apply()
-                    .await
-                {
+                if let Err(err) = set_hide_full_access_warning(&self.config.codex_home, true) {
                     tracing::error!(
                         error = %err,
                         "failed to persist full access warning acknowledgement"
@@ -453,6 +660,7 @@ impl App {
             AppEvent::FullScreenApprovalRequest(request) => match request {
                 ApprovalRequest::ApplyPatch { cwd, changes, .. } => {
                     let _ = tui.enter_alt_screen();
+                    self.disable_live_exec_polling();
                     let diff_summary = DiffSummary::new(changes, cwd);
                     self.overlay = Some(Overlay::new_static_with_renderables(
                         vec![diff_summary.into()],
@@ -461,6 +669,7 @@ impl App {
                 }
                 ApprovalRequest::Exec { command, .. } => {
                     let _ = tui.enter_alt_screen();
+                    self.disable_live_exec_polling();
                     let full_cmd = strip_bash_lc_and_escape(&command);
                     let full_cmd_lines = highlight_bash_to_lines(&full_cmd);
                     self.overlay = Some(Overlay::new_static_with_lines(
@@ -471,6 +680,60 @@ impl App {
             },
         }
         Ok(true)
+    }
+
+    fn enable_live_exec_polling(&mut self, tui: &mut tui::Tui) {
+        if !self.live_exec_poll.active {
+            self.live_exec_poll.active = true;
+            if self.live_exec_poll.task.is_none() {
+                let tx = self.app_event_tx.clone();
+                self.live_exec_poll.task = Some(tokio::spawn(async move {
+                    loop {
+                        tokio::time::sleep(LIVE_EXEC_POLL_INTERVAL).await;
+                        if tx.app_event_tx.is_closed() {
+                            break;
+                        }
+                        tx.send(AppEvent::LiveExecPollTick);
+                    }
+                }));
+            }
+        }
+
+        let _ = self.app_event_tx.send(AppEvent::LiveExecPollTick);
+        if matches!(self.overlay, Some(Overlay::LiveExec(_))) {
+            tui.frame_requester().schedule_frame();
+        }
+    }
+
+    pub(crate) fn disable_live_exec_polling(&mut self) {
+        if !self.chat_widget.active_background_shell_ids().is_empty() {
+            return;
+        }
+        self.live_exec_poll.active = false;
+        if let Some(task) = self.live_exec_poll.task.take() {
+            task.abort();
+        }
+    }
+
+    pub(crate) fn maybe_poll_live_exec(&mut self, tui: &mut tui::Tui) {
+        if !self.live_exec_poll.active {
+            return;
+        }
+
+        let shell_ids = self.chat_widget.active_background_shell_ids();
+        if shell_ids.is_empty() {
+            self.disable_live_exec_polling();
+            return;
+        }
+
+        for shell_id in shell_ids {
+            self.chat_widget
+                .submit_op(Op::PollBackgroundShell { shell_id });
+        }
+
+        if matches!(self.overlay, Some(Overlay::LiveExec(_))) {
+            tui.frame_requester().schedule_frame();
+        }
     }
 
     pub(crate) fn token_usage(&self) -> codex_core::protocol::TokenUsage {
@@ -485,6 +748,38 @@ impl App {
     async fn handle_key_event(&mut self, tui: &mut tui::Tui, key_event: KeyEvent) {
         match key_event {
             KeyEvent {
+                code: KeyCode::Char('r'),
+                modifiers: crossterm::event::KeyModifiers::CONTROL,
+                kind: KeyEventKind::Press,
+                ..
+            } => {
+                if matches!(self.overlay, Some(ref overlay) if overlay.is_live_exec()) {
+                    self.close_transcript_overlay(tui);
+                } else {
+                    let _ = tui.enter_alt_screen();
+                    self.overlay = Some(Overlay::new_live_exec(self.live_exec.clone()));
+                    if let Some(overlay) = &mut self.overlay {
+                        overlay.on_live_exec_opened();
+                    }
+                    self.enable_live_exec_polling(tui);
+                    tui.frame_requester().schedule_frame();
+                }
+            }
+            KeyEvent {
+                code: KeyCode::Char('b'),
+                modifiers: crossterm::event::KeyModifiers::CONTROL,
+                kind: KeyEventKind::Press,
+                ..
+            } => {
+                if let Some((call_id, description)) = self.chat_widget.prepare_promotion_request() {
+                    self.app_event_tx.send(AppEvent::CodexOp(Op::PromoteShell {
+                        call_id,
+                        description,
+                    }));
+                    self.enable_live_exec_polling(tui);
+                }
+            }
+            KeyEvent {
                 code: KeyCode::Char('t'),
                 modifiers: crossterm::event::KeyModifiers::CONTROL,
                 kind: KeyEventKind::Press,
@@ -492,6 +787,7 @@ impl App {
             } => {
                 // Enter alternate screen and set viewport to full size.
                 let _ = tui.enter_alt_screen();
+                self.disable_live_exec_polling();
                 self.overlay = Some(Overlay::new_transcript(self.transcript_cells.clone()));
                 tui.frame_requester().schedule_frame();
             }
@@ -575,6 +871,8 @@ mod tests {
             AuthManager::from_auth_for_testing(CodexAuth::from_api_key("Test API Key"));
         let file_search = FileSearchManager::new(config.cwd.clone(), app_event_tx.clone());
 
+        let live_exec_root = config.cwd.clone();
+
         App {
             server,
             app_event_tx,
@@ -583,6 +881,7 @@ mod tests {
             config,
             active_profile: None,
             file_search,
+            live_exec: Rc::new(RefCell::new(LiveExecState::new(live_exec_root))),
             transcript_cells: Vec::new(),
             overlay: None,
             deferred_history_lines: Vec::new(),
@@ -592,6 +891,7 @@ mod tests {
             backtrack: BacktrackState::default(),
             feedback: codex_feedback::CodexFeedback::new(),
             pending_update_action: None,
+            live_exec_poll: LiveExecPollState::default(),
         }
     }
 

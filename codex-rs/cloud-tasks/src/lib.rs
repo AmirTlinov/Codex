@@ -8,6 +8,7 @@ pub mod util;
 pub use cli::Cli;
 
 use anyhow::anyhow;
+use codex_core::auth::AuthCredentialsStoreMode;
 use std::io::IsTerminal;
 use std::io::Read;
 use std::path::PathBuf;
@@ -58,16 +59,7 @@ async fn init_backend(user_agent_suffix: &str) -> anyhow::Result<BackendContext>
 
     let auth = match codex_core::config::find_codex_home()
         .ok()
-        .map(|home| {
-            let store_mode = codex_core::config::Config::load_from_base_config_with_overrides(
-                codex_core::config::ConfigToml::default(),
-                codex_core::config::ConfigOverrides::default(),
-                home.clone(),
-            )
-            .map(|cfg| cfg.cli_auth_credentials_store_mode)
-            .unwrap_or_default();
-            codex_login::AuthManager::new(home, false, store_mode)
-        })
+        .map(|home| codex_login::AuthManager::new(home, AuthCredentialsStoreMode::File, false))
         .and_then(|am| am.auth())
     {
         Some(auth) => auth,
@@ -1044,7 +1036,7 @@ pub async fn run_main(cli: Cli, _codex_linux_sandbox_exe: Option<PathBuf>) -> an
                             // Close task modal/pending apply if present before opening env modal
                             app.diff_overlay = None;
                             app.env_modal = Some(app::EnvModalState { query: String::new(), selected: 0 });
-                            // Cache environments while the modal is open to avoid repeated fetches.
+                            // Cache environments until user explicitly refreshes with 'r' inside the modal.
                             let should_fetch = app.environments.is_empty();
                             if should_fetch {
                                 app.env_loading = true;
@@ -1095,19 +1087,7 @@ pub async fn run_main(cli: Cli, _codex_linux_sandbox_exe: Option<PathBuf>) -> an
                                                 let backend = Arc::clone(&backend);
                                                 let best_of_n = page.best_of_n;
                                                 tokio::spawn(async move {
-                                                    let git_ref = if let Ok(cwd) = std::env::current_dir() {
-                                                        if let Some(branch) = codex_core::git_info::default_branch_name(&cwd).await {
-                                                            branch
-                                                        } else if let Some(branch) = codex_core::git_info::current_branch_name(&cwd).await {
-                                                            branch
-                                                        } else {
-                                                            "main".to_string()
-                                                        }
-                                                    } else {
-                                                        "main".to_string()
-                                                    };
-
-                                                    let result = codex_cloud_tasks_client::CloudBackend::create_task(&*backend, &env, &text, &git_ref, false, best_of_n).await;
+                                                    let result = codex_cloud_tasks_client::CloudBackend::create_task(&*backend, &env, &text, "main", false, best_of_n).await;
                                                     let evt = match result {
                                                         Ok(ok) => app::AppEvent::NewTaskSubmitted(Ok(ok)),
                                                         Err(e) => app::AppEvent::NewTaskSubmitted(Err(format!("{e}"))),
@@ -1115,7 +1095,7 @@ pub async fn run_main(cli: Cli, _codex_linux_sandbox_exe: Option<PathBuf>) -> an
                                                     let _ = tx.send(evt);
                                                 });
                                             } else {
-                                                app.status = "No environment selected".to_string();
+                                                app.status = "No environment selected (press 'e' to choose)".to_string();
                                             }
                                     }
                                     needs_redraw = true;
@@ -1313,6 +1293,18 @@ pub async fn run_main(cli: Cli, _codex_linux_sandbox_exe: Option<PathBuf>) -> an
                             // Environment modal key handling
                             match key.code {
                                 KeyCode::Esc => { app.env_modal = None; needs_redraw = true; }
+                                KeyCode::Char('r') | KeyCode::Char('R') => {
+                                    // Trigger refresh of environments
+                                    app.env_loading = true; app.env_error = None; needs_redraw = true;
+                                    let _ = frame_tx.send(Instant::now() + Duration::from_millis(100));
+                                    let tx = tx.clone();
+                                    tokio::spawn(async move {
+            let base_url = crate::util::normalize_base_url(&std::env::var("CODEX_CLOUD_TASKS_BASE_URL").unwrap_or_else(|_| "https://chatgpt.com/backend-api".to_string()));
+            let headers = crate::util::build_chatgpt_headers().await;
+                                        let res = crate::env_detect::list_environments(&base_url, &headers).await;
+                                        let _ = tx.send(app::AppEvent::EnvironmentsLoaded(res));
+                                    });
+                                }
                                 KeyCode::Char(ch) if !key.modifiers.contains(KeyModifiers::CONTROL) && !key.modifiers.contains(KeyModifiers::ALT) => {
                                     if let Some(m) = app.env_modal.as_mut() { m.query.push(ch); }
                                     needs_redraw = true;
@@ -1419,7 +1411,7 @@ pub async fn run_main(cli: Cli, _codex_linux_sandbox_exe: Option<PathBuf>) -> an
                                 }
                                 KeyCode::Char('o') | KeyCode::Char('O') => {
                                     app.env_modal = Some(app::EnvModalState { query: String::new(), selected: 0 });
-                                    // Cache environments while the modal is open to avoid repeated fetches.
+                                    // Cache environments until user explicitly refreshes with 'r' inside the modal.
                                     let should_fetch = app.environments.is_empty();
                                     if should_fetch { app.env_loading = true; app.env_error = None; }
                                     needs_redraw = true;

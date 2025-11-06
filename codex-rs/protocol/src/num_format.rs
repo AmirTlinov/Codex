@@ -22,28 +22,27 @@ fn formatter() -> &'static DecimalFormatter {
     FORMATTER.get_or_init(|| make_local_formatter().unwrap_or_else(make_en_us_formatter))
 }
 
-/// Format an i64 with locale-aware digit separators (e.g. "12345" -> "12,345"
+/// Format a u64 with locale-aware digit separators (e.g. "12345" -> "12,345"
 /// for en-US).
-pub fn format_with_separators(n: i64) -> String {
+pub fn format_with_separators(n: u64) -> String {
     formatter().format(&Decimal::from(n)).to_string()
 }
 
-fn format_si_suffix_with_formatter(n: i64, formatter: &DecimalFormatter) -> String {
-    let n = n.max(0);
+fn format_si_suffix_with_formatter(n: u64, formatter: &DecimalFormatter) -> String {
     if n < 1000 {
         return formatter.format(&Decimal::from(n)).to_string();
     }
 
     // Format `n / scale` with the requested number of fractional digits.
-    let format_scaled = |n: i64, scale: i64, frac_digits: u32| -> String {
+    let format_scaled = |n: u64, scale: u64, frac_digits: u32| -> String {
         let value = n as f64 / scale as f64;
-        let scaled: i64 = (value * 10f64.powi(frac_digits as i32)).round() as i64;
+        let scaled: u64 = (value * 10f64.powi(frac_digits as i32)).round() as u64;
         let mut dec = Decimal::from(scaled);
         dec.multiply_pow10(-(frac_digits as i16));
         formatter.format(&dec).to_string()
     };
 
-    const UNITS: [(i64, &str); 3] = [(1_000, "K"), (1_000_000, "M"), (1_000_000_000, "G")];
+    const UNITS: [(u64, &str); 3] = [(1_000, "K"), (1_000_000, "M"), (1_000_000_000, "G")];
     let f = n as f64;
     for &(scale, suffix) in &UNITS {
         if (100.0 * f / scale as f64).round() < 1000.0 {
@@ -56,10 +55,8 @@ fn format_si_suffix_with_formatter(n: i64, formatter: &DecimalFormatter) -> Stri
     }
 
     // Above 1000G, keep whole‑G precision.
-    format!(
-        "{}G",
-        format_with_separators(((n as f64) / 1e9).round() as i64)
-    )
+    let rounded = ((n as f64) / 1e9).round() as u64;
+    format!("{}G", formatter.format(&Decimal::from(rounded)))
 }
 
 /// Format token counts to 3 significant figures, using base-10 SI suffixes.
@@ -68,7 +65,7 @@ fn format_si_suffix_with_formatter(n: i64, formatter: &DecimalFormatter) -> Stri
 ///   - 999 -> "999"
 ///   - 1200 -> "1.20K"
 ///   - 123456789 -> "123M"
-pub fn format_si_suffix(n: i64) -> String {
+pub fn format_si_suffix(n: u64) -> String {
     format_si_suffix_with_formatter(n, formatter())
 }
 
@@ -79,7 +76,7 @@ mod tests {
     #[test]
     fn kmg() {
         let formatter = make_en_us_formatter();
-        let fmt = |n: i64| format_si_suffix_with_formatter(n, &formatter);
+        let fmt = |n: u64| format_si_suffix_with_formatter(n, &formatter);
         assert_eq!(fmt(0), "0");
         assert_eq!(fmt(999), "999");
         assert_eq!(fmt(1_000), "1.00K");

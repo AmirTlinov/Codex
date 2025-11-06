@@ -1,6 +1,9 @@
 use crate::codex::Session;
 use crate::codex::TurnContext;
+use crate::conversation_history::ConversationHistory;
 use codex_protocol::models::FunctionCallOutputPayload;
+
+use crate::codex::convert_call_tool_result_to_function_call_output_payload;
 use codex_protocol::models::ResponseInputItem;
 use codex_protocol::models::ResponseItem;
 use tracing::warn;
@@ -10,8 +13,10 @@ use tracing::warn;
 /// - `ResponseInputItem`s to send back to the model on the next turn.
 pub(crate) async fn process_items(
     processed_items: Vec<crate::codex::ProcessedResponseItem>,
+    is_review_mode: bool,
+    review_thread_history: &mut ConversationHistory,
     sess: &Session,
-    turn_context: &TurnContext,
+    _turn_context: &TurnContext,
 ) -> (Vec<ResponseInputItem>, Vec<ResponseItem>) {
     let mut items_to_record_in_conversation_history = Vec::<ResponseItem>::new();
     let mut responses = Vec::<ResponseInputItem>::new();
@@ -58,11 +63,12 @@ pub(crate) async fn process_items(
             ) => {
                 items_to_record_in_conversation_history.push(item);
                 let output = match result {
-                    Ok(call_tool_result) => FunctionCallOutputPayload::from(call_tool_result),
+                    Ok(call_tool_result) => {
+                        convert_call_tool_result_to_function_call_output_payload(call_tool_result)
+                    }
                     Err(err) => FunctionCallOutputPayload {
                         content: err.clone(),
                         success: Some(false),
-                        ..Default::default()
                     },
                 };
                 items_to_record_in_conversation_history.push(ResponseItem::FunctionCallOutput {
@@ -97,8 +103,12 @@ pub(crate) async fn process_items(
 
     // Only attempt to take the lock if there is something to record.
     if !items_to_record_in_conversation_history.is_empty() {
-        sess.record_conversation_items(turn_context, &items_to_record_in_conversation_history)
-            .await;
+        if is_review_mode {
+            review_thread_history.record_items(items_to_record_in_conversation_history.iter());
+        } else {
+            sess.record_conversation_items(&items_to_record_in_conversation_history)
+                .await;
+        }
     }
     (responses, items_to_record_in_conversation_history)
 }

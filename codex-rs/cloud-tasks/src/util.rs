@@ -1,5 +1,6 @@
 use base64::Engine as _;
 use chrono::Utc;
+use codex_core::auth::AuthCredentialsStoreMode;
 use reqwest::header::HeaderMap;
 
 pub fn set_user_agent_suffix(suffix: &str) {
@@ -70,14 +71,9 @@ pub async fn build_chatgpt_headers() -> HeaderMap {
         HeaderValue::from_str(&ua).unwrap_or(HeaderValue::from_static("codex-cli")),
     );
     if let Ok(home) = codex_core::config::find_codex_home() {
-        let store_mode = codex_core::config::Config::load_from_base_config_with_overrides(
-            codex_core::config::ConfigToml::default(),
-            codex_core::config::ConfigOverrides::default(),
-            home.clone(),
-        )
-        .map(|cfg| cfg.cli_auth_credentials_store_mode)
-        .unwrap_or_default();
-        let am = codex_login::AuthManager::new(home, false, store_mode);
+        use codex_core::auth::AuthCredentialsStoreMode;
+
+        let am = codex_login::AuthManager::new(home, AuthCredentialsStoreMode::File, false);
         if let Some(auth) = am.auth()
             && let Ok(tok) = auth.get_token().await
             && !tok.is_empty()

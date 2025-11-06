@@ -1,19 +1,16 @@
+use std::convert::TryFrom;
 use std::io::BufRead;
 use std::path::Path;
-use std::sync::Arc;
 use std::sync::OnceLock;
 use std::time::Duration;
 
+use crate::AuthManager;
+use crate::auth::CodexAuth;
+use crate::error::RetryLimitReachedError;
+use crate::error::UnexpectedResponseError;
 use bytes::Bytes;
-use chrono::DateTime;
-use chrono::Utc;
 use codex_app_server_protocol::AuthMode;
-use codex_otel::otel_event_manager::OtelEventManager;
 use codex_protocol::ConversationId;
-use codex_protocol::config_types::ReasoningEffort as ReasoningEffortConfig;
-use codex_protocol::config_types::ReasoningSummary as ReasoningSummaryConfig;
-use codex_protocol::models::ResponseItem;
-use codex_protocol::protocol::SessionSource;
 use eventsource_stream::Eventsource;
 use futures::prelude::*;
 use regex_lite::Regex;
@@ -29,9 +26,6 @@ use tracing::debug;
 use tracing::trace;
 use tracing::warn;
 
-use crate::AuthManager;
-use crate::auth::CodexAuth;
-use crate::auth::RefreshTokenError;
 use crate::chat_completions::AggregateStreamExt;
 use crate::chat_completions::stream_chat_completions;
 use crate::client_common::Prompt;
@@ -41,26 +35,27 @@ use crate::client_common::ResponsesApiRequest;
 use crate::client_common::create_reasoning_param_for_request;
 use crate::client_common::create_text_param_for_request;
 use crate::config::Config;
-use crate::default_client::CodexHttpClient;
 use crate::default_client::create_client;
 use crate::error::CodexErr;
-use crate::error::ConnectionFailedError;
-use crate::error::ResponseStreamFailed;
 use crate::error::Result;
-use crate::error::RetryLimitReachedError;
-use crate::error::UnexpectedResponseError;
 use crate::error::UsageLimitReachedError;
 use crate::flags::CODEX_RS_SSE_FIXTURE;
 use crate::model_family::ModelFamily;
 use crate::model_provider_info::ModelProviderInfo;
 use crate::model_provider_info::WireApi;
 use crate::openai_model_info::get_model_info;
+use crate::openai_tools::create_tools_json_for_responses_api;
 use crate::protocol::RateLimitSnapshot;
 use crate::protocol::RateLimitWindow;
 use crate::protocol::TokenUsage;
+use crate::state::TaskKind;
 use crate::token_data::PlanType;
-use crate::tools::spec::create_tools_json_for_responses_api;
 use crate::util::backoff;
+use codex_otel::otel_event_manager::OtelEventManager;
+use codex_protocol::config_types::ReasoningEffort as ReasoningEffortConfig;
+use codex_protocol::config_types::ReasoningSummary as ReasoningSummaryConfig;
+use codex_protocol::models::ResponseItem;
+use std::sync::Arc;
 
 #[derive(Debug, Deserialize)]
 struct ErrorResponse {
@@ -75,7 +70,7 @@ struct Error {
 
     // Optional fields available on "usage_limit_reached" and "usage_not_included" errors
     plan_type: Option<PlanType>,
-    resets_at: Option<i64>,
+    resets_in_seconds: Option<u64>,
 }
 
 #[derive(Debug, Clone)]
@@ -83,15 +78,13 @@ pub struct ModelClient {
     config: Arc<Config>,
     auth_manager: Option<Arc<AuthManager>>,
     otel_event_manager: OtelEventManager,
-    client: CodexHttpClient,
+    client: reqwest::Client,
     provider: ModelProviderInfo,
     conversation_id: ConversationId,
     effort: Option<ReasoningEffortConfig>,
     summary: ReasoningSummaryConfig,
-    session_source: SessionSource,
 }
 
-#[allow(clippy::too_many_arguments)]
 impl ModelClient {
     pub fn new(
         config: Arc<Config>,
@@ -101,7 +94,6 @@ impl ModelClient {
         effort: Option<ReasoningEffortConfig>,
         summary: ReasoningSummaryConfig,
         conversation_id: ConversationId,
-        session_source: SessionSource,
     ) -> Self {
         let client = create_client();
 
@@ -114,16 +106,14 @@ impl ModelClient {
             conversation_id,
             effort,
             summary,
-            session_source,
         }
     }
 
-    pub fn get_model_context_window(&self) -> Option<i64> {
-        let pct = self.config.model_family.effective_context_window_percent;
+    pub fn get_model_context_window(&self) -> Option<u64> {
         self.config
             .model_context_window
+            .and_then(|value| u64::try_from(value).ok())
             .or_else(|| get_model_info(&self.config.model_family).map(|info| info.context_window))
-            .map(|w| w.saturating_mul(pct) / 100)
     }
 
     pub fn get_auto_compact_token_limit(&self) -> Option<i64> {
@@ -132,17 +122,20 @@ impl ModelClient {
         })
     }
 
-    pub fn config(&self) -> Arc<Config> {
-        Arc::clone(&self.config)
-    }
-
-    pub fn provider(&self) -> &ModelProviderInfo {
-        &self.provider
-    }
-
+    /// Dispatches to either the Responses or Chat implementation depending on
+    /// the provider config.  Public callers always invoke `stream()` – the
+    /// specialised helpers are private to avoid accidental misuse.
     pub async fn stream(&self, prompt: &Prompt) -> Result<ResponseStream> {
+        self.stream_with_task_kind(prompt, TaskKind::Regular).await
+    }
+
+    pub(crate) async fn stream_with_task_kind(
+        &self,
+        prompt: &Prompt,
+        task_kind: TaskKind,
+    ) -> Result<ResponseStream> {
         match self.provider.wire_api {
-            WireApi::Responses => self.stream_responses(prompt).await,
+            WireApi::Responses => self.stream_responses(prompt, task_kind).await,
             WireApi::Chat => {
                 // Create the raw streaming connection first.
                 let response_stream = stream_chat_completions(
@@ -151,7 +144,6 @@ impl ModelClient {
                     &self.client,
                     &self.provider,
                     &self.otel_event_manager,
-                    &self.session_source,
                 )
                 .await?;
 
@@ -184,7 +176,11 @@ impl ModelClient {
     }
 
     /// Implementation for the OpenAI *Responses* experimental API.
-    async fn stream_responses(&self, prompt: &Prompt) -> Result<ResponseStream> {
+    async fn stream_responses(
+        &self,
+        prompt: &Prompt,
+        task_kind: TaskKind,
+    ) -> Result<ResponseStream> {
         if let Some(path) = &*CODEX_RS_SSE_FIXTURE {
             // short circuit for tests
             warn!(path, "Streaming from fixture");
@@ -214,16 +210,18 @@ impl ModelClient {
 
         let input_with_instructions = prompt.get_formatted_input();
 
-        let verbosity = if self.config.model_family.support_verbosity {
-            self.config.model_verbosity
-        } else {
-            if self.config.model_verbosity.is_some() {
-                warn!(
-                    "model_verbosity is set but ignored as the model does not support verbosity: {}",
-                    self.config.model_family.family
-                );
+        let verbosity = match &self.config.model_family.family {
+            family if family == "gpt-5" => self.config.model_verbosity,
+            _ => {
+                if self.config.model_verbosity.is_some() {
+                    warn!(
+                        "model_verbosity is set but ignored for non-gpt-5 model family: {}",
+                        self.config.model_family.family
+                    );
+                }
+
+                None
             }
-            None
         };
 
         // Only include `text.verbosity` for GPT-5 family models
@@ -261,7 +259,7 @@ impl ModelClient {
         let max_attempts = self.provider.request_max_retries();
         for attempt in 0..=max_attempts {
             match self
-                .attempt_stream_responses(attempt, &payload_json, &auth_manager)
+                .attempt_stream_responses(attempt, &payload_json, &auth_manager, task_kind)
                 .await
             {
                 Ok(stream) => {
@@ -289,6 +287,7 @@ impl ModelClient {
         attempt: u64,
         payload_json: &Value,
         auth_manager: &Option<Arc<AuthManager>>,
+        task_kind: TaskKind,
     ) -> std::result::Result<ResponseStream, StreamAttemptError> {
         // Always fetch the latest auth in case a prior attempt refreshed the token.
         let auth = auth_manager.as_ref().and_then(|m| m.auth());
@@ -297,7 +296,6 @@ impl ModelClient {
             "POST to {}: {:?}",
             self.provider.get_full_url(&auth),
             serde_json::to_string(payload_json)
-                .unwrap_or("<unable to serialize payload>".to_string())
         );
 
         let mut req_builder = self
@@ -306,24 +304,13 @@ impl ModelClient {
             .await
             .map_err(StreamAttemptError::Fatal)?;
 
-        // Include subagent header only for subagent sessions.
-        if let SessionSource::SubAgent(sub) = &self.session_source {
-            let subagent = if let crate::protocol::SubAgentSource::Other(label) = sub {
-                label.clone()
-            } else {
-                serde_json::to_value(sub)
-                    .ok()
-                    .and_then(|v| v.as_str().map(std::string::ToString::to_string))
-                    .unwrap_or_else(|| "other".to_string())
-            };
-            req_builder = req_builder.header("x-openai-subagent", subagent);
-        }
-
         req_builder = req_builder
+            .header("OpenAI-Beta", "responses=experimental")
             // Send session_id for compatibility.
             .header("conversation_id", self.conversation_id.to_string())
             .header("session_id", self.conversation_id.to_string())
             .header(reqwest::header::ACCEPT, "text/event-stream")
+            .header("Codex-Task-Type", task_kind.header_value())
             .json(payload_json);
 
         if let Some(auth) = auth.as_ref()
@@ -344,6 +331,12 @@ impl ModelClient {
                 .headers()
                 .get("cf-ray")
                 .map(|v| v.to_str().unwrap_or_default().to_string());
+
+            trace!(
+                "Response status: {}, cf-ray: {:?}",
+                resp.status(),
+                request_id
+            );
         }
 
         match res {
@@ -360,12 +353,7 @@ impl ModelClient {
                 }
 
                 // spawn task to process SSE
-                let stream = resp.bytes_stream().map_err(move |e| {
-                    CodexErr::ResponseStreamFailed(ResponseStreamFailed {
-                        source: e,
-                        request_id: request_id.clone(),
-                    })
-                });
+                let stream = resp.bytes_stream().map_err(CodexErr::Reqwest);
                 tokio::spawn(process_sse(
                     stream,
                     tx_event,
@@ -388,19 +376,9 @@ impl ModelClient {
 
                 if status == StatusCode::UNAUTHORIZED
                     && let Some(manager) = auth_manager.as_ref()
-                    && let Some(auth) = auth.as_ref()
-                    && auth.mode == AuthMode::ChatGPT
-                    && let Err(err) = manager.refresh_token().await
+                    && manager.auth().is_some()
                 {
-                    let stream_error = match err {
-                        RefreshTokenError::Permanent(failed) => {
-                            StreamAttemptError::Fatal(CodexErr::RefreshTokenFailed(failed))
-                        }
-                        RefreshTokenError::Transient(other) => {
-                            StreamAttemptError::RetryableTransportError(CodexErr::Io(other))
-                        }
-                    };
-                    return Err(stream_error);
+                    let _ = manager.refresh_token().await;
                 }
 
                 // The OpenAI Responses endpoint returns structured JSON bodies even for 4xx/5xx
@@ -436,12 +414,10 @@ impl ModelClient {
                             let plan_type = error
                                 .plan_type
                                 .or_else(|| auth.as_ref().and_then(CodexAuth::get_plan_type));
-                            let resets_at = error
-                                .resets_at
-                                .and_then(|seconds| DateTime::<Utc>::from_timestamp(seconds, 0));
+                            let resets_in_seconds = error.resets_in_seconds;
                             let codex_err = CodexErr::UsageLimitReached(UsageLimitReachedError {
                                 plan_type,
-                                resets_at,
+                                resets_in_seconds,
                                 rate_limits: rate_limit_snapshot,
                             });
                             return Err(StreamAttemptError::Fatal(codex_err));
@@ -457,9 +433,7 @@ impl ModelClient {
                     request_id,
                 })
             }
-            Err(e) => Err(StreamAttemptError::RetryableTransportError(
-                CodexErr::ConnectionFailed(ConnectionFailedError { source: e }),
-            )),
+            Err(e) => Err(StreamAttemptError::RetryableTransportError(e.into())),
         }
     }
 
@@ -469,10 +443,6 @@ impl ModelClient {
 
     pub fn get_otel_event_manager(&self) -> OtelEventManager {
         self.otel_event_manager.clone()
-    }
-
-    pub fn get_session_source(&self) -> SessionSource {
-        self.session_source.clone()
     }
 
     /// Returns the currently configured model slug.
@@ -561,11 +531,11 @@ struct ResponseCompleted {
 
 #[derive(Debug, Deserialize)]
 struct ResponseCompletedUsage {
-    input_tokens: i64,
+    input_tokens: u64,
     input_tokens_details: Option<ResponseCompletedInputTokensDetails>,
-    output_tokens: i64,
+    output_tokens: u64,
     output_tokens_details: Option<ResponseCompletedOutputTokensDetails>,
-    total_tokens: i64,
+    total_tokens: u64,
 }
 
 impl From<ResponseCompletedUsage> for TokenUsage {
@@ -588,12 +558,12 @@ impl From<ResponseCompletedUsage> for TokenUsage {
 
 #[derive(Debug, Deserialize)]
 struct ResponseCompletedInputTokensDetails {
-    cached_tokens: i64,
+    cached_tokens: u64,
 }
 
 #[derive(Debug, Deserialize)]
 struct ResponseCompletedOutputTokensDetails {
-    reasoning_tokens: i64,
+    reasoning_tokens: u64,
 }
 
 fn attach_item_ids(payload_json: &mut Value, original_items: &[ResponseItem]) {
@@ -628,14 +598,14 @@ fn parse_rate_limit_snapshot(headers: &HeaderMap) -> Option<RateLimitSnapshot> {
         headers,
         "x-codex-primary-used-percent",
         "x-codex-primary-window-minutes",
-        "x-codex-primary-reset-at",
+        "x-codex-primary-reset-after-seconds",
     );
 
     let secondary = parse_rate_limit_window(
         headers,
         "x-codex-secondary-used-percent",
         "x-codex-secondary-window-minutes",
-        "x-codex-secondary-reset-at",
+        "x-codex-secondary-reset-after-seconds",
     );
 
     Some(RateLimitSnapshot { primary, secondary })
@@ -645,22 +615,22 @@ fn parse_rate_limit_window(
     headers: &HeaderMap,
     used_percent_header: &str,
     window_minutes_header: &str,
-    resets_at_header: &str,
+    resets_header: &str,
 ) -> Option<RateLimitWindow> {
     let used_percent: Option<f64> = parse_header_f64(headers, used_percent_header);
 
     used_percent.and_then(|used_percent| {
-        let window_minutes = parse_header_i64(headers, window_minutes_header);
-        let resets_at = parse_header_i64(headers, resets_at_header);
+        let window_minutes = parse_header_u64(headers, window_minutes_header);
+        let resets_in_seconds = parse_header_u64(headers, resets_header);
 
         let has_data = used_percent != 0.0
             || window_minutes.is_some_and(|minutes| minutes != 0)
-            || resets_at.is_some();
+            || resets_in_seconds.is_some_and(|seconds| seconds != 0);
 
         has_data.then_some(RateLimitWindow {
             used_percent,
             window_minutes,
-            resets_at,
+            resets_in_seconds,
         })
     })
 }
@@ -672,8 +642,8 @@ fn parse_header_f64(headers: &HeaderMap, name: &str) -> Option<f64> {
         .filter(|v| v.is_finite())
 }
 
-fn parse_header_i64(headers: &HeaderMap, name: &str) -> Option<i64> {
-    parse_header_str(headers, name)?.parse::<i64>().ok()
+fn parse_header_u64(headers: &HeaderMap, name: &str) -> Option<u64> {
+    parse_header_str(headers, name)?.parse::<u64>().ok()
 }
 
 fn parse_header_str<'a>(headers: &'a HeaderMap, name: &str) -> Option<&'a str> {
@@ -882,15 +852,21 @@ async fn process_sse<S>(
             | "response.in_progress"
             | "response.output_text.done" => {}
             "response.output_item.added" => {
-                let Some(item_val) = event.item else { continue };
-                let Ok(item) = serde_json::from_value::<ResponseItem>(item_val) else {
-                    debug!("failed to parse ResponseItem from output_item.done");
-                    continue;
-                };
-
-                let event = ResponseEvent::OutputItemAdded(item);
-                if tx_event.send(Ok(event)).await.is_err() {
-                    return;
+                if let Some(item) = event.item.as_ref() {
+                    // Detect web_search_call begin and forward a synthetic event upstream.
+                    if let Some(ty) = item.get("type").and_then(|v| v.as_str())
+                        && ty == "web_search_call"
+                    {
+                        let call_id = item
+                            .get("id")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("")
+                            .to_string();
+                        let ev = ResponseEvent::WebSearchCallBegin { call_id };
+                        if tx_event.send(Ok(ev)).await.is_err() {
+                            return;
+                        }
+                    }
                 }
             }
             "response.reasoning_summary_part.added" => {
@@ -937,10 +913,8 @@ async fn stream_from_fixture(
 fn rate_limit_regex() -> &'static Regex {
     static RE: OnceLock<Regex> = OnceLock::new();
 
-    // Match both OpenAI-style messages like "Please try again in 1.898s"
-    // and Azure OpenAI-style messages like "Try again in 35 seconds".
     #[expect(clippy::unwrap_used)]
-    RE.get_or_init(|| Regex::new(r"(?i)try again in\s*(\d+(?:\.\d+)?)\s*(s|ms|seconds?)").unwrap())
+    RE.get_or_init(|| Regex::new(r"Please try again in (\d+(?:\.\d+)?)(s|ms)").unwrap())
 }
 
 fn try_parse_retry_after(err: &Error) -> Option<Duration> {
@@ -948,8 +922,7 @@ fn try_parse_retry_after(err: &Error) -> Option<Duration> {
         return None;
     }
 
-    // parse retry hints like "try again in 1.898s" or
-    // "Try again in 35 seconds" using regex
+    // parse the Please try again in 1.898s format using regex
     let re = rate_limit_regex();
     if let Some(message) = &err.message
         && let Some(captures) = re.captures(message)
@@ -959,9 +932,9 @@ fn try_parse_retry_after(err: &Error) -> Option<Duration> {
 
         if let (Some(value), Some(unit)) = (seconds, unit) {
             let value = value.as_str().parse::<f64>().ok()?;
-            let unit = unit.as_str().to_ascii_lowercase();
+            let unit = unit.as_str();
 
-            if unit == "s" || unit.starts_with("second") {
+            if unit == "s" {
                 return Some(Duration::from_secs_f64(value));
             } else if unit == "ms" {
                 return Some(Duration::from_millis(value as u64));
@@ -1107,7 +1080,6 @@ mod tests {
             base_url: Some("https://test.com".to_string()),
             env_key: Some("TEST_API_KEY".to_string()),
             env_key_instructions: None,
-            experimental_bearer_token: None,
             wire_api: WireApi::Responses,
             query_params: None,
             http_headers: None,
@@ -1171,7 +1143,6 @@ mod tests {
             base_url: Some("https://test.com".to_string()),
             env_key: Some("TEST_API_KEY".to_string()),
             env_key_instructions: None,
-            experimental_bearer_token: None,
             wire_api: WireApi::Responses,
             query_params: None,
             http_headers: None,
@@ -1208,7 +1179,6 @@ mod tests {
             base_url: Some("https://test.com".to_string()),
             env_key: Some("TEST_API_KEY".to_string()),
             env_key_instructions: None,
-            experimental_bearer_token: None,
             wire_api: WireApi::Responses,
             query_params: None,
             http_headers: None,
@@ -1247,7 +1217,6 @@ mod tests {
             base_url: Some("https://test.com".to_string()),
             env_key: Some("TEST_API_KEY".to_string()),
             env_key_instructions: None,
-            experimental_bearer_token: None,
             wire_api: WireApi::Responses,
             query_params: None,
             http_headers: None,
@@ -1282,7 +1251,6 @@ mod tests {
             base_url: Some("https://test.com".to_string()),
             env_key: Some("TEST_API_KEY".to_string()),
             env_key_instructions: None,
-            experimental_bearer_token: None,
             wire_api: WireApi::Responses,
             query_params: None,
             http_headers: None,
@@ -1386,7 +1354,6 @@ mod tests {
                 base_url: Some("https://test.com".to_string()),
                 env_key: Some("TEST_API_KEY".to_string()),
                 env_key_instructions: None,
-                experimental_bearer_token: None,
                 wire_api: WireApi::Responses,
                 query_params: None,
                 http_headers: None,
@@ -1416,7 +1383,7 @@ mod tests {
             message: Some("Rate limit reached for gpt-5 in organization org- on tokens per min (TPM): Limit 1, Used 1, Requested 19304. Please try again in 28ms. Visit https://platform.openai.com/account/rate-limits to learn more.".to_string()),
             code: Some("rate_limit_exceeded".to_string()),
             plan_type: None,
-            resets_at: None
+            resets_in_seconds: None
         };
 
         let delay = try_parse_retry_after(&err);
@@ -1430,33 +1397,20 @@ mod tests {
             message: Some("Rate limit reached for gpt-5 in organization <ORG> on tokens per min (TPM): Limit 30000, Used 6899, Requested 24050. Please try again in 1.898s. Visit https://platform.openai.com/account/rate-limits to learn more.".to_string()),
             code: Some("rate_limit_exceeded".to_string()),
             plan_type: None,
-            resets_at: None
+            resets_in_seconds: None
         };
         let delay = try_parse_retry_after(&err);
         assert_eq!(delay, Some(Duration::from_secs_f64(1.898)));
     }
 
     #[test]
-    fn test_try_parse_retry_after_azure() {
-        let err = Error {
-            r#type: None,
-            message: Some("Rate limit exceeded. Try again in 35 seconds.".to_string()),
-            code: Some("rate_limit_exceeded".to_string()),
-            plan_type: None,
-            resets_at: None,
-        };
-        let delay = try_parse_retry_after(&err);
-        assert_eq!(delay, Some(Duration::from_secs(35)));
-    }
-
-    #[test]
-    fn error_response_deserializes_schema_known_plan_type_and_serializes_back() {
+    fn error_response_deserializes_old_schema_known_plan_type_and_serializes_back() {
         use crate::token_data::KnownPlan;
         use crate::token_data::PlanType;
 
-        let json =
-            r#"{"error":{"type":"usage_limit_reached","plan_type":"pro","resets_at":1704067200}}"#;
-        let resp: ErrorResponse = serde_json::from_str(json).expect("should deserialize schema");
+        let json = r#"{"error":{"type":"usage_limit_reached","plan_type":"pro","resets_in_seconds":3600}}"#;
+        let resp: ErrorResponse =
+            serde_json::from_str(json).expect("should deserialize old schema");
 
         assert_matches!(resp.error.plan_type, Some(PlanType::Known(KnownPlan::Pro)));
 
@@ -1465,12 +1419,13 @@ mod tests {
     }
 
     #[test]
-    fn error_response_deserializes_schema_unknown_plan_type_and_serializes_back() {
+    fn error_response_deserializes_old_schema_unknown_plan_type_and_serializes_back() {
         use crate::token_data::PlanType;
 
         let json =
-            r#"{"error":{"type":"usage_limit_reached","plan_type":"vip","resets_at":1704067260}}"#;
-        let resp: ErrorResponse = serde_json::from_str(json).expect("should deserialize schema");
+            r#"{"error":{"type":"usage_limit_reached","plan_type":"vip","resets_in_seconds":60}}"#;
+        let resp: ErrorResponse =
+            serde_json::from_str(json).expect("should deserialize old schema");
 
         assert_matches!(resp.error.plan_type, Some(PlanType::Unknown(ref s)) if s == "vip");
 

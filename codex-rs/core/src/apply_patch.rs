@@ -62,9 +62,9 @@ pub(crate) async fn apply_patch(
             // this session.
             let rx_approve = sess
                 .request_patch_approval(
-                    turn_context,
+                    turn_context.sub_id.clone(),
                     call_id.to_owned(),
-                    convert_apply_patch_to_protocol(&action),
+                    &action,
                     None,
                     None,
                 )

@@ -1,10 +1,11 @@
 use std::collections::HashMap;
 use std::collections::VecDeque;
+use std::convert::TryFrom;
 use std::path::PathBuf;
 use std::sync::Arc;
 
 use codex_core::config::Config;
-use codex_core::config::types::Notifications;
+use codex_core::config_types::Notifications;
 use codex_core::git_info::current_branch_name;
 use codex_core::git_info::local_git_branches;
 use codex_core::project_doc::DEFAULT_PROJECT_DOC_FILENAME;
@@ -16,7 +17,6 @@ use codex_core::protocol::AgentReasoningRawContentDeltaEvent;
 use codex_core::protocol::AgentReasoningRawContentEvent;
 use codex_core::protocol::ApplyPatchApprovalRequestEvent;
 use codex_core::protocol::BackgroundEventEvent;
-use codex_core::protocol::DeprecationNoticeEvent;
 use codex_core::protocol::ErrorEvent;
 use codex_core::protocol::Event;
 use codex_core::protocol::EventMsg;
@@ -24,6 +24,7 @@ use codex_core::protocol::ExecApprovalRequestEvent;
 use codex_core::protocol::ExecCommandBeginEvent;
 use codex_core::protocol::ExecCommandEndEvent;
 use codex_core::protocol::ExitedReviewModeEvent;
+use codex_core::protocol::InputItem;
 use codex_core::protocol::ListCustomPromptsResponseEvent;
 use codex_core::protocol::McpListToolsResponseEvent;
 use codex_core::protocol::McpToolCallBeginEvent;
@@ -42,23 +43,25 @@ use codex_core::protocol::UndoCompletedEvent;
 use codex_core::protocol::UndoStartedEvent;
 use codex_core::protocol::UserMessageEvent;
 use codex_core::protocol::ViewImageToolCallEvent;
-use codex_core::protocol::WarningEvent;
 use codex_core::protocol::WebSearchBeginEvent;
 use codex_core::protocol::WebSearchEndEvent;
 use codex_protocol::ConversationId;
 use codex_protocol::parse_command::ParsedCommand;
-use codex_protocol::user_input::UserInput;
 use crossterm::event::KeyCode;
 use crossterm::event::KeyEvent;
 use crossterm::event::KeyEventKind;
 use crossterm::event::KeyModifiers;
 use rand::Rng;
 use ratatui::buffer::Buffer;
+use ratatui::layout::Constraint;
+use ratatui::layout::Layout;
 use ratatui::layout::Rect;
 use ratatui::style::Color;
 use ratatui::style::Stylize;
 use ratatui::text::Line;
 use ratatui::widgets::Paragraph;
+use ratatui::widgets::Widget;
+use ratatui::widgets::WidgetRef;
 use ratatui::widgets::Wrap;
 use tokio::sync::mpsc::UnboundedSender;
 use tracing::debug;
@@ -70,6 +73,7 @@ use crate::bottom_pane::BottomPane;
 use crate::bottom_pane::BottomPaneParams;
 use crate::bottom_pane::CancellationEvent;
 use crate::bottom_pane::InputResult;
+use crate::bottom_pane::ProcessOverview;
 use crate::bottom_pane::SelectionAction;
 use crate::bottom_pane::SelectionItem;
 use crate::bottom_pane::SelectionViewParams;
@@ -80,20 +84,18 @@ use crate::diff_render::display_path_for;
 use crate::exec_cell::CommandOutput;
 use crate::exec_cell::ExecCell;
 use crate::exec_cell::new_active_exec_command;
+use crate::format_percent;
 use crate::get_git_diff::get_git_diff;
 use crate::history_cell;
 use crate::history_cell::AgentMessageCell;
+use crate::history_cell::BackgroundEventStatus;
 use crate::history_cell::HistoryCell;
 use crate::history_cell::McpToolCallCell;
 use crate::markdown::append_markdown;
 #[cfg(target_os = "windows")]
 use crate::onboarding::WSL_INSTRUCTIONS;
-use crate::render::Insets;
 use crate::render::renderable::ColumnRenderable;
-use crate::render::renderable::FlexRenderable;
 use crate::render::renderable::Renderable;
-use crate::render::renderable::RenderableExt;
-use crate::render::renderable::RenderableItem;
 use crate::slash_command::SlashCommand;
 use crate::status::RateLimitSnapshotDisplay;
 use crate::text_formatting::truncate_text;
@@ -114,21 +116,22 @@ use codex_common::approval_presets::builtin_approval_presets;
 use codex_common::model_presets::ModelPreset;
 use codex_common::model_presets::builtin_model_presets;
 use codex_core::AuthManager;
+use codex_core::BackgroundEventKind;
+use codex_core::BackgroundEventSummary;
 use codex_core::ConversationManager;
+use codex_core::parse_background_event_message;
 use codex_core::protocol::AskForApproval;
 use codex_core::protocol::SandboxPolicy;
 use codex_core::protocol_config_types::ReasoningEffort as ReasoningEffortConfig;
 use codex_file_search::FileMatch;
 use codex_protocol::plan_tool::UpdatePlanArgs;
-use strum::IntoEnumIterator;
 
-const USER_SHELL_COMMAND_HELP_TITLE: &str = "Prefix a command with ! to run it locally";
-const USER_SHELL_COMMAND_HELP_HINT: &str = "Example: !ls";
 // Track information about an in-flight exec command.
 struct RunningCommand {
     command: Vec<String>,
     parsed_cmd: Vec<ParsedCommand>,
-    is_user_shell_command: bool,
+    output: String,
+    shell_id: Option<String>,
 }
 
 const RATE_LIMIT_WARNING_THRESHOLDS: [f64; 3] = [75.0, 90.0, 95.0];
@@ -143,9 +146,9 @@ impl RateLimitWarningState {
     fn take_warnings(
         &mut self,
         secondary_used_percent: Option<f64>,
-        secondary_window_minutes: Option<i64>,
+        secondary_window_minutes: Option<u64>,
         primary_used_percent: Option<f64>,
-        primary_window_minutes: Option<i64>,
+        primary_window_minutes: Option<u64>,
     ) -> Vec<String> {
         let reached_secondary_cap =
             matches!(secondary_used_percent, Some(percent) if percent == 100.0);
@@ -166,6 +169,7 @@ impl RateLimitWarningState {
             }
             if let Some(threshold) = highest_secondary {
                 let limit_label = secondary_window_minutes
+                    .and_then(|minutes| i64::try_from(minutes).ok())
                     .map(get_limits_duration)
                     .unwrap_or_else(|| "weekly".to_string());
                 warnings.push(format!(
@@ -184,6 +188,7 @@ impl RateLimitWarningState {
             }
             if let Some(threshold) = highest_primary {
                 let limit_label = primary_window_minutes
+                    .and_then(|minutes| i64::try_from(minutes).ok())
                     .map(get_limits_duration)
                     .unwrap_or_else(|| "5h".to_string());
                 warnings.push(format!(
@@ -245,6 +250,9 @@ pub(crate) struct ChatWidget {
     // Stream lifecycle controller
     stream_controller: Option<StreamController>,
     running_commands: HashMap<String, RunningCommand>,
+    running_command_order: VecDeque<String>,
+    background_tasks: HashMap<String, BackgroundTaskInfo>,
+    background_order: VecDeque<String>,
     task_complete_pending: bool,
     // Queue of interruptive UI events deferred during an active write cycle
     interrupts: InterruptManager,
@@ -252,6 +260,8 @@ pub(crate) struct ChatWidget {
     reasoning_buffer: String,
     // Accumulates full reasoning content for transcript-only recording
     full_reasoning_buffer: String,
+    // Baseline status header that reflects context usage.
+    base_status_header: String,
     // Current status header shown in the status indicator.
     current_status_header: String,
     // Previous status header to restore after a transient stream retry.
@@ -277,6 +287,10 @@ pub(crate) struct ChatWidget {
     feedback: codex_feedback::CodexFeedback,
     // Current session rollout path (if known)
     current_rollout_path: Option<PathBuf>,
+    // Whether the agents context manager should start in include mode.
+    agents_context_include_mode: bool,
+    // Whether the selected agents context should attach to every message.
+    agents_context_active: bool,
 }
 
 struct UserMessage {
@@ -293,21 +307,17 @@ impl From<String> for UserMessage {
     }
 }
 
-impl From<&str> for UserMessage {
-    fn from(text: &str) -> Self {
-        Self {
-            text: text.to_string(),
-            image_paths: Vec::new(),
-        }
-    }
-}
-
 fn create_initial_user_message(text: String, image_paths: Vec<PathBuf>) -> Option<UserMessage> {
     if text.is_empty() && image_paths.is_empty() {
         None
     } else {
         Some(UserMessage { text, image_paths })
     }
+}
+
+#[derive(Debug, Default)]
+struct BackgroundTaskInfo {
+    description: Option<String>,
 }
 
 impl ChatWidget {
@@ -322,6 +332,191 @@ impl ChatWidget {
     fn set_status_header(&mut self, header: String) {
         self.current_status_header = header.clone();
         self.bottom_pane.update_status_header(header);
+    }
+
+    fn compose_base_status_header(&self) -> String {
+        let window = self.context_window_capacity();
+
+        let agents_tokens = if self.agents_context_active {
+            self.config.agents_context_prompt_tokens as f64
+        } else {
+            0.0
+        };
+        let mut parts = vec![String::from("Working")];
+        if let Some(window) = window {
+            let window_f = window as f64;
+            let agents_pct = (agents_tokens / window_f * 100.0).clamp(0.0, 100.0);
+            let left_pct = (100.0 - agents_pct).clamp(0.0, 100.0);
+            let left = format_percent(left_pct);
+            parts.push(format!("{left} context left"));
+        }
+        if let Some(background) = self.background_status_summary() {
+            parts.push(background);
+        }
+        parts.join(" • ")
+    }
+
+    fn background_status_summary(&self) -> Option<String> {
+        if self.background_tasks.is_empty() {
+            return None;
+        }
+
+        let primary = self
+            .background_order
+            .iter()
+            .rev()
+            .find_map(|id| self.background_tasks.get(id).map(|task| (id, task)))
+            .or_else(|| self.background_tasks.iter().next())?;
+
+        let (id, task) = primary;
+        let label = task
+            .description
+            .as_deref()
+            .map(str::trim)
+            .filter(|d| !d.is_empty())
+            .unwrap_or(id.as_str());
+
+        let count = self.background_tasks.len();
+        if count == 1 {
+            Some(format!("background: {label}"))
+        } else {
+            Some(format!("background: {label} +{}", count - 1))
+        }
+    }
+
+    fn background_process_overview(&self) -> Option<ProcessOverview> {
+        if self.background_tasks.is_empty() {
+            return None;
+        }
+
+        let mut running_details: Vec<String> = self
+            .background_order
+            .iter()
+            .rev()
+            .filter_map(|id| self.background_tasks.get(id).map(|task| (id, task)))
+            .map(|(id, task)| {
+                task.description
+                    .as_ref()
+                    .map(|value| value.trim())
+                    .filter(|value| !value.is_empty())
+                    .map(str::to_string)
+                    .unwrap_or_else(|| id.clone())
+            })
+            .collect();
+
+        if running_details.is_empty() {
+            return None;
+        }
+
+        let total = running_details.len();
+        const MAX_DETAILS: usize = 5;
+        let mut running_more = 0;
+        if running_details.len() > MAX_DETAILS {
+            running_more = running_details.len() - MAX_DETAILS;
+            running_details.truncate(MAX_DETAILS);
+        }
+
+        let footer_summary = self.background_status_summary();
+        let header = footer_summary.clone().unwrap_or_else(|| {
+            if total == 1 {
+                format!("Background: {}", running_details[0])
+            } else {
+                format!("Background: {} (+{} more)", running_details[0], total - 1)
+            }
+        });
+
+        Some(ProcessOverview {
+            header,
+            running_details,
+            running_more,
+            completed_details: Vec::new(),
+            completed_more: 0,
+            footer_summary,
+        })
+    }
+
+    fn reset_base_status_header(&mut self) {
+        let base = self.compose_base_status_header();
+        self.base_status_header = base.clone();
+        self.set_status_header(base);
+        self.update_context_metrics();
+        self.bottom_pane
+            .set_process_overview(self.background_process_overview());
+    }
+
+    fn recompute_base_status_header(&mut self) {
+        let base = self.compose_base_status_header();
+        let should_update = self.current_status_header == self.base_status_header;
+        self.base_status_header = base.clone();
+        if should_update {
+            self.set_status_header(base);
+        }
+        self.bottom_pane
+            .set_process_overview(self.background_process_overview());
+        self.update_context_metrics();
+    }
+
+    fn context_window_capacity(&self) -> Option<u64> {
+        if let Some(window) = self
+            .token_info
+            .as_ref()
+            .and_then(|info| info.model_context_window)
+        {
+            return Some(window);
+        }
+
+        self.config
+            .model_context_window
+            .and_then(|value| u64::try_from(value).ok())
+            .filter(|value| *value > 0)
+    }
+
+    fn compute_agents_percent(&self, window: Option<u64>) -> Option<u8> {
+        let window = window?;
+        if window == 0 || !self.agents_context_active {
+            return Some(0);
+        }
+        let agents_tokens = self.config.agents_context_prompt_tokens as u64;
+        if agents_tokens == 0 {
+            return Some(0);
+        }
+        let percent = (agents_tokens as f64 / window as f64 * 100.0)
+            .round()
+            .clamp(0.0, 100.0) as u8;
+        Some(percent)
+    }
+
+    fn update_context_metrics(&mut self) {
+        let window = self.context_window_capacity();
+        let agents_tokens = if self.agents_context_active {
+            self.config.agents_context_prompt_tokens as u64
+        } else {
+            0
+        };
+
+        let left_percent = if let Some(info) = self.token_info.as_ref() {
+            window.map(|capacity| {
+                info.last_token_usage
+                    .percent_of_context_window_remaining(capacity)
+            })
+        } else if let Some(window) = window {
+            let agents_percent = self
+                .compute_agents_percent(Some(window))
+                .unwrap_or_else(|| {
+                    if window == 0 {
+                        0
+                    } else {
+                        (agents_tokens as f64 / window as f64 * 100.0)
+                            .round()
+                            .clamp(0.0, 100.0) as u8
+                    }
+                });
+            Some(100u8.saturating_sub(agents_percent))
+        } else {
+            Some(100)
+        };
+
+        self.bottom_pane.set_context_window_percent(left_percent);
     }
 
     // --- Small event handlers ---
@@ -442,8 +637,8 @@ impl ChatWidget {
         self.bottom_pane.clear_ctrl_c_quit_hint();
         self.bottom_pane.set_task_running(true);
         self.retry_status_header = None;
-        self.bottom_pane.set_interrupt_hint_visible(true);
-        self.set_status_header(String::from("Working"));
+        self.bottom_pane.show_ctrl_c_quit_hint();
+        self.reset_base_status_header();
         self.full_reasoning_buffer.clear();
         self.reasoning_buffer.clear();
         self.request_redraw();
@@ -467,15 +662,9 @@ impl ChatWidget {
 
     pub(crate) fn set_token_info(&mut self, info: Option<TokenUsageInfo>) {
         if let Some(info) = info {
-            let context_window = info
-                .model_context_window
-                .or(self.config.model_context_window);
-            let percent = context_window.map(|window| {
-                info.last_token_usage
-                    .percent_of_context_window_remaining(window)
-            });
-            self.bottom_pane.set_context_window_percent(percent);
             self.token_info = Some(info);
+            self.update_context_metrics();
+            self.recompute_base_status_header();
         }
     }
 
@@ -527,11 +716,6 @@ impl ChatWidget {
 
         // After an error ends the turn, try sending the next queued input.
         self.maybe_send_next_queued_input();
-    }
-
-    fn on_warning(&mut self, message: String) {
-        self.add_to_history(history_cell::new_warning_event(message));
-        self.request_redraw();
     }
 
     /// Handle a turn aborted due to user interrupt (Esc).
@@ -602,14 +786,25 @@ impl ChatWidget {
 
     fn on_exec_command_output_delta(
         &mut self,
-        _ev: codex_core::protocol::ExecCommandOutputDeltaEvent,
+        ev: codex_core::protocol::ExecCommandOutputDeltaEvent,
     ) {
-        // TODO: Handle streaming exec output if/when implemented
+        use codex_core::protocol::ExecCommandOutputDeltaEvent;
+        let ExecCommandOutputDeltaEvent { call_id, chunk, .. } = ev;
+        if let Some(cmd) = self.running_commands.get_mut(&call_id) {
+            let text = String::from_utf8_lossy(&chunk).to_string();
+            cmd.output.push_str(&text);
+            self.app_event_tx.send(AppEvent::LiveExecOutputChunk {
+                call_id,
+                chunk: text,
+            });
+        }
     }
 
     fn on_patch_apply_begin(&mut self, event: PatchApplyBeginEvent) {
+        let PatchApplyBeginEvent { changes, .. } = event;
         self.add_to_history(history_cell::new_patch_event(
-            event.changes,
+            changes,
+            None,
             &self.config.cwd,
         ));
     }
@@ -672,26 +867,72 @@ impl ChatWidget {
     }
 
     fn on_shutdown_complete(&mut self) {
-        self.request_exit();
+        self.app_event_tx.send(AppEvent::ExitRequest);
     }
 
     fn on_turn_diff(&mut self, unified_diff: String) {
         debug!("TurnDiffEvent: {unified_diff}");
     }
 
-    fn on_deprecation_notice(&mut self, event: DeprecationNoticeEvent) {
-        let DeprecationNoticeEvent { summary, details } = event;
-        self.add_to_history(history_cell::new_deprecation_notice(summary, details));
+    fn on_background_event(&mut self, message: String) {
+        if let Some(summary) = parse_background_event_message(&message) {
+            debug!("BackgroundEvent: {message}");
+            self.handle_background_shell_event(summary);
+        } else {
+            debug!("BackgroundEvent (unparsed): {message}");
+            self.add_to_history(history_cell::new_info_event(message, None));
+        }
+    }
+
+    fn handle_background_shell_event(&mut self, summary: BackgroundEventSummary) {
+        self.flush_answer_stream_with_separator();
+        let BackgroundEventSummary {
+            shell_id,
+            kind,
+            description,
+        } = summary;
+
+        match kind {
+            BackgroundEventKind::Started => {
+                self.active_cell = None;
+                self.background_tasks.insert(
+                    shell_id.clone(),
+                    BackgroundTaskInfo {
+                        description: description.clone(),
+                    },
+                );
+                self.background_order.retain(|id| id != &shell_id);
+                self.background_order.push_back(shell_id.clone());
+                self.add_to_history(history_cell::new_background_event(
+                    shell_id,
+                    BackgroundEventStatus::Started,
+                    description,
+                ));
+                self.app_event_tx.send(AppEvent::EnsureLiveExecPolling);
+            }
+            BackgroundEventKind::Terminated { exit_code } => {
+                let description = description.filter(|d| !d.trim().is_empty()).or_else(|| {
+                    self.background_tasks
+                        .get(&shell_id)
+                        .and_then(|info| info.description.clone())
+                });
+                self.background_tasks.remove(&shell_id);
+                self.background_order.retain(|id| id != &shell_id);
+                self.add_to_history(history_cell::new_background_event(
+                    shell_id,
+                    BackgroundEventStatus::Terminated { exit_code },
+                    description,
+                ));
+                self.app_event_tx.send(AppEvent::LiveExecPollTick);
+            }
+        }
+        self.recompute_base_status_header();
         self.request_redraw();
     }
 
-    fn on_background_event(&mut self, message: String) {
-        debug!("BackgroundEvent: {message}");
-    }
-
     fn on_undo_started(&mut self, event: UndoStartedEvent) {
-        self.bottom_pane.ensure_status_indicator();
-        self.bottom_pane.set_interrupt_hint_visible(false);
+        self.bottom_pane.set_task_running(true);
+        self.bottom_pane.clear_ctrl_c_quit_hint();
         let message = event
             .message
             .unwrap_or_else(|| "Undo in progress...".to_string());
@@ -700,7 +941,7 @@ impl ChatWidget {
 
     fn on_undo_completed(&mut self, event: UndoCompletedEvent) {
         let UndoCompletedEvent { success, message } = event;
-        self.bottom_pane.hide_status_indicator();
+        self.bottom_pane.set_task_running(false);
         let message = message.unwrap_or_else(|| {
             if success {
                 "Undo completed successfully.".to_string()
@@ -783,6 +1024,7 @@ impl ChatWidget {
                 self.needs_final_message_separator = false;
             }
             self.stream_controller = Some(StreamController::new(
+                self.config.clone(),
                 self.last_rendered_width.get().map(|w| w.saturating_sub(2)),
             ));
         }
@@ -796,10 +1038,17 @@ impl ChatWidget {
 
     pub(crate) fn handle_exec_end_now(&mut self, ev: ExecCommandEndEvent) {
         let running = self.running_commands.remove(&ev.call_id);
-        let (command, parsed, is_user_shell_command) = match running {
-            Some(rc) => (rc.command, rc.parsed_cmd, rc.is_user_shell_command),
-            None => (vec![ev.call_id.clone()], Vec::new(), false),
+        self.running_command_order.retain(|id| id != &ev.call_id);
+        let (command, parsed) = match running {
+            Some(rc) => (rc.command, rc.parsed_cmd),
+            None => (vec![ev.call_id.clone()], Vec::new()),
         };
+        self.app_event_tx.send(AppEvent::LiveExecCommandFinished {
+            call_id: ev.call_id.clone(),
+            exit_code: ev.exit_code,
+            duration: ev.duration,
+            aggregated_output: ev.aggregated_output.clone(),
+        });
 
         let needs_new = self
             .active_cell
@@ -812,7 +1061,6 @@ impl ChatWidget {
                 ev.call_id.clone(),
                 command,
                 parsed,
-                is_user_shell_command,
             )));
         }
 
@@ -825,6 +1073,8 @@ impl ChatWidget {
                 &ev.call_id,
                 CommandOutput {
                     exit_code: ev.exit_code,
+                    stdout: ev.stdout.clone(),
+                    stderr: ev.stderr.clone(),
                     formatted_output: ev.formatted_output.clone(),
                     aggregated_output: ev.aggregated_output.clone(),
                 },
@@ -857,7 +1107,6 @@ impl ChatWidget {
             id,
             command: ev.command,
             reason: ev.reason,
-            risk: ev.risk,
         };
         self.bottom_pane.push_approval_request(request);
         self.request_redraw();
@@ -885,38 +1134,79 @@ impl ChatWidget {
     }
 
     pub(crate) fn handle_exec_begin_now(&mut self, ev: ExecCommandBeginEvent) {
+        let ExecCommandBeginEvent {
+            call_id,
+            command,
+            cwd,
+            parsed_cmd,
+        } = ev;
         // Ensure the status indicator is visible while the command runs.
+        self.running_command_order.retain(|id| id != &call_id);
+        self.running_command_order.push_back(call_id.clone());
         self.running_commands.insert(
-            ev.call_id.clone(),
+            call_id.clone(),
             RunningCommand {
-                command: ev.command.clone(),
-                parsed_cmd: ev.parsed_cmd.clone(),
-                is_user_shell_command: ev.is_user_shell_command,
+                command: command.clone(),
+                parsed_cmd: parsed_cmd.clone(),
+                output: String::new(),
+                shell_id: None,
             },
         );
         if let Some(cell) = self
             .active_cell
             .as_mut()
             .and_then(|c| c.as_any_mut().downcast_mut::<ExecCell>())
-            && let Some(new_exec) = cell.with_added_call(
-                ev.call_id.clone(),
-                ev.command.clone(),
-                ev.parsed_cmd.clone(),
-                ev.is_user_shell_command,
-            )
+            && let Some(new_exec) =
+                cell.with_added_call(call_id.clone(), command.clone(), parsed_cmd.clone())
         {
             *cell = new_exec;
         } else {
             self.flush_active_cell();
 
             self.active_cell = Some(Box::new(new_active_exec_command(
-                ev.call_id.clone(),
-                ev.command.clone(),
-                ev.parsed_cmd,
-                ev.is_user_shell_command,
+                call_id.clone(),
+                command.clone(),
+                parsed_cmd,
             )));
         }
 
+        self.app_event_tx.send(AppEvent::LiveExecCommandBegin {
+            call_id,
+            command,
+            cwd,
+        });
+        self.request_redraw();
+    }
+
+    pub(crate) fn prepare_promotion_request(&mut self) -> Option<(String, Option<String>)> {
+        let call_id = self
+            .running_command_order
+            .iter()
+            .rev()
+            .find(|id| {
+                self.running_commands
+                    .get(*id)
+                    .map_or(false, |cmd| cmd.shell_id.is_none())
+            })
+            .cloned()?;
+        let description = self
+            .running_commands
+            .get(&call_id)
+            .and_then(|cmd| (!cmd.command.is_empty()).then(|| cmd.command.join(" ")));
+        if let Some(cmd) = self.running_commands.get_mut(&call_id) {
+            cmd.shell_id = Some(String::new());
+        }
+        self.bottom_pane.hide_status_indicator();
+        self.recompute_base_status_header();
+        self.request_redraw();
+        Some((call_id, description))
+    }
+
+    fn on_shell_promoted(&mut self, call_id: &str, shell_id: &str) {
+        if let Some(cmd) = self.running_commands.get_mut(call_id) {
+            cmd.shell_id = Some(shell_id.to_string());
+        }
+        self.recompute_base_status_header();
         self.request_redraw();
     }
 
@@ -960,6 +1250,27 @@ impl ChatWidget {
         }
     }
 
+    fn layout_areas(&self, area: Rect) -> [Rect; 3] {
+        let bottom_min = self.bottom_pane.desired_height(area.width).min(area.height);
+        let remaining = area.height.saturating_sub(bottom_min);
+
+        let active_desired = self
+            .active_cell
+            .as_ref()
+            .map_or(0, |c| c.desired_height(area.width) + 1);
+        let active_height = active_desired.min(remaining);
+        // Note: no header area; remaining is not used beyond computing active height.
+
+        let header_height = 0u16;
+
+        Layout::vertical([
+            Constraint::Length(header_height),
+            Constraint::Length(active_height),
+            Constraint::Min(bottom_min),
+        ])
+        .areas(area)
+    }
+
     pub(crate) fn new(
         common: ChatWidgetInit,
         conversation_manager: Arc<ConversationManager>,
@@ -978,7 +1289,7 @@ impl ChatWidget {
         let placeholder = EXAMPLE_PROMPTS[rng.random_range(0..EXAMPLE_PROMPTS.len())].to_string();
         let codex_op_tx = spawn_agent(config.clone(), app_event_tx.clone(), conversation_manager);
 
-        Self {
+        let mut widget = Self {
             app_event_tx: app_event_tx.clone(),
             frame_requester: frame_requester.clone(),
             codex_op_tx,
@@ -1003,10 +1314,14 @@ impl ChatWidget {
             rate_limit_warnings: RateLimitWarningState::default(),
             stream_controller: None,
             running_commands: HashMap::new(),
+            running_command_order: VecDeque::new(),
+            background_tasks: HashMap::new(),
+            background_order: VecDeque::new(),
             task_complete_pending: false,
             interrupts: InterruptManager::new(),
             reasoning_buffer: String::new(),
             full_reasoning_buffer: String::new(),
+            base_status_header: String::from("Working"),
             current_status_header: String::from("Working"),
             retry_status_header: None,
             conversation_id: None,
@@ -1019,7 +1334,13 @@ impl ChatWidget {
             last_rendered_width: std::cell::Cell::new(None),
             feedback,
             current_rollout_path: None,
-        }
+            agents_context_include_mode: !config.agents_context_include.is_empty(),
+            agents_context_active: config.agents_context_prompt.is_some(),
+        };
+        widget.base_status_header = widget.compose_base_status_header();
+        widget.current_status_header = widget.base_status_header.clone();
+        widget.update_context_metrics();
+        widget
     }
 
     /// Create a ChatWidget attached to an existing conversation (e.g., a fork).
@@ -1044,7 +1365,7 @@ impl ChatWidget {
         let codex_op_tx =
             spawn_agent_from_existing(conversation, session_configured, app_event_tx.clone());
 
-        Self {
+        let mut widget = Self {
             app_event_tx: app_event_tx.clone(),
             frame_requester: frame_requester.clone(),
             codex_op_tx,
@@ -1069,10 +1390,14 @@ impl ChatWidget {
             rate_limit_warnings: RateLimitWarningState::default(),
             stream_controller: None,
             running_commands: HashMap::new(),
+            running_command_order: VecDeque::new(),
+            background_tasks: HashMap::new(),
+            background_order: VecDeque::new(),
             task_complete_pending: false,
             interrupts: InterruptManager::new(),
             reasoning_buffer: String::new(),
             full_reasoning_buffer: String::new(),
+            base_status_header: String::from("Working"),
             current_status_header: String::from("Working"),
             retry_status_header: None,
             conversation_id: None,
@@ -1085,7 +1410,21 @@ impl ChatWidget {
             last_rendered_width: std::cell::Cell::new(None),
             feedback,
             current_rollout_path: None,
-        }
+            agents_context_include_mode: !config.agents_context_include.is_empty(),
+            agents_context_active: config.agents_context_prompt.is_some(),
+        };
+        widget.base_status_header = widget.compose_base_status_header();
+        widget.current_status_header = widget.base_status_header.clone();
+        widget.update_context_metrics();
+        widget
+    }
+
+    pub fn desired_height(&self, width: u16) -> u16 {
+        self.bottom_pane.desired_height(width)
+            + self
+                .active_cell
+                .as_ref()
+                .map_or(0, |c| c.desired_height(width) + 1)
     }
 
     pub(crate) fn handle_key_event(&mut self, key_event: KeyEvent) {
@@ -1138,7 +1477,12 @@ impl ChatWidget {
                             text,
                             image_paths: self.bottom_pane.take_recent_submission_images(),
                         };
-                        self.queue_user_message(user_message);
+                        if self.bottom_pane.is_task_running() {
+                            self.queued_user_messages.push_back(user_message);
+                            self.refresh_queued_user_messages();
+                        } else {
+                            self.submit_user_message(user_message);
+                        }
                     }
                     InputResult::Command(cmd) => {
                         self.dispatch_command(cmd);
@@ -1195,11 +1539,14 @@ impl ChatWidget {
                     return;
                 }
                 const INIT_PROMPT: &str = include_str!("../prompt_for_init_command.md");
-                self.submit_user_message(INIT_PROMPT.to_string().into());
+                self.submit_text_message(INIT_PROMPT.to_string());
             }
             SlashCommand::Compact => {
                 self.clear_token_usage();
                 self.app_event_tx.send(AppEvent::CodexOp(Op::Compact));
+            }
+            SlashCommand::Context => {
+                self.app_event_tx.send(AppEvent::OpenAgentsContextManager);
             }
             SlashCommand::Review => {
                 self.open_review_popup();
@@ -1210,8 +1557,8 @@ impl ChatWidget {
             SlashCommand::Approvals => {
                 self.open_approvals_popup();
             }
-            SlashCommand::Quit | SlashCommand::Exit => {
-                self.request_exit();
+            SlashCommand::Quit => {
+                self.app_event_tx.send(AppEvent::ExitRequest);
             }
             SlashCommand::Logout => {
                 if let Err(e) = codex_core::auth::logout(
@@ -1220,7 +1567,7 @@ impl ChatWidget {
                 ) {
                     tracing::error!("failed to logout: {e}");
                 }
-                self.request_exit();
+                self.app_event_tx.send(AppEvent::ExitRequest);
             }
             SlashCommand::Undo => {
                 self.app_event_tx.send(AppEvent::CodexOp(Op::Undo));
@@ -1251,16 +1598,7 @@ impl ChatWidget {
             SlashCommand::Mcp => {
                 self.add_mcp_output();
             }
-            SlashCommand::Rollout => {
-                if let Some(path) = self.rollout_path() {
-                    self.add_info_message(
-                        format!("Current rollout path: {}", path.display()),
-                        None,
-                    );
-                } else {
-                    self.add_info_message("Rollout path is not available yet.".to_string(), None);
-                }
-            }
+            #[cfg(debug_assertions)]
             SlashCommand::TestApproval => {
                 use codex_core::protocol::EventMsg;
                 use std::collections::HashMap;
@@ -1343,47 +1681,79 @@ impl ChatWidget {
         self.app_event_tx.send(AppEvent::InsertHistoryCell(cell));
     }
 
-    fn queue_user_message(&mut self, user_message: UserMessage) {
-        if self.bottom_pane.is_task_running() {
-            self.queued_user_messages.push_back(user_message);
-            self.refresh_queued_user_messages();
-        } else {
-            self.submit_user_message(user_message);
+    fn handle_inline_context_command(&mut self, text: &str) -> bool {
+        let trimmed = text.trim();
+        let Some(rest) = trimmed.strip_prefix('/') else {
+            return false;
+        };
+        let mut parts = rest.split_whitespace();
+        let Some(name) = parts.next() else {
+            return false;
+        };
+        if !name.eq_ignore_ascii_case("context") {
+            return false;
+        }
+
+        match parts.next() {
+            Some(arg) if arg.eq_ignore_ascii_case("off") => {
+                if parts.next().is_some() {
+                    self.add_error_message("Usage: `/context off`".to_string());
+                } else if self.agents_context_active {
+                    self.set_agents_context_active(false);
+                    self.add_info_message(
+                        "Agents context disabled. Run `/context` to re-enable or adjust files."
+                            .to_string(),
+                        None,
+                    );
+                } else {
+                    self.add_info_message(
+                        "Agents context is already disabled. Run `/context` to attach files."
+                            .to_string(),
+                        None,
+                    );
+                }
+                true
+            }
+            Some(_) => {
+                self.add_error_message(
+                    "Unrecognized `/context` argument. Use `/context` to manage files or `/context off` to disable."
+                        .to_string(),
+                );
+                true
+            }
+            None => false,
         }
     }
 
     fn submit_user_message(&mut self, user_message: UserMessage) {
-        let UserMessage { text, image_paths } = user_message;
-        if text.is_empty() && image_paths.is_empty() {
+        if self.handle_inline_context_command(&user_message.text) {
             return;
         }
 
-        let mut items: Vec<UserInput> = Vec::new();
+        let UserMessage { text, image_paths } = user_message;
+        let context_prompt = if self.agents_context_active {
+            self.config.agents_context_prompt.clone()
+        } else {
+            None
+        };
+        let has_context = context_prompt.is_some();
 
-        // Special-case: "!cmd" executes a local shell command instead of sending to the model.
-        if let Some(stripped) = text.strip_prefix('!') {
-            let cmd = stripped.trim();
-            if cmd.is_empty() {
-                self.app_event_tx.send(AppEvent::InsertHistoryCell(Box::new(
-                    history_cell::new_info_event(
-                        USER_SHELL_COMMAND_HELP_TITLE.to_string(),
-                        Some(USER_SHELL_COMMAND_HELP_HINT.to_string()),
-                    ),
-                )));
-                return;
-            }
-            self.submit_op(Op::RunUserShellCommand {
-                command: cmd.to_string(),
-            });
+        if text.is_empty() && image_paths.is_empty() && !has_context {
             return;
+        }
+
+        let mut items: Vec<InputItem> = Vec::new();
+
+        if let Some(context) = context_prompt {
+            items.push(InputItem::Text { text: context });
         }
 
         if !text.is_empty() {
-            items.push(UserInput::Text { text: text.clone() });
+            items.push(InputItem::Text { text: text.clone() });
         }
 
         for path in image_paths {
-            items.push(UserInput::LocalImage { path });
+            items.push(InputItem::LocalImage { path });
         }
 
         self.codex_op_tx
@@ -1467,7 +1837,6 @@ impl ChatWidget {
                 self.set_token_info(ev.info);
                 self.on_rate_limit_snapshot(ev.rate_limits);
             }
-            EventMsg::Warning(WarningEvent { message }) => self.on_warning(message),
             EventMsg::Error(ErrorEvent { message }) => self.on_error(message),
             EventMsg::TurnAborted(ev) => match ev.reason {
                 TurnAbortReason::Interrupted => {
@@ -1503,9 +1872,22 @@ impl ChatWidget {
             EventMsg::ListCustomPromptsResponse(ev) => self.on_list_custom_prompts(ev),
             EventMsg::ShutdownComplete => self.on_shutdown_complete(),
             EventMsg::TurnDiff(TurnDiffEvent { unified_diff }) => self.on_turn_diff(unified_diff),
-            EventMsg::DeprecationNotice(ev) => self.on_deprecation_notice(ev),
             EventMsg::BackgroundEvent(BackgroundEventEvent { message }) => {
                 self.on_background_event(message)
+            }
+            EventMsg::ShellPromoted {
+                call_id,
+                shell_id,
+                initial_output,
+                description,
+            } => {
+                self.on_shell_promoted(&call_id, &shell_id);
+                self.app_event_tx.send(AppEvent::LiveExecPromoted {
+                    call_id,
+                    shell_id,
+                    initial_output,
+                    description,
+                });
             }
             EventMsg::UndoStarted(ev) => self.on_undo_started(ev),
             EventMsg::UndoCompleted(ev) => self.on_undo_completed(ev),
@@ -1519,12 +1901,8 @@ impl ChatWidget {
                 self.on_entered_review_mode(review_request)
             }
             EventMsg::ExitedReviewMode(review) => self.on_exited_review_mode(review),
-            EventMsg::RawResponseItem(_)
-            | EventMsg::ItemStarted(_)
-            | EventMsg::ItemCompleted(_)
-            | EventMsg::AgentMessageContentDelta(_)
-            | EventMsg::ReasoningContentDelta(_)
-            | EventMsg::ReasoningRawContentDelta(_) => {}
+            EventMsg::UnifiedExecSessions(_) => {}
+            EventMsg::ConversationPath(_) => {}
         }
     }
 
@@ -1553,7 +1931,7 @@ impl ChatWidget {
                 } else {
                     // Show explanation when there are no structured findings.
                     let mut rendered: Vec<ratatui::text::Line<'static>> = vec!["".into()];
-                    append_markdown(&explanation, None, &mut rendered);
+                    append_markdown(&explanation, None, &mut rendered, &self.config);
                     let body_cell = AgentMessageCell::new(rendered, false);
                     self.app_event_tx
                         .send(AppEvent::InsertHistoryCell(Box::new(body_cell)));
@@ -1562,7 +1940,7 @@ impl ChatWidget {
                 let message_text =
                     codex_core::review_format::format_review_findings_block(&output.findings, None);
                 let mut message_lines: Vec<ratatui::text::Line<'static>> = Vec::new();
-                append_markdown(&message_text, None, &mut message_lines);
+                append_markdown(&message_text, None, &mut message_lines, &self.config);
                 let body_cell = AgentMessageCell::new(message_lines, true);
                 self.app_event_tx
                     .send(AppEvent::InsertHistoryCell(Box::new(body_cell)));
@@ -1582,10 +1960,6 @@ impl ChatWidget {
         if !message.is_empty() {
             self.add_to_history(history_cell::new_user_prompt(message.to_string()));
         }
-    }
-
-    fn request_exit(&self) {
-        self.app_event_tx.send(AppEvent::ExitRequest);
     }
 
     fn request_redraw(&mut self) {
@@ -1662,7 +2036,6 @@ impl ChatWidget {
             context_usage,
             &self.conversation_id,
             self.rate_limit_snapshot.as_ref(),
-            Local::now(),
         ));
     }
 
@@ -1673,22 +2046,43 @@ impl ChatWidget {
         let auth_mode = self.auth_manager.auth().map(|auth| auth.mode);
         let presets: Vec<ModelPreset> = builtin_model_presets(auth_mode);
 
+        let mut grouped: std::collections::BTreeMap<&str, Vec<ModelPreset>> =
+            std::collections::BTreeMap::new();
+        for preset in presets.iter().copied() {
+            grouped.entry(preset.model).or_default().push(preset);
+        }
+
         let mut items: Vec<SelectionItem> = Vec::new();
-        for preset in presets.into_iter() {
-            let description = if preset.description.is_empty() {
+        for (model_slug, options) in grouped {
+            let sample = options
+                .iter()
+                .find(|preset| preset.effort == Some(ReasoningEffortConfig::Medium))
+                .copied()
+                .unwrap_or_else(|| options[0]);
+
+            let effort_labels: Vec<String> = options
+                .iter()
+                .filter_map(|preset| preset.effort)
+                .map(|effort| effort.to_string())
+                .collect();
+            let description = if !effort_labels.is_empty() {
+                Some(format!("Available efforts: {}", effort_labels.join(", ")))
+            } else if sample.description.trim().is_empty() {
                 None
             } else {
-                Some(preset.description.to_string())
+                Some(sample.description.to_string())
             };
-            let is_current = preset.model == current_model;
-            let preset_for_action = preset;
+
+            let is_current = model_slug == current_model;
+            let preset_for_action = sample;
             let actions: Vec<SelectionAction> = vec![Box::new(move |tx| {
                 tx.send(AppEvent::OpenReasoningPopup {
                     model: preset_for_action,
                 });
             })];
+
             items.push(SelectionItem {
-                name: preset.display_name.to_string(),
+                name: model_slug.to_string(),
                 description,
                 is_current,
                 actions,
@@ -1708,68 +2102,50 @@ impl ChatWidget {
 
     /// Open a popup to choose the reasoning effort (stage 2) for the given model.
     pub(crate) fn open_reasoning_popup(&mut self, preset: ModelPreset) {
-        let default_effort: ReasoningEffortConfig = preset.default_reasoning_effort;
-        let supported = preset.supported_reasoning_efforts;
-
-        struct EffortChoice {
-            stored: Option<ReasoningEffortConfig>,
-            display: ReasoningEffortConfig,
-        }
-        let mut choices: Vec<EffortChoice> = Vec::new();
-        for effort in ReasoningEffortConfig::iter() {
-            if supported.iter().any(|option| option.effort == effort) {
-                choices.push(EffortChoice {
-                    stored: Some(effort),
-                    display: effort,
-                });
-            }
-        }
-        if choices.is_empty() {
-            choices.push(EffortChoice {
-                stored: Some(default_effort),
-                display: default_effort,
-            });
+        let auth_mode = self.auth_manager.auth().map(|auth| auth.mode);
+        let mut available: Vec<ModelPreset> = builtin_model_presets(auth_mode)
+            .into_iter()
+            .filter(|candidate| candidate.model == preset.model)
+            .collect();
+        if available.is_empty() {
+            available.push(preset);
         }
 
-        let default_choice: Option<ReasoningEffortConfig> = choices
-            .iter()
-            .any(|choice| choice.stored == Some(default_effort))
-            .then_some(Some(default_effort))
-            .flatten()
-            .or_else(|| choices.iter().find_map(|choice| choice.stored))
-            .or(Some(default_effort));
-
+        let default_effort = preset.effort;
         let model_slug = preset.model.to_string();
         let is_current_model = self.config.model == preset.model;
         let highlight_choice = if is_current_model {
             self.config.model_reasoning_effort
         } else {
-            default_choice
+            default_effort
         };
+
         let mut items: Vec<SelectionItem> = Vec::new();
-        for choice in choices.iter() {
-            let effort = choice.display;
-            let mut effort_label = effort.to_string();
-            if let Some(first) = effort_label.get_mut(0..1) {
-                first.make_ascii_uppercase();
-            }
-            if choice.stored == default_choice {
+        for option in available.iter() {
+            let stored_effort = option.effort;
+            let mut effort_label = match stored_effort {
+                Some(value) => {
+                    let mut label = value.to_string();
+                    if let Some(first) = label.get_mut(0..1) {
+                        first.make_ascii_uppercase();
+                    }
+                    label
+                }
+                None => "Default".to_string(),
+            };
+            if stored_effort == default_effort {
                 effort_label.push_str(" (default)");
             }
 
-            let description = choice
-                .stored
-                .and_then(|effort| {
-                    supported
-                        .iter()
-                        .find(|option| option.effort == effort)
-                        .map(|option| option.description.to_string())
-                })
-                .filter(|text| !text.is_empty());
+            let description = if option.description.trim().is_empty() {
+                None
+            } else {
+                Some(option.description.to_string())
+            };
 
             let warning = "⚠ High reasoning effort can quickly consume Plus plan rate limits.";
             let show_warning =
-                preset.model == "gpt-5-codex" && effort == ReasoningEffortConfig::High;
+                option.model == "gpt-5-codex" && stored_effort == Some(ReasoningEffortConfig::High);
             let selected_description = show_warning.then(|| {
                 description
                     .as_ref()
@@ -1777,7 +2153,7 @@ impl ChatWidget {
             });
 
             let model_for_action = model_slug.clone();
-            let effort_for_action = choice.stored;
+            let effort_for_action = stored_effort;
             let actions: Vec<SelectionAction> = vec![Box::new(move |tx| {
                 tx.send(AppEvent::CodexOp(Op::OverrideTurnContext {
                     cwd: None,
@@ -1806,7 +2182,7 @@ impl ChatWidget {
                 name: effort_label,
                 description,
                 selected_description,
-                is_current: is_current_model && choice.stored == highlight_choice,
+                is_current: is_current_model && stored_effort == highlight_choice,
                 actions,
                 dismiss_on_select: true,
                 ..Default::default()
@@ -1837,15 +2213,13 @@ impl ChatWidget {
             .config
             .forced_auto_mode_downgraded_on_windows
         {
-            use ratatui_macros::line;
-
             let mut header = ColumnRenderable::new();
-            header.push(line![
-                "Codex forced your settings back to Read Only on this Windows machine.".bold()
-            ]);
-            header.push(line![
-                "To re-enable Auto mode, run Codex inside Windows Subsystem for Linux (WSL) or enable Full Access manually.".dim()
-                ]);
+            header.push(Line::from(vec![
+                "Codex forced your settings back to Read Only on this Windows machine.".bold(),
+            ]));
+            header.push(Line::from(vec![
+                "To re-enable Auto mode, run Codex inside Windows Subsystem for Linux (WSL) or enable Full Access manually.".dim(),
+            ]));
             Box::new(header)
         } else {
             Box::new(())
@@ -1857,10 +2231,7 @@ impl ChatWidget {
                 current_approval == preset.approval && current_sandbox == preset.sandbox;
             let name = preset.label.to_string();
             let description_text = preset.description;
-            let description = if cfg!(target_os = "windows")
-                && preset.id == "auto"
-                && codex_core::get_platform_sandbox().is_none()
-            {
+            let description = if cfg!(target_os = "windows") && preset.id == "auto" {
                 Some(format!(
                     "{description_text}\nRequires Windows Subsystem for Linux (WSL). Show installation instructions..."
                 ))
@@ -1880,10 +2251,7 @@ impl ChatWidget {
                         preset: preset_clone.clone(),
                     });
                 })]
-            } else if cfg!(target_os = "windows")
-                && preset.id == "auto"
-                && codex_core::get_platform_sandbox().is_none()
-            {
+            } else if cfg!(target_os = "windows") && preset.id == "auto" {
                 vec![Box::new(|tx| {
                     tx.send(AppEvent::ShowWindowsAutoModeInstructions);
                 })]
@@ -1994,14 +2362,14 @@ impl ChatWidget {
 
     #[cfg(target_os = "windows")]
     pub(crate) fn open_windows_auto_mode_instructions(&mut self) {
-        use ratatui_macros::line;
-
         let mut header = ColumnRenderable::new();
-        header.push(line![
-            "Auto mode requires Windows Subsystem for Linux (WSL2).".bold()
-        ]);
-        header.push(line!["Run Codex inside WSL to enable sandboxed commands."]);
-        header.push(line![""]);
+        header.push(Line::from(vec![
+            "Auto mode requires Windows Subsystem for Linux (WSL2).".bold(),
+        ]));
+        header.push(Line::from(
+            "Run Codex inside WSL to enable sandboxed commands.",
+        ));
+        header.push(Line::from(""));
         header.push(Paragraph::new(WSL_INSTRUCTIONS).wrap(Wrap { trim: false }));
 
         let items = vec![SelectionItem {
@@ -2052,6 +2420,51 @@ impl ChatWidget {
     pub(crate) fn set_model(&mut self, model: &str) {
         self.session_header.set_model(model);
         self.config.model = model.to_string();
+    }
+
+    pub(crate) fn apply_agents_context_from_config(&mut self, config: &Config) {
+        self.config.agents_context_entries = config.agents_context_entries.clone();
+        self.config.agents_context_include = config.agents_context_include.clone();
+        self.config.agents_context_exclude = config.agents_context_exclude.clone();
+        self.config.agents_context_prompt = config.agents_context_prompt.clone();
+        self.config.agents_context_prompt_tokens = config.agents_context_prompt_tokens;
+        self.config.agents_context_prompt_truncated = config.agents_context_prompt_truncated;
+        self.agents_context_include_mode = !self.config.agents_context_include.is_empty();
+        if self.config.agents_context_prompt.is_none() {
+            self.agents_context_active = false;
+        }
+        self.update_context_metrics();
+        self.recompute_base_status_header();
+        self.request_redraw();
+    }
+
+    pub(crate) fn set_agents_context_include_mode(&mut self, include_mode: bool) {
+        self.agents_context_include_mode = include_mode;
+    }
+
+    pub(crate) fn agents_context_include_mode(&self) -> bool {
+        self.agents_context_include_mode
+    }
+
+    pub(crate) fn set_agents_context_active(&mut self, active: bool) {
+        if self.agents_context_active == active {
+            return;
+        }
+        self.agents_context_active = active;
+        self.recompute_base_status_header();
+        self.request_redraw();
+    }
+
+    pub(crate) fn agents_context_active(&self) -> bool {
+        self.agents_context_active
+    }
+
+    pub(crate) fn active_background_shell_ids(&self) -> Vec<String> {
+        self.background_order
+            .iter()
+            .filter(|id| self.background_tasks.contains_key(*id))
+            .cloned()
+            .collect()
     }
 
     pub(crate) fn add_info_message(&mut self, message: String, hint: Option<String>) {
@@ -2132,8 +2545,6 @@ impl ChatWidget {
         self.add_to_history(history_cell::new_mcp_tools_output(
             &self.config,
             ev.tools,
-            ev.resources,
-            ev.resource_templates,
             &ev.auth_statuses,
         ));
     }
@@ -2306,6 +2717,16 @@ impl ChatWidget {
         self.bottom_pane.show_view(Box::new(view));
     }
 
+    /// Programmatically submit a user text message as if typed in the
+    /// composer. The text will be added to conversation history and sent to
+    /// the agent.
+    pub(crate) fn submit_text_message(&mut self, text: String) {
+        if text.is_empty() {
+            return;
+        }
+        self.submit_user_message(text.into());
+    }
+
     pub(crate) fn token_usage(&self) -> TokenUsage {
         self.token_info
             .as_ref()
@@ -2331,33 +2752,29 @@ impl ChatWidget {
         self.token_info = None;
     }
 
-    fn as_renderable(&self) -> RenderableItem<'_> {
-        let active_cell_renderable = match &self.active_cell {
-            Some(cell) => RenderableItem::Borrowed(cell).inset(Insets::tlbr(1, 0, 0, 0)),
-            None => RenderableItem::Owned(Box::new(())),
-        };
-        let mut flex = FlexRenderable::new();
-        flex.push(1, active_cell_renderable);
-        flex.push(
-            0,
-            RenderableItem::Borrowed(&self.bottom_pane).inset(Insets::tlbr(1, 0, 0, 0)),
-        );
-        RenderableItem::Owned(Box::new(flex))
+    pub fn cursor_pos(&self, area: Rect) -> Option<(u16, u16)> {
+        let [_, _, bottom_pane_area] = self.layout_areas(area);
+        self.bottom_pane.cursor_pos(bottom_pane_area)
     }
 }
 
-impl Renderable for ChatWidget {
-    fn render(&self, area: Rect, buf: &mut Buffer) {
-        self.as_renderable().render(area, buf);
+impl WidgetRef for &ChatWidget {
+    fn render_ref(&self, area: Rect, buf: &mut Buffer) {
+        let [_, active_cell_area, bottom_pane_area] = self.layout_areas(area);
+        (&self.bottom_pane).render(bottom_pane_area, buf);
+        if !active_cell_area.is_empty()
+            && let Some(cell) = &self.active_cell
+        {
+            let mut area = active_cell_area;
+            area.y = area.y.saturating_add(1);
+            area.height = area.height.saturating_sub(1);
+            if let Some(exec) = cell.as_any().downcast_ref::<ExecCell>() {
+                exec.render_ref(area, buf);
+            } else if let Some(tool) = cell.as_any().downcast_ref::<McpToolCallCell>() {
+                tool.render_ref(area, buf);
+            }
+        }
         self.last_rendered_width.set(Some(area.width as usize));
-    }
-
-    fn desired_height(&self, width: u16) -> u16 {
-        self.as_renderable().desired_height(width)
-    }
-
-    fn cursor_pos(&self, area: Rect) -> Option<(u16, u16)> {
-        self.as_renderable().cursor_pos(area)
     }
 }
 

@@ -1,0 +1,20 @@
+---
+source: tui/src/mcp/manager_view.rs
+expression: render_view(&view)
+---
+┌Configured MCP Servers────────────────────────────────────────────────┐
+│Name               Transport        Details                 Status    │
+│anthropic          stdio            anthropic-mcp --serve   unknown   │
+│openai             stdio            openai-mcp --serve      passing   │
+│                                                                      │
+│                                                                      │
+│                                                                      │
+│                                                                      │
+│                                                                      │
+└──────────────────────────────────────────────────────────────────────┘
+┌Details───────────────────────────────────────────────────────────────┐
+│Name: anthropic                                                       │
+│Transport: stdio  Command: anthropic-mcp                              │
+│Args: --serve                                                         │
+│Env:                                                                  │
+└──────────────────────────────────────────────────────────────────────┘

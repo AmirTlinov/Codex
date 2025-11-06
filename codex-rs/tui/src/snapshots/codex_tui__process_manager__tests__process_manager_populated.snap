@@ -1,0 +1,17 @@
+---
+source: tui/src/process_manager.rs
+expression: render_snapshot(&view)
+---
+┌Unified Exec Sessions─────────────────────────────────────────────────────────┐
+│Session    Status     Command                Started          Last output     │
+│7          ● Running  bash -lc long_running_ 1m30s ago        2s ago          │
+│3          ○ Exited   cargo test             1h ago           15m ago         │
+└──────────────────────────────────────────────────────────────────────────────┘
+┌Output preview────────────────────────────────────────────────────────────────┐
+│Command: bash -lc long_running_task                                           │
+│Status: Running                                                               │
+│Started: 1m30s ago                                                            │
+│Last output: 2s ago                                                           │
+│                                                                              │
+└──────────────────────────────────────────────────────────────────────────────┘
+↑/↓ navigate  •  Open log (o)  •  Input (i)  •  Kill (k)  •  Remove (d)  •  Refr
