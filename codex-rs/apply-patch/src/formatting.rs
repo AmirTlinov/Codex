@@ -85,7 +85,7 @@ fn run_cargo_fmt(root: &Path, operations: &[&OperationSummary]) -> Vec<Formattin
             .parent()
             .and_then(|p| p.file_name())
             .and_then(|n| n.to_str())
-            .map(|s| s.to_string());
+            .map(str::to_string);
         outcomes.push(FormattingOutcome {
             tool: "cargo fmt".to_string(),
             scope,
@@ -151,7 +151,7 @@ fn run_gofmt(root: &Path, operations: &[&OperationSummary]) -> Vec<FormattingOut
             scope: module
                 .file_name()
                 .and_then(|n| n.to_str())
-                .map(|s| s.to_string()),
+                .map(str::to_string),
             status: result.status,
             duration_ms: result.duration_ms,
             files: files.into_iter().collect(),
@@ -200,7 +200,7 @@ fn run_prettier(root: &Path, operations: &[&OperationSummary]) -> Vec<Formatting
                     scope: project
                         .file_name()
                         .and_then(|n| n.to_str())
-                        .map(|s| s.to_string()),
+                        .map(str::to_string),
                     status: TaskStatus::Skipped,
                     duration_ms: 0,
                     files: files.iter().cloned().collect(),
@@ -225,7 +225,7 @@ fn run_prettier(root: &Path, operations: &[&OperationSummary]) -> Vec<Formatting
             scope: project
                 .file_name()
                 .and_then(|n| n.to_str())
-                .map(|s| s.to_string()),
+                .map(str::to_string),
             status: result.status,
             duration_ms: result.duration_ms,
             files: files.into_iter().collect(),
@@ -288,7 +288,7 @@ fn run_swift_format(root: &Path, operations: &[&OperationSummary]) -> Vec<Format
             scope: module
                 .file_name()
                 .and_then(|n| n.to_str())
-                .map(|s| s.to_string()),
+                .map(str::to_string),
             status: result.status,
             duration_ms: result.duration_ms,
             files: files.into_iter().collect(),
@@ -345,7 +345,7 @@ fn run_php_cs_fixer(root: &Path, operations: &[&OperationSummary]) -> Vec<Format
             scope: project
                 .file_name()
                 .and_then(|n| n.to_str())
-                .map(|s| s.to_string()),
+                .map(str::to_string),
             status: result.status,
             duration_ms: result.duration_ms,
             files: files.into_iter().collect(),

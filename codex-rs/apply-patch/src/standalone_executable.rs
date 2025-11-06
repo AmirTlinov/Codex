@@ -206,11 +206,11 @@ fn write_post_checks_section(
         if let Some(note) = item.note.as_ref().filter(|s| !s.is_empty()) {
             line.push_str(" – ");
             line.push_str(note);
-        } else if item.status == TaskStatus::Failed {
-            if let Some(stderr) = item.stderr.as_ref().filter(|s| !s.is_empty()) {
-                line.push_str(" – ");
-                line.push_str(stderr);
-            }
+        } else if let (TaskStatus::Failed, Some(stderr)) =
+            (item.status, item.stderr.as_ref().filter(|s| !s.is_empty()))
+        {
+            line.push_str(" – ");
+            line.push_str(stderr);
         }
         writeln!(stdout, "{line}")?;
     }
@@ -285,10 +285,8 @@ fn is_operation_header(line: &str) -> bool {
 fn build_amendment_template(blocks: &[String], report: &PatchReport) -> Option<String> {
     let mut sections = Vec::new();
     for (idx, op) in report.operations.iter().enumerate() {
-        if op.status == OperationStatus::Failed {
-            if let Some(block) = blocks.get(idx) {
-                sections.push(block);
-            }
+        if let (OperationStatus::Failed, Some(block)) = (op.status, blocks.get(idx)) {
+            sections.push(block);
         }
     }
 

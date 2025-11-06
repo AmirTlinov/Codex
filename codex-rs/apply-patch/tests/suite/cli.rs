@@ -14,13 +14,13 @@ impl ParsedOutput {
         self.json
             .get("report")
             .and_then(Value::as_object)
-            .expect("report field present")
+            .unwrap_or_else(|| panic!("report field present"))
     }
 }
 
 fn parse_stdout_bytes(bytes: &[u8]) -> anyhow::Result<ParsedOutput> {
     let stdout = String::from_utf8(bytes.to_vec())?;
-    let mut lines: Vec<String> = stdout.lines().map(|line| line.to_string()).collect();
+    let mut lines: Vec<String> = stdout.lines().map(str::to_string).collect();
     let json_line = lines
         .pop()
         .ok_or_else(|| anyhow::anyhow!("apply_patch output missing JSON line"))?;
@@ -77,7 +77,7 @@ fn test_apply_patch_cli_add_and_update() -> anyhow::Result<()> {
     let operations = report
         .get("operations")
         .and_then(Value::as_array)
-        .expect("operations array present");
+        .unwrap_or_else(|| panic!("operations array present"));
     assert_eq!(operations.len(), 1);
     assert_eq!(
         operations[0].get("action").and_then(Value::as_str),

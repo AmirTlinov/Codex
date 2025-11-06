@@ -234,7 +234,7 @@ pub enum SymbolFallbackMode {
 }
 
 impl SymbolFallbackMode {
-    fn as_str(&self) -> &'static str {
+    fn as_str(self) -> &'static str {
         match self {
             SymbolFallbackMode::Ast => "ast",
             SymbolFallbackMode::Fuzzy => "fuzzy",
@@ -258,7 +258,7 @@ pub enum SymbolFallbackStrategy {
 }
 
 impl SymbolFallbackStrategy {
-    fn as_str(&self) -> &'static str {
+    fn as_str(self) -> &'static str {
         match self {
             SymbolFallbackStrategy::Ast => "ast",
             SymbolFallbackStrategy::Scoped => "scoped",
@@ -276,7 +276,7 @@ pub enum SymbolEditKind {
 }
 
 impl SymbolEditKind {
-    fn as_str(&self) -> &'static str {
+    fn as_str(self) -> &'static str {
         match self {
             SymbolEditKind::InsertBefore => "insert-before",
             SymbolEditKind::InsertAfter => "insert-after",
@@ -1482,7 +1482,7 @@ pub enum TaskStatus {
 }
 
 impl TaskStatus {
-    fn as_str(&self) -> &'static str {
+    fn as_str(self) -> &'static str {
         match self {
             TaskStatus::Applied => "applied",
             TaskStatus::Skipped => "skipped",
@@ -1654,7 +1654,7 @@ fn resolve_path(root: &Path, relative: &Path) -> anyhow::Result<PathBuf> {
 }
 
 fn schedule_symbol_edit(
-    relative_path: &PathBuf,
+    relative_path: &Path,
     symbol: &SymbolPath,
     new_lines: &[String],
     kind: SymbolEditKind,
@@ -1685,11 +1685,12 @@ fn schedule_symbol_edit(
     let metadata = FileMetadataSnapshot::from_path(&absolute)?;
 
     let summary_index = summaries.len();
-    let operation_summary = OperationSummary::new(OperationAction::Update, relative_path.clone())
-        .with_added(added)
-        .with_removed(removed)
-        .with_status(OperationStatus::Planned)
-        .with_symbol(symbol_summary);
+    let operation_summary =
+        OperationSummary::new(OperationAction::Update, relative_path.to_path_buf())
+            .with_added(added)
+            .with_removed(removed)
+            .with_status(OperationStatus::Planned)
+            .with_symbol(symbol_summary);
     summaries.push(operation_summary);
 
     planned.push(PlannedChange {
@@ -2071,6 +2072,7 @@ fn count_indent(line: &str) -> usize {
         .sum()
 }
 
+#[allow(clippy::too_many_arguments)]
 fn symbol_conflict_error(
     path: &Path,
     symbol: &SymbolPath,
@@ -2415,7 +2417,7 @@ fn plan_hunks(
                 new_lines,
             } => {
                 schedule_symbol_edit(
-                    path,
+                    path.as_path(),
                     symbol,
                     new_lines,
                     SymbolEditKind::InsertBefore,
@@ -2430,7 +2432,7 @@ fn plan_hunks(
                 new_lines,
             } => {
                 schedule_symbol_edit(
-                    path,
+                    path.as_path(),
                     symbol,
                     new_lines,
                     SymbolEditKind::InsertAfter,
@@ -2445,7 +2447,7 @@ fn plan_hunks(
                 new_lines,
             } => {
                 schedule_symbol_edit(
-                    path,
+                    path.as_path(),
                     symbol,
                     new_lines,
                     SymbolEditKind::ReplaceBody,
@@ -2579,14 +2581,15 @@ fn collect_unapplied_entries(
                     contents: new_content.clone(),
                 });
             }
-            PlannedChangeKind::Delete { path } => match fs::read(path) {
-                Ok(bytes) => entries.push(UnappliedEntry {
-                    path: path.clone(),
-                    kind: UnappliedKind::Delete,
-                    contents: String::from_utf8_lossy(&bytes).into_owned(),
-                }),
-                Err(_) => {}
-            },
+            PlannedChangeKind::Delete { path } => {
+                if let Ok(bytes) = fs::read(path) {
+                    entries.push(UnappliedEntry {
+                        path: path.clone(),
+                        kind: UnappliedKind::Delete,
+                        contents: String::from_utf8_lossy(&bytes).into_owned(),
+                    });
+                }
+            }
         }
     }
 

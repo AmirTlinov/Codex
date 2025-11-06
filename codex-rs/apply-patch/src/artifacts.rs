@@ -7,9 +7,10 @@ pub struct ArtifactSummary {
     pub unapplied: Vec<PathBuf>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub enum UnappliedKind {
     Add,
+    #[default]
     Update,
     Delete,
 }
@@ -21,12 +22,6 @@ impl UnappliedKind {
             UnappliedKind::Update => "update",
             UnappliedKind::Delete => "delete",
         }
-    }
-}
-
-impl Default for UnappliedKind {
-    fn default() -> Self {
-        UnappliedKind::Update
     }
 }
 

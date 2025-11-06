@@ -223,7 +223,7 @@ fn read_crate_name(manifest: &Path) -> Option<String> {
         .get("package")
         .and_then(|pkg| pkg.get("name"))
         .and_then(Value::as_str)
-        .map(|s| s.to_string())
+        .map(str::to_string)
 }
 
 struct CommandOutcome {
