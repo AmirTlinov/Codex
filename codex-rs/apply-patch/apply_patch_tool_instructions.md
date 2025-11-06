@@ -1,75 +1,71 @@
 ## `apply_patch`
 
-Use the `apply_patch` shell command to edit files.
-Your patch language is a stripped‑down, file‑oriented diff format designed to be easy to parse and safe to apply. You can think of it as a high‑level envelope:
+`apply_patch` is the Codex CLI editing tool used by GPT-class agents. It reads a single patch from STDIN and applies it to the current working directory without requiring flags or configuration files.
 
-*** Begin Patch
-[ one or more file sections ]
-*** End Patch
+### Patch Envelope
 
-Within that envelope, you get a sequence of file operations.
-You MUST include a header to specify the action you are taking.
-Each operation starts with one of three headers:
+Every patch is wrapped in a `*** Begin Patch` / `*** End Patch` block. Inside that envelope, mix any of the supported operations:
 
-*** Add File: <path> - create a new file. Every following line is a + line (the initial contents).
-*** Delete File: <path> - remove an existing file. Nothing follows.
-*** Update File: <path> - patch an existing file in place (optionally with a rename).
+- `*** Add File: <path>` – create a brand-new file. All following lines must start with `+`.
+- `*** Delete File: <path>` – remove an existing file. No additional lines are allowed.
+- `*** Update File: <path>` – apply diff hunks to an existing file (optionally preceded by `*** Move to: <new path>` to rename it).
+- `*** Insert Before Symbol: <path::SymbolPath>` – insert `+` lines before the symbol declaration.
+- `*** Insert After Symbol: <path::SymbolPath>` – insert `+` lines immediately after the symbol body.
+- `*** Replace Symbol Body: <path::SymbolPath>` – replace the body of the symbol with your `+` lines.
 
-May be immediately followed by *** Move to: <new path> if you want to rename the file.
-Then one or more “hunks”, each introduced by @@ (optionally followed by a hunk header).
-Within a hunk each line starts with:
+Optional header: `*** Move to: <new path>` may follow `Add/Update/Delete` to rename the file as part of the same operation.
 
-For instructions on [context_before] and [context_after]:
-- By default, show 3 lines of code immediately above and 3 lines immediately below each change. If a change is within 3 lines of a previous change, do NOT duplicate the first change’s [context_after] lines in the second change’s [context_before] lines.
-- If 3 lines of context is insufficient to uniquely identify the snippet of code within the file, use the @@ operator to indicate the class or function to which the snippet belongs. For instance, we might have:
-@@ class BaseClass
-[3 lines of pre-context]
-- [old_code]
-+ [new_code]
-[3 lines of post-context]
-
-- If a code block is repeated so many times in a class or function such that even a single `@@` statement and 3 lines of context cannot uniquely identify the snippet of code, you can use multiple `@@` statements to jump to the right context. For instance:
-
-@@ class BaseClass
-@@ 	 def method():
-[3 lines of pre-context]
-- [old_code]
-+ [new_code]
-[3 lines of post-context]
-
-The full grammar definition is below:
-Patch := Begin { FileOp } End
-Begin := "*** Begin Patch" NEWLINE
-End := "*** End Patch" NEWLINE
-FileOp := AddFile | DeleteFile | UpdateFile
-AddFile := "*** Add File: " path NEWLINE { "+" line NEWLINE }
-DeleteFile := "*** Delete File: " path NEWLINE
-UpdateFile := "*** Update File: " path NEWLINE [ MoveTo ] { Hunk }
-MoveTo := "*** Move to: " newPath NEWLINE
-Hunk := "@@" [ header ] NEWLINE { HunkLine } [ "*** End of File" NEWLINE ]
-HunkLine := (" " | "-" | "+") text NEWLINE
-
-A full patch can combine several operations:
-
-*** Begin Patch
-*** Add File: hello.txt
-+Hello world
-*** Update File: src/app.py
-*** Move to: src/main.py
-@@ def greet():
--print("Hi")
-+print("Hello, world!")
-*** Delete File: obsolete.txt
-*** End Patch
-
-It is important to remember:
-
-- You must include a header with your intended action (Add/Delete/Update)
-- You must prefix new lines with `+` even when creating a new file
-- File references can only be relative, NEVER ABSOLUTE.
-
-You can invoke apply_patch like:
+Example:
 
 ```
-shell {"command":["apply_patch","*** Begin Patch\n*** Add File: hello.txt\n+Hello, world!\n*** End Patch\n"]}
+*** Begin Patch
+*** Replace Symbol Body: src/lib.rs::greet
++{
++    println!("Hello, world!");
++}
+*** End Patch
 ```
+
+Guidelines:
+
+- Paths are always workspace-relative; never use absolute paths.
+- New or inserted lines must start with `+`.
+- Prefer symbol-aware directives over wide textual diffs when possible.
+
+### CLI Usage
+
+`apply_patch` reads the patch from STDIN. Typical usage with a heredoc:
+
+```
+apply_patch <<'PATCH'
+*** Begin Patch
+*** Update File: src/main.rs
+@@
+-fn main() {
+-    println!("Hi");
+-}
++fn main() {
++    println!("Hello, world!");
++}
+*** End Patch
+PATCH
+```
+
+Available subcommands:
+
+- `apply_patch` – apply the patch to disk.
+- `apply_patch dry-run` – validate and show the report without touching the filesystem.
+- `apply_patch explain` – identical to `dry-run`, intended for descriptive previews.
+- `apply_patch amend` – convenience alias: feed it the amendment template printed after a failure to reapply only the corrected hunks.
+
+### Output
+
+- Human-readable summary listing each operation with line deltas (`Applied operations`, `Attempted operations`, or `Planned operations`).
+- Optional sections for formatting and post-check results when those tasks run.
+- Diagnostics for any skipped tasks or conflicts.
+- Trailing single-line JSON: `{"schema":"apply_patch/v2","report":{...}}` for machine consumers.
+- No side files are written—logs, conflict dumps, and amendment templates are printed directly to stdout.
+
+### Failure Handling
+
+On failure the CLI keeps the workspace unchanged, prints diagnostics plus a diff hint, and emits an `Amendment template` containing only the operations that need to be retried. Edit that block and run `apply_patch` (or `apply_patch amend`) again to recover. The JSON report’s `status` becomes `failed` and includes the same diagnostics, errors, and amendment template.
