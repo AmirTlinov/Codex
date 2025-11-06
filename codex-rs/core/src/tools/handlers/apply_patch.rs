@@ -165,7 +165,52 @@ pub enum ApplyPatchToolType {
 pub(crate) fn create_apply_patch_freeform_tool() -> ToolSpec {
     ToolSpec::Freeform(FreeformTool {
         name: "apply_patch".to_string(),
-        description: "Use the `apply_patch` tool to edit files. This is a FREEFORM tool, so do not wrap the patch in JSON.".to_string(),
+        description: r#"`apply_patch` drives Codex CLI file edits for GPT-5-class agents. Feed it a raw `*** Begin Patch` … `*** End Patch` block; the CLI auto-detects modes and never needs extra flags or config.
+
+Patch envelope:
+*** Begin Patch
+[one or more operations]
+*** End Patch
+
+Operations (mix as needed):
+
+File edits
+*** Add File: <path> - create a new file (every line must start with `+`)
+*** Delete File: <path> - remove a file
+*** Update File: <path> - apply diff hunks to an existing file
+
+Symbol edits
+*** Insert Before Symbol: <path::SymbolPath> - insert lines before the declaration
+*** Insert After Symbol: <path::SymbolPath> - insert lines after the declaration
+*** Replace Symbol Body: <path::SymbolPath> - replace the body; provide only `+` lines
+
+Optional headers
+*** Move to: <new path> - place immediately after an Add/Update/Delete to rename the file
+
+Example:
+
+*** Begin Patch
+*** Replace Symbol Body: src/lib.rs::greet
+{
+    println!("Hello, world!");
+}
+*** End Patch
+
+Failure handling:
+- On errors the CLI prints diagnostics plus an amendment template you can edit and reapply.
+- `apply_patch amend` reapplies only the corrected hunks from that template.
+- `apply_patch dry-run` and `apply_patch explain` validate without touching the filesystem.
+
+Output:
+- Human-readable summary of operations, formatting, and checks.
+- Trailing single-line JSON report (`{"schema":"apply_patch/v2",...}`) keeps machine consumers in sync.
+
+Guidelines:
+- Use workspace-relative paths only.
+- Prefix new or inserted content with `+`.
+- Prefer symbol directives over wide diff chunks whenever possible.
+- No on-disk logs are written; everything you need is printed to stdout."#
+            .to_string(),
         format: FreeformToolFormat {
             r#type: "grammar".to_string(),
             syntax: "lark".to_string(),
@@ -186,74 +231,51 @@ pub(crate) fn create_apply_patch_json_tool() -> ToolSpec {
 
     ToolSpec::Function(ResponsesApiTool {
         name: "apply_patch".to_string(),
-        description: r#"Use the `apply_patch` tool to edit files.
-Your patch language is a stripped‑down, file‑oriented diff format designed to be easy to parse and safe to apply. You can think of it as a high‑level envelope:
+        description: r#"`apply_patch` drives Codex CLI file edits for GPT-5-class agents. Feed it a raw `*** Begin Patch` … `*** End Patch` block; the CLI auto-detects modes and never needs extra flags or config.
 
+Patch envelope:
 *** Begin Patch
-[ one or more file sections ]
+[one or more operations]
 *** End Patch
 
-Within that envelope, you get a sequence of file operations.
-You MUST include a header to specify the action you are taking.
-Each operation starts with one of three headers:
+Operations (mix as needed):
 
-*** Add File: <path> - create a new file. Every following line is a + line (the initial contents).
-*** Delete File: <path> - remove an existing file. Nothing follows.
-*** Update File: <path> - patch an existing file in place (optionally with a rename).
+File edits
+*** Add File: <path> - create a new file (every line must start with `+`)
+*** Delete File: <path> - remove a file
+*** Update File: <path> - apply diff hunks to an existing file
 
-May be immediately followed by *** Move to: <new path> if you want to rename the file.
-Then one or more “hunks”, each introduced by @@ (optionally followed by a hunk header).
-Within a hunk each line starts with:
+Symbol edits
+*** Insert Before Symbol: <path::SymbolPath> - insert lines before the declaration
+*** Insert After Symbol: <path::SymbolPath> - insert lines after the declaration
+*** Replace Symbol Body: <path::SymbolPath> - replace the body; provide only `+` lines
 
-For instructions on [context_before] and [context_after]:
-- By default, show 3 lines of code immediately above and 3 lines immediately below each change. If a change is within 3 lines of a previous change, do NOT duplicate the first change’s [context_after] lines in the second change’s [context_before] lines.
-- If 3 lines of context is insufficient to uniquely identify the snippet of code within the file, use the @@ operator to indicate the class or function to which the snippet belongs. For instance, we might have:
-@@ class BaseClass
-[3 lines of pre-context]
-- [old_code]
-+ [new_code]
-[3 lines of post-context]
+Optional headers
+*** Move to: <new path> - place immediately after an Add/Update/Delete to rename the file
 
-- If a code block is repeated so many times in a class or function such that even a single `@@` statement and 3 lines of context cannot uniquely identify the snippet of code, you can use multiple `@@` statements to jump to the right context. For instance:
-
-@@ class BaseClass
-@@ 	 def method():
-[3 lines of pre-context]
-- [old_code]
-+ [new_code]
-[3 lines of post-context]
-
-The full grammar definition is below:
-Patch := Begin { FileOp } End
-Begin := "*** Begin Patch" NEWLINE
-End := "*** End Patch" NEWLINE
-FileOp := AddFile | DeleteFile | UpdateFile
-AddFile := "*** Add File: " path NEWLINE { "+" line NEWLINE }
-DeleteFile := "*** Delete File: " path NEWLINE
-UpdateFile := "*** Update File: " path NEWLINE [ MoveTo ] { Hunk }
-MoveTo := "*** Move to: " newPath NEWLINE
-Hunk := "@@" [ header ] NEWLINE { HunkLine } [ "*** End of File" NEWLINE ]
-HunkLine := (" " | "-" | "+") text NEWLINE
-
-A full patch can combine several operations:
+Example:
 
 *** Begin Patch
-*** Add File: hello.txt
-+Hello world
-*** Update File: src/app.py
-*** Move to: src/main.py
-@@ def greet():
--print("Hi")
-+print("Hello, world!")
-*** Delete File: obsolete.txt
+*** Replace Symbol Body: src/lib.rs::greet
+{
+    println!("Hello, world!");
+}
 *** End Patch
 
-It is important to remember:
+Failure handling:
+- On errors the CLI prints diagnostics plus an amendment template you can edit and reapply.
+- `apply_patch amend` reapplies only the corrected hunks from that template.
+- `apply_patch dry-run` and `apply_patch explain` validate without touching the filesystem.
 
-- You must include a header with your intended action (Add/Delete/Update)
-- You must prefix new lines with `+` even when creating a new file
-- File references can only be relative, NEVER ABSOLUTE.
-"#
+Output:
+- Human-readable summary of operations, formatting, and checks.
+- Trailing single-line JSON report (`{"schema":"apply_patch/v2",...}`) keeps machine consumers in sync.
+
+Guidelines:
+- Use workspace-relative paths only.
+- Prefix new or inserted content with `+`.
+- Prefer symbol directives over wide diff chunks whenever possible.
+- No on-disk logs are written; everything you need is printed to stdout."#
             .to_string(),
         strict: false,
         parameters: JsonSchema::Object {
