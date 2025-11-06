@@ -96,6 +96,7 @@ pub enum SymbolResolution {
 }
 
 pub trait SymbolLocator: Sync + Send {
+    #[allow(dead_code)]
     fn language(&self) -> &'static str;
     fn extensions(&self) -> &'static [&'static str];
     fn locate(&self, source: &str, symbol: &SymbolPath) -> SymbolResolution;
