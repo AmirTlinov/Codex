@@ -18,7 +18,7 @@ The setting is read at startup and pushed down to both the TUI and inline markdo
 
 ### Agents context auto-attach {#agents-context-auto-attach}
 
-Legacy builds always injected `AGENTS.md` (and the rest of `.agents/context`) into every prompt, which made it easy to forget the files were even there. The new `auto_attach_agents_context` toggle restores that behavior by default but lets you opt out globally via `config.toml` *or* on a per-session basis from `/settings`. Disable it when you need a clean slate and re-enable it later without restarting the TUI.
+Codex now starts sessions the way legacy builds did: only `AGENTS.md` (and `AGENTS.override.md`) are injected automatically. Everything under `.agents/context` is dormant until you explicitly opt in via `/context` or by editing `config.toml`. Once you have selected files, the `auto_attach_agents_context` toggle controls whether that curated set is sent with every prompt. Flip it off for ad-hoc turns, or re-enable it later without restarting the TUI; the toggle is exposed both in `/settings` and as a config flag.
 
 ### Desktop notifications {#desktop-notifications}
 

@@ -1795,12 +1795,18 @@ impl Config {
         let raw_agents_context_exclude = cfg.agents_context_exclude.clone().unwrap_or_default();
         let agents_context_exclude =
             normalize_agents_filter_list(&raw_agents_context_exclude, "agents_context_exclude")?;
-        let agents_context_entries = load_agents_context_entries(
-            &agents_home,
-            project_agents_home.as_deref(),
-            &agents_context_include,
-            &agents_context_exclude,
-        )?;
+        let preload_agents_context =
+            !agents_context_include.is_empty() || !agents_context_exclude.is_empty();
+        let agents_context_entries = if preload_agents_context {
+            load_agents_context_entries(
+                &agents_home,
+                project_agents_home.as_deref(),
+                &agents_context_include,
+                &agents_context_exclude,
+            )?
+        } else {
+            Vec::new()
+        };
         let agents_tools = load_agents_tools(&agents_home, project_agents_home.as_deref())?;
         let AgentsContextRender {
             prompt: agents_context_prompt,
@@ -5182,7 +5188,36 @@ model = "gpt-5-codex"
     }
 
     #[test]
-    fn agents_workspace_resources_loaded() -> std::io::Result<()> {
+    fn agents_context_entries_skipped_without_filters() -> std::io::Result<()> {
+        let parent = TempDir::new().expect("temp parent");
+        let codex_home = parent.path().join(".codex");
+        fs::create_dir_all(&codex_home)?;
+
+        let context_dir = parent.path().join(".agents").join("context");
+        fs::create_dir_all(&context_dir)?;
+        fs::write(context_dir.join("global.md"), "Global memo.")?;
+
+        let workspace = TempDir::new().expect("temp workspace");
+
+        let config = Config::load_from_base_config_with_overrides(
+            ConfigToml::default(),
+            ConfigOverrides {
+                cwd: Some(workspace.path().to_path_buf()),
+                agents_home: Some(parent.path().join(".agents")),
+                ..ConfigOverrides::default()
+            },
+            codex_home,
+        )?;
+
+        assert!(config.agents_context_entries.is_empty());
+        assert!(config.agents_context_prompt.is_none());
+        assert_eq!(config.agents_context_prompt_tokens, 0);
+
+        Ok(())
+    }
+
+    #[test]
+    fn agents_workspace_resources_loaded_when_requested() -> std::io::Result<()> {
         let parent = TempDir::new().expect("temp parent");
         let codex_home = parent.path().join(".codex");
         fs::create_dir_all(&codex_home)?;
@@ -5200,8 +5235,13 @@ model = "gpt-5-codex"
 
         let workspace = TempDir::new().expect("temp workspace");
 
+        let cfg = ConfigToml {
+            agents_context_include: Some(vec!["global.md".to_string()]),
+            ..Default::default()
+        };
+
         let config = Config::load_from_base_config_with_overrides(
-            ConfigToml::default(),
+            cfg,
             ConfigOverrides {
                 cwd: Some(workspace.path().to_path_buf()),
                 agents_home: Some(parent.path().join(".agents")),
