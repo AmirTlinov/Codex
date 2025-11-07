@@ -17,6 +17,8 @@ use crate::exec_cell::ExecStreamKind;
 use crate::exec_command::strip_bash_lc_and_escape;
 use crate::file_search::FileSearchManager;
 use crate::format_token_count;
+#[cfg(not(debug_assertions))]
+use crate::get_update_action;
 use crate::history_cell::HistoryCell;
 #[cfg(not(debug_assertions))]
 use crate::history_cell::UpdateAvailableHistoryCell;
@@ -225,7 +227,7 @@ impl App {
                 tui,
                 AppEvent::InsertHistoryCell(Box::new(UpdateAvailableHistoryCell::new(
                     latest_version,
-                    crate::updates::get_update_action(),
+                    get_update_action(),
                 ))),
             )
             .await?;
