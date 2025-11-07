@@ -3,6 +3,63 @@ use crate::bash::try_parse_word_only_commands_sequence;
 use codex_protocol::parse_command::ParsedCommand;
 use shlex::split as shlex_split;
 use shlex::try_join as shlex_try_join;
+const SUPPORTED_HEREDOC_COMMANDS: &[&str] = &[
+    "cat",
+    "tee",
+    "ash",
+    "bash",
+    "dash",
+    "elvish",
+    "fish",
+    "ksh",
+    "pwsh",
+    "powershell",
+    "sh",
+    "xonsh",
+    "zsh",
+    "bun",
+    "deno",
+    "node",
+    "ts-node",
+    "ipython",
+    "pypy",
+    "pypy3",
+    "python",
+    "python2",
+    "python3",
+    "bb",
+    "clojure",
+    "elixir",
+    "erl",
+    "escript",
+    "go",
+    "groovy",
+    "julia",
+    "lua",
+    "luajit",
+    "nim",
+    "nodejs",
+    "perl",
+    "php",
+    "php8",
+    "ruby",
+    "scala",
+    "swift",
+    "duckdb",
+    "mongo",
+    "mongosh",
+    "mysql",
+    "mysqlsh",
+    "psql",
+    "redis-cli",
+    "sqlcmd",
+    "sqlite3",
+    "apply_patch",
+    "envsubst",
+    "jq",
+    "kubectl",
+    "yq",
+];
 use std::cell::Cell;
 
 fn shlex_join(tokens: &[String]) -> String {
@@ -290,7 +347,18 @@ mod tests {
         assert_parsed(
             &vec_str(&["bash", "-lc", script]),
             vec![ParsedCommand::Unknown {
-                cmd: script.to_string(),
+                cmd: "cat heredoc".to_string(),
+            }],
+        );
+    }
+
+    #[test]
+    fn python_heredoc_detected() {
+        let script = "python <<'PY'\nprint(1)\nPY";
+        assert_parsed(
+            &vec_str(&["bash", "-lc", script]),
+            vec![ParsedCommand::Unknown {
+                cmd: "python heredoc".to_string(),
             }],
         );
     }
@@ -1114,6 +1182,65 @@ fn is_tail_offset(value: &str) -> bool {
     is_digits(stripped)
 }
 
+fn detect_supported_heredoc_command(script: &str) -> Option<String> {
+    let mut lines = script.lines();
+    let first_line = lines.next()?.trim();
+    let idx = first_line.find("<<")?;
+    let command_token = first_line[..idx].split_whitespace().next()?;
+    let command_name = command_token.rsplit('/').next()?.to_lowercase();
+    if !SUPPORTED_HEREDOC_COMMANDS
+        .iter()
+        .any(|candidate| candidate.eq_ignore_ascii_case(&command_name))
+    {
+        return None;
+    }
+
+    let terminator = parse_heredoc_terminator_marker(&first_line[idx + 2..])?;
+    if terminator.is_empty() {
+        return None;
+    }
+
+    if lines.any(|line| line.trim() == terminator) {
+        Some(command_name)
+    } else {
+        None
+    }
+}
+
+fn parse_heredoc_terminator_marker(segment: &str) -> Option<String> {
+    let mut rest = segment.trim_start();
+    if let Some(stripped) = rest.strip_prefix('-') {
+        rest = stripped.trim_start();
+    }
+
+    let mut chars = rest.chars();
+    let first = chars.next()?;
+    if first == '\'' || first == '"' {
+        let quote = first;
+        let mut terminator = String::new();
+        for ch in chars {
+            if ch == quote {
+                break;
+            }
+            terminator.push(ch);
+        }
+        if terminator.is_empty() {
+            None
+        } else {
+            Some(terminator)
+        }
+    } else {
+        let mut terminator = first.to_string();
+        for ch in chars {
+            if ch.is_whitespace() || ch == '>' {
+                break;
+            }
+            terminator.push(ch);
+        }
+        Some(terminator)
+    }
+}
+
 fn split_on_connectors(tokens: &[String]) -> Vec<Vec<String>> {
     let mut out: Vec<Vec<String>> = Vec::new();
     let mut cur: Vec<String> = Vec::new();
@@ -1360,6 +1487,12 @@ fn parse_bash_lc_commands(original: &[String]) -> Option<Vec<ParsedCommand>> {
         }
         return Some(commands);
     }
+    if let Some(command) = detect_supported_heredoc_command(script) {
+        return Some(vec![ParsedCommand::Unknown {
+            cmd: format!("{command} heredoc"),
+        }]);
+    }
+
     Some(vec![ParsedCommand::Unknown {
         cmd: script.clone(),
     }])
