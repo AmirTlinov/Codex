@@ -9,33 +9,11 @@ pub mod runtimes;
 pub mod sandboxing;
 pub mod spec;
 
-use crate::apply_patch;
-use crate::apply_patch::ApplyPatchExec;
-use crate::apply_patch::InternalApplyPatchInvocation;
-use crate::apply_patch::convert_apply_patch_to_protocol;
-use crate::codex::Session;
-use crate::codex::TurnContext;
-use crate::error::CodexErr;
-use crate::error::SandboxErr;
-use crate::exec::ExecParams;
 use crate::exec::ExecToolCallOutput;
-use crate::exec::StdoutStream;
-use crate::executor::ExecutionMode;
-use crate::executor::errors::ExecError;
-use crate::executor::linkers::PreparedExec;
 use crate::function_tool::FunctionCallError;
-use crate::tools::context::ApplyPatchCommandContext;
-use crate::tools::context::ExecCommandContext;
-use crate::tools::context::SharedTurnDiffTracker;
-use codex_apply_patch::MaybeApplyPatchVerified;
-use codex_apply_patch::maybe_parse_apply_patch_verified;
-use codex_protocol::protocol::AskForApproval;
 use codex_utils_string::take_bytes_at_char_boundary;
 use codex_utils_string::take_last_bytes_at_char_boundary;
 pub use router::ToolRouter;
-use serde::Serialize;
-use std::sync::Arc;
-use tracing::trace;
 
 // Model-formatting limits: clients get full streams; only content sent to the model is truncated.
 pub(crate) const MODEL_FORMAT_MAX_BYTES: usize = 10 * 1024; // 10 KiB
@@ -49,169 +27,6 @@ pub(crate) const TELEMETRY_PREVIEW_MAX_BYTES: usize = 2 * 1024; // 2 KiB
 pub(crate) const TELEMETRY_PREVIEW_MAX_LINES: usize = 64; // lines
 pub(crate) const TELEMETRY_PREVIEW_TRUNCATION_NOTICE: &str =
     "[... telemetry preview truncated ...]";
-
-// TODO(jif) break this down
-pub(crate) async fn handle_container_exec_with_params(
-    tool_name: &str,
-    params: ExecParams,
-    sess: Arc<Session>,
-    turn_context: Arc<TurnContext>,
-    turn_diff_tracker: SharedTurnDiffTracker,
-    sub_id: String,
-    call_id: String,
-) -> Result<String, FunctionCallError> {
-    let otel_event_manager = turn_context.client.get_otel_event_manager();
-
-    if params.with_escalated_permissions.unwrap_or(false)
-        && !matches!(turn_context.approval_policy, AskForApproval::OnRequest)
-    {
-        return Err(FunctionCallError::RespondToModel(format!(
-            "approval policy is {policy:?}; reject command — you should not ask for escalated permissions if the approval policy is {policy:?}",
-            policy = turn_context.approval_policy
-        )));
-    }
-
-    // check if this was a patch, and apply it if so
-    let apply_patch_exec = match maybe_parse_apply_patch_verified(&params.command, &params.cwd) {
-        MaybeApplyPatchVerified::Body(changes) => {
-            match apply_patch::apply_patch(sess.as_ref(), turn_context.as_ref(), &call_id, changes)
-                .await
-            {
-                InternalApplyPatchInvocation::Output(item) => return item,
-                InternalApplyPatchInvocation::DelegateToExec(apply_patch_exec) => {
-                    Some(apply_patch_exec)
-                }
-            }
-        }
-        MaybeApplyPatchVerified::CorrectnessError(parse_error) => {
-            // It looks like an invocation of `apply_patch`, but we
-            // could not resolve it into a patch that would apply
-            // cleanly. Return to model for resample.
-            return Err(FunctionCallError::RespondToModel(format!(
-                "apply_patch verification failed: {parse_error}"
-            )));
-        }
-        MaybeApplyPatchVerified::ShellParseError(error) => {
-            trace!("Failed to parse shell command, {error:?}");
-            None
-        }
-        MaybeApplyPatchVerified::NotApplyPatch => None,
-    };
-
-    let command_for_display = if let Some(exec) = apply_patch_exec.as_ref() {
-        vec!["apply_patch".to_string(), exec.action.patch.clone()]
-    } else {
-        params.command.clone()
-    };
-
-    let exec_command_context = ExecCommandContext {
-        sub_id: sub_id.clone(),
-        call_id: call_id.clone(),
-        command_for_display: command_for_display.clone(),
-        cwd: params.cwd.clone(),
-        apply_patch: apply_patch_exec.as_ref().map(
-            |ApplyPatchExec {
-                 action,
-                 user_explicitly_approved_this_action,
-             }| ApplyPatchCommandContext {
-                user_explicitly_approved_this_action: *user_explicitly_approved_this_action,
-                changes: convert_apply_patch_to_protocol(action),
-            },
-        ),
-        tool_name: tool_name.to_string(),
-        otel_event_manager,
-    };
-
-    let mode = match apply_patch_exec {
-        Some(exec) => ExecutionMode::ApplyPatch(exec),
-        None => ExecutionMode::Shell,
-    };
-
-    sess.services.executor.update_environment(
-        turn_context.sandbox_policy.clone(),
-        turn_context.cwd.clone(),
-    );
-
-    let prepared_exec = PreparedExec::new(
-        exec_command_context,
-        params,
-        command_for_display,
-        mode,
-        Some(StdoutStream {
-            sub_id: sub_id.clone(),
-            call_id: call_id.clone(),
-            tx_event: sess.get_tx_event(),
-        }),
-        turn_context.shell_environment_policy.use_profile,
-    );
-
-    let output_result = sess
-        .run_exec_with_events(
-            turn_diff_tracker.clone(),
-            prepared_exec,
-            turn_context.approval_policy,
-        )
-        .await;
-
-    // always make sure to truncate the output if its length isn't controlled.
-    match output_result {
-        Ok(output) => {
-            let ExecToolCallOutput { exit_code, .. } = &output;
-            let content = format_exec_output_apply_patch(&output);
-            if *exit_code == 0 {
-                Ok(content)
-            } else {
-                Err(FunctionCallError::RespondToModel(content))
-            }
-        }
-        Err(ExecError::Function(err)) => Err(truncate_function_error(err)),
-        Err(ExecError::Codex(CodexErr::Sandbox(SandboxErr::Timeout { output }))) => Err(
-            FunctionCallError::RespondToModel(format_exec_output_apply_patch(&output)),
-        ),
-        Err(ExecError::Codex(err)) => {
-            let message = format!("execution error: {err:?}");
-            Err(FunctionCallError::RespondToModel(format_exec_output(
-                &message,
-            )))
-        }
-    }
-}
-
-pub fn format_exec_output_apply_patch(exec_output: &ExecToolCallOutput) -> String {
-    let ExecToolCallOutput {
-        exit_code,
-        duration,
-        ..
-    } = exec_output;
-
-    #[derive(Serialize)]
-    struct ExecMetadata {
-        exit_code: i32,
-        duration_seconds: f32,
-    }
-
-    #[derive(Serialize)]
-    struct ExecOutput<'a> {
-        output: &'a str,
-        metadata: ExecMetadata,
-    }
-
-    // round to 1 decimal place
-    let duration_seconds = ((duration.as_secs_f32()) * 10.0).round() / 10.0;
-
-    let formatted_output = format_exec_output_str(exec_output);
-
-    let payload = ExecOutput {
-        output: &formatted_output,
-        metadata: ExecMetadata {
-            exit_code: *exit_code,
-            duration_seconds,
-        },
-    };
-
-    #[expect(clippy::expect_used)]
-    serde_json::to_string(&payload).expect("serialize ExecOutput")
-}
 
 pub fn format_exec_output_str(exec_output: &ExecToolCallOutput) -> String {
     let ExecToolCallOutput {
@@ -231,6 +46,7 @@ pub fn format_exec_output_str(exec_output: &ExecToolCallOutput) -> String {
     format_exec_output(content)
 }
 
+#[allow(dead_code)] // Used by regression tests ensuring truncation behavior.
 fn truncate_function_error(err: FunctionCallError) -> FunctionCallError {
     match err {
         FunctionCallError::RespondToModel(msg) => {

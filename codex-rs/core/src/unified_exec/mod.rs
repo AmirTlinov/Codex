@@ -1,12 +1,8 @@
 use std::fmt;
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::sync::atomic::AtomicU64;
-use std::sync::atomic::Ordering;
 use std::time::Duration;
 use std::time::Instant;
-use std::time::SystemTime;
-use std::time::UNIX_EPOCH;
 
 use crate::codex::Session;
 use crate::codex::TurnContext;
@@ -27,7 +23,6 @@ pub use session_manager::UnifiedExecSessionManager;
 
 pub const MIN_YIELD_TIME_MS: u64 = 100;
 pub const MAX_YIELD_TIME_MS: u64 = 60_000;
-pub const DEFAULT_MAX_OUTPUT_TOKENS: usize = 2_048;
 pub const MAX_OUTPUT_TOKENS: usize = 32_768;
 pub const DEFAULT_TIMEOUT_MS: u64 = 1_000;
 pub const MAX_TIMEOUT_MS: u64 = 60_000;
@@ -57,14 +52,6 @@ impl fmt::Debug for UnifiedExecContext {
     }
 }
 
-pub struct ExecCommandRequest<'a> {
-    pub shell: &'a str,
-    pub command: &'a str,
-    pub login: bool,
-    pub yield_time_ms: Option<u64>,
-    pub max_output_tokens: Option<usize>,
-}
-
 pub struct WriteStdinRequest<'a> {
     pub session_id: i32,
     pub input: &'a str,
@@ -85,12 +72,10 @@ pub struct UnifiedExecResult {
 
 pub struct UnifiedExecResponse {
     pub event_call_id: String,
-    pub chunk_id: String,
     pub wall_time: Duration,
     pub output: String,
     pub session_id: Option<i32>,
     pub exit_code: Option<i32>,
-    pub original_token_count: Option<usize>,
 }
 
 pub struct UnifiedExecKillResult {
@@ -118,17 +103,6 @@ impl fmt::Debug for SessionEntry {
             .field("started_at", &self.started_at)
             .finish()
     }
-}
-
-static CHUNK_COUNTER: AtomicU64 = AtomicU64::new(1);
-
-pub(crate) fn generate_chunk_id() -> String {
-    let seq = CHUNK_COUNTER.fetch_add(1, Ordering::SeqCst);
-    let timestamp = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_micros();
-    format!("chunk-{timestamp:x}-{seq:x}")
 }
 
 pub(crate) fn clamp_yield_time(requested: Option<u64>) -> u64 {

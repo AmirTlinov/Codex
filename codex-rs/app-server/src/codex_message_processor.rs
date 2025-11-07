@@ -1290,6 +1290,7 @@ async fn apply_bespoke_event_handling(
             reason,
             parsed_cmd,
             risk,
+            recent_risks,
         }) => {
             let params = ExecCommandApprovalParams {
                 conversation_id,
@@ -1299,6 +1300,7 @@ async fn apply_bespoke_event_handling(
                 reason,
                 parsed_cmd,
                 risk,
+                recent_risks,
             };
             let rx = outgoing
                 .send_request(ServerRequestPayload::ExecCommandApproval(params))
@@ -1361,6 +1363,8 @@ async fn derive_config_from_params(
         show_raw_agent_reasoning: None,
         tools_web_search_request: None,
         experimental_sandbox_command_assessment: None,
+        wrap_break_long_words: None,
+        auto_attach_agents_context: None,
         additional_writable_roots: Vec::new(),
     };
 

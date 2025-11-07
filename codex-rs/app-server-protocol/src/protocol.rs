@@ -6,6 +6,7 @@ use crate::JSONRPCRequest;
 use crate::RequestId;
 use codex_protocol::ConversationId;
 use codex_protocol::approvals::SandboxCommandAssessment;
+use codex_protocol::approvals::SandboxRiskHistoryEntry;
 use codex_protocol::config_types::ForcedLoginMethod;
 use codex_protocol::config_types::ReasoningEffort;
 use codex_protocol::config_types::ReasoningSummary;
@@ -709,6 +710,8 @@ pub struct ExecCommandApprovalParams {
     pub parsed_cmd: Vec<ParsedCommand>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub risk: Option<SandboxCommandAssessment>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub recent_risks: Vec<SandboxRiskHistoryEntry>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, TS)]
@@ -920,6 +923,7 @@ mod tests {
                 cmd: "echo hello".to_string(),
             }],
             risk: None,
+            recent_risks: Vec::new(),
         };
         let request = ServerRequest::ExecCommandApproval {
             request_id: RequestId::Integer(7),

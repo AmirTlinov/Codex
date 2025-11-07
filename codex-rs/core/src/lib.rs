@@ -29,7 +29,6 @@ pub mod error;
 pub mod exec;
 mod exec_command;
 pub mod exec_env;
-pub mod executor;
 pub mod features;
 mod flags;
 mod foreground_shell;

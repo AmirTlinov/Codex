@@ -36,6 +36,12 @@ pub struct SandboxCommandAssessment {
     pub risk_categories: Vec<SandboxRiskCategory>,
 }
 
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq, JsonSchema, TS)]
+pub struct SandboxRiskHistoryEntry {
+    pub call_id: String,
+    pub assessment: SandboxCommandAssessment,
+}
+
 impl SandboxRiskLevel {
     pub fn as_str(&self) -> &'static str {
         match self {
@@ -75,6 +81,9 @@ pub struct ExecApprovalRequestEvent {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub risk: Option<SandboxCommandAssessment>,
     pub parsed_cmd: Vec<ParsedCommand>,
+    /// Recent risk assessments observed during this session (newest last).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub recent_risks: Vec<SandboxRiskHistoryEntry>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, JsonSchema, TS)]

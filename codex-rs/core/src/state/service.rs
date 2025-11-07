@@ -1,9 +1,9 @@
 use crate::RolloutRecorder;
 use crate::background_shell::BackgroundShellManager;
 use crate::exec_command::ExecSessionManager;
-use crate::executor::Executor;
 use crate::foreground_shell::ForegroundShellRegistry;
 use crate::mcp_connection_manager::McpConnectionManager;
+use crate::sandboxing::assessment::SandboxAssessmentService;
 use crate::tools::sandboxing::ApprovalStore;
 use crate::unified_exec::UnifiedExecSessionManager;
 use crate::user_notification::UserNotifier;
@@ -17,8 +17,8 @@ pub(crate) struct SessionServices {
     pub(crate) rollout: Mutex<Option<RolloutRecorder>>,
     pub(crate) user_shell: crate::shell::Shell,
     pub(crate) show_raw_agent_reasoning: bool,
-    pub(crate) executor: Executor,
     pub(crate) background_shell: BackgroundShellManager,
     pub(crate) foreground_shell: ForegroundShellRegistry,
     pub(crate) tool_approvals: Mutex<ApprovalStore>,
+    pub(crate) sandbox_assessment: SandboxAssessmentService,
 }

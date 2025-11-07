@@ -259,6 +259,10 @@ pub struct ShellToolCallParams {
     pub with_escalated_permissions: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub justification: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub run_in_background: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, TS)]
@@ -377,6 +381,8 @@ mod tests {
                 timeout_ms: Some(1000),
                 with_escalated_permissions: None,
                 justification: None,
+                run_in_background: None,
+                description: None,
             },
             params
         );

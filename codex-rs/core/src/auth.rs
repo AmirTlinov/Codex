@@ -85,7 +85,7 @@ impl CodexAuth {
 
         let access = updated
             .tokens
-            .and_then(|tokens| Some(tokens.access_token))
+            .map(|tokens| tokens.access_token)
             .ok_or_else(|| io::Error::other("token data is not available after refresh."))?;
         Ok(access)
     }
@@ -296,14 +296,12 @@ fn load_auth(
     mode: AuthCredentialsStoreMode,
     enable_codex_api_key_env: bool,
 ) -> io::Result<Option<CodexAuth>> {
-    if enable_codex_api_key_env {
-        if let Some(api_key) = read_codex_api_key_from_env() {
-            let client = crate::default_client::create_client();
-            return Ok(Some(CodexAuth::from_api_key_with_client(
-                api_key.as_str(),
-                client,
-            )));
-        }
+    if enable_codex_api_key_env && let Some(api_key) = read_codex_api_key_from_env() {
+        let client = crate::default_client::create_client();
+        return Ok(Some(CodexAuth::from_api_key_with_client(
+            api_key.as_str(),
+            client,
+        )));
     }
 
     let storage = create_auth_storage(codex_home.to_path_buf(), mode);

@@ -40,6 +40,9 @@ indexmap = { workspace = true }
 libc = { workspace = true }
 mcp-types = { workspace = true }
 os_info = { workspace = true }
+once_cell = { workspace = true }
+parking_lot = { workspace = true }
+lru = { workspace = true }
 portable-pty = { workspace = true }
 rand = { workspace = true }
 regex-lite = { workspace = true }

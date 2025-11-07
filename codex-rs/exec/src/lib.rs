@@ -183,6 +183,8 @@ pub async fn run_main(cli: Cli, codex_linux_sandbox_exe: Option<PathBuf>) -> any
         show_raw_agent_reasoning: oss.then_some(true),
         tools_web_search_request: None,
         experimental_sandbox_command_assessment: None,
+        wrap_break_long_words: None,
+        auto_attach_agents_context: None,
         additional_writable_roots: Vec::new(),
     };
     // Parse `-c` overrides.

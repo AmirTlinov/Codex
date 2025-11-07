@@ -1,5 +1,6 @@
 use async_trait::async_trait;
 use codex_protocol::models::ShellToolCallParams;
+use codex_protocol::protocol::SandboxCommandAssessment;
 use std::sync::Arc;
 use std::time::Duration;
 use std::time::Instant as StdInstant;
@@ -17,6 +18,7 @@ use crate::foreground_shell::ForegroundCompletion;
 use crate::foreground_shell::ForegroundShellState;
 use crate::foreground_shell::drive_foreground_shell;
 use crate::function_tool::FunctionCallError;
+use crate::sandboxing::assessment::SandboxAssessmentRequest;
 use crate::tools::context::ToolInvocation;
 use crate::tools::context::ToolOutput;
 use crate::tools::context::ToolPayload;
@@ -56,7 +58,42 @@ impl ShellHandler {
             env: create_env(&turn_context.shell_environment_policy),
             with_escalated_permissions: params.with_escalated_permissions,
             justification: params.justification.clone(),
+            risk: None,
         }
+    }
+
+    async fn maybe_assess_command(
+        session: &crate::codex::Session,
+        turn_context: &TurnContext,
+        call_id: &str,
+        request: &ShellRequest,
+    ) -> Option<SandboxCommandAssessment> {
+        let client = &turn_context.client;
+        let config = client.config_arc();
+        if !config.experimental_sandbox_command_assessment || request.command.is_empty() {
+            return None;
+        }
+        let call_id = call_id.to_string();
+        let request = SandboxAssessmentRequest {
+            config,
+            provider: client.get_provider(),
+            auth_manager: client.get_auth_manager(),
+            otel_event_manager: client.get_otel_event_manager(),
+            conversation_id: session.conversation_id(),
+            call_id: call_id.clone(),
+            command: request.command.clone(),
+            sandbox_policy: turn_context.sandbox_policy.clone(),
+            cwd: request.cwd.clone(),
+            failure_message: None,
+        };
+
+        let assessment = session.services.sandbox_assessment.assess(request).await?;
+
+        session
+            .record_risk_assessment(call_id, assessment.clone())
+            .await;
+
+        Some(assessment)
     }
 }
 
@@ -116,7 +153,6 @@ impl ShellHandler {
         call_id: String,
     ) -> Result<ToolOutput, FunctionCallError> {
         let exec_params = Self::to_exec_params(&params, turn.as_ref());
-        let shell_request = Self::to_shell_request(&params, turn.as_ref());
 
         // Approval policy guard for explicit escalation in non-OnRequest modes.
         if exec_params.with_escalated_permissions.unwrap_or(false)
@@ -168,6 +204,7 @@ impl ShellHandler {
                             timeout_ms: exec_params.timeout_ms,
                             user_explicitly_approved: apply.user_explicitly_approved_this_action,
                             codex_exe: turn.codex_linux_sandbox_exe.clone(),
+                            risk: apply.risk.clone(),
                         };
                         let mut orchestrator = ToolOrchestrator::new();
                         let mut runtime = ApplyPatchRuntime::new();
@@ -206,6 +243,39 @@ impl ShellHandler {
             codex_apply_patch::MaybeApplyPatchVerified::NotApplyPatch => {
                 // Fall through to regular shell execution.
             }
+        }
+
+        let mut shell_request = Self::to_shell_request(&params, turn.as_ref());
+        if let Some(risk) =
+            Self::maybe_assess_command(session.as_ref(), turn.as_ref(), &call_id, &shell_request)
+                .await
+        {
+            shell_request.risk = Some(risk);
+        }
+
+        if params.run_in_background.unwrap_or(false) {
+            let manager = &session.services.background_shell;
+            let response = manager
+                .start(
+                    shell_request,
+                    session.clone(),
+                    turn.clone(),
+                    &tracker,
+                    call_id.clone(),
+                    params.description.clone(),
+                )
+                .await?;
+
+            let content = serde_json::to_string(&response).map_err(|err| {
+                FunctionCallError::RespondToModel(format!(
+                    "failed to serialize run_in_background response: {err:?}"
+                ))
+            })?;
+
+            return Ok(ToolOutput::Function {
+                content,
+                success: Some(true),
+            });
         }
 
         // Foreground shell execution path using unified exec infrastructure.
@@ -324,8 +394,7 @@ impl ShellHandler {
             }
             ForegroundCompletion::Promoted(result) => {
                 session.services.foreground_shell.remove(&call_id).await;
-
-                let description: Option<String> = None;
+                let description = result.description.clone();
 
                 let message = match description.as_deref() {
                     Some(desc) => format!(
@@ -378,5 +447,120 @@ impl ShellHandler {
                 })
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::codex::make_session_and_context;
+    use crate::function_tool::FunctionCallError;
+    use crate::protocol::AskForApproval;
+    use crate::protocol::SandboxPolicy;
+    use crate::tools::context::SharedTurnDiffTracker;
+    use crate::tools::context::ToolInvocation;
+    use crate::tools::context::ToolOutput;
+    use crate::tools::context::ToolPayload;
+    use crate::turn_diff_tracker::TurnDiffTracker;
+    use codex_protocol::models::ShellToolCallParams;
+    use std::sync::Arc;
+    use tokio::sync::Mutex;
+
+    fn shell_command() -> Vec<String> {
+        if cfg!(windows) {
+            vec![
+                "cmd.exe".to_string(),
+                "/C".to_string(),
+                "echo hi".to_string(),
+            ]
+        } else {
+            vec![
+                "/bin/sh".to_string(),
+                "-c".to_string(),
+                "echo hi".to_string(),
+            ]
+        }
+    }
+
+    fn invocation(
+        session: Arc<crate::codex::Session>,
+        turn: Arc<TurnContext>,
+        tracker: SharedTurnDiffTracker,
+        call_id: &str,
+        params: ShellToolCallParams,
+    ) -> ToolInvocation {
+        ToolInvocation {
+            session,
+            turn,
+            tracker,
+            sub_id: "test-sub".to_string(),
+            call_id: call_id.to_string(),
+            tool_name: "shell".to_string(),
+            payload: ToolPayload::LocalShell { params },
+        }
+    }
+
+    #[tokio::test]
+    async fn rejects_escalated_permissions_when_policy_not_on_request() {
+        let (session, mut turn_raw) = make_session_and_context();
+        turn_raw.approval_policy = AskForApproval::OnFailure;
+        let session = Arc::new(session);
+        let mut turn = Arc::new(turn_raw);
+        let tracker: SharedTurnDiffTracker = Arc::new(Mutex::new(TurnDiffTracker::new()));
+
+        let params = ShellToolCallParams {
+            command: shell_command(),
+            workdir: None,
+            timeout_ms: Some(1000),
+            with_escalated_permissions: Some(true),
+            justification: Some("test".to_string()),
+            run_in_background: None,
+            description: None,
+        };
+
+        let handler = ShellHandler;
+        let result = handler
+            .handle(invocation(
+                Arc::clone(&session),
+                Arc::clone(&turn),
+                Arc::clone(&tracker),
+                "call-1",
+                params.clone(),
+            ))
+            .await;
+
+        let Err(FunctionCallError::RespondToModel(message)) = result else {
+            panic!("expected RespondToModel rejection");
+        };
+
+        let expected = format!(
+            "approval policy is {policy:?}; reject command — you should not ask for escalated permissions if the approval policy is {policy:?}",
+            policy = turn.approval_policy
+        );
+        assert_eq!(message, expected);
+
+        Arc::get_mut(&mut turn)
+            .expect("unique turn context")
+            .sandbox_policy = SandboxPolicy::DangerFullAccess;
+
+        let mut approved_params = params;
+        approved_params.with_escalated_permissions = Some(false);
+
+        let success = handler
+            .handle(invocation(
+                Arc::clone(&session),
+                Arc::clone(&turn),
+                tracker,
+                "call-2",
+                approved_params,
+            ))
+            .await
+            .expect("expected success");
+
+        let ToolOutput::Function { content, success } = success else {
+            panic!("expected function output");
+        };
+        assert_eq!(success, Some(true));
+        assert!(content.contains("hi"));
     }
 }

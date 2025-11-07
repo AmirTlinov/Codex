@@ -181,7 +181,10 @@ impl SymbolLocator for RustSymbolLocator {
             }
         };
         match find_candidate(&tree, source, symbol) {
-            Some(target) => SymbolResolution::Match(target),
+            Some(mut target) => {
+                target.language = self.language();
+                SymbolResolution::Match(target)
+            }
             None => SymbolResolution::NotFound {
                 reason: format!("symbol '{}' not found", symbol.last().unwrap_or("")),
             },

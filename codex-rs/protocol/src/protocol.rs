@@ -12,6 +12,9 @@ use std::time::Duration;
 
 use crate::ConversationId;
 pub use crate::approvals::SandboxCommandAssessment;
+pub use crate::approvals::SandboxRiskCategory;
+pub use crate::approvals::SandboxRiskHistoryEntry;
+pub use crate::approvals::SandboxRiskLevel;
 use crate::config_types::ReasoningEffort as ReasoningEffortConfig;
 use crate::config_types::ReasoningSummary as ReasoningSummaryConfig;
 use crate::custom_prompts::CustomPrompt;
@@ -1226,6 +1229,9 @@ pub struct ExecApprovalRequestEvent {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub risk: Option<SandboxCommandAssessment>,
     pub parsed_cmd: Vec<ParsedCommand>,
+    /// Recent risk assessments observed during this session (newest last).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub recent_risks: Vec<SandboxRiskHistoryEntry>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, TS)]

@@ -293,6 +293,37 @@ impl<'de> Deserialize<'de> for McpServerConfig {
 
         let transport = match raw {
             RawMcpServerConfig {
+                command: None,
+                url: None,
+                template_id: Some(_),
+                args,
+                env,
+                env_vars,
+                cwd,
+                bearer_token,
+                bearer_token_env_var,
+                http_headers,
+                env_http_headers,
+                ..
+            } => {
+                throw_if_set("template", "bearer_token", bearer_token.as_ref())?;
+                throw_if_set(
+                    "template",
+                    "bearer_token_env_var",
+                    bearer_token_env_var.as_ref(),
+                )?;
+                throw_if_set("template", "http_headers", http_headers.as_ref())?;
+                throw_if_set("template", "env_http_headers", env_http_headers.as_ref())?;
+
+                McpServerTransportConfig::Stdio {
+                    command: String::new(),
+                    args: args.unwrap_or_default(),
+                    env,
+                    env_vars: env_vars.unwrap_or_default(),
+                    cwd,
+                }
+            }
+            RawMcpServerConfig {
                 command: Some(command),
                 args,
                 env,
@@ -826,7 +857,9 @@ mod tests {
             McpServerTransportConfig::Stdio {
                 command: "echo".to_string(),
                 args: vec![],
-                env: None
+                env: None,
+                env_vars: vec![],
+                cwd: None,
             }
         );
         assert!(cfg.enabled);
@@ -847,7 +880,9 @@ mod tests {
             McpServerTransportConfig::Stdio {
                 command: "echo".to_string(),
                 args: vec!["hello".to_string(), "world".to_string()],
-                env: None
+                env: None,
+                env_vars: vec![],
+                cwd: None,
             }
         );
         assert!(cfg.enabled);
@@ -869,7 +904,9 @@ mod tests {
             McpServerTransportConfig::Stdio {
                 command: "echo".to_string(),
                 args: vec!["hello".to_string(), "world".to_string()],
-                env: Some(HashMap::from([("FOO".to_string(), "BAR".to_string())]))
+                env: Some(HashMap::from([("FOO".to_string(), "BAR".to_string())])),
+                env_vars: vec![],
+                cwd: None,
             }
         );
         assert!(cfg.enabled);
@@ -901,7 +938,9 @@ mod tests {
             cfg.transport,
             McpServerTransportConfig::StreamableHttp {
                 url: "https://example.com/mcp".to_string(),
-                bearer_token_env_var: None
+                bearer_token_env_var: None,
+                http_headers: None,
+                env_http_headers: None,
             }
         );
         assert!(cfg.enabled);
@@ -921,7 +960,9 @@ mod tests {
             cfg.transport,
             McpServerTransportConfig::StreamableHttp {
                 url: "https://example.com/mcp".to_string(),
-                bearer_token_env_var: Some("GITHUB_TOKEN".to_string())
+                bearer_token_env_var: Some("GITHUB_TOKEN".to_string()),
+                http_headers: None,
+                env_http_headers: None,
             }
         );
         assert!(cfg.enabled);

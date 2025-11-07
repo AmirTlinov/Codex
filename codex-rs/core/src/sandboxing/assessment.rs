@@ -1,3 +1,5 @@
+use std::collections::HashMap;
+use std::num::NonZeroUsize;
 use std::path::Path;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -18,7 +20,12 @@ use codex_protocol::models::ContentItem;
 use codex_protocol::models::ResponseItem;
 use codex_protocol::protocol::SandboxCommandAssessment;
 use futures::StreamExt;
+use lru::LruCache;
+#[cfg(test)]
+use once_cell::sync::Lazy;
+use parking_lot::Mutex;
 use serde_json::json;
+use tokio::sync::oneshot;
 use tokio::time::timeout;
 use tracing::warn;
 
@@ -260,3 +267,184 @@ fn response_item_text(item: &ResponseItem) -> Option<String> {
         _ => None,
     }
 }
+
+const DEFAULT_CACHE_CAPACITY: usize = 64;
+const SANDBOX_ASSESSMENT_CACHE_TTL: Duration = Duration::from_secs(120);
+
+#[derive(Clone, Debug)]
+pub struct SandboxAssessmentRequest {
+    pub config: Arc<Config>,
+    pub provider: ModelProviderInfo,
+    pub auth_manager: Option<Arc<AuthManager>>,
+    pub otel_event_manager: OtelEventManager,
+    pub conversation_id: ConversationId,
+    pub call_id: String,
+    pub command: Vec<String>,
+    pub sandbox_policy: SandboxPolicy,
+    pub cwd: PathBuf,
+    pub failure_message: Option<String>,
+}
+
+impl SandboxAssessmentRequest {
+    fn cache_key(&self) -> String {
+        format!(
+            "{:?}|{}|{:?}",
+            self.sandbox_policy,
+            self.cwd.display(),
+            self.command
+        )
+    }
+}
+
+struct CachedAssessment {
+    assessment: SandboxCommandAssessment,
+    expires_at: Instant,
+}
+
+#[derive(Clone)]
+pub struct SandboxAssessmentService {
+    inner: Arc<SandboxAssessmentInner>,
+}
+
+struct SandboxAssessmentInner {
+    cache: Mutex<LruCache<String, CachedAssessment>>,
+    pending: Mutex<HashMap<String, Vec<oneshot::Sender<Option<SandboxCommandAssessment>>>>>,
+}
+
+impl SandboxAssessmentService {
+    pub fn new(capacity: usize) -> Self {
+        let capacity = capacity.max(1);
+        // SAFETY: capacity is clamped to at least 1 above, so constructing NonZeroUsize is safe.
+        let cache_capacity = unsafe { NonZeroUsize::new_unchecked(capacity) };
+        let inner = Arc::new(SandboxAssessmentInner {
+            cache: Mutex::new(LruCache::new(cache_capacity)),
+            pending: Mutex::new(HashMap::new()),
+        });
+
+        Self { inner }
+    }
+
+    pub async fn assess(
+        &self,
+        request: SandboxAssessmentRequest,
+    ) -> Option<SandboxCommandAssessment> {
+        if request.command.is_empty() || !request.config.experimental_sandbox_command_assessment {
+            return None;
+        }
+
+        let key = request.cache_key();
+        if let Some(hit) = self.cached(&key) {
+            return Some(hit);
+        }
+
+        if let Some(rx) = self.enqueue_request(&key) {
+            return rx.await.unwrap_or(None);
+        }
+
+        let result = perform_assessment(request).await;
+        if let Some(assessment) = &result {
+            let mut cache = self.inner.cache.lock();
+            cache.put(
+                key.clone(),
+                CachedAssessment {
+                    assessment: assessment.clone(),
+                    expires_at: Instant::now() + SANDBOX_ASSESSMENT_CACHE_TTL,
+                },
+            );
+        }
+
+        self.finish_pending(key, result.clone());
+        result
+    }
+
+    fn cached(&self, key: &str) -> Option<SandboxCommandAssessment> {
+        let mut cache = self.inner.cache.lock();
+        match cache.get(key) {
+            Some(entry) if Instant::now() <= entry.expires_at => {
+                return Some(entry.assessment.clone());
+            }
+            _ => {}
+        }
+        None
+    }
+
+    fn enqueue_request(
+        &self,
+        key: &str,
+    ) -> Option<oneshot::Receiver<Option<SandboxCommandAssessment>>> {
+        let mut pending = self.inner.pending.lock();
+        if let Some(waiters) = pending.get_mut(key) {
+            let (tx, rx) = oneshot::channel();
+            waiters.push(tx);
+            Some(rx)
+        } else {
+            pending.insert(key.to_string(), Vec::new());
+            None
+        }
+    }
+
+    fn finish_pending(&self, key: String, result: Option<SandboxCommandAssessment>) {
+        let waiters = {
+            let mut pending = self.inner.pending.lock();
+            pending.remove(&key)
+        };
+        if let Some(waiters) = waiters {
+            for waiter in waiters {
+                let _ = waiter.send(result.clone());
+            }
+        }
+    }
+
+    #[cfg(test)]
+    pub fn set_test_override(&self, assessment: SandboxCommandAssessment) {
+        *TEST_OVERRIDE.lock() = Some(assessment);
+    }
+}
+
+impl Default for SandboxAssessmentService {
+    fn default() -> Self {
+        Self::new(DEFAULT_CACHE_CAPACITY)
+    }
+}
+
+async fn perform_assessment(request: SandboxAssessmentRequest) -> Option<SandboxCommandAssessment> {
+    #[cfg(test)]
+    {
+        if let Some(override_value) = TEST_OVERRIDE.lock().take() {
+            return Some(override_value);
+        }
+    }
+
+    let SandboxAssessmentRequest {
+        config,
+        provider,
+        auth_manager,
+        otel_event_manager,
+        conversation_id,
+        call_id,
+        command,
+        sandbox_policy,
+        cwd,
+        failure_message,
+    } = request;
+
+    let auth_manager = auth_manager?;
+
+    assess_command(
+        config,
+        provider,
+        auth_manager,
+        &otel_event_manager,
+        conversation_id,
+        &call_id,
+        &command,
+        &sandbox_policy,
+        &cwd,
+        failure_message.as_deref(),
+    )
+    .await
+}
+
+#[cfg(test)]
+static TEST_OVERRIDE: Lazy<Mutex<Option<SandboxCommandAssessment>>> =
+    Lazy::new(|| Mutex::new(None));

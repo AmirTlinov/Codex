@@ -316,6 +316,7 @@ async fn test_send_user_turn_changes_approval_policy_behavior() {
                 cmd: "python3 -c 'print(42)'".to_string()
             }],
             risk: None,
+            recent_risks: Vec::new(),
         },
         params
     );

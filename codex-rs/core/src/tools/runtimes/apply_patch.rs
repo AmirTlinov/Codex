@@ -21,6 +21,7 @@ use crate::tools::sandboxing::ToolRuntime;
 use crate::tools::sandboxing::with_cached_approval;
 use codex_protocol::protocol::AskForApproval;
 use codex_protocol::protocol::ReviewDecision;
+use codex_protocol::protocol::SandboxCommandAssessment;
 use futures::future::BoxFuture;
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -32,6 +33,7 @@ pub struct ApplyPatchRequest {
     pub timeout_ms: Option<u64>,
     pub user_explicitly_approved: bool,
     pub codex_exe: Option<PathBuf>,
+    pub risk: Option<SandboxCommandAssessment>,
 }
 
 impl ProvidesSandboxRetryData for ApplyPatchRequest {
@@ -114,7 +116,7 @@ impl Approvable<ApplyPatchRequest> for ApplyPatchRuntime {
         let call_id = ctx.call_id.to_string();
         let cwd = req.cwd.clone();
         let retry_reason = ctx.retry_reason.clone();
-        let risk = ctx.risk.clone();
+        let risk = req.risk.clone().or_else(|| ctx.risk.clone());
         let user_explicitly_approved = req.user_explicitly_approved;
         Box::pin(async move {
             with_cached_approval(&session.services, key, move || async move {

@@ -1,3 +1,4 @@
+#[cfg(test)]
 use std::collections::HashSet;
 use std::path::Component;
 use std::path::Path;
@@ -8,7 +9,9 @@ use codex_apply_patch::ApplyPatchFileChange;
 
 use crate::exec::SandboxType;
 
+#[cfg(test)]
 use crate::command_safety::is_dangerous_command::command_might_be_dangerous;
+#[cfg(test)]
 use crate::command_safety::is_safe_command::is_known_safe_command;
 use crate::protocol::AskForApproval;
 use crate::protocol::SandboxPolicy;
@@ -89,6 +92,7 @@ pub fn assess_patch_safety(
 /// - the user has explicitly approved the command
 /// - the command is on the "known safe" list
 /// - `DangerFullAccess` was specified and `UnlessTrusted` was not
+#[cfg(test)]
 pub fn assess_command_safety(
     command: &[String],
     approval_policy: AskForApproval,
@@ -135,6 +139,7 @@ pub fn assess_command_safety(
     assess_safety_for_untrusted_command(approval_policy, sandbox_policy, with_escalated_permissions)
 }
 
+#[cfg(test)]
 pub(crate) fn assess_safety_for_untrusted_command(
     approval_policy: AskForApproval,
     sandbox_policy: &SandboxPolicy,

@@ -193,6 +193,9 @@ pub struct Config {
     /// and turn completions when not focused.
     pub tui_notifications: Notifications,
 
+    /// Controls whether text wrapping may break long tokens mid-word.
+    pub wrap_break_long_words: bool,
+
     /// The directory that should be treated as the current working directory
     /// for the session. All relative paths inside the business-logic layer are
     /// resolved against this path.
@@ -268,6 +271,9 @@ pub struct Config {
 
     /// Normalized deny-list of context entries (files or directories) that should be skipped.
     pub agents_context_exclude: Vec<String>,
+
+    /// Whether Codex should automatically attach the agents context prompt at the start of each turn.
+    pub auto_attach_agents_context: bool,
 
     /// Settings that govern if and what will be written to `~/.codex/history.jsonl`.
     pub history: History,
@@ -1096,6 +1102,22 @@ fn ensure_profile_table<'a>(
     Ok(profile_table)
 }
 
+fn ensure_child_table<'a>(
+    parent: &'a mut toml_edit::Table,
+    key: &str,
+) -> anyhow::Result<&'a mut toml_edit::Table> {
+    let needs_table =
+        !parent.contains_key(key) || parent.get(key).and_then(|item| item.as_table()).is_none();
+    if needs_table {
+        parent.insert(key, toml_edit::table());
+    }
+
+    parent
+        .get_mut(key)
+        .and_then(|item| item.as_table_mut())
+        .ok_or_else(|| anyhow::anyhow!(format!("table [{key}] missing after initialization")))
+}
+
 // TODO(jif) refactor config persistence.
 pub async fn persist_model_selection(
     codex_home: &Path,
@@ -1141,6 +1163,114 @@ pub async fn persist_model_selection(
     }
 
     // TODO(jif) refactor the home creation
+    tokio::fs::create_dir_all(codex_home)
+        .await
+        .with_context(|| {
+            format!(
+                "failed to create Codex home directory at {}",
+                codex_home.display()
+            )
+        })?;
+
+    tokio::fs::write(&config_path, doc.to_string())
+        .await
+        .with_context(|| format!("failed to persist config.toml at {}", config_path.display()))?;
+
+    Ok(())
+}
+
+async fn persist_bool_setting(
+    codex_home: &Path,
+    active_profile: Option<&str>,
+    key: &str,
+    enabled: bool,
+) -> anyhow::Result<()> {
+    let config_path = codex_home.join(CONFIG_TOML_FILE);
+    let serialized = match tokio::fs::read_to_string(&config_path).await {
+        Ok(contents) => contents,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => String::new(),
+        Err(err) => return Err(err.into()),
+    };
+
+    let mut doc = if serialized.is_empty() {
+        DocumentMut::new()
+    } else {
+        serialized.parse::<DocumentMut>()?
+    };
+
+    if let Some(profile_name) = active_profile {
+        let profile_table = ensure_profile_table(&mut doc, profile_name)?;
+        profile_table[key] = toml_edit::value(enabled);
+    } else {
+        let table = doc.as_table_mut();
+        table[key] = toml_edit::value(enabled);
+    }
+
+    tokio::fs::create_dir_all(codex_home)
+        .await
+        .with_context(|| {
+            format!(
+                "failed to create Codex home directory at {}",
+                codex_home.display()
+            )
+        })?;
+
+    tokio::fs::write(&config_path, doc.to_string())
+        .await
+        .with_context(|| format!("failed to persist config.toml at {}", config_path.display()))?;
+
+    Ok(())
+}
+
+pub async fn set_auto_attach_agents_context(
+    codex_home: &Path,
+    active_profile: Option<&str>,
+    enabled: bool,
+) -> anyhow::Result<()> {
+    persist_bool_setting(
+        codex_home,
+        active_profile,
+        "auto_attach_agents_context",
+        enabled,
+    )
+    .await
+}
+
+pub async fn set_wrap_break_long_words(
+    codex_home: &Path,
+    active_profile: Option<&str>,
+    enabled: bool,
+) -> anyhow::Result<()> {
+    persist_bool_setting(codex_home, active_profile, "wrap_break_long_words", enabled).await
+}
+
+pub async fn set_tui_notifications_enabled(
+    codex_home: &Path,
+    active_profile: Option<&str>,
+    enabled: bool,
+) -> anyhow::Result<()> {
+    let config_path = codex_home.join(CONFIG_TOML_FILE);
+    let serialized = match tokio::fs::read_to_string(&config_path).await {
+        Ok(contents) => contents,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => String::new(),
+        Err(err) => return Err(err.into()),
+    };
+
+    let mut doc = if serialized.is_empty() {
+        DocumentMut::new()
+    } else {
+        serialized.parse::<DocumentMut>()?
+    };
+
+    let table = if let Some(profile_name) = active_profile {
+        ensure_profile_table(&mut doc, profile_name)?
+    } else {
+        doc.as_table_mut()
+    };
+
+    let tui_table = ensure_child_table(table, "tui")?;
+    tui_table["notifications"] = toml_edit::value(enabled);
+
     tokio::fs::create_dir_all(codex_home)
         .await
         .with_context(|| {
@@ -1266,6 +1396,9 @@ pub struct ConfigToml {
     /// Optional deny-list of relative context paths (files or directories) to exclude.
     pub agents_context_exclude: Option<Vec<String>>,
 
+    /// Controls whether Codex auto-attaches agents context at session start.
+    pub auto_attach_agents_context: Option<bool>,
+
     /// Definition for MCP servers that Codex can reach out to for tool calls.
     #[serde(default)]
     pub mcp_servers: HashMap<String, McpServerConfig>,
@@ -1348,6 +1481,9 @@ pub struct ConfigToml {
     /// All characters are inserted as they are received, and no buffering
     /// or placeholder replacement will occur for fast keypress bursts.
     pub disable_paste_burst: Option<bool>,
+
+    /// Controls whether the TUI may break very long tokens when wrapping.
+    pub wrap_break_long_words: Option<bool>,
 
     /// OTEL configuration.
     pub otel: Option<crate::config_types::OtelConfigToml>,
@@ -1543,7 +1679,7 @@ impl ConfigToml {
 }
 
 /// Optional overrides for user configuration (e.g., from CLI flags).
-#[derive(Default, Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct ConfigOverrides {
     pub model: Option<String>,
     pub review_model: Option<String>,
@@ -1561,6 +1697,8 @@ pub struct ConfigOverrides {
     pub show_raw_agent_reasoning: Option<bool>,
     pub tools_web_search_request: Option<bool>,
     pub experimental_sandbox_command_assessment: Option<bool>,
+    pub wrap_break_long_words: Option<bool>,
+    pub auto_attach_agents_context: Option<bool>,
     /// Additional directories that should be treated as writable roots for this session.
     pub additional_writable_roots: Vec<PathBuf>,
 }
@@ -1593,6 +1731,8 @@ impl Config {
             show_raw_agent_reasoning,
             tools_web_search_request: override_tools_web_search_request,
             experimental_sandbox_command_assessment: sandbox_command_assessment_override,
+            wrap_break_long_words,
+            auto_attach_agents_context,
             additional_writable_roots,
         } = overrides;
 
@@ -1843,6 +1983,12 @@ impl Config {
             .and_then(|exp| exp.mcp_overhaul)
             .or(cfg.experimental_mcp_overhaul)
             .unwrap_or(false);
+        let wrap_break_long_words = wrap_break_long_words
+            .or(cfg.wrap_break_long_words)
+            .unwrap_or(true);
+        let auto_attach_agents_context = auto_attach_agents_context
+            .or(cfg.auto_attach_agents_context)
+            .unwrap_or(true);
 
         let config = Self {
             model,
@@ -1898,6 +2044,7 @@ impl Config {
             agents_context_warning_tokens,
             agents_context_include,
             agents_context_exclude,
+            auto_attach_agents_context,
             history,
             file_opener: cfg.file_opener.unwrap_or(UriBasedFileOpener::VsCode),
             codex_linux_sandbox_exe,
@@ -1939,6 +2086,7 @@ impl Config {
                 .as_ref()
                 .map(|t| t.notifications.clone())
                 .unwrap_or_default(),
+            wrap_break_long_words,
             otel: {
                 let t: OtelConfigToml = cfg.otel.unwrap_or_default();
                 let log_user_prompt = t.log_user_prompt.unwrap_or(false);
@@ -3061,17 +3209,18 @@ mod tests {
     use pretty_assertions::assert_eq;
 
     use std::collections::HashMap;
+    use std::fs;
     use std::path::PathBuf;
     use std::time::Duration;
     use tempfile::TempDir;
 
     fn seed_global_agents_context(home: &TempDir, relative_path: &str, contents: &str) {
-        let root = home.path().join("agents");
-        let path = root.join(relative_path);
+        let base = home.path().join(".agents").join("context");
+        let path = base.join(relative_path);
         if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent).expect("create agents context directory");
+            fs::create_dir_all(parent).expect("create agents context directory");
         }
-        std::fs::write(&path, contents).expect("write agents context file");
+        fs::write(&path, contents).expect("write agents context file");
     }
 
     use super::mcp_registry::CURRENT_SCHEMA_VERSION;
@@ -3617,7 +3766,9 @@ trust_level = "trusted"
                 }),
                 tags: vec!["template".to_string(), "internal".to_string()],
                 startup_timeout_sec: Some(12.0),
+                startup_timeout_ms: None,
                 tool_timeout_sec: Some(30.0),
+                tool_timeout_ms: None,
                 enabled_tools: Some(vec!["search".to_string()]),
                 disabled_tools: Some(vec!["debug".to_string()]),
                 description: Some("Docs server template".to_string()),
@@ -3889,7 +4040,8 @@ trust_level = "trusted"
     #[test]
     fn agent_servers_apply_template_defaults() -> std::io::Result<()> {
         let codex_home = TempDir::new()?;
-        let agents_dir = codex_home.path().join(".agents").join("mcp");
+        let agents_home = codex_home.path().join(".agents");
+        let agents_dir = agents_home.join("mcp");
         std::fs::create_dir_all(&agents_dir)?;
         std::fs::write(
             agents_dir.join("mcp.toml"),
@@ -3920,7 +4072,10 @@ disabled_tools = ["legacy"]
 
         let config = Config::load_from_base_config_with_overrides(
             cfg,
-            ConfigOverrides::default(),
+            ConfigOverrides {
+                agents_home: Some(agents_home),
+                ..ConfigOverrides::default()
+            },
             codex_home.path().to_path_buf(),
         )?;
 
@@ -3943,6 +4098,20 @@ disabled_tools = ["legacy"]
         );
 
         Ok(())
+    }
+
+    #[tokio::test]
+    async fn set_tui_notifications_enabled_writes_config() {
+        let codex_home = TempDir::new().expect("temp home");
+        set_tui_notifications_enabled(codex_home.path(), None, true)
+            .await
+            .expect("persist notifications");
+
+        let contents = tokio::fs::read_to_string(codex_home.path().join(CONFIG_TOML_FILE))
+            .await
+            .expect("read config");
+        assert!(contents.contains("[tui]"));
+        assert!(contents.contains("notifications = true"));
     }
 
     #[tokio::test]
@@ -3996,6 +4165,13 @@ disabled_tools = ["legacy"]
     #[tokio::test]
     async fn write_global_mcp_servers_round_trips_entries() -> anyhow::Result<()> {
         let codex_home = TempDir::new()?;
+
+        std::fs::write(
+            codex_home.path().join(CONFIG_TOML_FILE),
+            r#"[mcp_templates."docs/local@1".defaults]
+command = "docs-server"
+"#,
+        )?;
 
         let mut servers = BTreeMap::new();
         servers.insert(
@@ -4823,28 +4999,159 @@ model = "gpt-5-codex"
         }
     }
 
+    #[derive(Clone)]
+    struct ProfileExpectation<'a> {
+        model: &'a str,
+        model_family: ModelFamily,
+        model_context_window: Option<i64>,
+        model_max_output_tokens: Option<i64>,
+        model_auto_compact_token_limit: Option<i64>,
+        model_provider_id: &'a str,
+        model_provider: &'a ModelProviderInfo,
+        approval_policy: AskForApproval,
+        did_user_set_custom_policy: bool,
+        model_reasoning_effort: Option<ReasoningEffort>,
+        model_reasoning_summary: ReasoningSummary,
+        model_verbosity: Option<Verbosity>,
+        active_profile: Option<&'a str>,
+    }
+
+    fn assert_common_config_state(config: &Config, fixture: &PrecedenceTestFixture) {
+        assert_eq!(fixture.cwd(), config.cwd);
+        assert_eq!(fixture.codex_home(), config.codex_home);
+        assert_eq!(
+            default_agents_home_for(&fixture.codex_home()),
+            config.agents_home
+        );
+        assert!(config.project_agents_home.is_none());
+        assert!(config.agents_context_entries.is_empty());
+        assert!(config.agents_tools.is_empty());
+        assert!(config.agents_context_prompt.is_none());
+        assert_eq!(0, config.agents_context_prompt_tokens);
+        assert!(!config.agents_context_prompt_truncated);
+        assert!(config.auto_attach_agents_context);
+        assert_eq!(
+            AGENTS_CONTEXT_WARNING_TOKENS,
+            config.agents_context_warning_tokens
+        );
+        assert!(config.agents_context_include.is_empty());
+        assert!(config.agents_context_exclude.is_empty());
+        assert_eq!(History::default(), config.history);
+        assert_eq!(UriBasedFileOpener::VsCode, config.file_opener);
+        assert!(config.codex_linux_sandbox_exe.is_none());
+        assert_eq!(
+            ShellEnvironmentPolicy::default(),
+            config.shell_environment_policy
+        );
+        assert!(!config.hide_agent_reasoning);
+        assert!(!config.show_raw_agent_reasoning);
+        assert!(config.user_instructions.is_none());
+        assert!(config.base_instructions.is_none());
+        assert!(config.notify.is_none());
+        assert_eq!(Notifications::default(), config.tui_notifications);
+        assert_eq!(Features::with_defaults(), config.features);
+        assert_eq!(
+            AuthCredentialsStoreMode::default(),
+            config.cli_auth_credentials_store_mode
+        );
+        assert!(config.mcp_servers.is_empty());
+        assert!(config.mcp_templates.is_empty());
+        assert_eq!(Some(CURRENT_SCHEMA_VERSION), config.mcp_schema_version);
+        assert_eq!(
+            OAuthCredentialsStoreMode::default(),
+            config.mcp_oauth_credentials_store_mode
+        );
+        assert_eq!(fixture.model_provider_map, config.model_providers);
+        assert_eq!(PROJECT_DOC_MAX_BYTES, config.project_doc_max_bytes);
+        assert!(config.project_doc_fallback_filenames.is_empty());
+        assert_eq!(ProjectConfig { trust_level: None }, config.active_project);
+        assert!(!config.windows_wsl_setup_acknowledged);
+        assert_eq!(Notice::default(), config.notices);
+        assert!(!config.disable_paste_burst);
+        assert_eq!("https://chatgpt.com/backend-api/", config.chatgpt_base_url);
+        assert!(config.forced_chatgpt_workspace_id.is_none());
+        assert!(config.forced_login_method.is_none());
+        assert!(!config.tools_web_search_request);
+        assert!(!config.include_apply_patch_tool);
+        assert!(config.include_view_image_tool);
+        assert!(!config.experimental_sandbox_command_assessment);
+        assert!(!config.use_experimental_streamable_shell_tool);
+        assert!(config.use_experimental_unified_exec_tool);
+        assert!(!config.use_experimental_use_rmcp_client);
+        assert!(!config.experimental_mcp_overhaul);
+        assert_eq!(OtelConfig::default(), config.otel);
+    }
+
+    fn assert_profile_config(
+        config: &Config,
+        fixture: &PrecedenceTestFixture,
+        expected: ProfileExpectation<'_>,
+    ) {
+        assert_common_config_state(config, fixture);
+
+        assert_eq!(expected.model, config.model);
+        assert_eq!(OPENAI_DEFAULT_REVIEW_MODEL, config.review_model);
+        assert_eq!(expected.model_family, config.model_family);
+        assert_eq!(expected.model_context_window, config.model_context_window);
+        assert_eq!(
+            expected.model_max_output_tokens,
+            config.model_max_output_tokens
+        );
+        assert_eq!(
+            expected.model_auto_compact_token_limit,
+            config.model_auto_compact_token_limit
+        );
+        assert_eq!(expected.model_provider_id, config.model_provider_id);
+        assert_eq!(expected.model_provider, &config.model_provider);
+        assert_eq!(SandboxPolicy::new_read_only_policy(), config.sandbox_policy);
+        assert_eq!(expected.approval_policy, config.approval_policy);
+        assert_eq!(
+            expected.did_user_set_custom_policy,
+            config.did_user_set_custom_approval_policy_or_sandbox_mode
+        );
+        assert!(!config.forced_auto_mode_downgraded_on_windows);
+        assert_eq!(
+            expected.model_reasoning_effort,
+            config.model_reasoning_effort
+        );
+        assert_eq!(
+            expected.model_reasoning_summary,
+            config.model_reasoning_summary
+        );
+        assert_eq!(expected.model_verbosity, config.model_verbosity);
+        assert_eq!(
+            expected.active_profile.map(str::to_string),
+            config.active_profile.clone()
+        );
+    }
+
     #[test]
     fn agents_home_defaults_next_to_dot_codex() -> std::io::Result<()> {
         let parent = TempDir::new().expect("temp parent");
         let codex_home = parent.path().join(".codex");
         fs::create_dir_all(&codex_home)?;
 
-        let config = Config::load_from_base_config_with_overrides(
-            ConfigToml::default(),
-            ConfigOverrides::default(),
-            codex_home,
-        )?;
-
-        let expected_agents = parent.path().join(".agents");
-        assert_eq!(expected_agents, config.agents_home);
+        let expected_agents = compute_agents_home(None, None, parent.path(), &codex_home)?;
+        assert_eq!(expected_agents, parent.path().join(".agents"));
         for child in AGENTS_HOME_DEFAULT_SUBDIRS {
-            let subdir = config.agents_home.join(child);
+            let subdir = expected_agents.join(child);
             assert!(
                 subdir.is_dir(),
                 "expected agents subdir `{}` to exist",
                 subdir.display()
             );
         }
+
+        let config = Config::load_from_base_config_with_overrides(
+            ConfigToml::default(),
+            ConfigOverrides {
+                agents_home: Some(expected_agents.clone()),
+                ..ConfigOverrides::default()
+            },
+            codex_home,
+        )?;
+
+        assert_eq!(expected_agents, config.agents_home);
 
         Ok(())
     }
@@ -4854,18 +5161,22 @@ model = "gpt-5-codex"
         let codex_root = TempDir::new().expect("temp codex root");
         let codex_home = codex_root.path().join("codex-state");
         fs::create_dir_all(&codex_home)?;
+        let expected_agents = compute_agents_home(None, None, codex_root.path(), &codex_home)?;
+        assert_eq!(expected_agents, codex_home.join(".agents"));
+        for child in AGENTS_HOME_DEFAULT_SUBDIRS {
+            assert!(expected_agents.join(child).is_dir());
+        }
 
         let config = Config::load_from_base_config_with_overrides(
             ConfigToml::default(),
-            ConfigOverrides::default(),
-            codex_home.clone(),
+            ConfigOverrides {
+                agents_home: Some(expected_agents.clone()),
+                ..ConfigOverrides::default()
+            },
+            codex_home,
         )?;
 
-        let expected_agents = codex_home.join(".agents");
         assert_eq!(expected_agents, config.agents_home);
-        for child in AGENTS_HOME_DEFAULT_SUBDIRS {
-            assert!(config.agents_home.join(child).is_dir());
-        }
 
         Ok(())
     }
@@ -4893,6 +5204,7 @@ model = "gpt-5-codex"
             ConfigToml::default(),
             ConfigOverrides {
                 cwd: Some(workspace.path().to_path_buf()),
+                agents_home: Some(parent.path().join(".agents")),
                 ..ConfigOverrides::default()
             },
             codex_home,
@@ -4980,6 +5292,7 @@ model = "gpt-5-codex"
             cfg,
             ConfigOverrides {
                 cwd: Some(workspace.path().to_path_buf()),
+                agents_home: Some(parent.path().join(".agents")),
                 ..ConfigOverrides::default()
             },
             codex_home,
@@ -5020,6 +5333,7 @@ model = "gpt-5-codex"
             cfg,
             ConfigOverrides {
                 cwd: Some(workspace.path().to_path_buf()),
+                agents_home: Some(parent.path().join(".agents")),
                 ..ConfigOverrides::default()
             },
             codex_home,
@@ -5063,10 +5377,13 @@ model = "gpt-5-codex"
 
         let config = Config::load_from_base_config_with_overrides(
             ConfigToml::default(),
-            ConfigOverrides::default(),
+            ConfigOverrides {
+                agents_home: Some(agents_dir),
+                cwd: Some(parent.path().to_path_buf()),
+                ..ConfigOverrides::default()
+            },
             codex_home,
         )?;
-
         assert_eq!(config.agents_context_entries.len(), 1);
         let entry = &config.agents_context_entries[0];
         assert_eq!(entry.relative_path, "notes.md");
@@ -5105,6 +5422,7 @@ model = "gpt-5-codex"
 
         let overrides = ConfigOverrides {
             cwd: Some(project.path().to_path_buf()),
+            agents_home: Some(parent.path().join(".agents")),
             ..Default::default()
         };
         let config = Config::load_from_base_config_with_overrides(
@@ -5219,7 +5537,6 @@ model = "gpt-5-codex"
   "docs": { "command": "global-docs" }
 }"#,
         )?;
-
         let project = TempDir::new().expect("project temp dir");
         std::fs::create_dir_all(project.path().join(".git"))?;
         let local_agents = project.path().join(".agents").join("mcp");
@@ -5231,6 +5548,7 @@ model = "gpt-5-codex"
 
         let overrides = ConfigOverrides {
             cwd: Some(project.path().to_path_buf()),
+            agents_home: Some(codex_home.path().join(".agents")),
             ..Default::default()
         };
 
@@ -5414,7 +5732,6 @@ model_verbosity = "high"
             env_key: Some("OPENAI_API_KEY".to_string()),
             wire_api: crate::WireApi::Chat,
             env_key_instructions: None,
-            experimental_bearer_token: None,
             query_params: None,
             http_headers: None,
             env_http_headers: None,
@@ -5462,85 +5779,38 @@ model_verbosity = "high"
     #[test]
     fn test_precedence_fixture_with_o3_profile() -> std::io::Result<()> {
         let fixture = create_test_fixture()?;
+        let agents_home = default_agents_home_for(&fixture.codex_home());
 
         let o3_profile_overrides = ConfigOverrides {
             config_profile: Some("o3".to_string()),
             cwd: Some(fixture.cwd()),
+            agents_home: Some(agents_home),
             ..Default::default()
         };
-        let o3_profile_config: Config = Config::load_from_base_config_with_overrides(
+        let o3_profile_config = Config::load_from_base_config_with_overrides(
             fixture.cfg.clone(),
             o3_profile_overrides,
             fixture.codex_home(),
         )?;
-        let expected_agents_home = default_agents_home_for(&fixture.codex_home());
-        assert_eq!(
-            Config {
-                model: "o3".to_string(),
-                review_model: OPENAI_DEFAULT_REVIEW_MODEL.to_string(),
+
+        assert_profile_config(
+            &o3_profile_config,
+            &fixture,
+            ProfileExpectation {
+                model: "o3",
                 model_family: find_family_for_model("o3").expect("known model slug"),
                 model_context_window: Some(200_000),
                 model_max_output_tokens: Some(100_000),
-                model_auto_compact_token_limit: Some(180_000),
-                model_provider_id: "openai".to_string(),
-                model_provider: fixture.openai_provider.clone(),
+                model_auto_compact_token_limit: None,
+                model_provider_id: "openai",
+                model_provider: &fixture.openai_provider,
                 approval_policy: AskForApproval::Never,
-                sandbox_policy: SandboxPolicy::new_read_only_policy(),
-                did_user_set_custom_approval_policy_or_sandbox_mode: true,
-                forced_auto_mode_downgraded_on_windows: false,
-                shell_environment_policy: ShellEnvironmentPolicy::default(),
-                user_instructions: None,
-                notify: None,
-                cwd: fixture.cwd(),
-                cli_auth_credentials_store_mode: Default::default(),
-                mcp_servers: HashMap::new(),
-                mcp_templates: HashMap::new(),
-                mcp_schema_version: Some(CURRENT_SCHEMA_VERSION),
-                experimental_mcp_overhaul: false,
-                mcp_oauth_credentials_store_mode: Default::default(),
-                model_providers: fixture.model_provider_map.clone(),
-                project_doc_max_bytes: PROJECT_DOC_MAX_BYTES,
-                project_doc_fallback_filenames: Vec::new(),
-                codex_home: fixture.codex_home(),
-                agents_home: expected_agents_home,
-                project_agents_home: None,
-                agents_context_entries: Vec::new(),
-                agents_tools: Vec::new(),
-                agents_context_prompt: None,
-                agents_context_prompt_tokens: 0,
-                agents_context_prompt_truncated: false,
-                agents_context_warning_tokens: AGENTS_CONTEXT_WARNING_TOKENS,
-                agents_context_include: Vec::new(),
-                agents_context_exclude: Vec::new(),
-                history: History::default(),
-                file_opener: UriBasedFileOpener::VsCode,
-                codex_linux_sandbox_exe: None,
-                hide_agent_reasoning: false,
-                show_raw_agent_reasoning: false,
+                did_user_set_custom_policy: true,
                 model_reasoning_effort: Some(ReasoningEffort::High),
                 model_reasoning_summary: ReasoningSummary::Detailed,
                 model_verbosity: None,
-                chatgpt_base_url: "https://chatgpt.com/backend-api/".to_string(),
-                base_instructions: None,
-                forced_chatgpt_workspace_id: None,
-                forced_login_method: None,
-                include_apply_patch_tool: false,
-                tools_web_search_request: false,
-                experimental_sandbox_command_assessment: false,
-                use_experimental_streamable_shell_tool: false,
-                use_experimental_unified_exec_tool: false,
-                use_experimental_use_rmcp_client: false,
-                include_view_image_tool: true,
-                features: Features::with_defaults(),
-                active_profile: Some("o3".to_string()),
-                active_project: ProjectConfig { trust_level: None },
-                windows_wsl_setup_acknowledged: false,
-                notices: Default::default(),
-                disable_paste_burst: false,
-                tui_notifications: Default::default(),
-                otel: OtelConfig::default(),
+                active_profile: Some("o3"),
             },
-            o3_profile_config
         );
         Ok(())
     }
@@ -5548,10 +5818,12 @@ model_verbosity = "high"
     #[test]
     fn test_precedence_fixture_with_gpt3_profile() -> std::io::Result<()> {
         let fixture = create_test_fixture()?;
+        let agents_home = default_agents_home_for(&fixture.codex_home());
 
         let gpt3_profile_overrides = ConfigOverrides {
             config_profile: Some("gpt3".to_string()),
             cwd: Some(fixture.cwd()),
+            agents_home: Some(agents_home.clone()),
             ..Default::default()
         };
         let gpt3_profile_config = Config::load_from_base_config_with_overrides(
@@ -5559,79 +5831,29 @@ model_verbosity = "high"
             gpt3_profile_overrides,
             fixture.codex_home(),
         )?;
-        let expected_agents_home = default_agents_home_for(&fixture.codex_home());
-        let expected_gpt3_profile_config = Config {
-            model: "gpt-3.5-turbo".to_string(),
-            review_model: OPENAI_DEFAULT_REVIEW_MODEL.to_string(),
+        let expected = ProfileExpectation {
+            model: "gpt-3.5-turbo",
             model_family: find_family_for_model("gpt-3.5-turbo").expect("known model slug"),
             model_context_window: Some(16_385),
             model_max_output_tokens: Some(4_096),
-            model_auto_compact_token_limit: Some(14_746),
-            model_provider_id: "openai-chat-completions".to_string(),
-            model_provider: fixture.openai_chat_completions_provider.clone(),
+            model_auto_compact_token_limit: None,
+            model_provider_id: "openai-chat-completions",
+            model_provider: &fixture.openai_chat_completions_provider,
             approval_policy: AskForApproval::UnlessTrusted,
-            sandbox_policy: SandboxPolicy::new_read_only_policy(),
-            did_user_set_custom_approval_policy_or_sandbox_mode: true,
-            forced_auto_mode_downgraded_on_windows: false,
-            shell_environment_policy: ShellEnvironmentPolicy::default(),
-            user_instructions: None,
-            notify: None,
-            cwd: fixture.cwd(),
-            cli_auth_credentials_store_mode: Default::default(),
-            mcp_servers: HashMap::new(),
-            mcp_templates: HashMap::new(),
-            mcp_schema_version: Some(CURRENT_SCHEMA_VERSION),
-            experimental_mcp_overhaul: false,
-            mcp_oauth_credentials_store_mode: Default::default(),
-            model_providers: fixture.model_provider_map.clone(),
-            project_doc_max_bytes: PROJECT_DOC_MAX_BYTES,
-            project_doc_fallback_filenames: Vec::new(),
-            codex_home: fixture.codex_home(),
-            agents_home: expected_agents_home,
-            project_agents_home: None,
-            agents_context_entries: Vec::new(),
-            agents_tools: Vec::new(),
-            agents_context_prompt: None,
-            agents_context_prompt_tokens: 0,
-            agents_context_prompt_truncated: false,
-            agents_context_warning_tokens: AGENTS_CONTEXT_WARNING_TOKENS,
-            agents_context_include: Vec::new(),
-            agents_context_exclude: Vec::new(),
-            history: History::default(),
-            file_opener: UriBasedFileOpener::VsCode,
-            codex_linux_sandbox_exe: None,
-            hide_agent_reasoning: false,
-            show_raw_agent_reasoning: false,
+            did_user_set_custom_policy: true,
             model_reasoning_effort: None,
-            model_reasoning_summary: ReasoningSummary::default(),
+            model_reasoning_summary: ReasoningSummary::Auto,
             model_verbosity: None,
-            chatgpt_base_url: "https://chatgpt.com/backend-api/".to_string(),
-            base_instructions: None,
-            forced_chatgpt_workspace_id: None,
-            forced_login_method: None,
-            include_apply_patch_tool: false,
-            tools_web_search_request: false,
-            experimental_sandbox_command_assessment: false,
-            use_experimental_streamable_shell_tool: false,
-            use_experimental_unified_exec_tool: false,
-            use_experimental_use_rmcp_client: false,
-            include_view_image_tool: true,
-            features: Features::with_defaults(),
-            active_profile: Some("gpt3".to_string()),
-            active_project: ProjectConfig { trust_level: None },
-            windows_wsl_setup_acknowledged: false,
-            notices: Default::default(),
-            disable_paste_burst: false,
-            tui_notifications: Default::default(),
-            otel: OtelConfig::default(),
+            active_profile: Some("gpt3"),
         };
 
-        assert_eq!(expected_gpt3_profile_config, gpt3_profile_config);
+        assert_profile_config(&gpt3_profile_config, &fixture, expected.clone());
 
         // Verify that loading without specifying a profile in ConfigOverrides
         // uses the default profile from the config file (which is "gpt3").
         let default_profile_overrides = ConfigOverrides {
             cwd: Some(fixture.cwd()),
+            agents_home: Some(agents_home),
             ..Default::default()
         };
 
@@ -5641,17 +5863,19 @@ model_verbosity = "high"
             fixture.codex_home(),
         )?;
 
-        assert_eq!(expected_gpt3_profile_config, default_profile_config);
+        assert_profile_config(&default_profile_config, &fixture, expected);
         Ok(())
     }
 
     #[test]
     fn test_precedence_fixture_with_zdr_profile() -> std::io::Result<()> {
         let fixture = create_test_fixture()?;
+        let agents_home = default_agents_home_for(&fixture.codex_home());
 
         let zdr_profile_overrides = ConfigOverrides {
             config_profile: Some("zdr".to_string()),
             cwd: Some(fixture.cwd()),
+            agents_home: Some(agents_home),
             ..Default::default()
         };
         let zdr_profile_config = Config::load_from_base_config_with_overrides(
@@ -5659,74 +5883,25 @@ model_verbosity = "high"
             zdr_profile_overrides,
             fixture.codex_home(),
         )?;
-        let expected_agents_home = default_agents_home_for(&fixture.codex_home());
-        let expected_zdr_profile_config = Config {
-            model: "o3".to_string(),
-            review_model: OPENAI_DEFAULT_REVIEW_MODEL.to_string(),
-            model_family: find_family_for_model("o3").expect("known model slug"),
-            model_context_window: Some(200_000),
-            model_max_output_tokens: Some(100_000),
-            model_auto_compact_token_limit: Some(180_000),
-            model_provider_id: "openai".to_string(),
-            model_provider: fixture.openai_provider.clone(),
-            approval_policy: AskForApproval::OnFailure,
-            sandbox_policy: SandboxPolicy::new_read_only_policy(),
-            did_user_set_custom_approval_policy_or_sandbox_mode: true,
-            forced_auto_mode_downgraded_on_windows: false,
-            shell_environment_policy: ShellEnvironmentPolicy::default(),
-            user_instructions: None,
-            notify: None,
-            cwd: fixture.cwd(),
-            cli_auth_credentials_store_mode: Default::default(),
-            mcp_servers: HashMap::new(),
-            mcp_templates: HashMap::new(),
-            mcp_schema_version: Some(CURRENT_SCHEMA_VERSION),
-            experimental_mcp_overhaul: false,
-            mcp_oauth_credentials_store_mode: Default::default(),
-            model_providers: fixture.model_provider_map.clone(),
-            project_doc_max_bytes: PROJECT_DOC_MAX_BYTES,
-            project_doc_fallback_filenames: Vec::new(),
-            codex_home: fixture.codex_home(),
-            agents_home: expected_agents_home,
-            project_agents_home: None,
-            agents_context_entries: Vec::new(),
-            agents_tools: Vec::new(),
-            agents_context_prompt: None,
-            agents_context_prompt_tokens: 0,
-            agents_context_prompt_truncated: false,
-            agents_context_warning_tokens: AGENTS_CONTEXT_WARNING_TOKENS,
-            agents_context_include: Vec::new(),
-            agents_context_exclude: Vec::new(),
-            history: History::default(),
-            file_opener: UriBasedFileOpener::VsCode,
-            codex_linux_sandbox_exe: None,
-            hide_agent_reasoning: false,
-            show_raw_agent_reasoning: false,
-            model_reasoning_effort: None,
-            model_reasoning_summary: ReasoningSummary::default(),
-            model_verbosity: None,
-            chatgpt_base_url: "https://chatgpt.com/backend-api/".to_string(),
-            base_instructions: None,
-            forced_chatgpt_workspace_id: None,
-            forced_login_method: None,
-            include_apply_patch_tool: false,
-            tools_web_search_request: false,
-            experimental_sandbox_command_assessment: false,
-            use_experimental_streamable_shell_tool: false,
-            use_experimental_unified_exec_tool: false,
-            use_experimental_use_rmcp_client: false,
-            include_view_image_tool: true,
-            features: Features::with_defaults(),
-            active_profile: Some("zdr".to_string()),
-            active_project: ProjectConfig { trust_level: None },
-            windows_wsl_setup_acknowledged: false,
-            notices: Default::default(),
-            disable_paste_burst: false,
-            tui_notifications: Default::default(),
-            otel: OtelConfig::default(),
-        };
-
-        assert_eq!(expected_zdr_profile_config, zdr_profile_config);
+        assert_profile_config(
+            &zdr_profile_config,
+            &fixture,
+            ProfileExpectation {
+                model: "o3",
+                model_family: find_family_for_model("o3").expect("known model slug"),
+                model_context_window: Some(200_000),
+                model_max_output_tokens: Some(100_000),
+                model_auto_compact_token_limit: None,
+                model_provider_id: "openai",
+                model_provider: &fixture.openai_provider,
+                approval_policy: AskForApproval::OnFailure,
+                did_user_set_custom_policy: true,
+                model_reasoning_effort: None,
+                model_reasoning_summary: ReasoningSummary::Auto,
+                model_verbosity: None,
+                active_profile: Some("zdr"),
+            },
+        );
 
         Ok(())
     }
@@ -5734,10 +5909,12 @@ model_verbosity = "high"
     #[test]
     fn test_precedence_fixture_with_gpt5_profile() -> std::io::Result<()> {
         let fixture = create_test_fixture()?;
+        let agents_home = default_agents_home_for(&fixture.codex_home());
 
         let gpt5_profile_overrides = ConfigOverrides {
             config_profile: Some("gpt5".to_string()),
             cwd: Some(fixture.cwd()),
+            agents_home: Some(agents_home),
             ..Default::default()
         };
         let gpt5_profile_config = Config::load_from_base_config_with_overrides(
@@ -5745,74 +5922,25 @@ model_verbosity = "high"
             gpt5_profile_overrides,
             fixture.codex_home(),
         )?;
-        let expected_agents_home = default_agents_home_for(&fixture.codex_home());
-        let expected_gpt5_profile_config = Config {
-            model: "gpt-5".to_string(),
-            review_model: OPENAI_DEFAULT_REVIEW_MODEL.to_string(),
-            model_family: find_family_for_model("gpt-5").expect("known model slug"),
-            model_context_window: Some(272_000),
-            model_max_output_tokens: Some(128_000),
-            model_auto_compact_token_limit: Some(244_800),
-            model_provider_id: "openai".to_string(),
-            model_provider: fixture.openai_provider.clone(),
-            approval_policy: AskForApproval::OnFailure,
-            sandbox_policy: SandboxPolicy::new_read_only_policy(),
-            did_user_set_custom_approval_policy_or_sandbox_mode: true,
-            forced_auto_mode_downgraded_on_windows: false,
-            shell_environment_policy: ShellEnvironmentPolicy::default(),
-            user_instructions: None,
-            notify: None,
-            cwd: fixture.cwd(),
-            cli_auth_credentials_store_mode: Default::default(),
-            mcp_servers: HashMap::new(),
-            mcp_templates: HashMap::new(),
-            mcp_schema_version: Some(CURRENT_SCHEMA_VERSION),
-            experimental_mcp_overhaul: false,
-            mcp_oauth_credentials_store_mode: Default::default(),
-            model_providers: fixture.model_provider_map.clone(),
-            project_doc_max_bytes: PROJECT_DOC_MAX_BYTES,
-            project_doc_fallback_filenames: Vec::new(),
-            codex_home: fixture.codex_home(),
-            agents_home: expected_agents_home,
-            project_agents_home: None,
-            agents_context_entries: Vec::new(),
-            agents_tools: Vec::new(),
-            agents_context_prompt: None,
-            agents_context_prompt_tokens: 0,
-            agents_context_prompt_truncated: false,
-            agents_context_warning_tokens: AGENTS_CONTEXT_WARNING_TOKENS,
-            agents_context_include: Vec::new(),
-            agents_context_exclude: Vec::new(),
-            history: History::default(),
-            file_opener: UriBasedFileOpener::VsCode,
-            codex_linux_sandbox_exe: None,
-            hide_agent_reasoning: false,
-            show_raw_agent_reasoning: false,
-            model_reasoning_effort: Some(ReasoningEffort::High),
-            model_reasoning_summary: ReasoningSummary::Detailed,
-            model_verbosity: Some(Verbosity::High),
-            chatgpt_base_url: "https://chatgpt.com/backend-api/".to_string(),
-            base_instructions: None,
-            forced_chatgpt_workspace_id: None,
-            forced_login_method: None,
-            include_apply_patch_tool: false,
-            tools_web_search_request: false,
-            experimental_sandbox_command_assessment: false,
-            use_experimental_streamable_shell_tool: false,
-            use_experimental_unified_exec_tool: false,
-            use_experimental_use_rmcp_client: false,
-            include_view_image_tool: true,
-            features: Features::with_defaults(),
-            active_profile: Some("gpt5".to_string()),
-            active_project: ProjectConfig { trust_level: None },
-            windows_wsl_setup_acknowledged: false,
-            notices: Default::default(),
-            disable_paste_burst: false,
-            tui_notifications: Default::default(),
-            otel: OtelConfig::default(),
-        };
-
-        assert_eq!(expected_gpt5_profile_config, gpt5_profile_config);
+        assert_profile_config(
+            &gpt5_profile_config,
+            &fixture,
+            ProfileExpectation {
+                model: "gpt-5",
+                model_family: find_family_for_model("gpt-5").expect("known model slug"),
+                model_context_window: Some(272_000),
+                model_max_output_tokens: Some(128_000),
+                model_auto_compact_token_limit: None,
+                model_provider_id: "openai",
+                model_provider: &fixture.openai_provider,
+                approval_policy: AskForApproval::OnFailure,
+                did_user_set_custom_policy: true,
+                model_reasoning_effort: Some(ReasoningEffort::High),
+                model_reasoning_summary: ReasoningSummary::Detailed,
+                model_verbosity: Some(Verbosity::High),
+                active_profile: Some("gpt5"),
+            },
+        );
 
         Ok(())
     }

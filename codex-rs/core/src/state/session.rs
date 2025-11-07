@@ -1,11 +1,14 @@
 //! Session-wide mutable state.
 
+use codex_protocol::approvals::SandboxCommandAssessment;
+use codex_protocol::approvals::SandboxRiskHistoryEntry;
 use codex_protocol::models::ResponseItem;
 
 use crate::conversation_history::ConversationHistory;
 use crate::protocol::RateLimitSnapshot;
 use crate::protocol::TokenUsage;
 use crate::protocol::TokenUsageInfo;
+use std::collections::VecDeque;
 
 /// Persistent, session-scoped state previously stored directly on `Session`.
 #[derive(Default)]
@@ -13,6 +16,7 @@ pub(crate) struct SessionState {
     pub(crate) history: ConversationHistory,
     pub(crate) token_info: Option<TokenUsageInfo>,
     pub(crate) latest_rate_limits: Option<RateLimitSnapshot>,
+    pub(crate) recent_risk_assessments: VecDeque<RiskAssessmentEntry>,
 }
 
 impl SessionState {
@@ -73,5 +77,49 @@ impl SessionState {
         }
     }
 
+    pub(crate) fn record_risk_assessment(
+        &mut self,
+        call_id: String,
+        assessment: SandboxCommandAssessment,
+    ) {
+        const MAX_RECENT_RISK_ASSESSMENTS: usize = 20;
+        if let Some(last) = self
+            .recent_risk_assessments
+            .back_mut()
+            .filter(|last| last.call_id == call_id)
+        {
+            if last.assessment != assessment {
+                last.assessment = assessment;
+            }
+            return;
+        }
+        if self.recent_risk_assessments.len() >= MAX_RECENT_RISK_ASSESSMENTS {
+            self.recent_risk_assessments.pop_front();
+        }
+        self.recent_risk_assessments.push_back(RiskAssessmentEntry {
+            call_id,
+            assessment,
+        });
+    }
+
+    pub(crate) fn risk_assessment_history(&self) -> Vec<RiskAssessmentEntry> {
+        self.recent_risk_assessments.iter().cloned().collect()
+    }
+
     // Pending input/approval moved to TurnState.
+}
+
+#[derive(Clone)]
+pub(crate) struct RiskAssessmentEntry {
+    pub call_id: String,
+    pub assessment: SandboxCommandAssessment,
+}
+
+impl From<RiskAssessmentEntry> for SandboxRiskHistoryEntry {
+    fn from(value: RiskAssessmentEntry) -> Self {
+        Self {
+            call_id: value.call_id,
+            assessment: value.assessment,
+        }
+    }
 }

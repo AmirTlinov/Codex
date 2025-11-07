@@ -5,13 +5,17 @@ use crate::protocol::FileChange;
 use crate::protocol::ReviewDecision;
 use crate::safety::SafetyCheck;
 use crate::safety::assess_patch_safety;
+use crate::sandboxing::assessment::SandboxAssessmentRequest;
 use codex_apply_patch::ApplyPatchAction;
 use codex_apply_patch::ApplyPatchFileChange;
+use codex_protocol::protocol::SandboxCommandAssessment;
 use std::collections::HashMap;
+use std::path::Path;
 use std::path::PathBuf;
 
 pub const CODEX_APPLY_PATCH_ARG1: &str = "--codex-run-as-apply-patch";
 
+#[derive(Debug)]
 pub(crate) enum InternalApplyPatchInvocation {
     /// The `apply_patch` call was handled programmatically, without any sort
     /// of sandbox, because the user explicitly approved it. This is the
@@ -31,6 +35,7 @@ pub(crate) enum InternalApplyPatchInvocation {
 pub(crate) struct ApplyPatchExec {
     pub(crate) action: ApplyPatchAction,
     pub(crate) user_explicitly_approved_this_action: bool,
+    pub(crate) risk: Option<SandboxCommandAssessment>,
 }
 
 pub(crate) async fn apply_patch(
@@ -48,10 +53,14 @@ pub(crate) async fn apply_patch(
         SafetyCheck::AutoApprove {
             user_explicitly_approved,
             ..
-        } => InternalApplyPatchInvocation::DelegateToExec(ApplyPatchExec {
-            action,
-            user_explicitly_approved_this_action: user_explicitly_approved,
-        }),
+        } => {
+            let risk = maybe_assess_apply_patch(sess, turn_context, call_id, &action).await;
+            InternalApplyPatchInvocation::DelegateToExec(ApplyPatchExec {
+                action,
+                user_explicitly_approved_this_action: user_explicitly_approved,
+                risk,
+            })
+        }
         SafetyCheck::AskUser => {
             // Compute a readable summary of path changes to include in the
             // approval request so the user can make an informed decision.
@@ -71,9 +80,11 @@ pub(crate) async fn apply_patch(
                 .await;
             match rx_approve.await.unwrap_or_default() {
                 ReviewDecision::Approved | ReviewDecision::ApprovedForSession => {
+                    let risk = maybe_assess_apply_patch(sess, turn_context, call_id, &action).await;
                     InternalApplyPatchInvocation::DelegateToExec(ApplyPatchExec {
                         action,
                         user_explicitly_approved_this_action: true,
+                        risk,
                     })
                 }
                 ReviewDecision::Denied | ReviewDecision::Abort => {
@@ -114,6 +125,86 @@ pub(crate) fn convert_apply_patch_to_protocol(
         result.insert(path.clone(), protocol_change);
     }
     result
+}
+
+fn sanitized_apply_patch_command(action: &ApplyPatchAction) -> Vec<String> {
+    if let Some(command) = &action.command {
+        return command.iter().map(|arg| sanitize_arg(arg, 512)).collect();
+    }
+
+    const MAX_SUMMARY_ENTRIES: usize = 8;
+    let mut summary: Vec<_> = action.changes().iter().collect();
+    summary.sort_by(|(path_a, _), (path_b, _)| path_a.cmp(path_b));
+
+    let mut command = vec!["apply_patch".to_string()];
+    let total = summary.len();
+    for (idx, (path, change)) in summary.into_iter().enumerate() {
+        if idx >= MAX_SUMMARY_ENTRIES {
+            command.push(format!("+{} more changes", total - MAX_SUMMARY_ENTRIES));
+            break;
+        }
+        let kind = match change {
+            ApplyPatchFileChange::Add { .. } => "add",
+            ApplyPatchFileChange::Delete { .. } => "delete",
+            ApplyPatchFileChange::Update { .. } => "update",
+        };
+        command.push(format!(
+            "{kind}:{}",
+            relative_path_display(path.as_path(), action.cwd.as_path())
+        ));
+    }
+    if total == 0 {
+        command.push("no_changes".to_string());
+    }
+    command.push(format!("total_changes={total}"));
+    command
+}
+
+fn sanitize_arg(arg: &str, max_len: usize) -> String {
+    if arg.len() <= max_len {
+        arg.to_string()
+    } else {
+        format!("{}…", &arg[..max_len])
+    }
+}
+
+fn relative_path_display(path: &Path, base: &Path) -> String {
+    match path.strip_prefix(base) {
+        Ok(rel) => rel.display().to_string(),
+        Err(_) => path.display().to_string(),
+    }
+}
+
+async fn maybe_assess_apply_patch(
+    session: &Session,
+    turn_context: &TurnContext,
+    call_id: &str,
+    action: &ApplyPatchAction,
+) -> Option<SandboxCommandAssessment> {
+    let client = &turn_context.client;
+    let config = client.config_arc();
+    if !config.experimental_sandbox_command_assessment {
+        return None;
+    }
+
+    let request = SandboxAssessmentRequest {
+        config,
+        provider: client.get_provider(),
+        auth_manager: client.get_auth_manager(),
+        otel_event_manager: client.get_otel_event_manager(),
+        conversation_id: session.conversation_id(),
+        call_id: call_id.to_string(),
+        command: sanitized_apply_patch_command(action),
+        sandbox_policy: turn_context.sandbox_policy.clone(),
+        cwd: action.cwd.clone(),
+        failure_message: None,
+    };
+
+    let assessment = session.services.sandbox_assessment.assess(request).await?;
+    session
+        .record_risk_assessment(call_id.to_string(), assessment.clone())
+        .await;
+    Some(assessment)
 }
 
 #[cfg(test)]

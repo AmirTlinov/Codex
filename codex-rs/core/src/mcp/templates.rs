@@ -27,6 +27,11 @@ impl TemplateCatalog {
         }
     }
 
+    /// Construct a catalog from an existing templates map.
+    pub fn from_templates(templates: HashMap<String, McpTemplate>) -> Self {
+        Self { templates }
+    }
+
     /// Load templates from the default resources directory.
     pub fn load_default() -> Result<Self> {
         let root = Self::default_template_dir();

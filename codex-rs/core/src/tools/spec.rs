@@ -220,6 +220,23 @@ fn create_shell_tool() -> ToolSpec {
             description: Some("Only set if with_escalated_permissions is true. 1-sentence explanation of why we want to run this command.".to_string()),
         },
     );
+    properties.insert(
+        "run_in_background".to_string(),
+        JsonSchema::Boolean {
+            description: Some(
+                "Set to true to keep the command running after returning initial output; poll via bash_output to stream logs.".to_string(),
+            ),
+        },
+    );
+    properties.insert(
+        "description".to_string(),
+        JsonSchema::String {
+            description: Some(
+                "Optional short label shown in background shell events and LiveExec UI."
+                    .to_string(),
+            ),
+        },
+    );
 
     ToolSpec::Function(ResponsesApiTool {
         name: "shell".to_string(),
@@ -228,6 +245,61 @@ fn create_shell_tool() -> ToolSpec {
         parameters: JsonSchema::Object {
             properties,
             required: Some(vec!["command".to_string()]),
+            additional_properties: Some(false.into()),
+        },
+    })
+}
+
+fn create_bash_output_tool() -> ToolSpec {
+    let mut properties = BTreeMap::new();
+    properties.insert(
+        "bash_id".to_string(),
+        JsonSchema::String {
+            description: Some(
+                "Identifier returned from a shell tool call with run_in_background set to true."
+                    .to_string(),
+            ),
+        },
+    );
+    properties.insert(
+        "filter".to_string(),
+        JsonSchema::String {
+            description: Some(
+                "Optional regular expression; only matching lines are returned.".to_string(),
+            ),
+        },
+    );
+
+    ToolSpec::Function(ResponsesApiTool {
+        name: "bash_output".to_string(),
+        description: "Polls the latest output from a running background shell.".to_string(),
+        strict: false,
+        parameters: JsonSchema::Object {
+            properties,
+            required: Some(vec!["bash_id".to_string()]),
+            additional_properties: Some(false.into()),
+        },
+    })
+}
+
+fn create_kill_shell_tool() -> ToolSpec {
+    let mut properties = BTreeMap::new();
+    properties.insert(
+        "shell_id".to_string(),
+        JsonSchema::String {
+            description: Some("Identifier of the background shell to terminate.".to_string()),
+        },
+    );
+
+    ToolSpec::Function(ResponsesApiTool {
+        name: "kill_shell".to_string(),
+        description:
+            "Stops a background shell session and returns its aggregated output and exit status."
+                .to_string(),
+        strict: false,
+        parameters: JsonSchema::Object {
+            properties,
+            required: Some(vec!["shell_id".to_string()]),
             additional_properties: Some(false.into()),
         },
     })
@@ -719,6 +791,7 @@ pub(crate) fn build_specs(
     use crate::exec_command::create_exec_command_tool_for_responses_api;
     use crate::exec_command::create_write_stdin_tool_for_responses_api;
     use crate::tools::handlers::ApplyPatchHandler;
+    use crate::tools::handlers::BackgroundShellHandler;
     use crate::tools::handlers::ExecStreamHandler;
     use crate::tools::handlers::GrepFilesHandler;
     use crate::tools::handlers::ListDirHandler;
@@ -740,6 +813,7 @@ pub(crate) fn build_specs(
     let apply_patch_handler = Arc::new(ApplyPatchHandler);
     let view_image_handler = Arc::new(ViewImageHandler);
     let mcp_handler = Arc::new(McpHandler);
+    let background_shell_handler = Arc::new(BackgroundShellHandler);
 
     if config.use_unified_exec_tool {
         builder.push_spec(create_unified_exec_tool());
@@ -769,6 +843,10 @@ pub(crate) fn build_specs(
     builder.register_handler("shell", shell_handler.clone());
     builder.register_handler("container.exec", shell_handler.clone());
     builder.register_handler("local_shell", shell_handler);
+    builder.push_spec(create_bash_output_tool());
+    builder.register_handler("bash_output", background_shell_handler.clone());
+    builder.push_spec(create_kill_shell_tool());
+    builder.register_handler("kill_shell", background_shell_handler);
 
     if config.plan_tool {
         builder.push_spec(PLAN_TOOL.clone());
@@ -917,7 +995,14 @@ mod tests {
 
         assert_eq_tool_names(
             &tools,
-            &["unified_exec", "update_plan", "web_search", "view_image"],
+            &[
+                "unified_exec",
+                "bash_output",
+                "kill_shell",
+                "update_plan",
+                "web_search",
+                "view_image",
+            ],
         );
     }
 
@@ -936,7 +1021,14 @@ mod tests {
 
         assert_eq_tool_names(
             &tools,
-            &["unified_exec", "update_plan", "web_search", "view_image"],
+            &[
+                "unified_exec",
+                "bash_output",
+                "kill_shell",
+                "update_plan",
+                "web_search",
+                "view_image",
+            ],
         );
     }
 
@@ -1043,6 +1135,8 @@ mod tests {
             &tools,
             &[
                 "unified_exec",
+                "bash_output",
+                "kill_shell",
                 "web_search",
                 "view_image",
                 "test_server/do_something_cool",
@@ -1050,7 +1144,7 @@ mod tests {
         );
 
         assert_eq!(
-            tools[3].spec,
+            tools[5].spec,
             ToolSpec::Function(ResponsesApiTool {
                 name: "test_server/do_something_cool".to_string(),
                 parameters: JsonSchema::Object {
@@ -1158,6 +1252,8 @@ mod tests {
             &tools,
             &[
                 "unified_exec",
+                "bash_output",
+                "kill_shell",
                 "view_image",
                 "test_server/cool",
                 "test_server/do",
@@ -1206,6 +1302,8 @@ mod tests {
             &tools,
             &[
                 "unified_exec",
+                "bash_output",
+                "kill_shell",
                 "apply_patch",
                 "web_search",
                 "view_image",
@@ -1214,7 +1312,7 @@ mod tests {
         );
 
         assert_eq!(
-            tools[4].spec,
+            tools[6].spec,
             ToolSpec::Function(ResponsesApiTool {
                 name: "dash/search".to_string(),
                 parameters: JsonSchema::Object {
@@ -1271,6 +1369,8 @@ mod tests {
             &tools,
             &[
                 "unified_exec",
+                "bash_output",
+                "kill_shell",
                 "apply_patch",
                 "web_search",
                 "view_image",
@@ -1278,7 +1378,7 @@ mod tests {
             ],
         );
         assert_eq!(
-            tools[4].spec,
+            tools[6].spec,
             ToolSpec::Function(ResponsesApiTool {
                 name: "dash/paginate".to_string(),
                 parameters: JsonSchema::Object {
@@ -1334,6 +1434,8 @@ mod tests {
             &tools,
             &[
                 "unified_exec",
+                "bash_output",
+                "kill_shell",
                 "apply_patch",
                 "web_search",
                 "view_image",
@@ -1341,7 +1443,7 @@ mod tests {
             ],
         );
         assert_eq!(
-            tools[4].spec,
+            tools[6].spec,
             ToolSpec::Function(ResponsesApiTool {
                 name: "dash/tags".to_string(),
                 parameters: JsonSchema::Object {
@@ -1399,6 +1501,8 @@ mod tests {
             &tools,
             &[
                 "unified_exec",
+                "bash_output",
+                "kill_shell",
                 "apply_patch",
                 "web_search",
                 "view_image",
@@ -1406,7 +1510,7 @@ mod tests {
             ],
         );
         assert_eq!(
-            tools[4].spec,
+            tools[6].spec,
             ToolSpec::Function(ResponsesApiTool {
                 name: "dash/value".to_string(),
                 parameters: JsonSchema::Object {
@@ -1501,6 +1605,8 @@ mod tests {
             &tools,
             &[
                 "unified_exec",
+                "bash_output",
+                "kill_shell",
                 "apply_patch",
                 "web_search",
                 "view_image",
@@ -1509,7 +1615,7 @@ mod tests {
         );
 
         assert_eq!(
-            tools[4].spec,
+            tools[6].spec,
             ToolSpec::Function(ResponsesApiTool {
                 name: "test_server/do_something_cool".to_string(),
                 parameters: JsonSchema::Object {

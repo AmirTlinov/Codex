@@ -11,7 +11,6 @@ use std::path::Path;
 
 pub mod apply_patch;
 pub mod shell;
-pub mod unified_exec;
 
 /// Shared helper to construct a CommandSpec from a tokenized command line.
 /// Validates that at least a program is present.

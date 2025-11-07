@@ -106,6 +106,7 @@ impl ToolHandler for ApplyPatchHandler {
                             timeout_ms: None,
                             user_explicitly_approved: apply.user_explicitly_approved_this_action,
                             codex_exe: turn.codex_linux_sandbox_exe.clone(),
+                            risk: apply.risk.clone(),
                         };
 
                         let mut orchestrator = ToolOrchestrator::new();

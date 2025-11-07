@@ -1,6 +1,5 @@
 use base64::Engine as _;
 use chrono::Utc;
-use codex_core::auth::AuthCredentialsStoreMode;
 use reqwest::header::HeaderMap;
 
 pub fn set_user_agent_suffix(suffix: &str) {

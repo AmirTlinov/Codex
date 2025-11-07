@@ -321,14 +321,7 @@ impl UnifiedExecSession {
         self.session.exit_code()
     }
 
-    pub(crate) fn command(&self) -> &[String] {
-        &self.command
-    }
-
-    pub(crate) fn started_at(&self) -> SystemTime {
-        self.started_at
-    }
-
+    #[allow(clippy::result_large_err)] // UnifiedExecError carries detailed sandbox diagnostics required by clients.
     pub(crate) fn kill(&self) -> Result<(), UnifiedExecError> {
         self.session
             .kill()

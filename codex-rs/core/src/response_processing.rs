@@ -11,6 +11,7 @@ use tracing::warn;
 /// Process streamed `ResponseItem`s from the model into the pair of:
 /// - items we should record in conversation history; and
 /// - `ResponseInputItem`s to send back to the model on the next turn.
+#[allow(dead_code)] // Used by the streaming response processor once MCP review is enabled.
 pub(crate) async fn process_items(
     processed_items: Vec<crate::codex::ProcessedResponseItem>,
     is_review_mode: bool,

@@ -61,17 +61,17 @@ impl WizardOutcome {
                 if !args.is_empty() {
                     map.insert("args".into(), args.join(", "));
                 }
-                if let Some(env) = env {
-                    if !env.is_empty() {
-                        let mut pairs: Vec<_> = env.iter().collect();
-                        pairs.sort_by(|(a, _), (b, _)| a.cmp(b));
-                        let joined = pairs
-                            .into_iter()
-                            .map(|(k, v)| format!("{k}={v}"))
-                            .collect::<Vec<_>>()
-                            .join(", ");
-                        map.insert("env".into(), joined);
-                    }
+                if let Some(env) = env
+                    && !env.is_empty()
+                {
+                    let mut pairs: Vec<_> = env.iter().collect();
+                    pairs.sort_by(|(a, _), (b, _)| a.cmp(b));
+                    let joined = pairs
+                        .into_iter()
+                        .map(|(k, v)| format!("{k}={v}"))
+                        .collect::<Vec<_>>()
+                        .join(", ");
+                    map.insert("env".into(), joined);
                 }
             }
             McpServerTransportConfig::StreamableHttp {
@@ -134,10 +134,10 @@ pub fn build_non_interactive(registry: &McpRegistry, args: &WizardArgs) -> Resul
 
     if args.command.is_some() || !args.args.is_empty() || !args.env.is_empty() {
         apply_stdio_overrides(&mut server, args.command.as_ref(), &args.args, &args.env);
-    } else if !args.env.is_empty() {
-        if let McpServerTransportConfig::Stdio { env, .. } = &mut server.transport {
-            merge_env(env, &args.env);
-        }
+    } else if !args.env.is_empty()
+        && let McpServerTransportConfig::Stdio { env, .. } = &mut server.transport
+    {
+        merge_env(env, &args.env);
     }
 
     if !args.auth_env.is_empty() || args.auth_type.is_some() || args.auth_secret_ref.is_some() {
@@ -280,11 +280,12 @@ pub fn run_interactive(
     );
 
     env_map = collect_env(env_map)?;
+    let env_for_transport = env_map.take();
     set_stdio_details(
         &mut server,
-        command.clone(),
-        args_vec.clone(),
-        env_map.clone(),
+        std::mem::take(&mut command),
+        std::mem::take(&mut args_vec),
+        env_for_transport,
     );
 
     let startup_timeout = parse_optional_u64(
@@ -336,7 +337,7 @@ pub fn run_interactive(
     Ok(WizardOutcome {
         name,
         server,
-        template_id: chosen_template.or(template_hint.map(|s| s.to_string())),
+        template_id: chosen_template.or(template_hint.map(ToString::to_string)),
         generated_at: SystemTime::now(),
     })
 }
@@ -638,7 +639,7 @@ fn parse_env_pair(raw: &str) -> Result<(String, String)> {
         .ok_or_else(|| anyhow!("Entry must be KEY=VALUE"))?;
     let value = parts
         .next()
-        .map(|s| s.to_string())
+        .map(ToString::to_string)
         .ok_or_else(|| anyhow!("Entry must be KEY=VALUE"))?;
     Ok((key.to_string(), value))
 }

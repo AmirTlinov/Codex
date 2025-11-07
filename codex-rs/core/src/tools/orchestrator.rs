@@ -12,6 +12,7 @@ use crate::sandboxing::SandboxManager;
 use crate::tools::sandboxing::ApprovalCtx;
 use crate::tools::sandboxing::ProvidesSandboxRetryData;
 use crate::tools::sandboxing::SandboxAttempt;
+use crate::tools::sandboxing::SandboxRetryData;
 use crate::tools::sandboxing::ToolCtx;
 use crate::tools::sandboxing::ToolError;
 use crate::tools::sandboxing::ToolRuntime;
@@ -101,6 +102,7 @@ impl ToolOrchestrator {
                         "sandbox denied and no retry".to_string(),
                     ));
                 }
+                let retry_metadata = req.sandbox_retry_data();
                 // Under `Never` or `OnRequest`, do not retry without sandbox; surface a concise message
                 // derived from the actual output (platform-agnostic).
                 if !tool.wants_no_sandbox_approval(approval_policy) {
@@ -112,7 +114,8 @@ impl ToolOrchestrator {
                 if !tool.should_bypass_approval(approval_policy, already_approved) {
                     let risk = None;
 
-                    let reason_msg = build_denial_reason_from_output(output.as_ref());
+                    let reason_msg =
+                        build_denial_reason_from_output(output.as_ref(), retry_metadata.as_ref());
                     let approval_ctx = ApprovalCtx {
                         session: tool_ctx.session,
                         turn: turn_ctx,
@@ -171,8 +174,18 @@ fn build_never_denied_message_from_output(output: &ExecToolCallOutput) -> String
     }
 }
 
-fn build_denial_reason_from_output(_output: &ExecToolCallOutput) -> String {
-    // Keep approval reason terse and stable for UX/tests, but accept the
-    // output so we can evolve heuristics later without touching call sites.
-    "command failed; retry without sandbox?".to_string()
+fn build_denial_reason_from_output(
+    _output: &ExecToolCallOutput,
+    retry_data: Option<&SandboxRetryData>,
+) -> String {
+    if let Some(meta) = retry_data {
+        let joined = if meta.command.is_empty() {
+            "<empty command>".to_string()
+        } else {
+            meta.command.join(" ")
+        };
+        format!("command `{joined}` failed; retry without sandbox?")
+    } else {
+        "command failed; retry without sandbox?".to_string()
+    }
 }

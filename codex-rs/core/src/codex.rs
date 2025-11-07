@@ -17,12 +17,12 @@ use async_channel::Receiver;
 use async_channel::Sender;
 use codex_apply_patch::ApplyPatchAction;
 use codex_protocol::ConversationId;
+use codex_protocol::approvals::SandboxCommandAssessment;
 use codex_protocol::protocol::ConversationPathResponseEvent;
 use codex_protocol::protocol::ExitedReviewModeEvent;
 use codex_protocol::protocol::McpAuthStatus;
 use codex_protocol::protocol::ReviewRequest;
 use codex_protocol::protocol::RolloutItem;
-use codex_protocol::protocol::SandboxCommandAssessment;
 use codex_protocol::protocol::SessionSource;
 use codex_protocol::protocol::TaskStartedEvent;
 use codex_protocol::protocol::TurnAbortReason;
@@ -42,6 +42,8 @@ use tracing::trace;
 use tracing::warn;
 
 use crate::ModelProviderInfo;
+#[cfg(test)]
+use crate::apply_patch::InternalApplyPatchInvocation;
 use crate::apply_patch::convert_apply_patch_to_protocol;
 use crate::client::ModelClient;
 use crate::client_common::Prompt;
@@ -52,15 +54,11 @@ use crate::conversation_history::ConversationHistory;
 use crate::environment_context::EnvironmentContext;
 use crate::error::CodexErr;
 use crate::error::Result as CodexResult;
-use crate::exec::ExecToolCallOutput;
 #[cfg(test)]
 use crate::exec::StreamOutput;
 use crate::exec_command::ExecCommandParams;
 use crate::exec_command::ExecSessionManager;
 use crate::exec_command::WriteStdinParams;
-use crate::executor::Executor;
-use crate::executor::ExecutorConfig;
-use crate::executor::normalize_exec_result;
 use crate::foreground_shell::ForegroundPromotionResult;
 use crate::foreground_shell::ForegroundShellRegistry;
 use crate::mcp::auth::compute_auth_statuses;
@@ -82,17 +80,14 @@ use crate::protocol::ErrorEvent;
 use crate::protocol::Event;
 use crate::protocol::EventMsg;
 use crate::protocol::ExecApprovalRequestEvent;
-use crate::protocol::ExecCommandBeginEvent;
-use crate::protocol::ExecCommandEndEvent;
 use crate::protocol::InputItem;
 use crate::protocol::ListCustomPromptsResponseEvent;
 use crate::protocol::Op;
-use crate::protocol::PatchApplyBeginEvent;
-use crate::protocol::PatchApplyEndEvent;
 use crate::protocol::RateLimitSnapshot;
 use crate::protocol::ReviewDecision;
 use crate::protocol::ReviewOutputEvent;
 use crate::protocol::SandboxPolicy;
+use crate::protocol::SandboxRiskHistoryEntry;
 use crate::protocol::SessionConfiguredEvent;
 use crate::protocol::StreamErrorEvent;
 use crate::protocol::Submission;
@@ -103,6 +98,7 @@ use crate::protocol::UnifiedExecSessionsEvent;
 use crate::protocol::WebSearchBeginEvent;
 use crate::rollout::RolloutRecorder;
 use crate::rollout::RolloutRecorderParams;
+use crate::sandboxing::assessment::SandboxAssessmentService;
 use crate::shell;
 use crate::state::ActiveTurn;
 use crate::state::SessionServices;
@@ -113,7 +109,6 @@ use crate::tasks::ReviewTask;
 use crate::tasks::UndoTask;
 use crate::tools::ToolRouter;
 use crate::tools::context::SharedTurnDiffTracker;
-use crate::tools::format_exec_output_str;
 use crate::tools::parallel::ToolCallRuntime;
 use crate::tools::sandboxing::ApprovalStore;
 use crate::turn_diff_tracker::TurnDiffTracker;
@@ -572,14 +567,10 @@ impl Session {
             rollout: Mutex::new(Some(rollout_recorder)),
             user_shell: default_shell,
             show_raw_agent_reasoning: config.show_raw_agent_reasoning,
-            executor: Executor::new(ExecutorConfig::new(
-                turn_context.sandbox_policy.clone(),
-                turn_context.cwd.clone(),
-                config.codex_linux_sandbox_exe.clone(),
-            )),
             background_shell: BackgroundShellManager::new(),
             foreground_shell: ForegroundShellRegistry::new(),
             tool_approvals: Mutex::new(ApprovalStore::default()),
+            sandbox_assessment: SandboxAssessmentService::default(),
         };
 
         let sess = Arc::new(Session {
@@ -619,6 +610,10 @@ impl Session {
 
     pub(crate) fn get_tx_event(&self) -> Sender<Event> {
         self.tx_event.clone()
+    }
+
+    pub(crate) fn conversation_id(&self) -> ConversationId {
+        self.conversation_id
     }
 
     pub(crate) fn next_internal_sub_id(&self) -> String {
@@ -700,6 +695,14 @@ impl Session {
         }
 
         let parsed_cmd = parse_command(&command);
+        let recent_risks = {
+            let state = self.state.lock().await;
+            state
+                .risk_assessment_history()
+                .into_iter()
+                .map(SandboxRiskHistoryEntry::from)
+                .collect::<Vec<_>>()
+        };
         let event = Event {
             id: event_id,
             msg: EventMsg::ExecApprovalRequest(ExecApprovalRequestEvent {
@@ -709,6 +712,7 @@ impl Session {
                 reason,
                 risk,
                 parsed_cmd,
+                recent_risks,
             }),
         };
         self.send_event(event).await;
@@ -779,6 +783,15 @@ impl Session {
     pub(crate) async fn record_conversation_items(&self, items: &[ResponseItem]) {
         self.record_into_history(items).await;
         self.persist_rollout_response_items(items).await;
+    }
+
+    pub(crate) async fn record_risk_assessment(
+        &self,
+        call_id: String,
+        assessment: SandboxCommandAssessment,
+    ) {
+        let mut state = self.state.lock().await;
+        state.record_risk_assessment(call_id, assessment);
     }
 
     fn reconstruct_history_from_rollout(
@@ -933,154 +946,6 @@ impl Session {
         if !user_msgs.is_empty() {
             self.persist_rollout_items(&user_msgs).await;
         }
-    }
-
-    async fn on_exec_command_begin(
-        &self,
-        turn_diff_tracker: SharedTurnDiffTracker,
-        exec_command_context: ExecCommandContext,
-    ) {
-        let ExecCommandContext {
-            sub_id,
-            call_id,
-            command_for_display,
-            cwd,
-            apply_patch,
-            ..
-        } = exec_command_context;
-        let msg = match apply_patch {
-            Some(ApplyPatchCommandContext {
-                user_explicitly_approved_this_action,
-                changes,
-            }) => {
-                {
-                    let mut tracker = turn_diff_tracker.lock().await;
-                    tracker.on_patch_begin(&changes);
-                }
-
-                EventMsg::PatchApplyBegin(PatchApplyBeginEvent {
-                    call_id,
-                    auto_approved: !user_explicitly_approved_this_action,
-                    changes,
-                })
-            }
-            None => EventMsg::ExecCommandBegin(ExecCommandBeginEvent {
-                call_id,
-                command: command_for_display.clone(),
-                cwd,
-                parsed_cmd: parse_command(&command_for_display),
-            }),
-        };
-        let event = Event {
-            id: sub_id.to_string(),
-            msg,
-        };
-        self.send_event(event).await;
-    }
-
-    async fn on_exec_command_end(
-        &self,
-        turn_diff_tracker: SharedTurnDiffTracker,
-        sub_id: &str,
-        call_id: &str,
-        output: &ExecToolCallOutput,
-        is_apply_patch: bool,
-    ) {
-        let ExecToolCallOutput {
-            stdout,
-            stderr,
-            aggregated_output,
-            duration,
-            exit_code,
-            timed_out: _,
-        } = output;
-        // Send full stdout/stderr to clients; do not truncate.
-        let stdout = stdout.text.clone();
-        let stderr = stderr.text.clone();
-        let formatted_output = format_exec_output_str(output);
-        let aggregated_output: String = aggregated_output.text.clone();
-
-        let msg = if is_apply_patch {
-            EventMsg::PatchApplyEnd(PatchApplyEndEvent {
-                call_id: call_id.to_string(),
-                stdout,
-                stderr,
-                success: *exit_code == 0,
-            })
-        } else {
-            EventMsg::ExecCommandEnd(ExecCommandEndEvent {
-                call_id: call_id.to_string(),
-                stdout,
-                stderr,
-                aggregated_output,
-                exit_code: *exit_code,
-                duration: *duration,
-                formatted_output,
-            })
-        };
-
-        let event = Event {
-            id: sub_id.to_string(),
-            msg,
-        };
-        self.send_event(event).await;
-
-        // If this is an apply_patch, after we emit the end patch, emit a second event
-        // with the full turn diff if there is one.
-        if is_apply_patch {
-            let unified_diff = {
-                let mut tracker = turn_diff_tracker.lock().await;
-                tracker.get_unified_diff()
-            };
-            if let Ok(Some(unified_diff)) = unified_diff {
-                let msg = EventMsg::TurnDiff(TurnDiffEvent { unified_diff });
-                let event = Event {
-                    id: sub_id.into(),
-                    msg,
-                };
-                self.send_event(event).await;
-            }
-        }
-    }
-    /// Runs the exec tool call and emits events for the begin and end of the
-    /// command even on error.
-    ///
-    /// Returns the output of the exec tool call.
-    pub(crate) async fn run_exec_with_events(
-        &self,
-        turn_diff_tracker: SharedTurnDiffTracker,
-        prepared: PreparedExec,
-        approval_policy: AskForApproval,
-    ) -> Result<ExecToolCallOutput, ExecError> {
-        let PreparedExec { context, request } = prepared;
-        let is_apply_patch = context.apply_patch.is_some();
-        let sub_id = context.sub_id.clone();
-        let call_id = context.call_id.clone();
-
-        self.on_exec_command_begin(turn_diff_tracker.clone(), context.clone())
-            .await;
-
-        let result = self
-            .services
-            .executor
-            .run(request, self, approval_policy, &context)
-            .await;
-
-        let normalized = normalize_exec_result(&result);
-        let borrowed = normalized.event_output();
-
-        self.on_exec_command_end(
-            turn_diff_tracker,
-            &sub_id,
-            &call_id,
-            borrowed,
-            is_apply_patch,
-        )
-        .await;
-
-        drop(normalized);
-
-        result
     }
 
     /// Helper that emits a BackgroundEvent with the given message. This keeps
@@ -2751,19 +2616,15 @@ pub(crate) async fn exit_review_mode(
         .await;
 }
 
-use crate::executor::errors::ExecError;
-use crate::executor::linkers::PreparedExec;
-use crate::tools::context::ApplyPatchCommandContext;
-use crate::tools::context::ExecCommandContext;
 #[cfg(test)]
 pub(crate) use tests::make_session_and_context;
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::config::ConfigOverrides;
     use crate::config::ConfigToml;
-
+    use crate::exec::ExecToolCallOutput;
+    use crate::function_tool::FunctionCallError;
     use crate::protocol::CompactedItem;
     use crate::protocol::InitialHistory;
     use crate::protocol::ResumedHistory;
@@ -2775,22 +2636,31 @@ mod tests {
     use crate::tools::MODEL_FORMAT_MAX_LINES;
     use crate::tools::MODEL_FORMAT_TAIL_LINES;
     use crate::tools::ToolRouter;
-    use crate::tools::handle_container_exec_with_params;
+    use crate::tools::context::SharedTurnDiffTracker;
+    use crate::tools::context::ToolInvocation;
+    use crate::tools::context::ToolPayload;
+    use crate::tools::format_exec_output_str;
+    use crate::tools::handlers::ShellHandler;
+    use crate::tools::registry::ToolHandler;
     use crate::turn_diff_tracker::TurnDiffTracker;
     use codex_app_server_protocol::AuthMode;
+    use codex_protocol::approvals::SandboxCommandAssessment;
+    use codex_protocol::approvals::SandboxRiskCategory;
+    use codex_protocol::approvals::SandboxRiskLevel;
     use codex_protocol::models::ContentItem;
     use codex_protocol::models::ResponseItem;
+    use codex_protocol::models::ShellToolCallParams;
 
     use mcp_types::ContentBlock;
     use mcp_types::TextContent;
     use pretty_assertions::assert_eq;
-    use serde::Deserialize;
     use serde_json::json;
     use std::path::PathBuf;
     use std::sync::Arc;
     use std::time::Duration as StdDuration;
     use tokio::time::Duration;
     use tokio::time::sleep;
+    use tokio::time::timeout;
 
     #[test]
     fn reconstruct_history_matches_live_compactions() {
@@ -3086,14 +2956,10 @@ mod tests {
             rollout: Mutex::new(None),
             user_shell: shell::Shell::Unknown,
             show_raw_agent_reasoning: config.show_raw_agent_reasoning,
-            executor: Executor::new(ExecutorConfig::new(
-                turn_context.sandbox_policy.clone(),
-                turn_context.cwd.clone(),
-                None,
-            )),
             background_shell: BackgroundShellManager::new(),
             foreground_shell: ForegroundShellRegistry::new(),
             tool_approvals: Mutex::new(ApprovalStore::default()),
+            sandbox_assessment: SandboxAssessmentService::default(),
         };
         let session = Session {
             conversation_id,
@@ -3108,7 +2974,17 @@ mod tests {
 
     // Like make_session_and_context, but returns Arc<Session> and the event receiver
     // so tests can assert on emitted events.
-    fn make_session_and_context_with_rx() -> (
+    pub(crate) fn make_session_and_context_with_rx() -> (
+        Arc<Session>,
+        Arc<TurnContext>,
+        async_channel::Receiver<Event>,
+    ) {
+        make_session_and_context_with_rx_overrides(ConfigOverrides::default())
+    }
+
+    pub(crate) fn make_session_and_context_with_rx_overrides(
+        overrides: ConfigOverrides,
+    ) -> (
         Arc<Session>,
         Arc<TurnContext>,
         async_channel::Receiver<Event>,
@@ -3117,7 +2993,7 @@ mod tests {
         let codex_home = tempfile::tempdir().expect("create temp dir");
         let config = Config::load_from_base_config_with_overrides(
             ConfigToml::default(),
-            ConfigOverrides::default(),
+            overrides,
             codex_home.path().to_path_buf(),
         )
         .expect("load default test config");
@@ -3159,14 +3035,10 @@ mod tests {
             rollout: Mutex::new(None),
             user_shell: shell::Shell::Unknown,
             show_raw_agent_reasoning: config.show_raw_agent_reasoning,
-            executor: Executor::new(ExecutorConfig::new(
-                config.sandbox_policy.clone(),
-                config.cwd.clone(),
-                None,
-            )),
             background_shell: BackgroundShellManager::new(),
             foreground_shell: ForegroundShellRegistry::new(),
             tool_approvals: Mutex::new(ApprovalStore::default()),
+            sandbox_assessment: SandboxAssessmentService::default(),
         };
         let session = Arc::new(Session {
             conversation_id,
@@ -3318,6 +3190,156 @@ mod tests {
         }
     }
 
+    #[tokio::test]
+    async fn exec_approval_event_carries_sandbox_risk() {
+        let overrides = ConfigOverrides {
+            experimental_sandbox_command_assessment: Some(true),
+            ..ConfigOverrides::default()
+        };
+        let (session, turn_context, rx) = make_session_and_context_with_rx_overrides(overrides);
+        let tracker: SharedTurnDiffTracker = Arc::new(Mutex::new(TurnDiffTracker::new()));
+
+        session
+            .services
+            .sandbox_assessment
+            .set_test_override(SandboxCommandAssessment {
+                description: "upload may leak secrets".to_string(),
+                risk_level: SandboxRiskLevel::High,
+                risk_categories: vec![SandboxRiskCategory::DataExfiltration],
+            });
+
+        let params = ShellToolCallParams {
+            command: vec![
+                "/bin/sh".to_string(),
+                "-c".to_string(),
+                "cat secret.txt".to_string(),
+            ],
+            workdir: None,
+            timeout_ms: Some(1_000),
+            with_escalated_permissions: Some(true),
+            justification: Some("need full fs access".to_string()),
+            run_in_background: None,
+            description: None,
+        };
+
+        let invocation = ToolInvocation {
+            session: Arc::clone(&session),
+            turn: Arc::clone(&turn_context),
+            tracker: Arc::clone(&tracker),
+            sub_id: "test-sub".to_string(),
+            call_id: "call-risk".to_string(),
+            tool_name: "shell".to_string(),
+            payload: ToolPayload::LocalShell { params },
+        };
+
+        let handler = ShellHandler;
+        let result = handler.handle(invocation).await;
+        assert!(matches!(result, Err(FunctionCallError::RespondToModel(_))));
+
+        let mut risk_payload = None;
+        for _ in 0..5 {
+            if let Ok(event) = timeout(Duration::from_secs(1), rx.recv()).await
+                && let EventMsg::ExecApprovalRequest(req) = event.expect("event").msg
+            {
+                assert!(
+                    req.recent_risks
+                        .iter()
+                        .any(|entry| entry.call_id == "call-risk"),
+                    "expected recent risk history to include current call"
+                );
+                risk_payload = req.risk;
+                break;
+            }
+        }
+
+        let risk = risk_payload.expect("risk assessment");
+        assert_eq!(risk.description, "upload may leak secrets");
+        assert_eq!(risk.risk_level, SandboxRiskLevel::High);
+        assert_eq!(
+            risk.risk_categories,
+            vec![SandboxRiskCategory::DataExfiltration]
+        );
+    }
+
+    #[tokio::test]
+    async fn apply_patch_delegate_records_risk() {
+        let overrides = ConfigOverrides {
+            experimental_sandbox_command_assessment: Some(true),
+            approval_policy: Some(AskForApproval::OnFailure),
+            ..ConfigOverrides::default()
+        };
+        let (session, turn_context, _rx) = make_session_and_context_with_rx_overrides(overrides);
+        session
+            .services
+            .sandbox_assessment
+            .set_test_override(SandboxCommandAssessment {
+                description: "patch may rewrite sensitive files".to_string(),
+                risk_level: SandboxRiskLevel::Medium,
+                risk_categories: vec![SandboxRiskCategory::SystemModification],
+            });
+
+        let patch_body =
+            "*** Begin Patch\n*** Add File: risk_demo.txt\n+hello\n*** End Patch".to_string();
+        let argv = vec!["apply_patch".to_string(), patch_body];
+        let action =
+            match codex_apply_patch::maybe_parse_apply_patch_verified(&argv, &turn_context.cwd) {
+                codex_apply_patch::MaybeApplyPatchVerified::Body(action) => action,
+                other => panic!("unexpected parse result: {other:?}"),
+            };
+
+        let result = crate::apply_patch::apply_patch(
+            session.as_ref(),
+            turn_context.as_ref(),
+            "apply-risk",
+            action,
+        )
+        .await;
+        let exec = match result {
+            InternalApplyPatchInvocation::DelegateToExec(exec) => exec,
+            other => panic!("expected delegate path, got {other:?}"),
+        };
+
+        let risk = exec.risk.expect("risk assessment");
+        assert_eq!(risk.description, "patch may rewrite sensitive files");
+        assert_eq!(risk.risk_level, SandboxRiskLevel::Medium);
+        assert_eq!(
+            risk.risk_categories,
+            vec![SandboxRiskCategory::SystemModification]
+        );
+
+        let state = session.state.lock().await;
+        assert!(
+            state
+                .recent_risk_assessments
+                .iter()
+                .any(|entry| entry.call_id == "apply-risk")
+        );
+    }
+
+    #[tokio::test]
+    async fn record_risk_assessment_persists_recent_entries() {
+        let (session, _turn_context) = make_session_and_context();
+        session
+            .record_risk_assessment(
+                "call-record".to_string(),
+                SandboxCommandAssessment {
+                    description: "editing files may be unsafe".to_string(),
+                    risk_level: SandboxRiskLevel::Medium,
+                    risk_categories: vec![SandboxRiskCategory::SystemModification],
+                },
+            )
+            .await;
+
+        let state = session.state.lock().await;
+        let entries = &state.recent_risk_assessments;
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].call_id, "call-record");
+        assert_eq!(
+            entries[0].assessment.risk_categories,
+            vec![SandboxRiskCategory::SystemModification]
+        );
+    }
+
     fn sample_rollout(
         session: &Session,
         turn_context: &TurnContext,
@@ -3418,110 +3440,5 @@ mod tests {
         rollout_items.push(RolloutItem::ResponseItem(assistant3.clone()));
 
         (rollout_items, live_history.contents())
-    }
-
-    #[tokio::test]
-    async fn rejects_escalated_permissions_when_policy_not_on_request() {
-        use crate::exec::ExecParams;
-        use crate::protocol::AskForApproval;
-        use crate::protocol::SandboxPolicy;
-        use crate::turn_diff_tracker::TurnDiffTracker;
-        use std::collections::HashMap;
-
-        let (session, mut turn_context_raw) = make_session_and_context();
-        // Ensure policy is NOT OnRequest so the early rejection path triggers
-        turn_context_raw.approval_policy = AskForApproval::OnFailure;
-        let session = Arc::new(session);
-        let mut turn_context = Arc::new(turn_context_raw);
-
-        let params = ExecParams {
-            command: if cfg!(windows) {
-                vec![
-                    "cmd.exe".to_string(),
-                    "/C".to_string(),
-                    "echo hi".to_string(),
-                ]
-            } else {
-                vec![
-                    "/bin/sh".to_string(),
-                    "-c".to_string(),
-                    "echo hi".to_string(),
-                ]
-            },
-            cwd: turn_context.cwd.clone(),
-            timeout_ms: Some(1000),
-            env: HashMap::new(),
-            with_escalated_permissions: Some(true),
-            justification: Some("test".to_string()),
-        };
-
-        let params2 = ExecParams {
-            with_escalated_permissions: Some(false),
-            ..params.clone()
-        };
-
-        let turn_diff_tracker = Arc::new(tokio::sync::Mutex::new(TurnDiffTracker::new()));
-
-        let tool_name = "shell";
-        let sub_id = "test-sub".to_string();
-        let call_id = "test-call".to_string();
-
-        let resp = handle_container_exec_with_params(
-            tool_name,
-            params,
-            Arc::clone(&session),
-            Arc::clone(&turn_context),
-            Arc::clone(&turn_diff_tracker),
-            sub_id,
-            call_id,
-        )
-        .await;
-
-        let Err(FunctionCallError::RespondToModel(output)) = resp else {
-            panic!("expected error result");
-        };
-
-        let expected = format!(
-            "approval policy is {policy:?}; reject command — you should not ask for escalated permissions if the approval policy is {policy:?}",
-            policy = turn_context.approval_policy
-        );
-
-        pretty_assertions::assert_eq!(output, expected);
-
-        // Now retry the same command WITHOUT escalated permissions; should succeed.
-        // Force DangerFullAccess to avoid platform sandbox dependencies in tests.
-        Arc::get_mut(&mut turn_context)
-            .expect("unique turn context Arc")
-            .sandbox_policy = SandboxPolicy::DangerFullAccess;
-
-        let resp2 = handle_container_exec_with_params(
-            tool_name,
-            params2,
-            Arc::clone(&session),
-            Arc::clone(&turn_context),
-            Arc::clone(&turn_diff_tracker),
-            "test-sub".to_string(),
-            "test-call-2".to_string(),
-        )
-        .await;
-
-        let output = resp2.expect("expected Ok result");
-
-        #[derive(Deserialize, PartialEq, Eq, Debug)]
-        struct ResponseExecMetadata {
-            exit_code: i32,
-        }
-
-        #[derive(Deserialize)]
-        struct ResponseExecOutput {
-            output: String,
-            metadata: ResponseExecMetadata,
-        }
-
-        let exec_output: ResponseExecOutput =
-            serde_json::from_str(&output).expect("valid exec output json");
-
-        pretty_assertions::assert_eq!(exec_output.metadata, ResponseExecMetadata { exit_code: 0 });
-        assert!(exec_output.output.contains("hi"));
     }
 }

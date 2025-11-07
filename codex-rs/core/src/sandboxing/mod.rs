@@ -69,31 +69,16 @@ impl SandboxManager {
     pub(crate) fn select_initial(
         &self,
         policy: &SandboxPolicy,
-        pref: SandboxablePreference,
+        _pref: SandboxablePreference,
     ) -> SandboxType {
-        match pref {
-            SandboxablePreference::Forbid => SandboxType::None,
-            SandboxablePreference::Require => {
-                #[cfg(target_os = "macos")]
-                {
-                    return SandboxType::MacosSeatbelt;
-                }
-                #[cfg(target_os = "linux")]
-                {
-                    return SandboxType::LinuxSeccomp;
-                }
-                #[allow(unreachable_code)]
-                SandboxType::None
-            }
-            SandboxablePreference::Auto => match policy {
-                SandboxPolicy::DangerFullAccess => SandboxType::None,
-                #[cfg(target_os = "macos")]
-                _ => SandboxType::MacosSeatbelt,
-                #[cfg(target_os = "linux")]
-                _ => SandboxType::LinuxSeccomp,
-                #[cfg(not(any(target_os = "macos", target_os = "linux")))]
-                _ => SandboxType::None,
-            },
+        match policy {
+            SandboxPolicy::DangerFullAccess => SandboxType::None,
+            #[cfg(target_os = "macos")]
+            _ => SandboxType::MacosSeatbelt,
+            #[cfg(target_os = "linux")]
+            _ => SandboxType::LinuxSeccomp,
+            #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+            _ => SandboxType::None,
         }
     }
 

@@ -64,15 +64,15 @@ impl ToolHandler for BackgroundShellHandler {
                         turn.clone(),
                     )
                     .await?;
-        let content = serde_json::to_string(&response).map_err(|err| {
-            FunctionCallError::RespondToModel(format!(
-                "failed to serialize bash_output response: {err:?}"
-            ))
-        })?;
-        Ok(ToolOutput::Function {
-            content,
-            success: Some(true),
-        })
+                let content = serde_json::to_string(&response).map_err(|err| {
+                    FunctionCallError::RespondToModel(format!(
+                        "failed to serialize bash_output response: {err:?}"
+                    ))
+                })?;
+                Ok(ToolOutput::Function {
+                    content,
+                    success: Some(true),
+                })
             }
             "kill_shell" => {
                 let args: KillShellArgs = serde_json::from_str(&arguments).map_err(|err| {
@@ -84,15 +84,15 @@ impl ToolHandler for BackgroundShellHandler {
                 let response = manager
                     .kill(&args.shell_id, session.clone(), turn.clone())
                     .await?;
-        let content = serde_json::to_string(&response).map_err(|err| {
-            FunctionCallError::RespondToModel(format!(
-                "failed to serialize kill_shell response: {err:?}"
-            ))
-        })?;
-        Ok(ToolOutput::Function {
-            content,
-            success: Some(true),
-        })
+                let content = serde_json::to_string(&response).map_err(|err| {
+                    FunctionCallError::RespondToModel(format!(
+                        "failed to serialize kill_shell response: {err:?}"
+                    ))
+                })?;
+                Ok(ToolOutput::Function {
+                    content,
+                    success: Some(true),
+                })
             }
             other => Err(FunctionCallError::RespondToModel(format!(
                 "unsupported background shell tool {other}"

@@ -128,6 +128,7 @@ impl ForegroundShellRegistry {
     }
 }
 
+#[allow(clippy::too_many_arguments)] // Each parameter maps to a distinct async channel or context required for promotion logic.
 pub(crate) async fn drive_foreground_shell(
     state: Arc<ForegroundShellState>,
     mut promotion_rx: watch::Receiver<PromotionState>,
