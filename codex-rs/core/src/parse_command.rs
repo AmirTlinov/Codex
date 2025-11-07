@@ -260,6 +260,29 @@ mod tests {
     }
 
     #[test]
+    fn cat_with_number_flag_is_read() {
+        let inner = "cat -n README.md";
+        assert_parsed(
+            &vec_str(&["bash", "-lc", inner]),
+            vec![ParsedCommand::Read {
+                cmd: inner.to_string(),
+                name: "README.md".to_string(),
+            }],
+        );
+    }
+
+    #[test]
+    fn cat_heredoc_remains_unknown() {
+        let script = "cat <<'EOF' > ./tmp.md\nbody\nEOF";
+        assert_parsed(
+            &vec_str(&["bash", "-lc", script]),
+            vec![ParsedCommand::Unknown {
+                cmd: script.to_string(),
+            }],
+        );
+    }
+
+    #[test]
     fn supports_tail_n_plus() {
         let inner = "tail -n +522 README.md";
         assert_parsed(
@@ -961,6 +984,11 @@ fn contains_connectors(tokens: &[String]) -> bool {
         .any(|t| t == "&&" || t == "||" || t == "|" || t == ";")
 }
 
+fn contains_shell_redirection(token: &str) -> bool {
+    let trimmed = token.trim_start_matches(|c: char| c == '(');
+    trimmed.starts_with('<') || trimmed.starts_with('>')
+}
+
 fn split_on_connectors(tokens: &[String]) -> Vec<Vec<String>> {
     let mut out: Vec<Vec<String>> = Vec::new();
     let mut cur: Vec<String> = Vec::new();
@@ -985,6 +1013,10 @@ fn trim_at_connector(tokens: &[String]) -> Vec<String> {
         .position(|t| t == "|" || t == "&&" || t == "||" || t == ";")
         .unwrap_or(tokens.len());
     tokens[..idx].to_vec()
+}
+
+fn is_cat_flag(arg: &str) -> bool {
+    arg.starts_with('-') && arg != "-"
 }
 
 /// Shorten a path to the last component, excluding `build`/`dist`/`node_modules`/`src`.
@@ -1328,14 +1360,28 @@ fn summarize_main_tokens(main_cmd: &[String]) -> ParsedCommand {
             }
         }
         Some((head, tail)) if head == "cat" => {
-            // Support both `cat <file>` and `cat -- <file>` forms.
+            // Support both `cat <file>` and `cat -- <file>` forms, allowing common flags like -n.
             let effective_tail: &[String] = if tail.first().map(String::as_str) == Some("--") {
                 &tail[1..]
             } else {
                 tail
             };
-            if effective_tail.len() == 1 {
-                let name = short_display_path(&effective_tail[0]);
+            let args_no_connector = trim_at_connector(effective_tail);
+            if args_no_connector.is_empty()
+                || args_no_connector
+                    .iter()
+                    .any(|arg| contains_shell_redirection(arg.as_str()))
+            {
+                return ParsedCommand::Unknown {
+                    cmd: shlex_join(main_cmd),
+                };
+            }
+            let non_flag_args: Vec<&String> = args_no_connector
+                .iter()
+                .filter(|arg| !is_cat_flag(arg))
+                .collect();
+            if non_flag_args.len() == 1 {
+                let name = short_display_path(non_flag_args[0]);
                 ParsedCommand::Read {
                     cmd: shlex_join(main_cmd),
                     name,
