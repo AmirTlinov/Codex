@@ -1629,6 +1629,30 @@ mod tests {
     }
 
     #[test]
+    fn heredoc_command_sqlite_run_summary() {
+        let script = "sqlite3 <<'SQL'\nselect 1;\nSQL\n";
+        let call_id = "c_sqlite".to_string();
+        let mut cell = ExecCell::new(ExecCall {
+            call_id: call_id.clone(),
+            command: vec!["bash".into(), "-lc".into(), script.to_string()],
+            parsed: vec![ParsedCommand::Unknown {
+                cmd: script.to_string(),
+            }],
+            output: None,
+            start_time: Some(Instant::now()),
+            duration: None,
+        });
+
+        cell.complete_call(&call_id, empty_command_output(), Duration::from_millis(1));
+
+        let rendered = render_lines(&cell.display_lines(80)).join("\n");
+        assert!(rendered.contains("Run"));
+        assert!(rendered.contains("sqlite3"));
+        assert!(rendered.contains("(1 line)"));
+        assert!(!rendered.contains("select 1"));
+    }
+
+    #[test]
     fn mcp_tools_output_masks_sensitive_values() {
         let mut config = test_config();
         let mut env = HashMap::new();

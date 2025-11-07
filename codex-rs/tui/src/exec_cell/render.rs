@@ -824,22 +824,75 @@ fn normalize_command_name(raw: &str) -> String {
     raw.rsplit('/').next().unwrap_or(raw).to_string()
 }
 
+const SUPPORTED_HEREDOC_COMMANDS: &[&str] = &[
+    // File writers / appenders
+    "cat",
+    "tee",
+    // Shells
+    "ash",
+    "bash",
+    "dash",
+    "elvish",
+    "fish",
+    "ksh",
+    "pwsh",
+    "powershell",
+    "sh",
+    "xonsh",
+    "zsh",
+    // JavaScript / TypeScript runtimes
+    "bun",
+    "deno",
+    "node",
+    "ts-node",
+    // Python runtimes
+    "ipython",
+    "pypy",
+    "pypy3",
+    "python",
+    "python2",
+    "python3",
+    // Other common interpreters / REPLs
+    "bb",
+    "clojure",
+    "elixir",
+    "erl",
+    "escript",
+    "go",
+    "groovy",
+    "julia",
+    "lua",
+    "luajit",
+    "nim",
+    "nodejs",
+    "perl",
+    "php",
+    "php8",
+    "ruby",
+    "scala",
+    "swift",
+    // Data / database CLIs
+    "duckdb",
+    "mongo",
+    "mongosh",
+    "mysql",
+    "mysqlsh",
+    "psql",
+    "redis-cli",
+    "sqlcmd",
+    "sqlite3",
+    // Utilities frequently scripted via heredoc
+    "apply_patch",
+    "envsubst",
+    "jq",
+    "kubectl",
+    "yq",
+];
+
 fn is_supported_heredoc_command(command: &str) -> bool {
-    matches!(
-        command,
-        "cat"
-            | "python"
-            | "python3"
-            | "node"
-            | "deno"
-            | "bash"
-            | "sh"
-            | "zsh"
-            | "perl"
-            | "ruby"
-            | "php"
-            | "go"
-    )
+    SUPPORTED_HEREDOC_COMMANDS
+        .iter()
+        .any(|candidate| candidate.eq_ignore_ascii_case(command))
 }
 
 fn parse_heredoc_terminator(line: &str) -> Option<String> {
