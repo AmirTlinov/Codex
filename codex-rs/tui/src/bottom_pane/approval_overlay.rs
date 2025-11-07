@@ -19,12 +19,19 @@ use crate::render::renderable::Renderable;
 use codex_core::protocol::FileChange;
 use codex_core::protocol::Op;
 use codex_core::protocol::ReviewDecision;
+use codex_core::protocol::SandboxCommandAssessment;
+use codex_core::protocol::SandboxRiskCategory;
+use codex_core::protocol::SandboxRiskHistoryEntry;
+use codex_core::protocol::SandboxRiskLevel;
 use crossterm::event::KeyCode;
 use crossterm::event::KeyEvent;
 use crossterm::event::KeyEventKind;
 use crossterm::event::KeyModifiers;
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
+use ratatui::style::Color;
+use ratatui::style::Modifier;
+use ratatui::style::Style;
 use ratatui::style::Stylize;
 use ratatui::text::Line;
 use ratatui::text::Span;
@@ -36,8 +43,11 @@ use ratatui::widgets::Wrap;
 pub(crate) enum ApprovalRequest {
     Exec {
         id: String,
+        call_id: String,
         command: Vec<String>,
         reason: Option<String>,
+        risk: Option<SandboxCommandAssessment>,
+        recent_risks: Vec<SandboxRiskHistoryEntry>,
     },
     ApplyPatch {
         id: String,
@@ -283,8 +293,11 @@ impl From<ApprovalRequest> for ApprovalRequestState {
         match value {
             ApprovalRequest::Exec {
                 id,
+                call_id,
                 command,
                 reason,
+                risk,
+                recent_risks,
             } => {
                 let mut header: Vec<Line<'static>> = Vec::new();
                 if let Some(reason) = reason
@@ -299,6 +312,18 @@ impl From<ApprovalRequest> for ApprovalRequestState {
                     first.spans.insert(0, Span::from("$ "));
                 }
                 header.extend(full_cmd_lines);
+
+                if let Some(risk) = risk {
+                    header.push(Line::from(""));
+                    header.extend(render_risk_block(&risk));
+                }
+
+                let history = render_recent_risk_history(&recent_risks, &call_id);
+                if !history.is_empty() {
+                    header.push(Line::from(""));
+                    header.extend(history);
+                }
+
                 Self {
                     variant: ApprovalVariant::Exec { id, command },
                     header: Box::new(Paragraph::new(header).wrap(Wrap { trim: false })),
@@ -392,18 +417,126 @@ fn patch_options() -> Vec<ApprovalOption> {
     ]
 }
 
+fn render_risk_block(risk: &SandboxCommandAssessment) -> Vec<Line<'static>> {
+    let mut lines = Vec::new();
+    lines.push(Line::from("Risk assessment:".bold()));
+    let mut level_line = vec!["  Level: ".into(), risk_level_span(risk.risk_level)];
+    if !risk.description.is_empty() {
+        level_line.push(" ".into());
+        level_line.push(risk.description.clone().italic());
+    }
+    lines.push(Line::from(level_line));
+    if let Some(categories) = format_risk_categories(&risk.risk_categories) {
+        lines.push(Line::from(vec!["  Categories: ".into(), categories.into()]));
+    }
+    lines
+}
+
+fn render_recent_risk_history(
+    entries: &[SandboxRiskHistoryEntry],
+    current_call_id: &str,
+) -> Vec<Line<'static>> {
+    const MAX_RECENT: usize = 3;
+    let mut lines = Vec::new();
+    let mut count = 0;
+    for entry in entries.iter().rev() {
+        if entry.call_id == current_call_id {
+            continue;
+        }
+        if count == 0 {
+            lines.push(Line::from("Recent risk assessments this session:".bold()));
+        }
+        if count >= MAX_RECENT {
+            break;
+        }
+        let label = format!("  {}", abbreviate_call_id(&entry.call_id)).dim();
+        let mut spans = vec![
+            label,
+            " ".into(),
+            risk_level_span(entry.assessment.risk_level),
+        ];
+        if !entry.assessment.description.is_empty() {
+            spans.push(" ".into());
+            spans.push(entry.assessment.description.clone().into());
+        }
+        lines.push(Line::from(spans));
+        count += 1;
+    }
+    lines
+}
+
+fn risk_level_span(level: SandboxRiskLevel) -> Span<'static> {
+    let (label, color) = match level {
+        SandboxRiskLevel::High => ("HIGH", Color::Red),
+        SandboxRiskLevel::Medium => ("MEDIUM", Color::Yellow),
+        SandboxRiskLevel::Low => ("LOW", Color::Green),
+    };
+    Span::styled(
+        label,
+        Style::default().fg(color).add_modifier(Modifier::BOLD),
+    )
+}
+
+fn format_risk_categories(categories: &[SandboxRiskCategory]) -> Option<String> {
+    if categories.is_empty() {
+        return None;
+    }
+    Some(
+        categories
+            .iter()
+            .map(|cat| title_case_words(cat.as_str()))
+            .collect::<Vec<_>>()
+            .join(", "),
+    )
+}
+
+fn abbreviate_call_id(call_id: &str) -> String {
+    const MAX_LEN: usize = 8;
+    let char_count = call_id.chars().count();
+    if char_count <= MAX_LEN {
+        call_id.to_string()
+    } else {
+        let suffix: String = call_id.chars().skip(char_count - MAX_LEN).collect();
+        format!("…{suffix}")
+    }
+}
+
+fn title_case_words(text: &str) -> String {
+    text.split('_')
+        .map(|part| {
+            let mut chars = part.chars();
+            match chars.next() {
+                Some(first) => {
+                    let mut result = first.to_uppercase().collect::<String>();
+                    result.push_str(&chars.as_str().to_lowercase());
+                    result
+                }
+                None => String::new(),
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::app_event::AppEvent;
+    use codex_core::protocol::SandboxCommandAssessment;
+    use codex_core::protocol::SandboxRiskCategory;
+    use codex_core::protocol::SandboxRiskHistoryEntry;
+    use codex_core::protocol::SandboxRiskLevel;
     use pretty_assertions::assert_eq;
     use tokio::sync::mpsc::unbounded_channel;
 
     fn make_exec_request() -> ApprovalRequest {
         ApprovalRequest::Exec {
             id: "test".to_string(),
+            call_id: "req-1".to_string(),
             command: vec!["echo".to_string(), "hi".to_string()],
             reason: Some("reason".to_string()),
+            risk: None,
+            recent_risks: Vec::new(),
         }
     }
 
@@ -445,6 +578,9 @@ mod tests {
             id: "test".into(),
             command,
             reason: None,
+            call_id: "call-xyz".into(),
+            risk: None,
+            recent_risks: Vec::new(),
         };
 
         let view = ApprovalOverlay::new(exec_request, tx);
@@ -515,5 +651,59 @@ mod tests {
             }
         }
         assert_eq!(decision, Some(ReviewDecision::ApprovedForSession));
+    }
+
+    #[test]
+    fn exec_modal_displays_risk_and_history() {
+        let (tx_raw, _rx) = unbounded_channel::<AppEvent>();
+        let tx = AppEventSender::new(tx_raw);
+        let current_risk = SandboxCommandAssessment {
+            description: "Deleting tracked files".to_string(),
+            risk_level: SandboxRiskLevel::High,
+            risk_categories: vec![SandboxRiskCategory::DataDeletion],
+        };
+        let history = vec![SandboxRiskHistoryEntry {
+            call_id: "previous-risk-call".to_string(),
+            assessment: SandboxCommandAssessment {
+                description: "Possible secret upload".to_string(),
+                risk_level: SandboxRiskLevel::Medium,
+                risk_categories: vec![SandboxRiskCategory::DataExfiltration],
+            },
+        }];
+        let request = ApprovalRequest::Exec {
+            id: "risk".into(),
+            call_id: "current-call".into(),
+            command: vec!["rm".into(), "-rf".into(), ".git".into()],
+            reason: None,
+            risk: Some(current_risk),
+            recent_risks: history,
+        };
+        let view = ApprovalOverlay::new(request, tx);
+        let height = view.desired_height(60);
+        let mut buf = Buffer::empty(Rect::new(0, 0, 60, height));
+        view.render(Rect::new(0, 0, 60, height), &mut buf);
+        let rendered: Vec<String> = (0..buf.area.height)
+            .map(|row| {
+                (0..buf.area.width)
+                    .map(|col| buf[(col, row)].symbol().chars().next().unwrap_or(' '))
+                    .collect()
+            })
+            .collect();
+        assert!(
+            rendered.iter().any(|line| line.contains("Risk assessment")),
+            "risk block missing: {rendered:?}"
+        );
+        assert!(
+            rendered
+                .iter()
+                .any(|line| line.contains("Recent risk assessments")),
+            "history heading missing: {rendered:?}"
+        );
+        assert!(
+            rendered
+                .iter()
+                .any(|line| line.contains("Possible secret upload")),
+            "history entry missing description: {rendered:?}"
+        );
     }
 }

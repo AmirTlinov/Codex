@@ -1,3 +1,7 @@
+// Update prompt logic is not wired up in debug builds to avoid hitting
+// GitHub APIs when developing locally, so silence dead code warnings there.
+#![cfg_attr(debug_assertions, allow(dead_code))]
+
 use chrono::DateTime;
 use chrono::Duration;
 use chrono::Utc;

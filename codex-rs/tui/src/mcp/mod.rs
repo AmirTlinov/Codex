@@ -1,5 +1,4 @@
 mod manager_view;
-#[allow(dead_code)]
 mod types;
 mod wizard_view;
 

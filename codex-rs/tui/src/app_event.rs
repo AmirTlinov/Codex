@@ -9,6 +9,8 @@ use codex_core::protocol::Event;
 use codex_file_search::FileMatch;
 
 use crate::bottom_pane::ApprovalRequest;
+use crate::exec_cell::ExecStreamAction;
+use crate::exec_cell::ExecStreamKind;
 use crate::history_cell::HistoryCell;
 use crate::mcp::McpWizardDraft;
 
@@ -108,6 +110,24 @@ pub(crate) enum AppEvent {
     /// Update the current sandbox policy in the running app and widget.
     UpdateSandboxPolicy(SandboxPolicy),
 
+    /// Toggle auto-attach behavior for agents context.
+    SetAutoAttachAgentsContext {
+        enabled: bool,
+        persist: bool,
+    },
+
+    /// Toggle whether transcript rendering may break extremely long tokens mid-word.
+    SetWrapBreakLongWords {
+        enabled: bool,
+        persist: bool,
+    },
+
+    /// Toggle desktop notification support in the TUI.
+    SetDesktopNotifications {
+        enabled: bool,
+        persist: bool,
+    },
+
     /// Update whether the full access warning prompt has been acknowledged.
     UpdateFullAccessWarningAcknowledged(bool),
 
@@ -116,6 +136,9 @@ pub(crate) enum AppEvent {
 
     /// Re-open the approval presets popup.
     OpenApprovalsPopup,
+
+    /// Open the consolidated settings popup.
+    OpenSettings,
 
     /// Forwarded conversation history snapshot from the current conversation.
     ConversationHistory(ConversationPathResponseEvent),
@@ -146,8 +169,8 @@ pub(crate) enum AppEvent {
     /// Launch the agents context manager overlay to adjust included files.
     OpenAgentsContextManager,
 
-    /// Clear any previously attached agents context selection after it has been consumed.
-    ClearAgentsContextSelection,
+    /// Open the MCP server manager overlay.
+    OpenMcpManager,
 
     /// Open the process manager overlay showing background unified exec sessions.
     OpenProcessManager,
@@ -176,6 +199,18 @@ pub(crate) enum AppEvent {
     /// Request to export buffered output for a session to disk.
     OpenUnifiedExecExportPrompt {
         session_id: i32,
+    },
+
+    /// Submit typed input to a running unified exec session.
+    SendUnifiedExecInput {
+        session_id: i32,
+        input: String,
+    },
+
+    /// Export buffered output for a unified exec session to disk.
+    ExportUnifiedExecSessionLog {
+        session_id: i32,
+        destination: String,
     },
 
     /// Request the backend to terminate a running unified exec session.
@@ -207,6 +242,13 @@ pub(crate) enum AppEvent {
     /// Remove an MCP server configuration by name.
     RemoveMcpServer {
         name: String,
+    },
+
+    /// Toggle stdout/stderr visibility for a completed exec call.
+    ToggleExecStream {
+        call_id: Option<String>,
+        stream: ExecStreamKind,
+        action: ExecStreamAction,
     },
 }
 

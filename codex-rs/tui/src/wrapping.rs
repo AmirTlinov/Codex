@@ -1,10 +1,18 @@
 use ratatui::text::Line;
 use ratatui::text::Span;
 use std::ops::Range;
+use std::sync::atomic::AtomicBool;
+use std::sync::atomic::Ordering;
 use textwrap::Options;
 use textwrap::wrap_algorithms::Penalties;
 
 use crate::render::line_utils::push_owned_lines;
+
+static BREAK_LONG_WORDS: AtomicBool = AtomicBool::new(true);
+
+pub(crate) fn set_wrap_break_words(enabled: bool) {
+    BREAK_LONG_WORDS.store(enabled, Ordering::Relaxed);
+}
 
 pub(crate) fn wrap_ranges<'a, O>(text: &str, width_or_options: O) -> Vec<Range<usize>>
 where
@@ -81,7 +89,6 @@ impl From<usize> for RtOptions<'_> {
     }
 }
 
-#[allow(dead_code)]
 impl<'a> RtOptions<'a> {
     pub fn new(width: usize) -> Self {
         RtOptions {
@@ -89,7 +96,7 @@ impl<'a> RtOptions<'a> {
             line_ending: textwrap::LineEnding::LF,
             initial_indent: Line::default(),
             subsequent_indent: Line::default(),
-            break_words: true,
+            break_words: BREAK_LONG_WORDS.load(Ordering::Relaxed),
             word_separator: textwrap::WordSeparator::new(),
             wrap_algorithm: textwrap::WrapAlgorithm::OptimalFit(Penalties {
                 // ~infinite overflow penalty, we never want to overflow a line.
@@ -98,17 +105,6 @@ impl<'a> RtOptions<'a> {
             }),
             word_splitter: textwrap::WordSplitter::HyphenSplitter,
         }
-    }
-
-    pub fn line_ending(self, line_ending: textwrap::LineEnding) -> Self {
-        RtOptions {
-            line_ending,
-            ..self
-        }
-    }
-
-    pub fn width(self, width: usize) -> Self {
-        RtOptions { width, ..self }
     }
 
     pub fn initial_indent(self, initial_indent: Line<'a>) -> Self {
@@ -125,20 +121,6 @@ impl<'a> RtOptions<'a> {
         }
     }
 
-    pub fn break_words(self, break_words: bool) -> Self {
-        RtOptions {
-            break_words,
-            ..self
-        }
-    }
-
-    pub fn word_separator(self, word_separator: textwrap::WordSeparator) -> RtOptions<'a> {
-        RtOptions {
-            word_separator,
-            ..self
-        }
-    }
-
     pub fn wrap_algorithm(self, wrap_algorithm: textwrap::WrapAlgorithm) -> RtOptions<'a> {
         RtOptions {
             wrap_algorithm,
@@ -149,6 +131,14 @@ impl<'a> RtOptions<'a> {
     pub fn word_splitter(self, word_splitter: textwrap::WordSplitter) -> RtOptions<'a> {
         RtOptions {
             word_splitter,
+            ..self
+        }
+    }
+
+    #[cfg(test)]
+    pub fn break_words(self, break_words: bool) -> Self {
+        RtOptions {
+            break_words,
             ..self
         }
     }
@@ -240,7 +230,6 @@ where
 
 /// Wrap a sequence of lines, applying the initial indent only to the very first
 /// output line, and using the subsequent indent for all later wrapped pieces.
-#[allow(dead_code)]
 pub(crate) fn word_wrap_lines<'a, I, O>(lines: I, width_or_options: O) -> Vec<Line<'static>>
 where
     I: IntoIterator<Item = &'a Line<'a>>,
@@ -265,7 +254,6 @@ where
     out
 }
 
-#[allow(dead_code)]
 pub(crate) fn word_wrap_lines_borrowed<'a, I, O>(lines: I, width_or_options: O) -> Vec<Line<'a>>
 where
     I: IntoIterator<Item = &'a Line<'a>>,

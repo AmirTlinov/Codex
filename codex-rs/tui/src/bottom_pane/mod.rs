@@ -27,6 +27,7 @@ mod file_search_popup;
 mod footer;
 mod list_selection_view;
 mod prompt_args;
+pub(crate) use list_selection_view::ListSelectionView;
 pub(crate) use list_selection_view::SelectionViewParams;
 mod paste_burst;
 pub mod popup_consts;
@@ -125,6 +126,7 @@ impl BottomPane {
         }
     }
 
+    #[cfg(test)]
     pub(crate) fn status_indicator_visible(&self) -> bool {
         self.status.is_some()
     }
@@ -263,6 +265,7 @@ impl BottomPane {
         } else if self.composer_is_empty() {
             CancellationEvent::NotHandled
         } else {
+            self.composer.remember_current_text_for_history();
             self.view_stack.pop();
             self.clear_composer_for_ctrl_c();
             self.show_ctrl_c_quit_hint();
@@ -397,10 +400,6 @@ impl BottomPane {
     pub(crate) fn show_selection_view(&mut self, params: list_selection_view::SelectionViewParams) {
         let view = list_selection_view::ListSelectionView::new(params, self.app_event_tx.clone());
         self.push_view(Box::new(view));
-    }
-
-    pub(crate) fn show_custom_view(&mut self, view: Box<dyn BottomPaneView>) {
-        self.push_view(view);
     }
 
     /// Update the queued messages shown under the status header.
@@ -595,8 +594,11 @@ mod tests {
     fn exec_request() -> ApprovalRequest {
         ApprovalRequest::Exec {
             id: "1".to_string(),
+            call_id: "call-1".to_string(),
             command: vec!["echo".into(), "ok".into()],
             reason: None,
+            risk: None,
+            recent_risks: Vec::new(),
         }
     }
 

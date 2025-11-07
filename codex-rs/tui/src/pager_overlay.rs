@@ -478,6 +478,14 @@ impl TranscriptOverlay {
         }
     }
 
+    pub(crate) fn replace_cell(&mut self, idx: usize, cell: Arc<dyn HistoryCell>) {
+        if idx >= self.cells.len() {
+            return;
+        }
+        self.cells[idx] = cell;
+        self.view.renderables = Self::render_cells(&self.cells, self.highlight_cell);
+    }
+
     pub(crate) fn set_highlight_cell(&mut self, cell: Option<usize>) {
         self.highlight_cell = cell;
         self.view.renderables = Self::render_cells(&self.cells, self.highlight_cell);
@@ -1102,13 +1110,13 @@ mod tests {
         );
         exec_cell.complete_call(
             "exec-1",
-            CommandOutput {
-                exit_code: 0,
-                stdout: String::new(),
-                stderr: String::new(),
-                aggregated_output: "src\nREADME.md\n".into(),
-                formatted_output: "src\nREADME.md\n".into(),
-            },
+            CommandOutput::new(
+                0,
+                String::new(),
+                String::new(),
+                "src\nREADME.md\n".into(),
+                "src\nREADME.md\n".into(),
+            ),
             Duration::from_millis(420),
         );
         let exec_cell: Arc<dyn HistoryCell> = Arc::new(exec_cell);

@@ -2,28 +2,54 @@ use crate::UpdateAction;
 use crate::agents_context_manager::AgentsContextManagerConfig;
 use crate::agents_context_manager::AgentsContextManagerOutcome;
 use crate::agents_context_manager::run_agents_context_manager;
+use crate::agents_context_warning::AgentsContextDecision;
+use crate::agents_context_warning::AgentsContextWarningParams;
+use crate::agents_context_warning::run_agents_context_warning;
 use crate::app_backtrack::BacktrackState;
 use crate::app_event::AppEvent;
 use crate::app_event_sender::AppEventSender;
 use crate::bottom_pane::ApprovalRequest;
 use crate::chatwidget::ChatWidget;
 use crate::diff_render::DiffSummary;
+use crate::exec_cell::ExecCell;
+use crate::exec_cell::ExecStreamAction;
+use crate::exec_cell::ExecStreamKind;
 use crate::exec_command::strip_bash_lc_and_escape;
 use crate::file_search::FileSearchManager;
 use crate::format_token_count;
 use crate::history_cell::HistoryCell;
+#[cfg(not(debug_assertions))]
+use crate::history_cell::UpdateAvailableHistoryCell;
 use crate::live_exec::LiveExecState;
+use crate::mcp::McpManagerEntry;
+use crate::mcp::McpManagerState;
+use crate::mcp::McpWizardDraft;
+use crate::mcp::McpWizardInit;
 use crate::pager_overlay::Overlay;
+use crate::process_manager::ProcessManagerEntry;
+use crate::process_manager::ProcessOutputData;
+use crate::process_manager::entry_and_data_from_output;
 use crate::render::highlight::highlight_bash_to_lines;
 use crate::resume_picker::ResumeSelection;
 use crate::tui;
 use crate::tui::TuiEvent;
 use codex_ansi_escape::ansi_escape_line;
 use codex_core::AuthManager;
+use codex_core::CodexConversation;
 use codex_core::ConversationManager;
+use codex_core::UnifiedExecOutputWindow;
+use codex_core::config::AgentsSource;
 use codex_core::config::Config;
+use codex_core::config::load_global_mcp_servers;
 use codex_core::config::persist_model_selection;
+use codex_core::config::set_auto_attach_agents_context;
 use codex_core::config::set_hide_full_access_warning;
+use codex_core::config::set_tui_notifications_enabled;
+use codex_core::config::set_wrap_break_long_words;
+use codex_core::config_types::McpServerConfig;
+use codex_core::config_types::Notifications;
+use codex_core::mcp::registry::McpRegistry;
+use codex_core::mcp::templates::TemplateCatalog;
 use codex_core::model_family::find_family_for_model;
 use codex_core::protocol::Op;
 use codex_core::protocol::SessionSource;
@@ -32,12 +58,14 @@ use codex_core::protocol_config_types::ReasoningEffort as ReasoningEffortConfig;
 use codex_protocol::ConversationId;
 use color_eyre::eyre::Result;
 use color_eyre::eyre::WrapErr;
+use color_eyre::eyre::eyre;
 use crossterm::event::KeyCode;
 use crossterm::event::KeyEvent;
 use crossterm::event::KeyEventKind;
 use ratatui::style::Stylize;
 use ratatui::text::Line;
 use std::cell::RefCell;
+use std::collections::HashMap;
 use std::collections::HashSet;
 use std::path::PathBuf;
 use std::rc::Rc;
@@ -49,9 +77,6 @@ use std::time::Duration;
 use tokio::select;
 use tokio::sync::mpsc::unbounded_channel;
 use tokio::task::JoinHandle;
-
-#[cfg(not(debug_assertions))]
-use crate::history_cell::UpdateAvailableHistoryCell;
 
 #[derive(Debug, Clone)]
 pub struct AppExitInfo {
@@ -365,8 +390,9 @@ impl App {
                 call_id,
                 shell_id,
                 initial_output,
-                ..
+                description,
             } => {
+                let shell_label = shell_id.clone();
                 {
                     let mut state = self.live_exec.borrow_mut();
                     state.promote(&call_id, shell_id, initial_output);
@@ -378,6 +404,15 @@ impl App {
                     tui.frame_requester().schedule_frame();
                 }
                 self.enable_live_exec_polling(tui);
+                if let Some(desc) = description.as_deref() {
+                    let trimmed = desc.trim();
+                    if !trimmed.is_empty() {
+                        self.chat_widget.add_info_message(
+                            format!("Background shell `{shell_label}`: {trimmed}"),
+                            None,
+                        );
+                    }
+                }
             }
             AppEvent::LiveExecPollTick => {
                 self.maybe_poll_live_exec(tui);
@@ -531,6 +566,7 @@ impl App {
                                                 .to_string(),
                                         ),
                                     );
+                                    self.maybe_prompt_agents_context_warning(tui).await?;
                                 } else {
                                     self.chat_widget.set_agents_context_active(false);
                                     self.chat_widget.add_info_message(
@@ -550,38 +586,134 @@ impl App {
                     }
                 }
             }
-            AppEvent::ClearAgentsContextSelection => {
-                self.config.agents_context_entries.clear();
-                self.config.agents_context_include.clear();
-                self.config.agents_context_exclude.clear();
-                self.config.agents_context_prompt = None;
-                self.config.agents_context_prompt_tokens = 0;
-                self.config.agents_context_prompt_truncated = false;
-                self.chat_widget
-                    .apply_agents_context_from_config(&self.config);
-                self.chat_widget.set_agents_context_active(false);
-                tui.frame_requester().schedule_frame();
+            AppEvent::OpenMcpManager => {
+                if let Err(err) = self.open_mcp_manager_overlay().await {
+                    tracing::error!(error = %err, "failed to open MCP manager");
+                    self.chat_widget
+                        .add_error_message(format!("Failed to open MCP manager: {err}"));
+                    self.chat_widget.add_mcp_output();
+                }
             }
             AppEvent::OpenProcessManager => {
-                self.chat_widget.add_info_message(
-                    "Process manager view is not yet available in this build.".to_string(),
-                    None,
-                );
+                if let Err(err) = self.open_process_manager_overlay().await {
+                    tracing::error!(error = %err, "failed to open process manager overlay");
+                    self.chat_widget
+                        .add_error_message(format!("Failed to open process manager: {err}"));
+                }
             }
-            AppEvent::OpenUnifiedExecInputPrompt { .. }
-            | AppEvent::OpenUnifiedExecOutput { .. }
-            | AppEvent::RefreshUnifiedExecOutput { .. }
-            | AppEvent::LoadUnifiedExecOutputWindow { .. }
-            | AppEvent::OpenUnifiedExecExportPrompt { .. }
-            | AppEvent::KillUnifiedExecSession { .. }
-            | AppEvent::RemoveUnifiedExecSession { .. } => {
-                tracing::warn!("Unified exec management event ignored in this build");
+            AppEvent::OpenUnifiedExecInputPrompt { session_id } => {
+                self.chat_widget.open_unified_exec_input_prompt(session_id);
             }
-            AppEvent::OpenMcpWizard { .. }
-            | AppEvent::ApplyMcpWizard { .. }
-            | AppEvent::ReloadMcpServers
-            | AppEvent::RemoveMcpServer { .. } => {
-                tracing::warn!("MCP management event ignored in this build");
+            AppEvent::OpenUnifiedExecOutput { session_id } => {
+                if let Err(err) = self.show_unified_exec_output(session_id, None).await {
+                    tracing::error!(error = %err, "failed to load unified exec output");
+                    self.chat_widget
+                        .add_error_message(format!("Failed to load process output: {err}"));
+                }
+            }
+            AppEvent::RefreshUnifiedExecOutput { session_id } => {
+                if let Err(err) = self.show_unified_exec_output(session_id, None).await {
+                    tracing::error!(error = %err, "failed to refresh unified exec output");
+                    self.chat_widget
+                        .add_error_message(format!("Failed to refresh process output: {err}"));
+                }
+            }
+            AppEvent::LoadUnifiedExecOutputWindow { session_id, window } => {
+                if let Err(err) = self
+                    .show_unified_exec_output(session_id, Some(window))
+                    .await
+                {
+                    tracing::error!(error = %err, "failed to load output window");
+                    self.chat_widget.add_error_message(format!(
+                        "Failed to load requested output window: {err}"
+                    ));
+                }
+            }
+            AppEvent::OpenUnifiedExecExportPrompt { session_id } => {
+                let suggestion = self.default_export_suggestion(session_id);
+                self.chat_widget
+                    .open_unified_exec_export_prompt(session_id, suggestion);
+            }
+            AppEvent::SendUnifiedExecInput { session_id, input } => {
+                if let Err(err) = self.send_unified_exec_input(session_id, input).await {
+                    tracing::error!(error = %err, "failed to send unified exec input");
+                    self.chat_widget
+                        .add_error_message(format!("Failed to send input: {err}"));
+                }
+            }
+            AppEvent::ExportUnifiedExecSessionLog {
+                session_id,
+                destination,
+            } => {
+                if let Err(err) = self.export_unified_exec_log(session_id, destination).await {
+                    tracing::error!(error = %err, "failed to export unified exec log");
+                    self.chat_widget
+                        .add_error_message(format!("Failed to export session log: {err}"));
+                }
+            }
+            AppEvent::KillUnifiedExecSession { session_id } => {
+                if let Err(err) = self.kill_unified_exec_session(session_id).await {
+                    tracing::error!(error = %err, "failed to kill unified exec session");
+                    self.chat_widget
+                        .add_error_message(format!("Failed to kill session: {err}"));
+                } else if let Err(err) = self.open_process_manager_overlay().await {
+                    tracing::error!(error = %err, "failed to refresh process manager");
+                }
+            }
+            AppEvent::RemoveUnifiedExecSession { session_id } => {
+                if let Err(err) = self.remove_unified_exec_session(session_id).await {
+                    tracing::error!(error = %err, "failed to remove unified exec session");
+                    self.chat_widget
+                        .add_error_message(format!("Failed to remove session: {err}"));
+                } else if let Err(err) = self.open_process_manager_overlay().await {
+                    tracing::error!(error = %err, "failed to refresh process manager");
+                }
+            }
+            AppEvent::ToggleExecStream {
+                call_id,
+                stream,
+                action,
+            } => {
+                self.handle_exec_stream_toggle(tui, call_id, stream, action)
+                    .await?;
+            }
+            AppEvent::OpenMcpWizard {
+                template_id,
+                draft,
+                existing_name,
+            } => {
+                if let Err(err) = self
+                    .open_mcp_wizard(template_id, draft, existing_name)
+                    .await
+                {
+                    tracing::error!(error = %err, "failed to open MCP wizard");
+                    self.chat_widget
+                        .add_error_message(format!("Failed to open MCP wizard: {err}"));
+                }
+            }
+            AppEvent::ApplyMcpWizard {
+                draft,
+                existing_name,
+            } => {
+                if let Err(err) = self.apply_mcp_wizard(draft, existing_name).await {
+                    tracing::error!(error = %err, "failed to apply MCP wizard");
+                    self.chat_widget
+                        .add_error_message(format!("Failed to save MCP server: {err}"));
+                }
+            }
+            AppEvent::ReloadMcpServers => {
+                if let Err(err) = self.reload_mcp_servers().await {
+                    tracing::error!(error = %err, "failed to reload MCP servers");
+                    self.chat_widget
+                        .add_error_message(format!("Failed to reload MCP servers: {err}"));
+                }
+            }
+            AppEvent::RemoveMcpServer { name } => {
+                if let Err(err) = self.remove_mcp_server(&name).await {
+                    tracing::error!(error = %err, server = %name, "failed to remove MCP server");
+                    self.chat_widget
+                        .add_error_message(format!("Failed to remove MCP server `{name}`: {err}"));
+                }
             }
             AppEvent::ShowWindowsAutoModeInstructions => {
                 self.chat_widget.open_windows_auto_mode_instructions();
@@ -631,6 +763,65 @@ impl App {
             AppEvent::UpdateSandboxPolicy(policy) => {
                 self.chat_widget.set_sandbox_policy(policy);
             }
+            AppEvent::SetAutoAttachAgentsContext { enabled, persist } => {
+                self.chat_widget.update_auto_attach_agents_context(enabled);
+                self.config.auto_attach_agents_context = enabled;
+                if persist
+                    && let Err(err) = set_auto_attach_agents_context(
+                        &self.config.codex_home,
+                        self.active_profile.as_deref(),
+                        enabled,
+                    )
+                    .await
+                {
+                    tracing::error!(
+                        error = %err,
+                        "failed to persist auto-attach agents context preference"
+                    );
+                    self.chat_widget.add_error_message(format!(
+                        "Failed to save agents context preference: {err}"
+                    ));
+                }
+            }
+            AppEvent::SetWrapBreakLongWords { enabled, persist } => {
+                self.chat_widget.update_wrap_break_long_words(enabled);
+                self.config.wrap_break_long_words = enabled;
+                if persist
+                    && let Err(err) = set_wrap_break_long_words(
+                        &self.config.codex_home,
+                        self.active_profile.as_deref(),
+                        enabled,
+                    )
+                    .await
+                {
+                    tracing::error!(
+                        error = %err,
+                        "failed to persist wrap preference"
+                    );
+                    self.chat_widget
+                        .add_error_message(format!("Failed to save wrapping preference: {err}"));
+                }
+            }
+            AppEvent::SetDesktopNotifications { enabled, persist } => {
+                self.chat_widget.update_notifications_enabled(enabled);
+                self.config.tui_notifications = Notifications::Enabled(enabled);
+                if persist
+                    && let Err(err) = set_tui_notifications_enabled(
+                        &self.config.codex_home,
+                        self.active_profile.as_deref(),
+                        enabled,
+                    )
+                    .await
+                {
+                    tracing::error!(
+                        error = %err,
+                        "failed to persist notification preference"
+                    );
+                    self.chat_widget.add_error_message(format!(
+                        "Failed to save notification preference: {err}"
+                    ));
+                }
+            }
             AppEvent::UpdateFullAccessWarningAcknowledged(ack) => {
                 self.chat_widget.set_full_access_warning_acknowledged(ack);
             }
@@ -647,6 +838,9 @@ impl App {
             }
             AppEvent::OpenApprovalsPopup => {
                 self.chat_widget.open_approvals_popup();
+            }
+            AppEvent::OpenSettings => {
+                self.chat_widget.open_settings_overlay();
             }
             AppEvent::OpenReviewBranchPicker(cwd) => {
                 self.chat_widget.show_review_branch_picker(&cwd).await;
@@ -699,7 +893,7 @@ impl App {
             }
         }
 
-        let _ = self.app_event_tx.send(AppEvent::LiveExecPollTick);
+        self.app_event_tx.send(AppEvent::LiveExecPollTick);
         if matches!(self.overlay, Some(Overlay::LiveExec(_))) {
             tui.frame_requester().schedule_frame();
         }
@@ -740,6 +934,514 @@ impl App {
         self.chat_widget.token_usage()
     }
 
+    async fn open_process_manager_overlay(&mut self) -> Result<()> {
+        let entries = self.fetch_process_manager_entries().await?;
+        self.chat_widget.show_process_manager(entries);
+        Ok(())
+    }
+
+    async fn fetch_process_manager_entries(&self) -> Result<Vec<ProcessManagerEntry>> {
+        let conversation = self.active_conversation().await?;
+        let snapshots = conversation.unified_exec_sessions().await;
+        Ok(snapshots
+            .into_iter()
+            .map(ProcessManagerEntry::from_snapshot)
+            .collect())
+    }
+
+    async fn show_unified_exec_output(
+        &mut self,
+        session_id: i32,
+        window: Option<UnifiedExecOutputWindow>,
+    ) -> Result<()> {
+        match self.fetch_unified_exec_output(session_id, window).await? {
+            Some((entry, data)) => {
+                self.chat_widget.show_unified_exec_output(entry, data);
+            }
+            None => {
+                self.chat_widget.add_info_message(
+                    format!("No output available for session {session_id}."),
+                    None,
+                );
+            }
+        }
+        Ok(())
+    }
+
+    async fn fetch_unified_exec_output(
+        &self,
+        session_id: i32,
+        window: Option<UnifiedExecOutputWindow>,
+    ) -> Result<Option<(ProcessManagerEntry, ProcessOutputData)>> {
+        let conversation = self.active_conversation().await?;
+        let output = if let Some(window) = window {
+            conversation
+                .unified_exec_output_window(session_id, window)
+                .await
+        } else {
+            conversation.unified_exec_output(session_id).await
+        };
+        Ok(output.map(entry_and_data_from_output))
+    }
+
+    async fn send_unified_exec_input(&mut self, session_id: i32, input: String) -> Result<()> {
+        let trimmed = input.trim();
+        if trimmed.is_empty() {
+            self.chat_widget
+                .add_info_message("Input cancelled: nothing to send.".to_string(), None);
+            return Ok(());
+        }
+
+        let conversation = self.active_conversation().await?;
+        conversation
+            .run_unified_exec(Some(session_id), std::slice::from_ref(&input), None)
+            .await
+            .map_err(|err| eyre!(err))?;
+
+        self.chat_widget
+            .add_info_message(format!("Sent input to session {session_id}."), None);
+        self.show_unified_exec_output(session_id, None).await?;
+        Ok(())
+    }
+
+    async fn export_unified_exec_log(
+        &mut self,
+        session_id: i32,
+        destination: String,
+    ) -> Result<()> {
+        let path = self.resolve_export_path(&destination, session_id);
+        let conversation = self.active_conversation().await?;
+        conversation
+            .export_unified_exec_log(session_id, path.clone())
+            .await
+            .map_err(|err| eyre!(err))?;
+        self.chat_widget.add_info_message(
+            format!(
+                "Exported session {session_id} output to {}.",
+                path.display()
+            ),
+            None,
+        );
+        Ok(())
+    }
+
+    async fn kill_unified_exec_session(&mut self, session_id: i32) -> Result<()> {
+        let conversation = self.active_conversation().await?;
+        let killed = conversation.kill_unified_exec_session(session_id).await;
+        if killed {
+            self.chat_widget.add_info_message(
+                format!("Requested session {session_id} to terminate."),
+                None,
+            );
+            Ok(())
+        } else {
+            Err(eyre!("Session {session_id} is not running"))
+        }
+    }
+
+    async fn remove_unified_exec_session(&mut self, session_id: i32) -> Result<()> {
+        let conversation = self.active_conversation().await?;
+        let removed = conversation.remove_unified_exec_session(session_id).await;
+        if removed {
+            self.chat_widget.add_info_message(
+                format!("Removed session {session_id} from the manager."),
+                None,
+            );
+            Ok(())
+        } else {
+            Err(eyre!("Session {session_id} not found"))
+        }
+    }
+
+    fn default_export_suggestion(&self, session_id: i32) -> Option<String> {
+        let path = self.resolve_export_path("", session_id);
+        Some(path.display().to_string())
+    }
+
+    fn resolve_export_path(&self, destination: &str, session_id: i32) -> PathBuf {
+        let trimmed = destination.trim();
+        if trimmed.is_empty() {
+            return self
+                .config
+                .cwd
+                .join(format!("unified-exec-session-{session_id}.log"));
+        }
+
+        let path = PathBuf::from(trimmed);
+        if path.is_absolute() {
+            path
+        } else {
+            self.config.cwd.join(path)
+        }
+    }
+
+    async fn handle_exec_stream_toggle(
+        &mut self,
+        tui: &mut tui::Tui,
+        call_id: Option<String>,
+        stream: ExecStreamKind,
+        action: ExecStreamAction,
+    ) -> Result<()> {
+        let call_id = match call_id.or_else(|| self.latest_exec_call_id()) {
+            Some(id) => id,
+            None => {
+                self.chat_widget
+                    .add_error_message("No completed shell commands to toggle.".to_string());
+                return Ok(());
+            }
+        };
+
+        let Some((idx, exec_cell)) =
+            self.transcript_cells
+                .iter()
+                .enumerate()
+                .rev()
+                .find_map(|(index, cell)| {
+                    cell.as_any()
+                        .downcast_ref::<ExecCell>()
+                        .and_then(|exec| exec.contains_call(&call_id).then_some((index, exec)))
+                })
+        else {
+            self.chat_widget
+                .add_error_message(format!("Could not find shell output for `{call_id}`."));
+            return Ok(());
+        };
+
+        let Some(output) = exec_cell.call_output(&call_id) else {
+            self.chat_widget
+                .add_error_message(format!("Shell output for `{call_id}` is still running."));
+            return Ok(());
+        };
+
+        let stream_text = match stream {
+            ExecStreamKind::Stdout => &output.stdout,
+            ExecStreamKind::Stderr => &output.stderr,
+        };
+        if stream_text.trim().is_empty() {
+            self.chat_widget.add_info_message(
+                format!(
+                    "{} has no buffered output for call `{call_id}`.",
+                    stream.as_str()
+                ),
+                None,
+            );
+            return Ok(());
+        }
+
+        if matches!(action, ExecStreamAction::Expand) && !output.stream_collapsed(stream) {
+            self.chat_widget.add_info_message(
+                format!("{} is already expanded for `{call_id}`.", stream.as_str()),
+                None,
+            );
+            return Ok(());
+        }
+        if matches!(action, ExecStreamAction::Collapse) && output.stream_collapsed(stream) {
+            self.chat_widget.add_info_message(
+                format!("{} is already collapsed for `{call_id}`.", stream.as_str()),
+                None,
+            );
+            return Ok(());
+        }
+
+        let Some(updated_exec) = exec_cell.apply_stream_action(&call_id, &[stream], action) else {
+            self.chat_widget
+                .add_error_message("Unable to toggle stream visibility.".to_string());
+            return Ok(());
+        };
+
+        let cell: Arc<dyn HistoryCell> = Arc::new(updated_exec);
+        self.transcript_cells[idx] = cell.clone();
+        if let Some(Overlay::Transcript(t)) = &mut self.overlay {
+            t.replace_cell(idx, cell.clone());
+        }
+        self.repaint_transcript(tui)?;
+
+        let state_collapsed = cell
+            .as_any()
+            .downcast_ref::<ExecCell>()
+            .and_then(|exec| exec.call_output(&call_id))
+            .map(|out| out.stream_collapsed(stream))
+            .unwrap_or(false);
+        let state_label = if state_collapsed {
+            "collapsed"
+        } else {
+            "expanded"
+        };
+        self.chat_widget.add_info_message(
+            format!("{} {state_label} for call `{call_id}`.", stream.as_str()),
+            None,
+        );
+        Ok(())
+    }
+
+    fn latest_exec_call_id(&self) -> Option<String> {
+        self.transcript_cells.iter().rev().find_map(|cell| {
+            cell.as_any()
+                .downcast_ref::<ExecCell>()
+                .and_then(|exec| exec.last_completed_call_id().map(str::to_string))
+        })
+    }
+
+    fn repaint_transcript(&mut self, tui: &mut tui::Tui) -> Result<()> {
+        let width = tui.terminal.last_known_screen_size.width;
+        let mut lines: Vec<Line<'static>> = Vec::new();
+        let mut has_visible = false;
+        for cell in &self.transcript_cells {
+            let mut rendered = cell.display_lines(width);
+            if rendered.is_empty() {
+                continue;
+            }
+            if !cell.is_stream_continuation() {
+                if has_visible {
+                    lines.push(Line::from(""));
+                } else {
+                    has_visible = true;
+                }
+            }
+            lines.append(&mut rendered);
+        }
+        tui.replace_history_lines(lines)?;
+        self.has_emitted_history_lines = has_visible;
+        Ok(())
+    }
+
+    async fn active_conversation(&self) -> Result<Arc<CodexConversation>> {
+        let conversation_id = self
+            .chat_widget
+            .conversation_id()
+            .ok_or_else(|| eyre!("Session is still starting"))?;
+        let conversation = self
+            .server
+            .get_conversation(conversation_id)
+            .await
+            .wrap_err("failed to load active conversation")?;
+        Ok(conversation)
+    }
+
+    fn template_catalog(&self) -> TemplateCatalog {
+        TemplateCatalog::from_templates(self.config.mcp_templates.clone())
+    }
+
+    fn build_mcp_registry(&self) -> McpRegistry<'_> {
+        McpRegistry::new(&self.config, self.template_catalog())
+    }
+
+    async fn open_mcp_manager_overlay(&mut self) -> Result<()> {
+        let registry = self.build_mcp_registry();
+        let state = McpManagerState::from_registry(&registry);
+        let entries = state
+            .servers
+            .into_iter()
+            .map(|snapshot| McpManagerEntry {
+                health: registry.health_report(&snapshot.name),
+                snapshot,
+            })
+            .collect();
+        self.chat_widget
+            .show_mcp_manager(entries, state.template_count);
+        Ok(())
+    }
+
+    async fn open_mcp_wizard(
+        &mut self,
+        mut template_id: Option<String>,
+        draft: Option<McpWizardDraft>,
+        existing_name: Option<String>,
+    ) -> Result<()> {
+        let catalog = self.template_catalog();
+        let had_draft = draft.is_some();
+        let mut resolved_draft = draft.unwrap_or_default();
+        if resolved_draft.template_id.is_none() {
+            resolved_draft.template_id = template_id.take();
+        }
+        if !had_draft
+            && let Some(template_cfg) = resolved_draft
+                .template_id
+                .clone()
+                .and_then(|id| catalog.instantiate(&id))
+        {
+            resolved_draft.apply_template_config(&template_cfg);
+        }
+
+        let init = McpWizardInit {
+            app_event_tx: self.app_event_tx.clone(),
+            catalog,
+            draft: Some(resolved_draft),
+            existing_name,
+        };
+        self.chat_widget.open_mcp_wizard(init);
+        Ok(())
+    }
+
+    async fn apply_mcp_wizard(
+        &mut self,
+        draft: McpWizardDraft,
+        existing_name: Option<String>,
+    ) -> Result<()> {
+        let catalog = self.template_catalog();
+        let server = draft
+            .build_server_config(&catalog)
+            .map_err(|err| eyre!(err))?;
+        let name = draft.name.clone();
+        self.upsert_mcp_server(existing_name.as_deref(), &name, server)
+            .await?;
+        self.chat_widget
+            .add_info_message(format!("Saved MCP server `{name}`."), None);
+        self.open_mcp_manager_overlay().await?;
+        Ok(())
+    }
+
+    async fn reload_mcp_servers(&mut self) -> Result<()> {
+        let servers = load_global_mcp_servers(&self.config.codex_home)
+            .await?
+            .into_iter()
+            .collect::<HashMap<_, _>>();
+        self.config.mcp_servers = servers;
+        self.chat_widget
+            .add_info_message("Reloaded MCP servers from disk.".to_string(), None);
+        self.open_mcp_manager_overlay().await?;
+        Ok(())
+    }
+
+    async fn remove_mcp_server(&mut self, name: &str) -> Result<()> {
+        let registry = self.build_mcp_registry();
+        let removed = registry.remove_server(name).map_err(|err| eyre!(err))?;
+        if removed {
+            self.config.mcp_servers.remove(name);
+            self.chat_widget
+                .add_info_message(format!("Removed MCP server `{name}`."), None);
+            self.open_mcp_manager_overlay().await?;
+            Ok(())
+        } else {
+            Err(eyre!(format!("MCP server `{name}` not found")))
+        }
+    }
+
+    async fn upsert_mcp_server(
+        &mut self,
+        existing_name: Option<&str>,
+        name: &str,
+        server: McpServerConfig,
+    ) -> Result<()> {
+        let registry = self.build_mcp_registry();
+        registry
+            .upsert_server_with_existing(existing_name, name, server.clone())
+            .map_err(|err| eyre!(err))?;
+        match existing_name {
+            Some(old) if old != name => {
+                self.config.mcp_servers.remove(old);
+            }
+            _ => {}
+        }
+        self.config.mcp_servers.insert(name.to_string(), server);
+        Ok(())
+    }
+
+    async fn maybe_prompt_agents_context_warning(&mut self, tui: &mut tui::Tui) -> Result<()> {
+        let warning_limit = self.config.agents_context_warning_tokens;
+        if warning_limit == 0 {
+            return Ok(());
+        }
+        let tokens = self.config.agents_context_prompt_tokens;
+        if tokens <= warning_limit {
+            return Ok(());
+        }
+        if self.config.agents_context_entries.is_empty() {
+            return Ok(());
+        }
+
+        let (global_count, project_count) = self.agents_context_counts();
+        let percent = self
+            .chat_widget
+            .context_window_capacity()
+            .and_then(|window| {
+                if window == 0 {
+                    None
+                } else {
+                    Some(tokens as f64 / window as f64 * 100.0)
+                }
+            });
+        let params = AgentsContextWarningParams {
+            tokens,
+            percent_of_window: percent,
+            truncated: self.config.agents_context_prompt_truncated,
+            global_context_path: self.config.agents_home.display().to_string(),
+            project_context_path: self
+                .config
+                .project_agents_home
+                .as_ref()
+                .map(|path| path.display().to_string()),
+            global_entry_count: global_count,
+            project_entry_count: project_count,
+        };
+
+        match run_agents_context_warning(tui, params).await? {
+            AgentsContextDecision::Continue => {}
+            AgentsContextDecision::DisableForSession => {
+                self.chat_widget.set_agents_context_active(false);
+                self.chat_widget.add_info_message(
+                    "Agents context disabled for this session.".to_string(),
+                    Some("Use `/context` to re-enable.".to_string()),
+                );
+            }
+            AgentsContextDecision::ShowPathsAndExit => {
+                self.warn_agents_show_paths();
+            }
+            AgentsContextDecision::RequestCompression => {
+                self.warn_agents_request_compression();
+            }
+            AgentsContextDecision::ManageEntries => {
+                self.chat_widget
+                    .add_info_message("Re-opening agents context manager.".to_string(), None);
+                self.app_event_tx.send(AppEvent::OpenAgentsContextManager);
+            }
+        }
+
+        Ok(())
+    }
+
+    fn agents_context_counts(&self) -> (usize, usize) {
+        let mut global = 0;
+        let mut project = 0;
+        for entry in &self.config.agents_context_entries {
+            match entry.source {
+                AgentsSource::Global => global += 1,
+                AgentsSource::Project => project += 1,
+            }
+        }
+        (global, project)
+    }
+
+    fn warn_agents_show_paths(&mut self) {
+        let mut lines = vec![format!(
+            "Global context directory: {}",
+            self.config.agents_home.display()
+        )];
+        match &self.config.project_agents_home {
+            Some(path) => lines.push(format!("Project context directory: {}", path.display())),
+            None => lines.push("Project context directory not detected.".to_string()),
+        }
+        self.chat_widget.add_info_message(
+            lines.join("\n"),
+            Some("Inspect these folders to trim large files.".to_string()),
+        );
+    }
+
+    fn warn_agents_request_compression(&mut self) {
+        let suggestion = format!(
+            "Please compress the agents context so it stays under {} tokens.",
+            format_token_count(self.config.agents_context_warning_tokens as u64)
+        );
+        if self.chat_widget.composer_is_empty() {
+            self.chat_widget.set_composer_text(suggestion);
+        } else {
+            self.chat_widget.add_info_message(
+                suggestion,
+                Some("Edit the composer before sending.".to_string()),
+            );
+        }
+    }
+
     fn on_update_reasoning_effort(&mut self, effort: Option<ReasoningEffortConfig>) {
         self.chat_widget.set_reasoning_effort(effort);
         self.config.model_reasoning_effort = effort;
@@ -763,6 +1465,20 @@ impl App {
                     }
                     self.enable_live_exec_polling(tui);
                     tui.frame_requester().schedule_frame();
+                }
+            }
+            KeyEvent {
+                code: KeyCode::Char('b'),
+                modifiers,
+                kind: KeyEventKind::Press,
+                ..
+            } if modifiers.contains(crossterm::event::KeyModifiers::CONTROL)
+                && modifiers.contains(crossterm::event::KeyModifiers::SHIFT) =>
+            {
+                if let Err(err) = self.open_process_manager_overlay().await {
+                    tracing::error!(error = %err, "failed to open process manager overlay");
+                    self.chat_widget
+                        .add_error_message(format!("Failed to open process manager: {err}"));
                 }
             }
             KeyEvent {

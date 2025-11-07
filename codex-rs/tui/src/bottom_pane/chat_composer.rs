@@ -323,6 +323,11 @@ impl ChatComposer {
         self.history.reset_navigation();
     }
 
+    pub(crate) fn remember_current_text_for_history(&mut self) {
+        let current = self.textarea.text();
+        self.history.record_local_submission(current);
+    }
+
     /// Get the current composer text.
     pub(crate) fn current_text(&self) -> String {
         self.textarea.text().to_string()

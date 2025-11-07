@@ -83,6 +83,8 @@ use crate::clipboard_paste::paste_image_to_temp_png;
 use crate::diff_render::display_path_for;
 use crate::exec_cell::CommandOutput;
 use crate::exec_cell::ExecCell;
+use crate::exec_cell::ExecStreamAction;
+use crate::exec_cell::ExecStreamKind;
 use crate::exec_cell::new_active_exec_command;
 use crate::format_percent;
 use crate::get_git_diff::get_git_diff;
@@ -92,10 +94,23 @@ use crate::history_cell::BackgroundEventStatus;
 use crate::history_cell::HistoryCell;
 use crate::history_cell::McpToolCallCell;
 use crate::markdown::append_markdown;
+use crate::mcp::McpManagerEntry;
+use crate::mcp::McpManagerInit;
+use crate::mcp::McpManagerView;
+use crate::mcp::McpWizardInit;
+use crate::mcp::McpWizardView;
 #[cfg(target_os = "windows")]
 use crate::onboarding::WSL_INSTRUCTIONS;
+use crate::process_manager::ProcessManagerEntry;
+use crate::process_manager::ProcessManagerInit;
+use crate::process_manager::ProcessManagerView;
+use crate::process_manager::ProcessOutputData;
+use crate::process_manager::ProcessOutputInit;
+use crate::process_manager::ProcessOutputView;
 use crate::render::renderable::ColumnRenderable;
 use crate::render::renderable::Renderable;
+use crate::settings_overlay::SettingsOverlay;
+use crate::settings_overlay::SettingsState;
 use crate::slash_command::SlashCommand;
 use crate::status::RateLimitSnapshotDisplay;
 use crate::text_formatting::truncate_text;
@@ -321,6 +336,26 @@ struct BackgroundTaskInfo {
 }
 
 impl ChatWidget {
+    fn normalize_background_description(description: Option<String>) -> Option<String> {
+        description.and_then(|text| {
+            let trimmed = text.trim();
+            if trimmed.is_empty() {
+                return None;
+            }
+
+            if let Some(stripped) = trimmed.strip_prefix("promoted from foreground:") {
+                let cleaned = stripped.trim();
+                if cleaned.is_empty() {
+                    None
+                } else {
+                    Some(cleaned.to_string())
+                }
+            } else {
+                Some(trimmed.to_string())
+            }
+        })
+    }
+
     fn flush_answer_stream_with_separator(&mut self) {
         if let Some(mut controller) = self.stream_controller.take()
             && let Some(cell) = controller.finalize()
@@ -416,7 +451,9 @@ impl ChatWidget {
             running_details.truncate(MAX_DETAILS);
         }
 
-        let footer_summary = self.background_status_summary();
+        let footer_summary = self
+            .background_status_summary()
+            .map(|summary| format!("{summary} • Press Ctrl+Shift+B for process manager"));
         let header = footer_summary.clone().unwrap_or_else(|| {
             if total == 1 {
                 format!("Background: {}", running_details[0])
@@ -433,6 +470,139 @@ impl ChatWidget {
             completed_more: 0,
             footer_summary,
         })
+    }
+
+    fn process_manager_view_mut(&mut self) -> Option<&mut ProcessManagerView> {
+        self.bottom_pane
+            .active_view_mut()
+            .and_then(|view| view.as_any_mut().downcast_mut::<ProcessManagerView>())
+    }
+
+    fn process_output_view_mut(&mut self) -> Option<&mut ProcessOutputView> {
+        self.bottom_pane
+            .active_view_mut()
+            .and_then(|view| view.as_any_mut().downcast_mut::<ProcessOutputView>())
+    }
+
+    fn mcp_manager_view_mut(&mut self) -> Option<&mut McpManagerView> {
+        self.bottom_pane
+            .active_view_mut()
+            .and_then(|view| view.as_any_mut().downcast_mut::<McpManagerView>())
+    }
+
+    pub(crate) fn show_process_manager(&mut self, entries: Vec<ProcessManagerEntry>) {
+        if let Some(view) = self.process_manager_view_mut() {
+            view.set_entries(entries);
+        } else {
+            let view = ProcessManagerView::new(ProcessManagerInit {
+                app_event_tx: self.app_event_tx.clone(),
+                entries,
+            });
+            self.bottom_pane.show_view(Box::new(view));
+        }
+        self.request_redraw();
+    }
+
+    pub(crate) fn show_mcp_manager(
+        &mut self,
+        entries: Vec<McpManagerEntry>,
+        template_count: usize,
+    ) {
+        if let Some(view) = self.mcp_manager_view_mut() {
+            view.set_entries(entries, template_count);
+        } else {
+            let init = McpManagerInit {
+                app_event_tx: self.app_event_tx.clone(),
+                entries,
+                template_count,
+            };
+            self.bottom_pane
+                .show_view(Box::new(McpManagerView::new(init)));
+        }
+        self.request_redraw();
+    }
+
+    pub(crate) fn open_mcp_wizard(&mut self, init: McpWizardInit) {
+        self.bottom_pane
+            .show_view(Box::new(McpWizardView::new(init)));
+        self.request_redraw();
+    }
+
+    pub(crate) fn show_unified_exec_output(
+        &mut self,
+        entry: ProcessManagerEntry,
+        data: ProcessOutputData,
+    ) {
+        if let Some(view) = self.process_output_view_mut()
+            && view.session_id() == entry.session_id
+        {
+            view.update_entry(entry);
+            view.set_output_data(data);
+        } else {
+            let init = ProcessOutputInit {
+                entry,
+                data,
+                app_event_tx: self.app_event_tx.clone(),
+            };
+            self.bottom_pane
+                .show_view(Box::new(ProcessOutputView::new(init)));
+        }
+        self.request_redraw();
+    }
+
+    pub(crate) fn open_unified_exec_input_prompt(&mut self, session_id: i32) {
+        let tx = self.app_event_tx.clone();
+        let view = CustomPromptView::new(
+            format!("Send input to session {session_id}"),
+            "Type input and press Enter (Shift+Enter for newline)".to_string(),
+            Some("Input is sent verbatim to the running process.".to_string()),
+            Box::new(move |text: String| {
+                tx.send(AppEvent::SendUnifiedExecInput {
+                    session_id,
+                    input: text,
+                });
+            }),
+        );
+        self.bottom_pane.show_view(Box::new(view));
+        self.request_redraw();
+    }
+
+    pub(crate) fn open_unified_exec_export_prompt(
+        &mut self,
+        session_id: i32,
+        suggestion: Option<String>,
+    ) {
+        let default_destination = suggestion.unwrap_or_default();
+        let label_default = default_destination.clone();
+        let context_label = if label_default.is_empty() {
+            Some("Enter a destination path and press Enter.".to_string())
+        } else {
+            Some(format!(
+                "Press Enter to save to {label_default} or type another path."
+            ))
+        };
+        let default_for_closure = default_destination;
+        let tx = self.app_event_tx.clone();
+        let view = CustomPromptView::new(
+            format!("Export session {session_id} output"),
+            "Type a file path and press Enter".to_string(),
+            context_label,
+            Box::new(move |destination: String| {
+                let mut path = destination;
+                if path.trim().is_empty() {
+                    path = default_for_closure.clone();
+                }
+                if path.trim().is_empty() {
+                    return;
+                }
+                tx.send(AppEvent::ExportUnifiedExecSessionLog {
+                    session_id,
+                    destination: path,
+                });
+            }),
+        );
+        self.bottom_pane.show_view(Box::new(view));
+        self.request_redraw();
     }
 
     fn reset_base_status_header(&mut self) {
@@ -456,7 +626,7 @@ impl ChatWidget {
         self.update_context_metrics();
     }
 
-    fn context_window_capacity(&self) -> Option<u64> {
+    pub(crate) fn context_window_capacity(&self) -> Option<u64> {
         if let Some(window) = self
             .token_info
             .as_ref()
@@ -895,10 +1065,12 @@ impl ChatWidget {
         match kind {
             BackgroundEventKind::Started => {
                 self.active_cell = None;
+                let normalized_description =
+                    Self::normalize_background_description(description.clone());
                 self.background_tasks.insert(
                     shell_id.clone(),
                     BackgroundTaskInfo {
-                        description: description.clone(),
+                        description: normalized_description,
                     },
                 );
                 self.background_order.retain(|id| id != &shell_id);
@@ -911,11 +1083,12 @@ impl ChatWidget {
                 self.app_event_tx.send(AppEvent::EnsureLiveExecPolling);
             }
             BackgroundEventKind::Terminated { exit_code } => {
-                let description = description.filter(|d| !d.trim().is_empty()).or_else(|| {
-                    self.background_tasks
-                        .get(&shell_id)
-                        .and_then(|info| info.description.clone())
-                });
+                let description =
+                    Self::normalize_background_description(description).or_else(|| {
+                        self.background_tasks
+                            .get(&shell_id)
+                            .and_then(|info| info.description.clone())
+                    });
                 self.background_tasks.remove(&shell_id);
                 self.background_order.retain(|id| id != &shell_id);
                 self.add_to_history(history_cell::new_background_event(
@@ -1071,13 +1244,13 @@ impl ChatWidget {
         {
             cell.complete_call(
                 &ev.call_id,
-                CommandOutput {
-                    exit_code: ev.exit_code,
-                    stdout: ev.stdout.clone(),
-                    stderr: ev.stderr.clone(),
-                    formatted_output: ev.formatted_output.clone(),
-                    aggregated_output: ev.aggregated_output.clone(),
-                },
+                CommandOutput::new(
+                    ev.exit_code,
+                    ev.stdout.clone(),
+                    ev.stderr.clone(),
+                    ev.aggregated_output.clone(),
+                    ev.formatted_output.clone(),
+                ),
                 ev.duration,
             );
             if cell.should_flush() {
@@ -1099,14 +1272,19 @@ impl ChatWidget {
 
     pub(crate) fn handle_exec_approval_now(&mut self, id: String, ev: ExecApprovalRequestEvent) {
         self.flush_answer_stream_with_separator();
-        let command = shlex::try_join(ev.command.iter().map(String::as_str))
+        let command_preview = shlex::try_join(ev.command.iter().map(String::as_str))
             .unwrap_or_else(|_| ev.command.join(" "));
-        self.notify(Notification::ExecApprovalRequested { command });
+        self.notify(Notification::ExecApprovalRequested {
+            command: command_preview,
+        });
 
         let request = ApprovalRequest::Exec {
             id,
+            call_id: ev.call_id,
             command: ev.command,
             reason: ev.reason,
+            risk: ev.risk,
+            recent_risks: ev.recent_risks,
         };
         self.bottom_pane.push_approval_request(request);
         self.request_redraw();
@@ -1141,6 +1319,7 @@ impl ChatWidget {
             parsed_cmd,
         } = ev;
         // Ensure the status indicator is visible while the command runs.
+        self.bottom_pane.set_task_running(true);
         self.running_command_order.retain(|id| id != &call_id);
         self.running_command_order.push_back(call_id.clone());
         self.running_commands.insert(
@@ -1186,7 +1365,7 @@ impl ChatWidget {
             .find(|id| {
                 self.running_commands
                     .get(*id)
-                    .map_or(false, |cmd| cmd.shell_id.is_none())
+                    .is_some_and(|cmd| cmd.shell_id.is_none())
             })
             .cloned()?;
         let description = self
@@ -1288,6 +1467,7 @@ impl ChatWidget {
         let mut rng = rand::rng();
         let placeholder = EXAMPLE_PROMPTS[rng.random_range(0..EXAMPLE_PROMPTS.len())].to_string();
         let codex_op_tx = spawn_agent(config.clone(), app_event_tx.clone(), conversation_manager);
+        crate::wrapping::set_wrap_break_words(config.wrap_break_long_words);
 
         let mut widget = Self {
             app_event_tx: app_event_tx.clone(),
@@ -1335,7 +1515,8 @@ impl ChatWidget {
             feedback,
             current_rollout_path: None,
             agents_context_include_mode: !config.agents_context_include.is_empty(),
-            agents_context_active: config.agents_context_prompt.is_some(),
+            agents_context_active: config.auto_attach_agents_context
+                && config.agents_context_prompt.is_some(),
         };
         widget.base_status_header = widget.compose_base_status_header();
         widget.current_status_header = widget.base_status_header.clone();
@@ -1364,6 +1545,7 @@ impl ChatWidget {
 
         let codex_op_tx =
             spawn_agent_from_existing(conversation, session_configured, app_event_tx.clone());
+        crate::wrapping::set_wrap_break_words(config.wrap_break_long_words);
 
         let mut widget = Self {
             app_event_tx: app_event_tx.clone(),
@@ -1411,7 +1593,8 @@ impl ChatWidget {
             feedback,
             current_rollout_path: None,
             agents_context_include_mode: !config.agents_context_include.is_empty(),
-            agents_context_active: config.agents_context_prompt.is_some(),
+            agents_context_active: config.auto_attach_agents_context
+                && config.agents_context_prompt.is_some(),
         };
         widget.base_status_header = widget.compose_base_status_header();
         widget.current_status_header = widget.base_status_header.clone();
@@ -1551,6 +1734,9 @@ impl ChatWidget {
             SlashCommand::Review => {
                 self.open_review_popup();
             }
+            SlashCommand::Settings => {
+                self.app_event_tx.send(AppEvent::OpenSettings);
+            }
             SlashCommand::Model => {
                 self.open_model_popup();
             }
@@ -1596,7 +1782,7 @@ impl ChatWidget {
                 self.add_status_output();
             }
             SlashCommand::Mcp => {
-                self.add_mcp_output();
+                self.app_event_tx.send(AppEvent::OpenMcpManager);
             }
             #[cfg(debug_assertions)]
             SlashCommand::TestApproval => {
@@ -1725,8 +1911,70 @@ impl ChatWidget {
         }
     }
 
+    fn handle_inline_logs_command(&mut self, text: &str) -> bool {
+        let trimmed = text.trim();
+        let Some(rest) = trimmed.strip_prefix('/') else {
+            return false;
+        };
+        let mut parts = rest.split_whitespace();
+        let Some(name) = parts.next() else {
+            return false;
+        };
+        if !name.eq_ignore_ascii_case("logs") {
+            return false;
+        }
+
+        #[derive(Clone, Copy)]
+        enum StreamSelector {
+            Stdout,
+            Stderr,
+            Both,
+        }
+
+        let mut selector = StreamSelector::Stdout;
+        let mut action = ExecStreamAction::Toggle;
+        let mut call_id: Option<String> = None;
+        for token in parts {
+            match token.to_ascii_lowercase().as_str() {
+                "stdout" => selector = StreamSelector::Stdout,
+                "stderr" => selector = StreamSelector::Stderr,
+                "both" => selector = StreamSelector::Both,
+                "show" | "expand" => action = ExecStreamAction::Expand,
+                "hide" | "collapse" => action = ExecStreamAction::Collapse,
+                "toggle" => action = ExecStreamAction::Toggle,
+                other => {
+                    if call_id.is_none() {
+                        call_id = Some(other.to_string());
+                    } else {
+                        self.add_error_message(
+                            "Usage: `/logs [stdout|stderr|both] [show|hide|toggle] [call-id]`"
+                                .to_string(),
+                        );
+                        return true;
+                    }
+                }
+            }
+        }
+
+        let targets: Vec<ExecStreamKind> = match selector {
+            StreamSelector::Stdout => vec![ExecStreamKind::Stdout],
+            StreamSelector::Stderr => vec![ExecStreamKind::Stderr],
+            StreamSelector::Both => vec![ExecStreamKind::Stdout, ExecStreamKind::Stderr],
+        };
+        for stream in targets {
+            self.app_event_tx.send(AppEvent::ToggleExecStream {
+                call_id: call_id.clone(),
+                stream,
+                action,
+            });
+        }
+        true
+    }
+
     fn submit_user_message(&mut self, user_message: UserMessage) {
-        if self.handle_inline_context_command(&user_message.text) {
+        if self.handle_inline_context_command(&user_message.text)
+            || self.handle_inline_logs_command(&user_message.text)
+        {
             return;
         }
 
@@ -2422,6 +2670,92 @@ impl ChatWidget {
         self.config.model = model.to_string();
     }
 
+    pub(crate) fn update_auto_attach_agents_context(&mut self, enabled: bool) {
+        if self.config.auto_attach_agents_context == enabled {
+            return;
+        }
+        self.config.auto_attach_agents_context = enabled;
+        if enabled {
+            if self.config.agents_context_prompt.is_some() && !self.agents_context_active {
+                self.set_agents_context_active(true);
+                self.add_info_message(
+                    "Agents context will attach automatically to future prompts.".to_string(),
+                    Some("Use `/context off` to disable for this session.".to_string()),
+                );
+            } else {
+                self.recompute_base_status_header();
+                self.request_redraw();
+            }
+        } else if self.agents_context_active {
+            self.set_agents_context_active(false);
+            self.add_info_message(
+                "Agents context auto-attach disabled.".to_string(),
+                Some("Run `/context` when you want to include files.".to_string()),
+            );
+        } else {
+            self.recompute_base_status_header();
+            self.request_redraw();
+        }
+    }
+
+    pub(crate) fn update_wrap_break_long_words(&mut self, enabled: bool) {
+        if self.config.wrap_break_long_words == enabled {
+            return;
+        }
+        self.config.wrap_break_long_words = enabled;
+        crate::wrapping::set_wrap_break_words(enabled);
+        let message = if enabled {
+            "Enabled aggressive wrapping for very long tokens."
+        } else {
+            "Disabled aggressive wrapping for very long tokens."
+        };
+        self.add_info_message(message.to_string(), None);
+    }
+
+    pub(crate) fn update_notifications_enabled(&mut self, enabled: bool) {
+        let (current_enabled, was_custom) = match &self.config.tui_notifications {
+            Notifications::Enabled(flag) => (*flag, false),
+            Notifications::Custom(_) => (true, true),
+        };
+        if !was_custom && current_enabled == enabled {
+            return;
+        }
+
+        self.config.tui_notifications = Notifications::Enabled(enabled);
+        let hint = if was_custom && enabled {
+            Some(
+                "Custom notification allowlist cleared; edit `tui.notifications` in config.toml for granular control.".to_string(),
+            )
+        } else {
+            None
+        };
+        let message = if enabled {
+            "Desktop notifications enabled."
+        } else {
+            "Desktop notifications disabled."
+        };
+        self.add_info_message(message.to_string(), hint);
+    }
+
+    pub(crate) fn open_settings_overlay(&mut self) {
+        let (notifications_enabled, notifications_custom) = match &self.config.tui_notifications {
+            Notifications::Enabled(enabled) => (*enabled, false),
+            Notifications::Custom(values) => (!values.is_empty(), true),
+        };
+        let state = SettingsState {
+            auto_attach_agents_context: self.config.auto_attach_agents_context,
+            wrap_break_long_words: self.config.wrap_break_long_words,
+            agents_context_available: self.config.agents_context_prompt.is_some(),
+            notifications_enabled,
+            notifications_custom,
+        };
+        self.bottom_pane.show_view(Box::new(SettingsOverlay::new(
+            self.app_event_tx.clone(),
+            state,
+        )));
+        self.request_redraw();
+    }
+
     pub(crate) fn apply_agents_context_from_config(&mut self, config: &Config) {
         self.config.agents_context_entries = config.agents_context_entries.clone();
         self.config.agents_context_include = config.agents_context_include.clone();
@@ -2429,10 +2763,10 @@ impl ChatWidget {
         self.config.agents_context_prompt = config.agents_context_prompt.clone();
         self.config.agents_context_prompt_tokens = config.agents_context_prompt_tokens;
         self.config.agents_context_prompt_truncated = config.agents_context_prompt_truncated;
+        self.config.auto_attach_agents_context = config.auto_attach_agents_context;
         self.agents_context_include_mode = !self.config.agents_context_include.is_empty();
-        if self.config.agents_context_prompt.is_none() {
-            self.agents_context_active = false;
-        }
+        self.agents_context_active =
+            self.config.auto_attach_agents_context && self.config.agents_context_prompt.is_some();
         self.update_context_metrics();
         self.recompute_base_status_header();
         self.request_redraw();
@@ -2451,12 +2785,9 @@ impl ChatWidget {
             return;
         }
         self.agents_context_active = active;
+        self.update_context_metrics();
         self.recompute_base_status_header();
         self.request_redraw();
-    }
-
-    pub(crate) fn agents_context_active(&self) -> bool {
-        self.agents_context_active
     }
 
     pub(crate) fn active_background_shell_ids(&self) -> Vec<String> {

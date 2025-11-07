@@ -1,3 +1,4 @@
+#[cfg(not(debug_assertions))]
 use crate::UpdateAction;
 use crate::diff_render::create_diff_summary;
 use crate::diff_render::display_path_for;
@@ -17,7 +18,6 @@ use crate::style::user_message_style;
 use crate::text_formatting::format_and_truncate_tool_result;
 use crate::text_formatting::truncate_text;
 use crate::ui_consts::LIVE_PREFIX_COLS;
-use crate::version::CODEX_CLI_VERSION;
 use crate::wrapping::RtOptions;
 use crate::wrapping::word_wrap_line;
 use crate::wrapping::word_wrap_lines;
@@ -273,14 +273,14 @@ impl HistoryCell for PlainHistoryCell {
     }
 }
 
-#[cfg_attr(debug_assertions, allow(dead_code))]
+#[cfg(not(debug_assertions))]
 #[derive(Debug)]
 pub(crate) struct UpdateAvailableHistoryCell {
     latest_version: String,
     update_action: Option<UpdateAction>,
 }
 
-#[cfg_attr(debug_assertions, allow(dead_code))]
+#[cfg(not(debug_assertions))]
 impl UpdateAvailableHistoryCell {
     pub(crate) fn new(latest_version: String, update_action: Option<UpdateAction>) -> Self {
         Self {
@@ -290,6 +290,7 @@ impl UpdateAvailableHistoryCell {
     }
 }
 
+#[cfg(not(debug_assertions))]
 impl HistoryCell for UpdateAvailableHistoryCell {
     fn display_lines(&self, width: u16) -> Vec<Line<'static>> {
         let update_instruction = if let Some(update_action) = self.update_action {
@@ -310,10 +311,15 @@ impl HistoryCell for UpdateAvailableHistoryCell {
             padded_emoji("✨").bold().cyan(),
             "Update available!".bold().cyan(),
             " ".into(),
-            format!("{CODEX_CLI_VERSION} -> {}", self.latest_version).bold(),
+            format!(
+                "{} -> {}",
+                crate::version::CODEX_CLI_VERSION,
+                self.latest_version
+            )
+            .bold(),
         ]);
 
-        let mut lines = vec![
+        let lines = vec![
             header,
             update_instruction,
             Line::from(""),
@@ -1054,7 +1060,7 @@ pub(crate) fn new_background_event(
         .as_ref()
         .map(|value| value.trim())
         .filter(|value| !value.is_empty())
-        .map(|value| value.to_string());
+        .map(str::to_string);
 
     let mut spans: Vec<Span<'static>> = vec![
         "• ".dim(),
@@ -1062,7 +1068,7 @@ pub(crate) fn new_background_event(
         format!("`{shell_id}`").bold(),
     ];
 
-    if let Some(desc) = description.clone() {
+    if let Some(desc) = description {
         spans.push(" ".into());
         spans.push("(".dim());
         spans.push(desc.into());
@@ -1333,13 +1339,8 @@ pub(crate) fn new_patch_apply_failure(stderr: String) -> PlainHistoryCell {
     lines.push(Line::from("✘ Failed to apply patch".magenta().bold()));
 
     if !stderr.trim().is_empty() {
-        let output_data = CommandOutput {
-            exit_code: 1,
-            stdout: String::new(),
-            stderr: stderr.clone(),
-            aggregated_output: stderr,
-            formatted_output: String::new(),
-        };
+        let output_data =
+            CommandOutput::new(1, String::new(), stderr.clone(), stderr, String::new());
         let output = output_lines(
             Some(&output_data),
             OutputLinesParams {
@@ -1390,7 +1391,7 @@ pub(crate) fn new_reasoning_summary_block(
                         header_buffer,
                         summary_buffer,
                         false,
-                        citation_context.clone(),
+                        citation_context,
                     ));
                 }
             }
@@ -1491,13 +1492,13 @@ mod tests {
     }
 
     fn empty_command_output() -> CommandOutput {
-        CommandOutput {
-            exit_code: 0,
-            stdout: String::new(),
-            stderr: String::new(),
-            aggregated_output: String::new(),
-            formatted_output: String::new(),
-        }
+        CommandOutput::new(
+            0,
+            String::new(),
+            String::new(),
+            String::new(),
+            String::new(),
+        )
     }
 
     fn render_lines(lines: &[Line<'static>]) -> Vec<String> {
@@ -2179,13 +2180,8 @@ mod tests {
             .map(|n| n.to_string())
             .collect::<Vec<_>>()
             .join("\n");
-        let output_data = CommandOutput {
-            exit_code: 1,
-            stdout: String::new(),
-            stderr: stderr.clone(),
-            formatted_output: String::new(),
-            aggregated_output: stderr,
-        };
+        let output_data =
+            CommandOutput::new(1, String::new(), stderr.clone(), stderr, String::new());
         cell.complete_call(&call_id, output_data, Duration::from_millis(1));
 
         let rendered = cell
@@ -2221,13 +2217,8 @@ mod tests {
         });
 
         let stderr = "error: first line on stderr\nerror: second line on stderr".to_string();
-        let output_data = CommandOutput {
-            exit_code: 1,
-            stdout: String::new(),
-            stderr: stderr.clone(),
-            formatted_output: String::new(),
-            aggregated_output: stderr,
-        };
+        let output_data =
+            CommandOutput::new(1, String::new(), stderr.clone(), stderr, String::new());
         cell.complete_call(&call_id, output_data, Duration::from_millis(5));
 
         // Narrow width to force the command to render under the header line.

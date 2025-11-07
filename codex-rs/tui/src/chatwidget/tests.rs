@@ -1,6 +1,8 @@
 use super::*;
 use crate::app_event::AppEvent;
 use crate::app_event_sender::AppEventSender;
+use crate::exec_cell::ExecStreamAction;
+use crate::exec_cell::ExecStreamKind;
 use crate::test_backend::VT100Backend;
 use crate::tui::FrameRequester;
 use assert_matches::assert_matches;
@@ -11,6 +13,7 @@ use codex_core::config::Config;
 use codex_core::config::ConfigOverrides;
 use codex_core::config::ConfigToml;
 use codex_core::config::OPENAI_DEFAULT_MODEL;
+use codex_core::config_types::Notifications;
 use codex_core::protocol::AgentMessageDeltaEvent;
 use codex_core::protocol::AgentMessageEvent;
 use codex_core::protocol::AgentReasoningDeltaEvent;
@@ -308,7 +311,8 @@ fn make_chatwidget_manual() -> (
         feedback: codex_feedback::CodexFeedback::new(),
         current_rollout_path: None,
         agents_context_include_mode: false,
-        agents_context_active: cfg.agents_context_prompt.is_some(),
+        agents_context_active: cfg.auto_attach_agents_context
+            && cfg.agents_context_prompt.is_some(),
     };
     widget.base_status_header = widget.compose_base_status_header();
     widget.current_status_header = widget.base_status_header.clone();
@@ -421,6 +425,80 @@ fn active_context_is_attached_to_every_message() {
 }
 
 #[test]
+fn auto_attach_agents_context_from_config() {
+    let (mut chat, mut rx, mut ops) = make_chatwidget_manual();
+    chat.config.agents_context_prompt = Some("<agents_context>ctx</agents_context>".to_string());
+    chat.config.agents_context_prompt_tokens = 3;
+    chat.config.auto_attach_agents_context = true;
+    let config_snapshot = chat.config.clone();
+    chat.apply_agents_context_from_config(&config_snapshot);
+    assert!(chat.agents_context_active);
+
+    chat.submit_user_message("Auto".to_string().into());
+    let _ = drain_insert_history(&mut rx);
+    let items = loop {
+        match ops.try_recv() {
+            Ok(Op::UserInput { items }) => break items,
+            Ok(Op::AddToHistory { .. }) => continue,
+            Ok(other) => panic!("expected Op::UserInput, got {other:?}"),
+            Err(err) => panic!("expected Op::UserInput, channel empty: {err}"),
+        }
+    };
+    assert_eq!(items.len(), 2);
+    assert_eq!(
+        items[0],
+        InputItem::Text {
+            text: "<agents_context>ctx</agents_context>".to_string()
+        }
+    );
+    assert_eq!(
+        items[1],
+        InputItem::Text {
+            text: "Auto".to_string()
+        }
+    );
+}
+
+#[test]
+fn settings_toggle_disables_auto_attach() {
+    let (mut chat, mut rx, mut ops) = make_chatwidget_manual();
+    chat.config.agents_context_prompt = Some("<agents_context>ctx</agents_context>".to_string());
+    chat.config.agents_context_prompt_tokens = 3;
+    chat.config.auto_attach_agents_context = true;
+    let config_snapshot = chat.config.clone();
+    chat.apply_agents_context_from_config(&config_snapshot);
+    assert!(chat.agents_context_active);
+
+    chat.update_auto_attach_agents_context(false);
+    assert!(!chat.agents_context_active);
+
+    chat.submit_user_message("Manual".to_string().into());
+    let _ = drain_insert_history(&mut rx);
+    let items = loop {
+        match ops.try_recv() {
+            Ok(Op::UserInput { items }) => break items,
+            Ok(Op::AddToHistory { .. }) => continue,
+            Ok(other) => panic!("expected Op::UserInput, got {other:?}"),
+            Err(err) => panic!("expected Op::UserInput, channel empty: {err}"),
+        }
+    };
+    assert_eq!(items.len(), 1);
+    assert_eq!(
+        items[0],
+        InputItem::Text {
+            text: "Manual".to_string()
+        }
+    );
+
+    while let Ok(op) = ops.try_recv() {
+        match op {
+            Op::AddToHistory { .. } => continue,
+            other => panic!("unexpected trailing op {other:?}"),
+        }
+    }
+}
+
+#[test]
 fn context_off_command_disables_persistent_context() {
     let (mut chat, mut rx, mut ops) = make_chatwidget_manual();
 
@@ -454,6 +532,69 @@ fn context_off_command_disables_persistent_context() {
             text: "Hello".to_string()
         }
     );
+}
+
+#[test]
+fn logs_command_defaults_to_stdout_toggle() {
+    let (mut chat, mut rx, _ops) = make_chatwidget_manual();
+
+    assert!(chat.handle_inline_logs_command("/logs"));
+
+    match rx.try_recv() {
+        Ok(AppEvent::ToggleExecStream {
+            call_id,
+            stream,
+            action,
+        }) => {
+            assert!(call_id.is_none(), "expected default call id selection");
+            assert_eq!(stream, ExecStreamKind::Stdout);
+            assert_eq!(action, ExecStreamAction::Toggle);
+        }
+        other => panic!("expected ToggleExecStream, got {other:?}"),
+    }
+
+    match rx.try_recv() {
+        Err(TryRecvError::Empty) => {}
+        other => panic!("unexpected extra app event: {other:?}"),
+    }
+}
+
+#[test]
+fn logs_command_supports_stream_selector_and_call_id() {
+    let (mut chat, mut rx, _ops) = make_chatwidget_manual();
+
+    assert!(chat.handle_inline_logs_command("/logs both hide shell_42"));
+
+    match rx.try_recv() {
+        Ok(AppEvent::ToggleExecStream {
+            call_id,
+            stream,
+            action,
+        }) => {
+            assert_eq!(call_id.as_deref(), Some("shell_42"));
+            assert_eq!(stream, ExecStreamKind::Stdout);
+            assert_eq!(action, ExecStreamAction::Collapse);
+        }
+        other => panic!("expected stdout collapse event, got {other:?}"),
+    }
+
+    match rx.try_recv() {
+        Ok(AppEvent::ToggleExecStream {
+            call_id,
+            stream,
+            action,
+        }) => {
+            assert_eq!(call_id.as_deref(), Some("shell_42"));
+            assert_eq!(stream, ExecStreamKind::Stderr);
+            assert_eq!(action, ExecStreamAction::Collapse);
+        }
+        other => panic!("expected stderr collapse event, got {other:?}"),
+    }
+
+    match rx.try_recv() {
+        Err(TryRecvError::Empty) => {}
+        other => panic!("unexpected trailing app event: {other:?}"),
+    }
 }
 
 #[test]
@@ -519,6 +660,7 @@ fn exec_approval_emits_proposed_command_and_decision_history() {
         ),
         risk: None,
         parsed_cmd: vec![],
+        recent_risks: Vec::new(),
     };
     chat.handle_codex_event(Event {
         id: "sub-short".into(),
@@ -562,6 +704,7 @@ fn exec_approval_decision_truncates_multiline_and_long_commands() {
         ),
         risk: None,
         parsed_cmd: vec![],
+        recent_risks: Vec::new(),
     };
     chat.handle_codex_event(Event {
         id: "sub-multi".into(),
@@ -611,6 +754,7 @@ fn exec_approval_decision_truncates_multiline_and_long_commands() {
         reason: None,
         risk: None,
         parsed_cmd: vec![],
+        recent_risks: Vec::new(),
     };
     chat.handle_codex_event(Event {
         id: "sub-long".into(),
@@ -1530,6 +1674,20 @@ fn approvals_selection_popup_snapshot() {
 }
 
 #[test]
+fn settings_overlay_snapshot() {
+    let (mut chat, _rx, _op_rx) = make_chatwidget_manual();
+
+    chat.config.auto_attach_agents_context = true;
+    chat.config.agents_context_prompt = Some("<agents_context>ctx</agents_context>".to_string());
+    chat.config.agents_context_prompt_tokens = 3;
+    chat.config.tui_notifications = Notifications::Enabled(true);
+    chat.open_settings_overlay();
+
+    let popup = render_bottom_popup(&chat, 80);
+    assert_snapshot!("settings_overlay", popup);
+}
+
+#[test]
 fn approvals_popup_includes_wsl_note_for_auto_mode() {
     let (mut chat, _rx, _op_rx) = make_chatwidget_manual();
 
@@ -1869,6 +2027,7 @@ fn approval_modal_exec_snapshot() {
         ),
         risk: None,
         parsed_cmd: vec![],
+        recent_risks: Vec::new(),
     };
     chat.handle_codex_event(Event {
         id: "sub-approve".into(),
@@ -1914,6 +2073,7 @@ fn approval_modal_exec_without_reason_snapshot() {
         reason: None,
         risk: None,
         parsed_cmd: vec![],
+        recent_risks: Vec::new(),
     };
     chat.handle_codex_event(Event {
         id: "sub-approve-noreason".into(),
@@ -2125,6 +2285,7 @@ fn status_widget_and_approval_modal_snapshot() {
         ),
         risk: None,
         parsed_cmd: vec![],
+        recent_risks: Vec::new(),
     };
     chat.handle_codex_event(Event {
         id: "sub-approve-exec".into(),

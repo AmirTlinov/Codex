@@ -110,7 +110,6 @@ pub(crate) struct HealthDraft {
     pub protocol: Option<String>,
 }
 
-#[allow(dead_code)]
 impl McpWizardDraft {
     pub(crate) fn from_existing(name: String, cfg: &McpServerConfig) -> Self {
         let mut draft = Self {
@@ -121,22 +120,18 @@ impl McpWizardDraft {
         draft
     }
 
-    #[allow(dead_code)]
     pub(crate) fn stdio(&self) -> &StdioDraft {
         &self.stdio
     }
 
-    #[allow(dead_code)]
     pub(crate) fn stdio_mut(&mut self) -> &mut StdioDraft {
         &mut self.stdio
     }
 
-    #[allow(dead_code)]
     pub(crate) fn http(&self) -> &StreamableHttpDraft {
         &self.http
     }
 
-    #[allow(dead_code)]
     pub(crate) fn http_mut(&mut self) -> &mut StreamableHttpDraft {
         &mut self.http
     }
@@ -458,7 +453,6 @@ pub(crate) struct McpServerSnapshot {
     pub tool_timeout_ms: Option<u64>,
 }
 
-#[allow(dead_code)]
 impl McpServerSnapshot {
     pub(crate) fn from_config(name: &str, cfg: &McpServerConfig) -> Self {
         let mut snapshot = Self {

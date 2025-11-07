@@ -1,0 +1,16 @@
+---
+source: tui/src/chatwidget/tests.rs
+expression: popup
+---
+  Settings
+
+› 1. Auto-attach agents context (On)  Toggle whether Codex injects AGENTS.md
+                                      without running /context.
+  2. Wrap long tokens (Enabled)       Break extremely long tokens when
+                                      rendering transcript output.
+  3. Desktop notifications (On)       Enable terminal-native notifications for
+                                      agent turns and approvals.
+  4. Open agents context manager      Same as running `/context`.
+  5. Close settings
+
+  Enter to toggle · Esc to close

@@ -68,6 +68,14 @@ impl McpManagerView {
         }
     }
 
+    pub(crate) fn set_entries(&mut self, entries: Vec<McpManagerEntry>, template_count: usize) {
+        self.entries = entries;
+        self.template_count = template_count;
+        self.scroll.clamp_selection(self.entries.len());
+        self.scroll
+            .ensure_visible(self.entries.len(), self.visible_rows());
+    }
+
     fn selected_entry(&self) -> Option<&McpManagerEntry> {
         self.scroll
             .selected_idx

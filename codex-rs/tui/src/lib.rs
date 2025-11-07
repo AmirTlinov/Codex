@@ -66,6 +66,7 @@ mod render;
 mod resume_picker;
 mod selection_list;
 mod session_log;
+mod settings_overlay;
 mod shimmer;
 mod slash_command;
 mod status;
@@ -186,6 +187,8 @@ pub async fn run_main(
         show_raw_agent_reasoning: cli.oss.then_some(true),
         tools_web_search_request: cli.web_search.then_some(true),
         experimental_sandbox_command_assessment: None,
+        wrap_break_long_words: None,
+        auto_attach_agents_context: None,
         additional_writable_roots: Vec::new(),
     };
     let raw_overrides = cli.config_overrides.raw_overrides.clone();

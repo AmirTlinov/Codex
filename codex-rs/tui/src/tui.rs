@@ -485,6 +485,13 @@ impl Tui {
         self.frame_requester().schedule_frame();
     }
 
+    pub fn replace_history_lines(&mut self, lines: Vec<Line<'static>>) -> Result<()> {
+        self.pending_history_lines = lines;
+        self.terminal.clear()?;
+        self.frame_requester().schedule_frame();
+        Ok(())
+    }
+
     pub fn draw(
         &mut self,
         height: u16,

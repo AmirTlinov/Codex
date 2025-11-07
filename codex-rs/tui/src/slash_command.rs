@@ -13,6 +13,7 @@ pub enum SlashCommand {
     // DO NOT ALPHA-SORT! Enum order is presentation order in the popup, so
     // more frequently used commands should be listed first.
     Model,
+    Settings,
     Approvals,
     Review,
     Feedback,
@@ -39,6 +40,7 @@ impl SlashCommand {
             SlashCommand::Init => "create an AGENTS.md file with instructions for Codex",
             SlashCommand::Compact => "summarize conversation to prevent hitting the context limit",
             SlashCommand::Review => "review my current changes and find issues",
+            SlashCommand::Settings => "adjust session preferences (context, wrap, etc.)",
             SlashCommand::Feedback => "share feedback with the Codex team",
             SlashCommand::Context => "manage the agents context selection",
             SlashCommand::Undo => "restore the workspace to the last Codex snapshot",
@@ -76,6 +78,7 @@ impl SlashCommand {
             | SlashCommand::Feedback
             | SlashCommand::Mention
             | SlashCommand::Context
+            | SlashCommand::Settings
             | SlashCommand::Status
             | SlashCommand::Mcp
             | SlashCommand::Quit => true,

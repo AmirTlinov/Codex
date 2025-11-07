@@ -3,6 +3,7 @@ use std::time::Instant;
 use super::model::CommandOutput;
 use super::model::ExecCall;
 use super::model::ExecCell;
+use super::model::ExecStreamKind;
 use crate::exec_command::relativize_to_home;
 use crate::exec_command::strip_bash_lc_and_escape;
 use crate::history_cell::HistoryCell;
@@ -27,6 +28,9 @@ use textwrap::WordSplitter;
 use unicode_width::UnicodeWidthStr;
 
 pub(crate) const TOOL_CALL_MAX_LINES: usize = 5;
+const STREAM_SECTION_INDENT: &str = "    ";
+const STREAM_PREVIEW_LINES: usize = 3;
+const STREAM_EXPANDED_LINE_CAP: usize = 400;
 
 pub(crate) struct OutputLinesParams {
     pub(crate) include_angle_pipe: bool,
@@ -213,6 +217,8 @@ impl HistoryCell for ExecCell {
                 };
                 result.push_span(format!(" • {duration}").dim());
                 lines.push(result);
+
+                lines.extend(render_stream_sections(output, width));
             }
         }
         lines
@@ -581,6 +587,196 @@ impl HeredocLabel {
     }
 }
 
+fn render_stream_sections(output: &CommandOutput, width: u16) -> Vec<Line<'static>> {
+    let mut sections: Vec<Line<'static>> = Vec::new();
+    let mut wrote_stdout = false;
+    if !output.stdout.is_empty() {
+        sections.extend(stream_section_lines(
+            width,
+            ExecStreamKind::Stdout,
+            &output.stdout,
+            output.stdout_collapsed,
+        ));
+        wrote_stdout = !sections.is_empty();
+    }
+    if !output.stderr.is_empty() {
+        if wrote_stdout {
+            sections.push(Line::from(""));
+        }
+        sections.extend(stream_section_lines(
+            width,
+            ExecStreamKind::Stderr,
+            &output.stderr,
+            output.stderr_collapsed,
+        ));
+    }
+    sections
+}
+
+fn stream_section_lines(
+    width: u16,
+    kind: ExecStreamKind,
+    content: &str,
+    collapsed: bool,
+) -> Vec<Line<'static>> {
+    let mut lines = Vec::new();
+    let indicator = if collapsed { "▶".dim() } else { "▼".dim() };
+    let label_span = match kind {
+        ExecStreamKind::Stdout => "stdout".green().bold(),
+        ExecStreamKind::Stderr => "stderr".red().bold(),
+    };
+    let line_count = content.lines().count();
+    let summary = format!("({line_count} {})", pluralize_line_word(line_count)).dim();
+    lines.push(Line::from(vec![
+        indicator,
+        " ".into(),
+        label_span,
+        " ".into(),
+        summary,
+    ]));
+
+    if content.trim().is_empty() {
+        lines.push(format!("{STREAM_SECTION_INDENT}<empty>").dim().into());
+        lines.push(stream_hint_line(kind, collapsed));
+        return lines;
+    }
+
+    if collapsed {
+        let mut preview_iter = content.lines();
+        for _ in 0..STREAM_PREVIEW_LINES {
+            if let Some(preview_line) = preview_iter.next() {
+                lines.push(
+                    format!("{STREAM_SECTION_INDENT}{preview_line}")
+                        .dim()
+                        .into(),
+                );
+            } else {
+                break;
+            }
+        }
+        let remaining = line_count.saturating_sub(STREAM_PREVIEW_LINES);
+        if remaining > 0 {
+            lines.push(
+                format!(
+                    "{STREAM_SECTION_INDENT}… +{remaining} more {}",
+                    pluralize_line_word(remaining)
+                )
+                .dim()
+                .into(),
+            );
+        }
+        lines.push(stream_hint_line(kind, collapsed));
+        return lines;
+    }
+
+    let indent_span: Span<'static> = STREAM_SECTION_INDENT.to_string().into();
+    let available_width = width
+        .saturating_sub(STREAM_SECTION_INDENT.len() as u16)
+        .max(1);
+    let mut wrapped = word_wrap_lines(
+        &content
+            .lines()
+            .map(|line| colorize_stream_line(kind, line))
+            .collect::<Vec<_>>(),
+        RtOptions::new(available_width as usize),
+    );
+    let hidden = wrapped.len().saturating_sub(STREAM_EXPANDED_LINE_CAP);
+    if hidden > 0 {
+        wrapped.truncate(STREAM_EXPANDED_LINE_CAP);
+    }
+    lines.extend(prefix_lines(
+        wrapped,
+        indent_span.clone(),
+        indent_span.clone(),
+    ));
+    if hidden > 0 {
+        lines.push(
+            format!(
+                "{STREAM_SECTION_INDENT}… +{hidden} additional wrapped {} (open the process manager with Ctrl+Shift+B → `o` for the full log)",
+                pluralize_line_word(hidden)
+            )
+            .dim()
+            .into(),
+        );
+    }
+    lines.push(stream_hint_line(kind, collapsed));
+    lines
+}
+
+fn stream_hint_line(kind: ExecStreamKind, collapsed: bool) -> Line<'static> {
+    let verb = if collapsed { "show" } else { "hide" };
+    let action = if collapsed { "expand" } else { "collapse" };
+    format!(
+        "{STREAM_SECTION_INDENT}Use `/logs {} {verb}` to {action} this block.",
+        kind.as_str()
+    )
+    .dim()
+    .into()
+}
+
+fn colorize_stream_line(kind: ExecStreamKind, line: &str) -> Line<'static> {
+    let mut styled = ansi_escape_line(line);
+    let style = stream_style(kind);
+    styled
+        .spans
+        .iter_mut()
+        .for_each(|span| span.style = span.style.patch(style));
+    styled
+}
+
+fn stream_style(kind: ExecStreamKind) -> Style {
+    match kind {
+        ExecStreamKind::Stdout => Style::default().fg(Color::Green),
+        ExecStreamKind::Stderr => Style::default().fg(Color::Red),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn lines_to_strings(lines: &[Line<'static>]) -> Vec<String> {
+        lines
+            .iter()
+            .map(|line| {
+                line.spans
+                    .iter()
+                    .map(|span| span.content.as_ref())
+                    .collect::<String>()
+            })
+            .collect()
+    }
+
+    #[test]
+    fn collapsed_stream_includes_hint() {
+        let lines = stream_section_lines(
+            80,
+            ExecStreamKind::Stdout,
+            "alpha\nbeta\ngamma\ndelta",
+            true,
+        );
+        let rendered = lines_to_strings(&lines);
+        assert!(
+            rendered
+                .iter()
+                .any(|line| line.contains("/logs stdout show")),
+            "expected collapsed hint"
+        );
+    }
+
+    #[test]
+    fn expanded_stream_includes_hint() {
+        let lines = stream_section_lines(80, ExecStreamKind::Stdout, "alpha\nbeta\n", false);
+        let rendered = lines_to_strings(&lines);
+        assert!(
+            rendered
+                .iter()
+                .any(|line| line.contains("/logs stdout hide")),
+            "expected expanded hint"
+        );
+    }
+}
+
 fn summarize_unknown_command(cmd: &str) -> Option<(&'static str, Vec<Span<'static>>)> {
     let info = detect_heredoc_command(cmd)?;
     let summary = heredoc_summary(&info);
@@ -933,13 +1129,15 @@ fn format_path_for_display(path: &str) -> String {
     }
 }
 
+fn pluralize_line_word(count: usize) -> &'static str {
+    if count == 1 { "line" } else { "lines" }
+}
+
 fn pluralize_lines(count: usize) -> Option<String> {
     if count == 0 {
         None
-    } else if count == 1 {
-        Some("1 line".to_string())
     } else {
-        Some(format!("{count} lines"))
+        Some(format!("{count} {}", pluralize_line_word(count)))
     }
 }
 
