@@ -1064,9 +1064,8 @@ impl ChatWidget {
 
         match kind {
             BackgroundEventKind::Started => {
-                let normalized_description =
-                    Self::normalize_background_description(description)
-                        .or_else(|| self.background_command_label(&shell_id));
+                let normalized_description = Self::normalize_background_description(description)
+                    .or_else(|| self.background_command_label(&shell_id));
                 self.background_tasks.insert(
                     shell_id.clone(),
                     BackgroundTaskInfo {

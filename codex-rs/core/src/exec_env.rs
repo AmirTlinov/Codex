@@ -12,7 +12,7 @@ use std::collections::HashSet;
 /// The derivation follows the algorithm documented in the struct-level comment
 /// for [`ShellEnvironmentPolicy`].
 pub fn create_env(policy: &ShellEnvironmentPolicy) -> HashMap<String, String> {
-    populate_env(std::env::vars(), policy)
+    populate_env(current_env_lossy(), policy)
 }
 
 fn populate_env<I>(vars: I, policy: &ShellEnvironmentPolicy) -> HashMap<String, String>
@@ -66,6 +66,17 @@ where
     }
 
     env_map
+}
+
+fn current_env_lossy() -> Vec<(String, String)> {
+    std::env::vars_os()
+        .map(|(key, value)| {
+            (
+                key.to_string_lossy().into_owned(),
+                value.to_string_lossy().into_owned(),
+            )
+        })
+        .collect()
 }
 
 #[cfg(test)]

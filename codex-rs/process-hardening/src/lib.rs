@@ -40,9 +40,9 @@ pub(crate) fn pre_main_hardening_linux() {
 
     // Official Codex releases are MUSL-linked, which means that variables such
     // as LD_PRELOAD are ignored anyway, but just to be sure, clear them here.
-    let ld_keys: Vec<String> = std::env::vars()
+    let ld_keys: Vec<_> = std::env::vars_os()
         .filter_map(|(key, _)| {
-            if key.starts_with("LD_") {
+            if key.to_string_lossy().starts_with("LD_") {
                 Some(key)
             } else {
                 None
@@ -52,7 +52,7 @@ pub(crate) fn pre_main_hardening_linux() {
 
     for key in ld_keys {
         unsafe {
-            std::env::remove_var(key);
+            std::env::remove_var(&key);
         }
     }
 }
@@ -74,9 +74,9 @@ pub(crate) fn pre_main_hardening_macos() {
 
     // Remove all DYLD_ environment variables, which can be used to subvert
     // library loading.
-    let dyld_keys: Vec<String> = std::env::vars()
+    let dyld_keys: Vec<_> = std::env::vars_os()
         .filter_map(|(key, _)| {
-            if key.starts_with("DYLD_") {
+            if key.to_string_lossy().starts_with("DYLD_") {
                 Some(key)
             } else {
                 None
@@ -86,7 +86,7 @@ pub(crate) fn pre_main_hardening_macos() {
 
     for key in dyld_keys {
         unsafe {
-            std::env::remove_var(key);
+            std::env::remove_var(&key);
         }
     }
 }

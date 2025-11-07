@@ -105,7 +105,7 @@ impl UnifiedExecSessionManager {
             .ok_or(UnifiedExecError::MissingCommandLine)?;
 
         let cwd = env::current_dir().map_err(|err| UnifiedExecError::create_session(err.into()))?;
-        let env_map: HashMap<String, String> = env::vars().collect();
+        let env_map = collect_env_lossy();
 
         let spawned = codex_utils_pty::spawn_pty_process(program, args, cwd.as_path(), &env_map)
             .await
@@ -479,6 +479,17 @@ impl UnifiedExecSessionManager {
         let entry = self.sessions.lock().await.remove(&session_id);
         entry.is_some()
     }
+}
+
+fn collect_env_lossy() -> HashMap<String, String> {
+    env::vars_os()
+        .map(|(key, value)| {
+            (
+                key.to_string_lossy().into_owned(),
+                value.to_string_lossy().into_owned(),
+            )
+        })
+        .collect()
 }
 
 enum SessionStatus {
