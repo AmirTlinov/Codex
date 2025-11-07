@@ -1064,13 +1064,13 @@ impl ChatWidget {
 
         match kind {
             BackgroundEventKind::Started => {
-                self.active_cell = None;
                 let normalized_description =
-                    Self::normalize_background_description(description.clone());
+                    Self::normalize_background_description(description)
+                        .or_else(|| self.background_command_label(&shell_id));
                 self.background_tasks.insert(
                     shell_id.clone(),
                     BackgroundTaskInfo {
-                        description: normalized_description,
+                        description: normalized_description.clone(),
                     },
                 );
                 self.background_order.retain(|id| id != &shell_id);
@@ -1078,17 +1078,18 @@ impl ChatWidget {
                 self.add_to_history(history_cell::new_background_event(
                     shell_id,
                     BackgroundEventStatus::Started,
-                    description,
+                    normalized_description,
                 ));
                 self.app_event_tx.send(AppEvent::EnsureLiveExecPolling);
             }
             BackgroundEventKind::Terminated { exit_code } => {
+                let cached_description = self
+                    .background_tasks
+                    .get(&shell_id)
+                    .and_then(|info| info.description.clone())
+                    .or_else(|| self.background_command_label(&shell_id));
                 let description =
-                    Self::normalize_background_description(description).or_else(|| {
-                        self.background_tasks
-                            .get(&shell_id)
-                            .and_then(|info| info.description.clone())
-                    });
+                    Self::normalize_background_description(description).or(cached_description);
                 self.background_tasks.remove(&shell_id);
                 self.background_order.retain(|id| id != &shell_id);
                 self.add_to_history(history_cell::new_background_event(
@@ -1101,6 +1102,21 @@ impl ChatWidget {
         }
         self.recompute_base_status_header();
         self.request_redraw();
+    }
+
+    fn background_command_label(&self, shell_id: &str) -> Option<String> {
+        self.running_commands
+            .values()
+            .find(|cmd| cmd.shell_id.as_deref() == Some(shell_id))
+            .and_then(|cmd| {
+                if cmd.command.is_empty() {
+                    None
+                } else {
+                    shlex::try_join(cmd.command.iter().map(String::as_str))
+                        .ok()
+                        .or_else(|| Some(cmd.command.join(" ")))
+                }
+            })
     }
 
     fn on_undo_started(&mut self, event: UndoStartedEvent) {

@@ -199,6 +199,18 @@ impl BackgroundShellManager {
                 .await;
         }
 
+        if running {
+            session
+                .send_shell_promoted(
+                    &turn.sub_id,
+                    call_id.clone(),
+                    shell_id.clone(),
+                    initial_output.clone(),
+                    description.clone(),
+                )
+                .await;
+        }
+
         session
             .notify_background_event(
                 &turn.sub_id,

@@ -254,6 +254,8 @@ impl ShellHandler {
         }
 
         if params.run_in_background.unwrap_or(false) {
+            let description =
+                Self::background_description(params.description.as_deref(), &shell_request.command);
             let manager = &session.services.background_shell;
             let response = manager
                 .start(
@@ -262,7 +264,7 @@ impl ShellHandler {
                     turn.clone(),
                     &tracker,
                     call_id.clone(),
-                    params.description.clone(),
+                    description.clone(),
                 )
                 .await?;
 
@@ -447,6 +449,24 @@ impl ShellHandler {
                 })
             }
         }
+    }
+}
+
+impl ShellHandler {
+    fn background_description(explicit: Option<&str>, command: &[String]) -> Option<String> {
+        let cleaned = explicit
+            .map(str::trim)
+            .filter(|text| !text.is_empty())
+            .map(std::string::ToString::to_string);
+        cleaned.or_else(|| {
+            if command.is_empty() {
+                None
+            } else {
+                shlex::try_join(command.iter().map(String::as_str))
+                    .ok()
+                    .or_else(|| Some(command.join(" ")))
+            }
+        })
     }
 }
 

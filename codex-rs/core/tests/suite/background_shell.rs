@@ -173,6 +173,21 @@ async fn background_shell_supports_polling_and_kill() -> Result<()> {
 
     submit_background_turn(&test, "exercise background shell tools").await?;
 
+    let (promo_call_id, promo_shell_id, promo_description) =
+        wait_for_event_match(&test.codex, |msg| match msg {
+            EventMsg::ShellPromoted {
+                call_id,
+                shell_id,
+                description,
+                ..
+            } => Some((call_id.clone(), shell_id.clone(), description.clone())),
+            _ => None,
+        })
+        .await;
+    assert_eq!(promo_call_id, start_call_id);
+    assert_eq!(promo_shell_id, "shell_0");
+    assert_eq!(promo_description.as_deref(), Some("demo background shell"));
+
     let start_event = wait_for_event_match(&test.codex, |msg| match msg {
         EventMsg::BackgroundEvent(BackgroundEventEvent { message })
             if message.contains("shell shell_0 started") =>

@@ -1,6 +1,7 @@
 use super::*;
 use crate::app_event::AppEvent;
 use crate::app_event_sender::AppEventSender;
+use crate::exec_cell::ExecCell;
 use crate::exec_cell::ExecStreamAction;
 use crate::exec_cell::ExecStreamKind;
 use crate::test_backend::VT100Backend;
@@ -1323,6 +1324,59 @@ fn background_events_emit_live_exec_poll_notifications() {
     assert!(
         !chat.background_tasks.contains_key("shell_7"),
         "background task should be cleared after termination"
+    );
+}
+
+#[test]
+fn background_start_without_description_preserves_exec_cell() {
+    let (mut chat, mut rx, _op_rx) = make_chatwidget_manual();
+    let call_id = "bg-call";
+
+    chat.handle_codex_event(Event {
+        id: "turn-1".to_string(),
+        msg: EventMsg::ExecCommandBegin(ExecCommandBeginEvent {
+            call_id: call_id.to_string(),
+            command: vec!["printf".into(), "kickoff".into()],
+            cwd: chat.config.cwd.clone(),
+            parsed_cmd: Vec::new(),
+        }),
+    });
+    // Drain any events produced by ExecCommandBegin.
+    while rx.try_recv().is_ok() {}
+
+    chat.handle_codex_event(Event {
+        id: "shell-promoted".to_string(),
+        msg: EventMsg::ShellPromoted {
+            call_id: call_id.to_string(),
+            shell_id: "shell_9".to_string(),
+            initial_output: String::new(),
+            description: None,
+        },
+    });
+    // Consume LiveExecPromoted notification.
+    while rx.try_recv().is_ok() {}
+
+    chat.handle_codex_event(Event {
+        id: "bg-start".to_string(),
+        msg: EventMsg::BackgroundEvent(BackgroundEventEvent {
+            message: "Background shell shell_9 started".to_string(),
+        }),
+    });
+
+    let active_exec = chat
+        .active_cell
+        .as_ref()
+        .and_then(|cell| cell.as_any().downcast_ref::<ExecCell>());
+    assert!(
+        active_exec.is_some(),
+        "exec cell should remain visible during background execution"
+    );
+    assert_eq!(
+        chat.background_tasks
+            .get("shell_9")
+            .and_then(|info| info.description.clone())
+            .as_deref(),
+        Some("printf kickoff")
     );
 }
 
