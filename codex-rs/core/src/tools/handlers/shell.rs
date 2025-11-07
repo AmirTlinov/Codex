@@ -346,7 +346,7 @@ impl ShellHandler {
         let context = UnifiedExecContext::new(session.clone(), turn.clone(), call_id.clone());
         let command_label = exec_params.command.join(" ");
         let session_id = manager
-            .store_session(unified_session, &context, &command_label, start_wall)
+            .store_session(unified_session, &context, &exec_params.command, start_wall)
             .await;
 
         let (state, promotion_rx, promotion_result_rx) = ForegroundShellState::new(session_id);

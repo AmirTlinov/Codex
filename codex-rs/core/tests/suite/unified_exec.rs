@@ -315,7 +315,11 @@ async fn unified_exec_emits_exec_events() -> Result<()> {
     };
     assert_eq!(
         begin_event.command,
-        vec!["/bin/sh -c printf EXEC-END".to_string()]
+        vec![
+            "/bin/sh".to_string(),
+            "-c".to_string(),
+            "printf EXEC-END".to_string(),
+        ]
     );
 
     let end_event: ExecCommandEndEvent = match wait_for_event(

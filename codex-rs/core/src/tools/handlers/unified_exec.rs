@@ -88,14 +88,9 @@ impl ToolHandler for UnifiedExecHandler {
             timeout_ms,
         };
 
-        let command_label = input.join(" ");
         let mut emitter = None;
         if parsed_session_id.is_none() {
-            emitter = Some(ToolEmitter::unified_exec(
-                command_label.clone(),
-                turn.cwd.clone(),
-                true,
-            ));
+            emitter = Some(ToolEmitter::unified_exec(input.clone(), turn.cwd.clone(), true));
             if let Some(emitter) = emitter.as_ref() {
                 let event_ctx = ToolEventCtx::new(session.as_ref(), turn.as_ref(), &call_id, None);
                 emitter.begin(event_ctx).await;

@@ -82,7 +82,7 @@ pub(crate) enum ToolEmitter {
         _reason: Option<String>,
     },
     UnifiedExec {
-        command: String,
+        command: Vec<String>,
         cwd: PathBuf,
         // True for `exec_command` and false for `write_stdin`.
         #[allow(dead_code)]
@@ -107,7 +107,7 @@ impl ToolEmitter {
         }
     }
 
-    pub fn unified_exec(command: String, cwd: PathBuf, is_startup_command: bool) -> Self {
+    pub fn unified_exec(command: Vec<String>, cwd: PathBuf, is_startup_command: bool) -> Self {
         Self::UnifiedExec {
             command,
             cwd,
@@ -208,7 +208,7 @@ impl ToolEmitter {
                 emit_patch_end(ctx, String::new(), (*message).to_string(), false).await;
             }
             (Self::UnifiedExec { command, cwd, .. }, ToolEventStage::Begin) => {
-                emit_exec_command_begin(ctx, &[command.to_string()], cwd.as_path()).await;
+                emit_exec_command_begin(ctx, command, cwd.as_path()).await;
             }
             (Self::UnifiedExec { .. }, ToolEventStage::Success(output)) => {
                 emit_exec_end(

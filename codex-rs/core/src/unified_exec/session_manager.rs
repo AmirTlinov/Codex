@@ -114,7 +114,6 @@ impl UnifiedExecSessionManager {
             return Err(UnifiedExecError::MissingCommandLine);
         }
 
-        let command_display = command_tokens.join(" ");
         let cwd = if let Some(context) = context {
             context.turn.cwd.clone()
         } else {
@@ -153,7 +152,7 @@ impl UnifiedExecSessionManager {
                 let duration = StdInstant::now().saturating_duration_since(start_wall);
                 Self::emit_exec_end_from_context(
                     context,
-                    command_display.clone(),
+                    command_tokens.clone(),
                     output.clone(),
                     exit,
                     duration,
@@ -168,7 +167,7 @@ impl UnifiedExecSessionManager {
 
         let session_id = if let Some(context) = context {
             Some(
-                self.store_session(session, context, &command_display, start_wall)
+                self.store_session(session, context, &command_tokens, start_wall)
                     .await,
             )
         } else {
@@ -294,7 +293,7 @@ impl UnifiedExecSessionManager {
         &self,
         session: UnifiedExecSession,
         context: &UnifiedExecContext,
-        command: &str,
+        command: &[String],
         started_at: StdInstant,
     ) -> i32 {
         let session_id = self.next_session_id.fetch_add(1, Ordering::SeqCst);
@@ -303,7 +302,7 @@ impl UnifiedExecSessionManager {
             session_ref: Some(Arc::clone(&context.session)),
             turn_ref: Some(Arc::clone(&context.turn)),
             call_id: Some(context.call_id.clone()),
-            command: command.to_string(),
+            command: command.to_vec(),
             cwd: context.turn.cwd.clone(),
             started_at,
         };
@@ -323,7 +322,7 @@ impl UnifiedExecSessionManager {
             session_ref: None,
             turn_ref: None,
             call_id: None,
-            command: command.join(" "),
+            command,
             cwd,
             started_at: StdInstant::now(),
         };
@@ -352,7 +351,7 @@ impl UnifiedExecSessionManager {
             };
             let event_ctx =
                 ToolEventCtx::new(session_ref.as_ref(), turn_ref.as_ref(), call_id, None);
-            let emitter = ToolEmitter::unified_exec(entry.command, entry.cwd, true);
+            let emitter = ToolEmitter::unified_exec(entry.command.clone(), entry.cwd, true);
             emitter
                 .emit(event_ctx, ToolEventStage::Success(output))
                 .await;
@@ -361,7 +360,7 @@ impl UnifiedExecSessionManager {
 
     async fn emit_exec_end_from_context(
         context: &UnifiedExecContext,
-        command: String,
+        command: Vec<String>,
         aggregated_output: String,
         exit_code: i32,
         duration: Duration,

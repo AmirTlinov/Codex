@@ -172,7 +172,7 @@ impl BackgroundShellManager {
                 .store_session(
                     unified_session,
                     &context,
-                    &request.command.join(" "),
+                    &request.command,
                     start_wall,
                 )
                 .await;

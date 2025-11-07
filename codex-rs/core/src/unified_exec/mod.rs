@@ -89,7 +89,7 @@ pub(crate) struct SessionEntry {
     pub session_ref: Option<Arc<Session>>,
     pub turn_ref: Option<Arc<TurnContext>>,
     pub call_id: Option<String>,
-    pub command: String,
+    pub command: Vec<String>,
     pub cwd: PathBuf,
     pub started_at: Instant,
 }
