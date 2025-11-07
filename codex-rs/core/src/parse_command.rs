@@ -3,6 +3,7 @@ use crate::bash::try_parse_word_only_commands_sequence;
 use codex_protocol::parse_command::ParsedCommand;
 use shlex::split as shlex_split;
 use shlex::try_join as shlex_try_join;
+use std::cell::Cell;
 
 fn shlex_join(tokens: &[String]) -> String {
     shlex_try_join(tokens.iter().map(String::as_str))
@@ -260,6 +261,18 @@ mod tests {
     }
 
     #[test]
+    fn cat_respects_double_dash() {
+        let inner = "cat -- docs/CHANGELOG.md";
+        assert_parsed(
+            &vec_str(&["bash", "-lc", inner]),
+            vec![ParsedCommand::Read {
+                cmd: inner.to_string(),
+                name: "CHANGELOG.md".to_string(),
+            }],
+        );
+    }
+
+    #[test]
     fn cat_with_number_flag_is_read() {
         let inner = "cat -n README.md";
         assert_parsed(
@@ -278,6 +291,30 @@ mod tests {
             &vec_str(&["bash", "-lc", script]),
             vec![ParsedCommand::Unknown {
                 cmd: script.to_string(),
+            }],
+        );
+    }
+
+    #[test]
+    fn tail_follow_with_offset_is_read() {
+        let inner = "tail -f -n +25 README.md";
+        assert_parsed(
+            &vec_str(&["bash", "-lc", inner]),
+            vec![ParsedCommand::Read {
+                cmd: inner.to_string(),
+                name: "README.md".to_string(),
+            }],
+        );
+    }
+
+    #[test]
+    fn sed_range_extracts_file() {
+        let inner = "sed -n '10,20p' src/lib.rs";
+        assert_parsed(
+            &vec_str(&["bash", "-lc", inner]),
+            vec![ParsedCommand::Read {
+                cmd: inner.to_string(),
+                name: "lib.rs".to_string(),
             }],
         );
     }
@@ -984,9 +1021,97 @@ fn contains_connectors(tokens: &[String]) -> bool {
         .any(|t| t == "&&" || t == "||" || t == "|" || t == ";")
 }
 
-fn contains_shell_redirection(token: &str) -> bool {
-    let trimmed = token.trim_start_matches(|c: char| c == '(');
-    trimmed.starts_with('<') || trimmed.starts_with('>')
+fn contains_redirection(tokens: &[String]) -> bool {
+    tokens
+        .iter()
+        .any(|token| classify_redirection_token(token).is_some())
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum RedirectionKind {
+    Operator,
+    Inline,
+}
+
+fn classify_redirection_token(token: &str) -> Option<RedirectionKind> {
+    if token.is_empty() || token == "--" {
+        return None;
+    }
+
+    let mut chars = token.chars().peekable();
+    while let Some(&ch) = chars.peek() {
+        if ch.is_ascii_digit() || ch == '&' {
+            chars.next();
+        } else {
+            break;
+        }
+    }
+
+    let mut op_len = 0;
+    while let Some(&ch) = chars.peek() {
+        if ch == '<' || ch == '>' {
+            op_len += 1;
+            chars.next();
+        } else {
+            break;
+        }
+    }
+
+    if op_len == 0 {
+        return None;
+    }
+
+    let rest: String = chars.collect();
+    if rest.is_empty() {
+        return Some(RedirectionKind::Operator);
+    }
+
+    let rest_stripped = rest.trim_matches(&['"', '\'']);
+    if rest_stripped.chars().any(|c| c == '<' || c == '>') {
+        return None;
+    }
+
+    Some(RedirectionKind::Inline)
+}
+
+#[derive(Clone, Copy)]
+enum FlagParseResult {
+    Consumed(usize),
+    StopParsing,
+    NotFlag,
+}
+
+fn first_positional_arg<'a>(
+    tokens: &'a [String],
+    parser: impl Fn(&[String], usize) -> FlagParseResult,
+) -> Option<&'a String> {
+    let mut i = 0;
+    while i < tokens.len() {
+        match parser(tokens, i) {
+            FlagParseResult::Consumed(n) => {
+                if n == 0 {
+                    break;
+                }
+                i += n;
+            }
+            FlagParseResult::StopParsing => {
+                return tokens.get(i + 1);
+            }
+            FlagParseResult::NotFlag => {
+                return Some(&tokens[i]);
+            }
+        }
+    }
+    None
+}
+
+fn is_digits(value: &str) -> bool {
+    !value.is_empty() && value.chars().all(|c| c.is_ascii_digit())
+}
+
+fn is_tail_offset(value: &str) -> bool {
+    let stripped = value.strip_prefix('+').unwrap_or(value);
+    is_digits(stripped)
 }
 
 fn split_on_connectors(tokens: &[String]) -> Vec<Vec<String>> {
@@ -1360,28 +1485,24 @@ fn summarize_main_tokens(main_cmd: &[String]) -> ParsedCommand {
             }
         }
         Some((head, tail)) if head == "cat" => {
-            // Support both `cat <file>` and `cat -- <file>` forms, allowing common flags like -n.
-            let effective_tail: &[String] = if tail.first().map(String::as_str) == Some("--") {
-                &tail[1..]
-            } else {
-                tail
-            };
-            let args_no_connector = trim_at_connector(effective_tail);
-            if args_no_connector.is_empty()
-                || args_no_connector
-                    .iter()
-                    .any(|arg| contains_shell_redirection(arg.as_str()))
-            {
+            let args_no_connector = trim_at_connector(tail);
+            if args_no_connector.is_empty() || contains_redirection(&args_no_connector) {
                 return ParsedCommand::Unknown {
                     cmd: shlex_join(main_cmd),
                 };
             }
-            let non_flag_args: Vec<&String> = args_no_connector
-                .iter()
-                .filter(|arg| !is_cat_flag(arg))
-                .collect();
-            if non_flag_args.len() == 1 {
-                let name = short_display_path(non_flag_args[0]);
+            let parser = |tokens: &[String], idx: usize| {
+                let token = &tokens[idx];
+                if token == "--" {
+                    FlagParseResult::StopParsing
+                } else if is_cat_flag(token) {
+                    FlagParseResult::Consumed(1)
+                } else {
+                    FlagParseResult::NotFlag
+                }
+            };
+            if let Some(path) = first_positional_arg(&args_no_connector, parser) {
+                let name = short_display_path(path);
                 ParsedCommand::Read {
                     cmd: shlex_join(main_cmd),
                     name,
@@ -1393,90 +1514,33 @@ fn summarize_main_tokens(main_cmd: &[String]) -> ParsedCommand {
             }
         }
         Some((head, tail)) if head == "head" => {
-            // Support `head -n 50 file` and `head -n50 file` forms.
-            let has_valid_n = match tail.split_first() {
-                Some((first, rest)) if first == "-n" => rest
-                    .first()
-                    .is_some_and(|n| n.chars().all(|c| c.is_ascii_digit())),
-                Some((first, _)) if first.starts_with("-n") => {
-                    first[2..].chars().all(|c| c.is_ascii_digit())
+            let args_no_connector = trim_at_connector(tail);
+            let seen_flag = Cell::new(false);
+            let parser = |tokens: &[String], idx: usize| {
+                let token = &tokens[idx];
+                if token == "--" {
+                    return FlagParseResult::StopParsing;
                 }
-                _ => false,
-            };
-            if has_valid_n {
-                // Build candidates skipping the numeric value consumed by `-n` when separated.
-                let mut candidates: Vec<&String> = Vec::new();
-                let mut i = 0;
-                while i < tail.len() {
-                    if i == 0 && tail[i] == "-n" && i + 1 < tail.len() {
-                        let n = &tail[i + 1];
-                        if n.chars().all(|c| c.is_ascii_digit()) {
-                            i += 2;
-                            continue;
-                        }
+                if token == "-n" {
+                    if let Some(next) = tokens.get(idx + 1)
+                        && is_digits(next)
+                    {
+                        seen_flag.set(true);
+                        return FlagParseResult::Consumed(2);
                     }
-                    candidates.push(&tail[i]);
-                    i += 1;
-                }
-                if let Some(p) = candidates.into_iter().find(|p| !p.starts_with('-')) {
-                    let name = short_display_path(p);
-                    return ParsedCommand::Read {
-                        cmd: shlex_join(main_cmd),
-                        name,
-                    };
-                }
-            }
-            ParsedCommand::Unknown {
-                cmd: shlex_join(main_cmd),
-            }
-        }
-        Some((head, tail)) if head == "tail" => {
-            // Support `tail -n +10 file` and `tail -n+10 file` forms.
-            let has_valid_n = match tail.split_first() {
-                Some((first, rest)) if first == "-n" => rest.first().is_some_and(|n| {
-                    let s = n.strip_prefix('+').unwrap_or(n);
-                    !s.is_empty() && s.chars().all(|c| c.is_ascii_digit())
-                }),
-                Some((first, _)) if first.starts_with("-n") => {
-                    let v = &first[2..];
-                    let s = v.strip_prefix('+').unwrap_or(v);
-                    !s.is_empty() && s.chars().all(|c| c.is_ascii_digit())
-                }
-                _ => false,
-            };
-            if has_valid_n {
-                // Build candidates skipping the numeric value consumed by `-n` when separated.
-                let mut candidates: Vec<&String> = Vec::new();
-                let mut i = 0;
-                while i < tail.len() {
-                    if i == 0 && tail[i] == "-n" && i + 1 < tail.len() {
-                        let n = &tail[i + 1];
-                        let s = n.strip_prefix('+').unwrap_or(n);
-                        if !s.is_empty() && s.chars().all(|c| c.is_ascii_digit()) {
-                            i += 2;
-                            continue;
-                        }
+                } else if token.starts_with("-n") {
+                    let value = &token[2..];
+                    if is_digits(value) {
+                        seen_flag.set(true);
+                        return FlagParseResult::Consumed(1);
                     }
-                    candidates.push(&tail[i]);
-                    i += 1;
                 }
-                if let Some(p) = candidates.into_iter().find(|p| !p.starts_with('-')) {
-                    let name = short_display_path(p);
-                    return ParsedCommand::Read {
-                        cmd: shlex_join(main_cmd),
-                        name,
-                    };
-                }
-            }
-            ParsedCommand::Unknown {
-                cmd: shlex_join(main_cmd),
-            }
-        }
-        Some((head, tail)) if head == "nl" => {
-            // Avoid treating option values as paths (e.g., nl -s "  ").
-            let candidates = skip_flag_values(tail, &["-s", "-w", "-v", "-i", "-b"]);
-            if let Some(p) = candidates.into_iter().find(|p| !p.starts_with('-')) {
-                let name = short_display_path(p);
+                FlagParseResult::NotFlag
+            };
+            if let Some(path) = first_positional_arg(&args_no_connector, parser)
+                && seen_flag.get()
+            {
+                let name = short_display_path(path);
                 ParsedCommand::Read {
                     cmd: shlex_join(main_cmd),
                     name,
@@ -1487,13 +1551,96 @@ fn summarize_main_tokens(main_cmd: &[String]) -> ParsedCommand {
                 }
             }
         }
-        Some((head, tail))
-            if head == "sed"
-                && tail.len() >= 3
-                && tail[0] == "-n"
-                && is_valid_sed_n_arg(tail.get(1).map(String::as_str)) =>
-        {
-            if let Some(path) = tail.get(2) {
+        Some((head, tail)) if head == "tail" => {
+            let args_no_connector = trim_at_connector(tail);
+            let seen_flag = Cell::new(false);
+            let parser = |tokens: &[String], idx: usize| {
+                let token = &tokens[idx];
+                if token == "--" {
+                    return FlagParseResult::StopParsing;
+                }
+                if token == "-f" || token == "--follow" {
+                    return FlagParseResult::Consumed(1);
+                }
+                if token == "-n" {
+                    if let Some(next) = tokens.get(idx + 1)
+                        && is_tail_offset(next)
+                    {
+                        seen_flag.set(true);
+                        return FlagParseResult::Consumed(2);
+                    }
+                } else if token.starts_with("-n") {
+                    let value = &token[2..];
+                    if is_tail_offset(value) {
+                        seen_flag.set(true);
+                        return FlagParseResult::Consumed(1);
+                    }
+                }
+                FlagParseResult::NotFlag
+            };
+            if let Some(path) = first_positional_arg(&args_no_connector, parser)
+                && seen_flag.get()
+            {
+                let name = short_display_path(path);
+                ParsedCommand::Read {
+                    cmd: shlex_join(main_cmd),
+                    name,
+                }
+            } else {
+                ParsedCommand::Unknown {
+                    cmd: shlex_join(main_cmd),
+                }
+            }
+        }
+        Some((head, tail)) if head == "nl" => {
+            let args_no_connector = trim_at_connector(tail);
+            let parser = |tokens: &[String], idx: usize| {
+                let token = &tokens[idx];
+                if token == "--" {
+                    return FlagParseResult::StopParsing;
+                }
+                if matches!(token.as_str(), "-s" | "-w" | "-v" | "-i" | "-b") {
+                    if tokens.get(idx + 1).is_some() {
+                        return FlagParseResult::Consumed(2);
+                    }
+                }
+                FlagParseResult::NotFlag
+            };
+            if let Some(path) = first_positional_arg(&args_no_connector, parser) {
+                let name = short_display_path(path);
+                ParsedCommand::Read {
+                    cmd: shlex_join(main_cmd),
+                    name,
+                }
+            } else {
+                ParsedCommand::Unknown {
+                    cmd: shlex_join(main_cmd),
+                }
+            }
+        }
+        Some((head, tail)) if head == "sed" => {
+            let args_no_connector = trim_at_connector(tail);
+            if args_no_connector.is_empty() {
+                return ParsedCommand::Unknown {
+                    cmd: shlex_join(main_cmd),
+                };
+            }
+            let pattern_consumed = Cell::new(false);
+            let parser = |tokens: &[String], idx: usize| {
+                if idx == 0 && tokens[idx] == "-n" {
+                    if let Some(pattern) = tokens.get(idx + 1)
+                        && is_valid_sed_n_arg(Some(pattern))
+                    {
+                        pattern_consumed.set(true);
+                        return FlagParseResult::Consumed(2);
+                    }
+                    return FlagParseResult::NotFlag;
+                }
+                FlagParseResult::NotFlag
+            };
+            if let Some(path) = first_positional_arg(&args_no_connector, parser)
+                && pattern_consumed.get()
+            {
                 let name = short_display_path(path);
                 ParsedCommand::Read {
                     cmd: shlex_join(main_cmd),
