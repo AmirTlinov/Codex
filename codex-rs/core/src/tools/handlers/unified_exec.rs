@@ -5,8 +5,13 @@ use crate::function_tool::FunctionCallError;
 use crate::tools::context::ToolInvocation;
 use crate::tools::context::ToolOutput;
 use crate::tools::context::ToolPayload;
+use crate::tools::events::ToolEmitter;
+use crate::tools::events::ToolEventCtx;
+use crate::tools::events::ToolEventFailure;
+use crate::tools::events::ToolEventStage;
 use crate::tools::registry::ToolHandler;
 use crate::tools::registry::ToolKind;
+use crate::unified_exec::UnifiedExecContext;
 use crate::unified_exec::UnifiedExecRequest;
 
 pub struct UnifiedExecHandler;
@@ -36,6 +41,8 @@ impl ToolHandler for UnifiedExecHandler {
     async fn handle(&self, invocation: ToolInvocation) -> Result<ToolOutput, FunctionCallError> {
         let ToolInvocation {
             session,
+            turn,
+            call_id,
             payload,
             sub_id,
             ..
@@ -81,12 +88,48 @@ impl ToolHandler for UnifiedExecHandler {
             timeout_ms,
         };
 
-        let value = session
-            .run_unified_exec_request(request)
-            .await
-            .map_err(|err| {
-                FunctionCallError::RespondToModel(format!("unified exec failed: {err:?}"))
-            })?;
+        let command_label = input.join(" ");
+        let mut emitter = None;
+        if parsed_session_id.is_none() {
+            emitter = Some(ToolEmitter::unified_exec(
+                command_label.clone(),
+                turn.cwd.clone(),
+                true,
+            ));
+            if let Some(emitter) = emitter.as_ref() {
+                let event_ctx = ToolEventCtx::new(session.as_ref(), turn.as_ref(), &call_id, None);
+                emitter.begin(event_ctx).await;
+            }
+        }
+
+        let exec_context = UnifiedExecContext::new(session.clone(), turn.clone(), call_id.clone());
+
+        let result = if parsed_session_id.is_some() {
+            session.run_unified_exec_request(request).await
+        } else {
+            session
+                .run_unified_exec_request_with_context(request, &exec_context)
+                .await
+        };
+
+        let value = match result {
+            Ok(value) => value,
+            Err(err) => {
+                if let Some(emitter) = emitter.as_ref() {
+                    let event_ctx =
+                        ToolEventCtx::new(session.as_ref(), turn.as_ref(), &call_id, None);
+                    emitter
+                        .emit(
+                            event_ctx,
+                            ToolEventStage::Failure(ToolEventFailure::Message(err.to_string())),
+                        )
+                        .await;
+                }
+                return Err(FunctionCallError::RespondToModel(format!(
+                    "unified exec failed: {err:?}"
+                )));
+            }
+        };
         session.publish_unified_exec_sessions(&sub_id).await;
 
         #[derive(serde::Serialize)]

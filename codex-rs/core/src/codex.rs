@@ -1171,7 +1171,18 @@ impl Session {
     ) -> Result<crate::unified_exec::UnifiedExecResult, crate::unified_exec::UnifiedExecError> {
         self.services
             .unified_exec_manager
-            .handle_request(request)
+            .handle_request(request, None)
+            .await
+    }
+
+    pub(crate) async fn run_unified_exec_request_with_context(
+        &self,
+        request: crate::unified_exec::UnifiedExecRequest<'_>,
+        context: &crate::unified_exec::UnifiedExecContext,
+    ) -> Result<crate::unified_exec::UnifiedExecResult, crate::unified_exec::UnifiedExecError> {
+        self.services
+            .unified_exec_manager
+            .handle_request(request, Some(context))
             .await
     }
 

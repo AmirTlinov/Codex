@@ -6,6 +6,7 @@ use std::sync::atomic::AtomicI32;
 use std::sync::atomic::Ordering;
 use std::time::Instant as StdInstant;
 
+use anyhow::anyhow;
 use tokio::sync::Mutex;
 use tokio::sync::Notify;
 use tokio::sync::mpsc;
@@ -13,13 +14,21 @@ use tokio::time::Duration;
 use tokio::time::Instant as TokioInstant;
 use tracing::warn;
 
+use crate::error::CodexErr;
+use crate::error::SandboxErr;
 use crate::exec::ExecToolCallOutput;
 use crate::exec::SandboxType;
 use crate::exec::StreamOutput;
+use crate::exec_env::create_env;
 use crate::sandboxing::ExecEnv;
 use crate::tools::events::ToolEmitter;
 use crate::tools::events::ToolEventCtx;
 use crate::tools::events::ToolEventStage;
+use crate::tools::orchestrator::ToolOrchestrator;
+use crate::tools::runtimes::unified_exec::UnifiedExecRequest as UnifiedExecToolRequest;
+use crate::tools::runtimes::unified_exec::UnifiedExecRuntime;
+use crate::tools::sandboxing::ToolCtx;
+use crate::tools::sandboxing::ToolError;
 
 use super::DEFAULT_TIMEOUT_MS;
 use super::MAX_TIMEOUT_MS;
@@ -51,6 +60,7 @@ impl UnifiedExecSessionManager {
     pub(crate) async fn handle_request(
         &self,
         request: UnifiedExecRequest<'_>,
+        context: Option<&UnifiedExecContext>,
     ) -> Result<UnifiedExecResult, UnifiedExecError> {
         let (timeout_ms, timeout_warning) = match request.timeout_ms {
             Some(requested) if requested > MAX_TIMEOUT_MS => (
@@ -99,20 +109,35 @@ impl UnifiedExecSessionManager {
             return Err(UnifiedExecError::MissingCommandLine);
         }
 
-        let command = request.input_chunks.to_vec();
-        let (program, args) = command
-            .split_first()
-            .ok_or(UnifiedExecError::MissingCommandLine)?;
+        let command_tokens = request.input_chunks.to_vec();
+        if command_tokens.is_empty() {
+            return Err(UnifiedExecError::MissingCommandLine);
+        }
 
-        let cwd = env::current_dir().map_err(|err| UnifiedExecError::create_session(err.into()))?;
-        let env_map = collect_env_lossy();
+        let command_display = command_tokens.join(" ");
+        let cwd = if let Some(context) = context {
+            context.turn.cwd.clone()
+        } else {
+            env::current_dir().map_err(|err| UnifiedExecError::create_session(err.into()))?
+        };
 
-        let spawned = codex_utils_pty::spawn_pty_process(program, args, cwd.as_path(), &env_map)
-            .await
-            .map_err(UnifiedExecError::create_session)?;
-        let session =
-            UnifiedExecSession::from_spawned(command.clone(), spawned, SandboxType::None).await?;
+        let session = if let Some(context) = context {
+            self.open_session_with_sandbox(command_tokens.clone(), context)
+                .await?
+        } else {
+            let (program, args) = command_tokens
+                .split_first()
+                .ok_or(UnifiedExecError::MissingCommandLine)?;
+            let env_map = collect_env_lossy();
+            let spawned =
+                codex_utils_pty::spawn_pty_process(program, args, cwd.as_path(), &env_map)
+                    .await
+                    .map_err(UnifiedExecError::create_session)?;
+            UnifiedExecSession::from_spawned(command_tokens.clone(), spawned, SandboxType::None)
+                .await?
+        };
 
+        let start_wall = StdInstant::now();
         let (output_buffer, output_notify) = session.output_handles();
         let deadline = TokioInstant::now() + Duration::from_millis(timeout_ms);
         let collected =
@@ -122,11 +147,33 @@ impl UnifiedExecSessionManager {
             output = format!("{warning}{output}");
         }
 
-        let session_id = if session.has_exited() {
-            None
+        if session.has_exited() {
+            if let Some(context) = context {
+                let exit = session.exit_code().unwrap_or(-1);
+                let duration = StdInstant::now().saturating_duration_since(start_wall);
+                Self::emit_exec_end_from_context(
+                    context,
+                    command_display.clone(),
+                    output.clone(),
+                    exit,
+                    duration,
+                )
+                .await;
+            }
+            return Ok(UnifiedExecResult {
+                session_id: None,
+                output,
+            });
+        }
+
+        let session_id = if let Some(context) = context {
+            Some(
+                self.store_session(session, context, &command_display, start_wall)
+                    .await,
+            )
         } else {
             Some(
-                self.store_session_without_context(session, command, cwd)
+                self.store_session_without_context(session, command_tokens, cwd)
                     .await,
             )
         };
@@ -312,6 +359,33 @@ impl UnifiedExecSessionManager {
         }
     }
 
+    async fn emit_exec_end_from_context(
+        context: &UnifiedExecContext,
+        command: String,
+        aggregated_output: String,
+        exit_code: i32,
+        duration: Duration,
+    ) {
+        let output = ExecToolCallOutput {
+            exit_code,
+            stdout: StreamOutput::new(aggregated_output.clone()),
+            stderr: StreamOutput::new(String::new()),
+            aggregated_output: StreamOutput::new(aggregated_output),
+            duration,
+            timed_out: false,
+        };
+        let event_ctx = ToolEventCtx::new(
+            context.session.as_ref(),
+            context.turn.as_ref(),
+            &context.call_id,
+            None,
+        );
+        let emitter = ToolEmitter::unified_exec(command, context.turn.cwd.clone(), true);
+        emitter
+            .emit(event_ctx, ToolEventStage::Success(output))
+            .await;
+    }
+
     pub(crate) async fn open_session_with_exec_env(
         &self,
         env: &ExecEnv,
@@ -325,6 +399,49 @@ impl UnifiedExecSessionManager {
                 .await
                 .map_err(UnifiedExecError::create_session)?;
         UnifiedExecSession::from_spawned(env.command.clone(), spawned, env.sandbox).await
+    }
+
+    pub(crate) async fn open_session_with_sandbox(
+        &self,
+        command: Vec<String>,
+        context: &UnifiedExecContext,
+    ) -> Result<UnifiedExecSession, UnifiedExecError> {
+        let mut orchestrator = ToolOrchestrator::new();
+        let mut runtime = UnifiedExecRuntime::new(self);
+        let req = UnifiedExecToolRequest::new(
+            command,
+            context.turn.cwd.clone(),
+            create_env(&context.turn.shell_environment_policy),
+        );
+        let tool_ctx = ToolCtx {
+            session: context.session.as_ref(),
+            turn: context.turn.as_ref(),
+            call_id: context.call_id.clone(),
+            tool_name: "unified_exec".to_string(),
+        };
+        orchestrator
+            .run(
+                &mut runtime,
+                &req,
+                &tool_ctx,
+                context.turn.as_ref(),
+                context.turn.approval_policy,
+            )
+            .await
+            .map_err(|err| match err {
+                ToolError::Codex(CodexErr::Sandbox(SandboxErr::Denied { output })) => {
+                    UnifiedExecError::SandboxDenied {
+                        message: "sandbox denied command".to_string(),
+                        output: *output,
+                    }
+                }
+                ToolError::SandboxDenied(message) | ToolError::Rejected(message) => {
+                    UnifiedExecError::create_session(anyhow!(message))
+                }
+                ToolError::Codex(other) => {
+                    UnifiedExecError::create_session(anyhow!(other.to_string()))
+                }
+            })
     }
 
     pub(crate) async fn terminate_session(

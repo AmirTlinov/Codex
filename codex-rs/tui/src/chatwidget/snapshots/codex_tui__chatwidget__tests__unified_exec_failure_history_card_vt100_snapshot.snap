@@ -1,0 +1,7 @@
+---
+source: tui/src/chatwidget/tests.rs
+assertion_line: 3124
+expression: term.backend().vt100().screen().contents()
+---
+• Ran sleep 5
+  └ Command timed out after 1s while waiting for sandbox approval.

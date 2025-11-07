@@ -1,0 +1,2 @@
+{"source":"tui_agents_context_opt_in","summary":["TUI sessions no longer auto-activate saved agents context on startup","ChatWidget::new now starts with agents context inactive until /context manager is used"],"citation":"tui/src/chatwidget.rs:1487-1520"}
+{"source":"tui_settings_overlay","summary":["Added `/settings` popup so users can toggle wrap behaviour and agents context auto-attach without leaving the TUI","Auto-attach preference now persists via config helpers and matches legacy defaults"],"citation":"tui/src/settings_overlay.rs:1-164"}

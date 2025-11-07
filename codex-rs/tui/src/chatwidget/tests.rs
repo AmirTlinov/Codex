@@ -3066,6 +3066,66 @@ fn chatwidget_exec_and_status_layout_vt100_snapshot() {
     assert_snapshot!(term.backend().vt100().screen().contents());
 }
 
+#[test]
+fn unified_exec_history_card_vt100_snapshot() {
+    let (mut chat, mut rx, _op_rx) = make_chatwidget_manual();
+
+    // Simulate a unified_exec tool call lifecycle.
+    begin_exec(&mut chat, "unified-exec-call", "ls -la /workspace");
+    end_exec(
+        &mut chat,
+        "unified-exec-call",
+        "drwxr-xr-x  5 user user    160 .\ndrwxr-xr-x 18 user user    576 ..\n-rw-r--r--  1 user user   1024 Cargo.toml\n-rw-r--r--  1 user user   4096 README.md\n",
+        "",
+        0,
+    );
+
+    let width: u16 = 80;
+    let height: u16 = 20;
+    let backend = VT100Backend::new(width, height);
+    let mut term = crate::custom_terminal::Terminal::with_options(backend).expect("terminal");
+    term.set_viewport_area(Rect::new(0, height - 1, width, 1));
+
+    for lines in drain_insert_history(&mut rx) {
+        crate::insert_history::insert_history_lines(&mut term, lines);
+    }
+
+    assert_snapshot!(term.backend().vt100().screen().contents());
+}
+
+#[test]
+fn unified_exec_failure_history_card_vt100_snapshot() {
+    let (mut chat, mut rx, _op_rx) = make_chatwidget_manual();
+
+    begin_exec(&mut chat, "failed-unified-exec", "sleep 5");
+    chat.handle_codex_event(Event {
+        id: "failed-unified-exec".into(),
+        msg: EventMsg::ExecCommandEnd(ExecCommandEndEvent {
+            call_id: "failed-unified-exec".into(),
+            stdout: String::new(),
+            stderr: String::new(),
+            aggregated_output: "Command timed out after 1s while waiting for sandbox approval."
+                .into(),
+            exit_code: 124,
+            duration: std::time::Duration::from_millis(1_000),
+            formatted_output: "Command timed out after 1s while waiting for sandbox approval."
+                .into(),
+        }),
+    });
+
+    let width: u16 = 80;
+    let height: u16 = 20;
+    let backend = VT100Backend::new(width, height);
+    let mut term = crate::custom_terminal::Terminal::with_options(backend).expect("terminal");
+    term.set_viewport_area(Rect::new(0, height - 1, width, 1));
+
+    for lines in drain_insert_history(&mut rx) {
+        crate::insert_history::insert_history_lines(&mut term, lines);
+    }
+
+    assert_snapshot!(term.backend().vt100().screen().contents());
+}
+
 // E2E vt100 snapshot for complex markdown with indented and nested fenced code blocks
 #[test]
 fn chatwidget_markdown_code_blocks_vt100_snapshot() {

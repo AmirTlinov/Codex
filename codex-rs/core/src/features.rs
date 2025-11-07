@@ -237,7 +237,7 @@ pub const FEATURES: &[FeatureSpec] = &[
         id: Feature::PlanTool,
         key: "plan_tool",
         stage: Stage::Stable,
-        default_enabled: false,
+        default_enabled: true,
     },
     FeatureSpec {
         id: Feature::ApplyPatchFreeform,

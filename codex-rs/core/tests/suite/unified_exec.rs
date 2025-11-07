@@ -6,6 +6,8 @@ use anyhow::Result;
 use codex_core::features::Feature;
 use codex_core::protocol::AskForApproval;
 use codex_core::protocol::EventMsg;
+use codex_core::protocol::ExecCommandBeginEvent;
+use codex_core::protocol::ExecCommandEndEvent;
 use codex_core::protocol::InputItem;
 use codex_core::protocol::Op;
 use codex_core::protocol::SandboxPolicy;
@@ -192,7 +194,7 @@ async fn unified_exec_emits_session_snapshots() -> Result<()> {
         ..
     } = builder.build(&server).await?;
 
-    let call_id = "uexec-start";
+    let call_id = "uexec-snapshot";
     let args = serde_json::json!({
         "input": ["/bin/cat"],
         "timeout_ms": 200,
@@ -201,7 +203,6 @@ async fn unified_exec_emits_session_snapshots() -> Result<()> {
     let responses = vec![sse(vec![
         ev_response_created("resp-1"),
         ev_function_call(call_id, "unified_exec", &serde_json::to_string(&args)?),
-        ev_assistant_message("msg-1", "done"),
         ev_completed("resp-1"),
     ])];
     mount_sse_sequence(&server, responses).await;
@@ -221,13 +222,17 @@ async fn unified_exec_emits_session_snapshots() -> Result<()> {
         })
         .await?;
 
-    let snapshot_event = wait_for_event(&codex, |event| {
-        matches!(event, EventMsg::UnifiedExecSessions(_))
-    })
-    .await;
+    let event = loop {
+        let snapshot_event = wait_for_event(&codex, |event| {
+            matches!(event, EventMsg::UnifiedExecSessions(_))
+        })
+        .await;
 
-    let EventMsg::UnifiedExecSessions(event) = snapshot_event else {
-        unreachable!("predicate ensured snapshot event");
+        if let EventMsg::UnifiedExecSessions(event) = snapshot_event {
+            if !event.sessions.is_empty() {
+                break event;
+            }
+        }
     };
 
     assert_eq!(event.sessions.len(), 1, "expected single session snapshot");
@@ -244,6 +249,88 @@ async fn unified_exec_emits_session_snapshots() -> Result<()> {
         "no output expected yet"
     );
 
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn unified_exec_emits_exec_events() -> Result<()> {
+    skip_if_no_network!(Ok(()));
+    skip_if_sandbox!(Ok(()));
+
+    let server = start_mock_server().await;
+
+    let mut builder = test_codex().with_config(|config| {
+        config.features.enable(Feature::UnifiedExec);
+    });
+    let TestCodex {
+        codex,
+        cwd,
+        session_configured,
+        ..
+    } = builder.build(&server).await?;
+
+    let call_id = "uexec-exec-events";
+    let args = serde_json::json!({
+        "input": ["/bin/sh", "-c", "printf EXEC-END"],
+        "timeout_ms": 200,
+    });
+
+    let responses = vec![
+        sse(vec![
+            ev_response_created("resp-1"),
+            ev_function_call(call_id, "unified_exec", &serde_json::to_string(&args)?),
+            ev_completed("resp-1"),
+        ]),
+        sse(vec![
+            ev_response_created("resp-2"),
+            ev_assistant_message("msg-1", "done"),
+            ev_completed("resp-2"),
+        ]),
+    ];
+    mount_sse_sequence(&server, responses).await;
+
+    codex
+        .submit(Op::UserTurn {
+            items: vec![InputItem::Text {
+                text: "run unified exec".into(),
+            }],
+            final_output_json_schema: None,
+            cwd: cwd.path().to_path_buf(),
+            approval_policy: AskForApproval::Never,
+            sandbox_policy: SandboxPolicy::DangerFullAccess,
+            model: session_configured.model.clone(),
+            effort: None,
+            summary: ReasoningSummary::Auto,
+        })
+        .await?;
+
+    let begin_event: ExecCommandBeginEvent = match wait_for_event(
+        &codex,
+        |msg| matches!(msg, EventMsg::ExecCommandBegin(ev) if ev.call_id == call_id),
+    )
+    .await
+    {
+        EventMsg::ExecCommandBegin(ev) => ev,
+        other => panic!("expected ExecCommandBegin, got {other:?}"),
+    };
+    assert_eq!(
+        begin_event.command,
+        vec!["/bin/sh -c printf EXEC-END".to_string()]
+    );
+
+    let end_event: ExecCommandEndEvent = match wait_for_event(
+        &codex,
+        |msg| matches!(msg, EventMsg::ExecCommandEnd(ev) if ev.call_id == call_id),
+    )
+    .await
+    {
+        EventMsg::ExecCommandEnd(ev) => ev,
+        other => panic!("expected ExecCommandEnd, got {other:?}"),
+    };
+    assert_eq!(end_event.exit_code, 0);
+    assert!(end_event.stdout.contains("EXEC-END"));
+
+    wait_for_event(&codex, |event| matches!(event, EventMsg::TaskComplete(_))).await;
     Ok(())
 }
 

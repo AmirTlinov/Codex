@@ -1,0 +1,1 @@
+{"source":"sandbox_assessment_service","summary":["Per-session SandboxAssessmentService keeps LRU cache + pending fanout using async jobs","Shell handler now calls the service and records risk history on SessionState","New regression tests cover exec approval risk payload and SessionState persistence"],"citation":"core/src/sandboxing/assessment.rs:317-448"}
