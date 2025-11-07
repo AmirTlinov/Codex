@@ -33,6 +33,7 @@ pub mod features;
 mod flags;
 mod foreground_shell;
 pub mod git_info;
+pub mod heredoc;
 pub mod landlock;
 pub mod mcp;
 mod mcp_connection_manager;

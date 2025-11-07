@@ -137,6 +137,8 @@ impl ExecCell {
                     ParsedCommand::Read { .. }
                         | ParsedCommand::ListFiles { .. }
                         | ParsedCommand::Search { .. }
+                        | ParsedCommand::Write { .. }
+                        | ParsedCommand::Run { .. }
                 )
             })
     }

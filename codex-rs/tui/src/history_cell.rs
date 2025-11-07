@@ -1524,8 +1524,11 @@ mod tests {
         let mut cell = ExecCell::new(ExecCall {
             call_id: call_id.clone(),
             command: vec!["bash".into(), "-lc".into(), script.to_string()],
-            parsed: vec![ParsedCommand::Unknown {
+            parsed: vec![ParsedCommand::Write {
                 cmd: script.to_string(),
+                targets: vec!["/tmp/example.py".to_string()],
+                append: false,
+                line_count: Some(2),
             }],
             output: None,
             start_time: Some(Instant::now()),
@@ -1553,8 +1556,11 @@ mod tests {
         let mut cell = ExecCell::new(ExecCall {
             call_id: call_id.clone(),
             command: vec!["bash".into(), "-lc".into(), script.to_string()],
-            parsed: vec![ParsedCommand::Unknown {
+            parsed: vec![ParsedCommand::Write {
                 cmd: script.to_string(),
+                targets: vec!["./logs/output.txt".to_string()],
+                append: true,
+                line_count: Some(1),
             }],
             output: None,
             start_time: Some(Instant::now()),
@@ -1581,8 +1587,10 @@ mod tests {
         let mut cell = ExecCell::new(ExecCall {
             call_id: call_id.clone(),
             command: vec!["bash".into(), "-lc".into(), script.to_string()],
-            parsed: vec![ParsedCommand::Unknown {
+            parsed: vec![ParsedCommand::Run {
                 cmd: script.to_string(),
+                program: "python".to_string(),
+                line_count: Some(2),
             }],
             output: None,
             start_time: Some(Instant::now()),
@@ -1611,8 +1619,11 @@ mod tests {
         let mut cell = ExecCell::new(ExecCall {
             call_id: call_id.clone(),
             command: vec!["bash".into(), "-lc".into(), script.to_string()],
-            parsed: vec![ParsedCommand::Unknown {
+            parsed: vec![ParsedCommand::Write {
                 cmd: script.to_string(),
+                targets: vec!["file-a.txt".to_string(), "file-b.txt".to_string()],
+                append: false,
+                line_count: Some(1),
             }],
             output: None,
             start_time: Some(Instant::now()),
@@ -1635,8 +1646,10 @@ mod tests {
         let mut cell = ExecCell::new(ExecCall {
             call_id: call_id.clone(),
             command: vec!["bash".into(), "-lc".into(), script.to_string()],
-            parsed: vec![ParsedCommand::Unknown {
+            parsed: vec![ParsedCommand::Run {
                 cmd: script.to_string(),
+                program: "sqlite3".to_string(),
+                line_count: Some(1),
             }],
             output: None,
             start_time: Some(Instant::now()),

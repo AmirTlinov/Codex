@@ -19,6 +19,17 @@ pub enum ParsedCommand {
         query: Option<String>,
         path: Option<String>,
     },
+    Write {
+        cmd: String,
+        targets: Vec<String>,
+        append: bool,
+        line_count: Option<usize>,
+    },
+    Run {
+        cmd: String,
+        program: String,
+        line_count: Option<usize>,
+    },
     Unknown {
         cmd: String,
     },

@@ -1,65 +1,9 @@
 use crate::bash::try_parse_bash;
 use crate::bash::try_parse_word_only_commands_sequence;
+use crate::heredoc::{self, HeredocAction};
 use codex_protocol::parse_command::ParsedCommand;
 use shlex::split as shlex_split;
 use shlex::try_join as shlex_try_join;
-const SUPPORTED_HEREDOC_COMMANDS: &[&str] = &[
-    "cat",
-    "tee",
-    "ash",
-    "bash",
-    "dash",
-    "elvish",
-    "fish",
-    "ksh",
-    "pwsh",
-    "powershell",
-    "sh",
-    "xonsh",
-    "zsh",
-    "bun",
-    "deno",
-    "node",
-    "ts-node",
-    "ipython",
-    "pypy",
-    "pypy3",
-    "python",
-    "python2",
-    "python3",
-    "bb",
-    "clojure",
-    "elixir",
-    "erl",
-    "escript",
-    "go",
-    "groovy",
-    "julia",
-    "lua",
-    "luajit",
-    "nim",
-    "nodejs",
-    "perl",
-    "php",
-    "php8",
-    "ruby",
-    "scala",
-    "swift",
-    "duckdb",
-    "mongo",
-    "mongosh",
-    "mysql",
-    "mysqlsh",
-    "psql",
-    "redis-cli",
-    "sqlcmd",
-    "sqlite3",
-    "apply_patch",
-    "envsubst",
-    "jq",
-    "kubectl",
-    "yq",
-];
 use std::cell::Cell;
 
 fn shlex_join(tokens: &[String]) -> String {
@@ -342,12 +286,15 @@ mod tests {
     }
 
     #[test]
-    fn cat_heredoc_remains_unknown() {
+    fn cat_heredoc_is_write() {
         let script = "cat <<'EOF' > ./tmp.md\nbody\nEOF";
         assert_parsed(
             &vec_str(&["bash", "-lc", script]),
-            vec![ParsedCommand::Unknown {
-                cmd: "cat heredoc".to_string(),
+            vec![ParsedCommand::Write {
+                cmd: script.to_string(),
+                targets: vec!["tmp.md".to_string()],
+                append: false,
+                line_count: Some(1),
             }],
         );
     }
@@ -357,8 +304,10 @@ mod tests {
         let script = "python <<'PY'\nprint(1)\nPY";
         assert_parsed(
             &vec_str(&["bash", "-lc", script]),
-            vec![ParsedCommand::Unknown {
-                cmd: "python heredoc".to_string(),
+            vec![ParsedCommand::Run {
+                cmd: script.to_string(),
+                program: "python".to_string(),
+                line_count: Some(1),
             }],
         );
     }
@@ -1182,62 +1131,26 @@ fn is_tail_offset(value: &str) -> bool {
     is_digits(stripped)
 }
 
-fn detect_supported_heredoc_command(script: &str) -> Option<String> {
-    let mut lines = script.lines();
-    let first_line = lines.next()?.trim();
-    let idx = first_line.find("<<")?;
-    let command_token = first_line[..idx].split_whitespace().next()?;
-    let command_name = command_token.rsplit('/').next()?.to_lowercase();
-    if !SUPPORTED_HEREDOC_COMMANDS
-        .iter()
-        .any(|candidate| candidate.eq_ignore_ascii_case(&command_name))
-    {
-        return None;
-    }
-
-    let terminator = parse_heredoc_terminator_marker(&first_line[idx + 2..])?;
-    if terminator.is_empty() {
-        return None;
-    }
-
-    if lines.any(|line| line.trim() == terminator) {
-        Some(command_name)
-    } else {
-        None
-    }
-}
-
-fn parse_heredoc_terminator_marker(segment: &str) -> Option<String> {
-    let mut rest = segment.trim_start();
-    if let Some(stripped) = rest.strip_prefix('-') {
-        rest = stripped.trim_start();
-    }
-
-    let mut chars = rest.chars();
-    let first = chars.next()?;
-    if first == '\'' || first == '"' {
-        let quote = first;
-        let mut terminator = String::new();
-        for ch in chars {
-            if ch == quote {
-                break;
+fn parsed_command_from_heredoc(script: &str, meta: heredoc::HeredocMetadata) -> ParsedCommand {
+    match meta.action {
+        HeredocAction::Run => ParsedCommand::Run {
+            cmd: script.to_string(),
+            program: meta.command,
+            line_count: Some(meta.line_count),
+        },
+        HeredocAction::Write { append } => {
+            let targets = meta
+                .targets
+                .iter()
+                .map(|t| short_display_path(&t.path))
+                .collect();
+            ParsedCommand::Write {
+                cmd: script.to_string(),
+                targets,
+                append,
+                line_count: Some(meta.line_count),
             }
-            terminator.push(ch);
         }
-        if terminator.is_empty() {
-            None
-        } else {
-            Some(terminator)
-        }
-    } else {
-        let mut terminator = first.to_string();
-        for ch in chars {
-            if ch.is_whitespace() || ch == '>' {
-                break;
-            }
-            terminator.push(ch);
-        }
-        Some(terminator)
     }
 }
 
@@ -1487,10 +1400,8 @@ fn parse_bash_lc_commands(original: &[String]) -> Option<Vec<ParsedCommand>> {
         }
         return Some(commands);
     }
-    if let Some(command) = detect_supported_heredoc_command(script) {
-        return Some(vec![ParsedCommand::Unknown {
-            cmd: format!("{command} heredoc"),
-        }]);
+    if let Some(meta) = heredoc::analyze(script) {
+        return Some(vec![parsed_command_from_heredoc(script, meta)]);
     }
 
     Some(vec![ParsedCommand::Unknown {
