@@ -1,4 +1,5 @@
 use crate::protocol::SandboxPolicy;
+use crate::spawn::CODEX_FORCE_LINUX_SANDBOX_ENV_VAR;
 use crate::spawn::StdioPolicy;
 use crate::spawn::spawn_child_async;
 use std::collections::HashMap;
@@ -20,13 +21,17 @@ pub async fn spawn_command_under_linux_sandbox<P>(
     sandbox_policy: &SandboxPolicy,
     sandbox_policy_cwd: &Path,
     stdio_policy: StdioPolicy,
-    env: HashMap<String, String>,
+    mut env: HashMap<String, String>,
 ) -> std::io::Result<Child>
 where
     P: AsRef<Path>,
 {
     let args = create_linux_sandbox_command_args(command, sandbox_policy, sandbox_policy_cwd);
     let arg0 = Some("codex-linux-sandbox");
+    env.insert(
+        CODEX_FORCE_LINUX_SANDBOX_ENV_VAR.to_string(),
+        "1".to_string(),
+    );
     spawn_child_async(
         codex_linux_sandbox_exe.as_ref().to_path_buf(),
         args,

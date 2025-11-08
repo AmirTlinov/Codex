@@ -31,6 +31,7 @@ pub(crate) struct ToolsConfig {
     pub include_view_image_tool: bool,
     pub use_unified_exec_tool: bool,
     pub experimental_supported_tools: Vec<String>,
+    pub exec_command_metadata: bool,
 }
 
 pub(crate) struct ToolsConfigParams<'a> {
@@ -50,6 +51,7 @@ impl ToolsConfig {
         let include_apply_patch_tool = features.enabled(Feature::ApplyPatchFreeform);
         let include_web_search_request = features.enabled(Feature::WebSearchRequest);
         let include_view_image_tool = features.enabled(Feature::ViewImageTool);
+        let exec_command_metadata = features.enabled(Feature::ExecCommandMetadata);
 
         let shell_type = if use_streamable_shell_tool {
             ConfigShellToolType::Streamable
@@ -79,6 +81,7 @@ impl ToolsConfig {
             include_view_image_tool,
             use_unified_exec_tool,
             experimental_supported_tools: model_family.experimental_supported_tools.clone(),
+            exec_command_metadata,
         }
     }
 }
@@ -1086,12 +1089,22 @@ mod tests {
     fn test_build_specs_mcp_tools() {
         let model_family = find_family_for_model("o3").expect("o3 should be a valid model family");
         let mut features = Features::with_defaults();
+        features.disable(Feature::PlanTool);
         features.enable(Feature::UnifiedExec);
         features.enable(Feature::WebSearchRequest);
+        assert!(
+            !features.enabled(Feature::PlanTool),
+            "plan tool should be disabled by default for this test"
+        );
         let config = ToolsConfig::new(&ToolsConfigParams {
             model_family: &model_family,
             features: &features,
         });
+        assert!(
+            !config.plan_tool,
+            "config plan flag should be false; feature_enabled={}",
+            features.enabled(Feature::PlanTool)
+        );
         let (tools, _) = build_specs(
             &config,
             Some(HashMap::from([(
@@ -1116,7 +1129,7 @@ mod tests {
                                     "string_property",
                                     "number_property",
                                 ],
-                                "additionalProperties": Some(false),
+                                "additionalProperties": false,
                             },
                         })),
                         required: None,

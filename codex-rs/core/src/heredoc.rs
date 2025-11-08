@@ -1,5 +1,8 @@
 use std::borrow::Cow;
 
+pub use codex_protocol::heredoc::HeredocSummary;
+pub use codex_protocol::heredoc::HeredocSummaryLabel;
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HeredocTarget {
     pub path: String,
@@ -175,7 +178,10 @@ fn parse_redirection_destinations(line: &str) -> Option<Vec<HeredocTarget>> {
     let mut in_single = false;
     let mut in_double = false;
     let mut iter = line.char_indices().peekable();
-    while let Some((idx, ch)) = iter.next() {
+    loop {
+        let Some((idx, ch)) = iter.next() else {
+            break;
+        };
         match ch {
             '\'' => {
                 if !in_double {
@@ -231,7 +237,10 @@ fn parse_tee_destinations(line: &str) -> Option<Vec<HeredocTarget>> {
     let mut in_single = false;
     let mut in_double = false;
     let mut iter = line.char_indices().peekable();
-    while let Some((idx, ch)) = iter.next() {
+    loop {
+        let Some((idx, ch)) = iter.next() else {
+            break;
+        };
         match ch {
             '\'' => {
                 if !in_double {
@@ -342,4 +351,95 @@ fn parse_token(input: &str) -> Option<ParsedToken<'_>> {
         token,
         remainder: "",
     })
+}
+
+pub fn summarize(meta: &HeredocMetadata) -> HeredocSummary {
+    match meta.action {
+        HeredocAction::Run => HeredocSummary {
+            label: HeredocSummaryLabel::Run,
+            program: Some(meta.command.clone()),
+            targets: Vec::new(),
+            line_count: Some(meta.line_count),
+        },
+        HeredocAction::Write { append } => HeredocSummary {
+            label: if append {
+                HeredocSummaryLabel::Append
+            } else {
+                HeredocSummaryLabel::Write
+            },
+            program: None,
+            targets: meta.targets.iter().map(|t| t.path.clone()).collect(),
+            line_count: Some(meta.line_count),
+        },
+    }
+}
+
+pub fn summarize_script(script: &str) -> Option<HeredocSummary> {
+    analyze(script).map(|meta| summarize(&meta))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use pretty_assertions::assert_eq;
+
+    #[test]
+    fn summarize_run_action_sets_program_and_line_count() {
+        let meta = HeredocMetadata {
+            command: "python".into(),
+            command_line: "python <<'PY'".into(),
+            action: HeredocAction::Run,
+            targets: Vec::new(),
+            line_count: 4,
+        };
+
+        let summary = summarize(&meta);
+
+        assert_eq!(summary.label, HeredocSummaryLabel::Run);
+        assert_eq!(summary.program.as_deref(), Some("python"));
+        assert!(summary.targets.is_empty());
+        assert_eq!(summary.line_count, Some(4));
+    }
+
+    #[test]
+    fn summarize_write_action_lists_targets_and_append_flag() {
+        let meta = HeredocMetadata {
+            command: "cat".into(),
+            command_line: "cat <<'EOF' >> /tmp/log".into(),
+            action: HeredocAction::Write { append: true },
+            targets: vec![
+                HeredocTarget {
+                    path: "/tmp/log".into(),
+                    append: true,
+                },
+                HeredocTarget {
+                    path: "./notes.txt".into(),
+                    append: true,
+                },
+            ],
+            line_count: 1,
+        };
+
+        let summary = summarize(&meta);
+
+        assert_eq!(summary.label, HeredocSummaryLabel::Append);
+        assert!(summary.program.is_none());
+        assert_eq!(
+            summary.targets,
+            vec!["/tmp/log".to_string(), "./notes.txt".to_string()]
+        );
+        assert_eq!(summary.line_count, Some(1));
+    }
+
+    #[test]
+    fn summarize_script_extracts_targets_and_line_count() {
+        let script = "cat <<'EOF' > ./src/lib.rs\nfn hello() {}\nEOF";
+
+        let summary = summarize_script(script).expect("expected heredoc summary");
+
+        assert_eq!(summary.label, HeredocSummaryLabel::Write);
+        assert!(summary.program.is_none());
+        assert_eq!(summary.targets, vec!["./src/lib.rs".to_string()]);
+        assert_eq!(summary.line_count, Some(1));
+    }
 }

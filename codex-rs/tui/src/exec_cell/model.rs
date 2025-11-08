@@ -1,6 +1,7 @@
 use std::time::Duration;
 use std::time::Instant;
 
+use codex_protocol::exec_metadata::ExecCommandMetadata;
 use codex_protocol::parse_command::ParsedCommand;
 
 #[derive(Clone, Debug)]
@@ -32,6 +33,7 @@ pub(crate) struct ExecCall {
     pub(crate) call_id: String,
     pub(crate) command: Vec<String>,
     pub(crate) parsed: Vec<ParsedCommand>,
+    pub(crate) metadata: ExecCommandMetadata,
     pub(crate) output: Option<CommandOutput>,
     pub(crate) start_time: Option<Instant>,
     pub(crate) duration: Option<Duration>,
@@ -55,11 +57,13 @@ impl ExecCell {
         call_id: String,
         command: Vec<String>,
         parsed: Vec<ParsedCommand>,
+        metadata: ExecCommandMetadata,
     ) -> Option<Self> {
         let call = ExecCall {
             call_id,
             command,
             parsed,
+            metadata,
             output: None,
             start_time: Some(Instant::now()),
             duration: None,

@@ -37,6 +37,7 @@ use codex_exec::exec_events::TurnFailedEvent;
 use codex_exec::exec_events::TurnStartedEvent;
 use codex_exec::exec_events::Usage;
 use codex_exec::exec_events::WebSearchItem;
+use codex_protocol::exec_metadata::ExecCommandMetadata;
 use codex_protocol::plan_tool::PlanItemArg;
 use codex_protocol::plan_tool::StepStatus;
 use codex_protocol::plan_tool::UpdatePlanArgs;
@@ -506,6 +507,7 @@ fn exec_command_end_success_produces_completed_command_item() {
             command: vec!["bash".to_string(), "-lc".to_string(), "echo hi".to_string()],
             cwd: std::env::current_dir().unwrap(),
             parsed_cmd: Vec::new(),
+            metadata: ExecCommandMetadata::default(),
         }),
     );
     let out_begin = ep.collect_thread_events(&begin);
@@ -566,6 +568,7 @@ fn exec_command_end_failure_produces_failed_command_item() {
             command: vec!["sh".to_string(), "-c".to_string(), "exit 1".to_string()],
             cwd: std::env::current_dir().unwrap(),
             parsed_cmd: Vec::new(),
+            metadata: ExecCommandMetadata::default(),
         }),
     );
     assert_eq!(

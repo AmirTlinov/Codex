@@ -1,6 +1,7 @@
 use crate::bash::try_parse_bash;
 use crate::bash::try_parse_word_only_commands_sequence;
-use crate::heredoc::{self, HeredocAction};
+use crate::heredoc::HeredocAction;
+use crate::heredoc::{self};
 use codex_protocol::parse_command::ParsedCommand;
 use shlex::split as shlex_split;
 use shlex::try_join as shlex_try_join;
@@ -10,6 +11,23 @@ fn shlex_join(tokens: &[String]) -> String {
     shlex_try_join(tokens.iter().map(String::as_str))
         .unwrap_or_else(|_| "<command included NUL byte>".to_string())
 }
+
+const NL_SHORT_FLAGS_WITH_VALUE: &[&str] =
+    &["-b", "-d", "-f", "-h", "-i", "-l", "-n", "-s", "-v", "-w"];
+const NL_SHORT_FLAGS_NO_VALUE: &[&str] = &["-p"];
+const NL_LONG_FLAGS_WITH_VALUE: &[&str] = &[
+    "--body-numbering",
+    "--section-delimiter",
+    "--footer-numbering",
+    "--header-numbering",
+    "--line-increment",
+    "--join-blank-lines",
+    "--number-format",
+    "--number-separator",
+    "--starting-line-number",
+    "--number-width",
+];
+const NL_LONG_FLAGS_NO_VALUE: &[&str] = &["--no-renumber", "--help", "--version"];
 
 /// DO NOT REVIEW THIS CODE BY HAND
 /// This parsing code is quite complex and not easy to hand-modify.
@@ -1636,18 +1654,49 @@ fn summarize_main_tokens(main_cmd: &[String]) -> ParsedCommand {
         }
         Some((head, tail)) if head == "nl" => {
             let args_no_connector = trim_at_connector(tail);
-            let parser = |tokens: &[String], idx: usize| {
-                let token = &tokens[idx];
-                if token == "--" {
-                    return FlagParseResult::StopParsing;
-                }
-                if matches!(token.as_str(), "-s" | "-w" | "-v" | "-i" | "-b")
-                    && tokens.get(idx + 1).is_some()
-                {
-                    return FlagParseResult::Consumed(2);
-                }
-                FlagParseResult::NotFlag
-            };
+            let parser =
+                |tokens: &[String], idx: usize| {
+                    let token = &tokens[idx];
+                    if token == "--" {
+                        return FlagParseResult::StopParsing;
+                    }
+                    if token.starts_with("--") {
+                        let (flag, inline_value) = match token.split_once('=') {
+                            Some((flag, _)) => (flag, true),
+                            None => (token.as_str(), false),
+                        };
+                        if NL_LONG_FLAGS_WITH_VALUE.contains(&flag) {
+                            if inline_value {
+                                return FlagParseResult::Consumed(1);
+                            }
+                            return FlagParseResult::Consumed(if tokens.get(idx + 1).is_some() {
+                                2
+                            } else {
+                                1
+                            });
+                        }
+                        if NL_LONG_FLAGS_NO_VALUE.contains(&flag) {
+                            return FlagParseResult::Consumed(1);
+                        }
+                        return FlagParseResult::NotFlag;
+                    }
+                    if token.starts_with('-') && token.len() > 1 {
+                        for flag in NL_SHORT_FLAGS_WITH_VALUE {
+                            if token == *flag {
+                                return FlagParseResult::Consumed(
+                                    if tokens.get(idx + 1).is_some() { 2 } else { 1 },
+                                );
+                            }
+                            if token.starts_with(flag) && token.len() > flag.len() {
+                                return FlagParseResult::Consumed(1);
+                            }
+                        }
+                        if NL_SHORT_FLAGS_NO_VALUE.contains(&token.as_str()) {
+                            return FlagParseResult::Consumed(1);
+                        }
+                    }
+                    FlagParseResult::NotFlag
+                };
             if let Some(path) = first_positional_arg(&args_no_connector, parser) {
                 let name = short_display_path(path);
                 ParsedCommand::Read {

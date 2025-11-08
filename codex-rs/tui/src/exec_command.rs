@@ -21,11 +21,10 @@ pub(crate) fn strip_bash_lc_and_escape(command: &[String]) -> String {
 }
 
 fn is_shell_wrapper(first: &str, second: &str) -> bool {
-    matches!((first, second),
-        ("bash", "-lc") |
-        ("/bin/bash", "-lc") |
-        ("sh", "-c") |
-        ("/bin/sh", "-c"))
+    matches!(
+        (first, second),
+        ("bash", "-lc") | ("/bin/bash", "-lc") | ("sh", "-c") | ("/bin/sh", "-c")
+    )
 }
 
 /// If `path` is absolute and inside $HOME, return the part *after* the home
@@ -78,12 +77,7 @@ mod tests {
             ],
         ];
 
-        let expected = [
-            "ls",
-            "rg pattern",
-            "printf hi",
-            "cargo test",
-        ];
+        let expected = ["ls", "rg pattern", "printf hi", "cargo test"];
 
         for (args, expect) in cases.into_iter().zip(expected) {
             assert_eq!(strip_bash_lc_and_escape(&args), expect);

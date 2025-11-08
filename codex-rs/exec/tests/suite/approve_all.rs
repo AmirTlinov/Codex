@@ -47,6 +47,8 @@ async fn run_exec_with_args(args: &[&str]) -> Result<String> {
 
     let requests = mock.requests();
     assert!(requests.len() >= 2, "expected at least two responses POSTs");
+    let body = requests[1].body_json();
+    println!("request body: {body:#?}");
     let item = requests[1].function_call_output(call_id);
     let output_str = item
         .get("output")

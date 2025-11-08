@@ -1,0 +1,1 @@
+{"source":"codex-rs","summary":["Added ExecCommandMetadata plumbing (protocol/core/tui) with heredoc summaries and UI rendering","Improved linux sandbox spawning by forcing env fallback when arg0 aliasing fails","Background shell start events without descriptions no longer flush active exec cells, preserving visible output"],"citation":"apply_patch_background_shell"}

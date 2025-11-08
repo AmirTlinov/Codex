@@ -5415,7 +5415,7 @@ model = "gpt-5-codex"
         fs::write(target_dir.join("data.md"), "Ignored directory entry")?;
         symlink(&target_dir, context_dir.join("embedding-link"))?;
 
-        let config = Config::load_from_base_config_with_overrides(
+        let mut config = Config::load_from_base_config_with_overrides(
             ConfigToml::default(),
             ConfigOverrides {
                 agents_home: Some(agents_dir),
@@ -5424,6 +5424,7 @@ model = "gpt-5-codex"
             },
             codex_home,
         )?;
+        config.refresh_agents_context_entries(Vec::new(), Vec::new())?;
         assert_eq!(config.agents_context_entries.len(), 1);
         let entry = &config.agents_context_entries[0];
         assert_eq!(entry.relative_path, "notes.md");
@@ -5465,11 +5466,12 @@ model = "gpt-5-codex"
             agents_home: Some(parent.path().join(".agents")),
             ..Default::default()
         };
-        let config = Config::load_from_base_config_with_overrides(
+        let mut config = Config::load_from_base_config_with_overrides(
             ConfigToml::default(),
             overrides,
             codex_home,
         )?;
+        config.refresh_agents_context_entries(Vec::new(), Vec::new())?;
 
         assert_eq!(config.agents_context_entries.len(), 1);
         let entry = &config.agents_context_entries[0];
@@ -5505,7 +5507,7 @@ model = "gpt-5-codex"
         fs::write(agents_home.join("context").join("memo.md"), "Global memo.")?;
         fs::write(agents_home.join("tools").join("helper.sh"), "echo helper\n")?;
 
-        let config = Config::load_from_base_config_with_overrides(
+        let mut config = Config::load_from_base_config_with_overrides(
             ConfigToml::default(),
             ConfigOverrides {
                 agents_home: Some(agents_home.clone()),
@@ -5513,6 +5515,7 @@ model = "gpt-5-codex"
             },
             codex_home.path().to_path_buf(),
         )?;
+        config.refresh_agents_context_entries(Vec::new(), Vec::new())?;
 
         let prompt = config
             .agents_context_prompt

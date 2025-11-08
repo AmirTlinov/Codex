@@ -169,12 +169,7 @@ impl BackgroundShellManager {
 
         if running {
             let session_id = manager
-                .store_session(
-                    unified_session,
-                    &context,
-                    &request.command,
-                    start_wall,
-                )
+                .store_session(unified_session, &context, &request.command, start_wall)
                 .await;
             let entry = BackgroundCommandEntry {
                 session_id,

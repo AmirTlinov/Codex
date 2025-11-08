@@ -24,6 +24,17 @@ pub enum Stage {
     Removed,
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn plan_tool_disabled_by_default() {
+        let features = Features::with_defaults();
+        assert!(!features.enabled(Feature::PlanTool));
+    }
+}
+
 /// Unique features toggled via configuration.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum Feature {
@@ -45,6 +56,8 @@ pub enum Feature {
     SandboxCommandAssessment,
     /// Automatically approve all approval requests from the harness.
     ApproveAll,
+    /// Emit structured exec command metadata for front-ends.
+    ExecCommandMetadata,
 }
 
 impl Feature {
@@ -237,7 +250,7 @@ pub const FEATURES: &[FeatureSpec] = &[
         id: Feature::PlanTool,
         key: "plan_tool",
         stage: Stage::Stable,
-        default_enabled: true,
+        default_enabled: false,
     },
     FeatureSpec {
         id: Feature::ApplyPatchFreeform,
@@ -268,5 +281,11 @@ pub const FEATURES: &[FeatureSpec] = &[
         key: "approve_all",
         stage: Stage::Experimental,
         default_enabled: false,
+    },
+    FeatureSpec {
+        id: Feature::ExecCommandMetadata,
+        key: "exec_command_metadata",
+        stage: Stage::Beta,
+        default_enabled: true,
     },
 ];

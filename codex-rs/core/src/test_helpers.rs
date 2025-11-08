@@ -2,9 +2,12 @@
 pub mod fixtures {
     use base64::Engine;
     use serde::Serialize;
-    use serde_json::{Map, Value, json};
+    use serde_json::Map;
+    use serde_json::Value;
+    use serde_json::json;
     use std::future::Future;
-    use tokio::time::{Duration, timeout};
+    use tokio::time::Duration;
+    use tokio::time::timeout;
 
     fn b64url_no_pad(bytes: &[u8]) -> String {
         base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(bytes)

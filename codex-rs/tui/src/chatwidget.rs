@@ -139,12 +139,14 @@ use codex_core::protocol::AskForApproval;
 use codex_core::protocol::SandboxPolicy;
 use codex_core::protocol_config_types::ReasoningEffort as ReasoningEffortConfig;
 use codex_file_search::FileMatch;
+use codex_protocol::exec_metadata::ExecCommandMetadata;
 use codex_protocol::plan_tool::UpdatePlanArgs;
 
 // Track information about an in-flight exec command.
 struct RunningCommand {
     command: Vec<String>,
     parsed_cmd: Vec<ParsedCommand>,
+    metadata: ExecCommandMetadata,
     output: String,
     shell_id: Option<String>,
 }
@@ -1064,21 +1066,26 @@ impl ChatWidget {
 
         match kind {
             BackgroundEventKind::Started => {
-                let normalized_description = Self::normalize_background_description(description)
+                let normalized_description =
+                    Self::normalize_background_description(description);
+                let fallback_description = normalized_description
+                    .clone()
                     .or_else(|| self.background_command_label(&shell_id));
                 self.background_tasks.insert(
                     shell_id.clone(),
                     BackgroundTaskInfo {
-                        description: normalized_description.clone(),
+                        description: fallback_description,
                     },
                 );
                 self.background_order.retain(|id| id != &shell_id);
                 self.background_order.push_back(shell_id.clone());
-                self.add_to_history(history_cell::new_background_event(
-                    shell_id,
-                    BackgroundEventStatus::Started,
-                    normalized_description,
-                ));
+                if normalized_description.is_some() {
+                    self.add_to_history(history_cell::new_background_event(
+                        shell_id,
+                        BackgroundEventStatus::Started,
+                        normalized_description,
+                    ));
+                }
                 self.app_event_tx.send(AppEvent::EnsureLiveExecPolling);
             }
             BackgroundEventKind::Terminated { exit_code } => {
@@ -1227,9 +1234,13 @@ impl ChatWidget {
     pub(crate) fn handle_exec_end_now(&mut self, ev: ExecCommandEndEvent) {
         let running = self.running_commands.remove(&ev.call_id);
         self.running_command_order.retain(|id| id != &ev.call_id);
-        let (command, parsed) = match running {
-            Some(rc) => (rc.command, rc.parsed_cmd),
-            None => (vec![ev.call_id.clone()], Vec::new()),
+        let (command, parsed, metadata) = match running {
+            Some(rc) => (rc.command, rc.parsed_cmd, rc.metadata),
+            None => (
+                vec![ev.call_id.clone()],
+                Vec::new(),
+                ExecCommandMetadata::default(),
+            ),
         };
         self.app_event_tx.send(AppEvent::LiveExecCommandFinished {
             call_id: ev.call_id.clone(),
@@ -1249,6 +1260,7 @@ impl ChatWidget {
                 ev.call_id.clone(),
                 command,
                 parsed,
+                metadata,
             )));
         }
 
@@ -1332,6 +1344,7 @@ impl ChatWidget {
             command,
             cwd,
             parsed_cmd,
+            metadata,
         } = ev;
         // Ensure the status indicator is visible while the command runs.
         self.bottom_pane.set_task_running(true);
@@ -1342,6 +1355,7 @@ impl ChatWidget {
             RunningCommand {
                 command: command.clone(),
                 parsed_cmd: parsed_cmd.clone(),
+                metadata: metadata.clone(),
                 output: String::new(),
                 shell_id: None,
             },
@@ -1350,8 +1364,12 @@ impl ChatWidget {
             .active_cell
             .as_mut()
             .and_then(|c| c.as_any_mut().downcast_mut::<ExecCell>())
-            && let Some(new_exec) =
-                cell.with_added_call(call_id.clone(), command.clone(), parsed_cmd.clone())
+            && let Some(new_exec) = cell.with_added_call(
+                call_id.clone(),
+                command.clone(),
+                parsed_cmd.clone(),
+                metadata.clone(),
+            )
         {
             *cell = new_exec;
         } else {
@@ -1361,6 +1379,7 @@ impl ChatWidget {
                 call_id.clone(),
                 command.clone(),
                 parsed_cmd,
+                metadata,
             )));
         }
 

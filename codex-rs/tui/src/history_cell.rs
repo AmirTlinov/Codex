@@ -1468,6 +1468,7 @@ mod tests {
     use codex_core::config_types::McpServerConfig;
     use codex_core::config_types::McpServerTransportConfig;
     use codex_core::protocol::McpAuthStatus;
+    use codex_protocol::exec_metadata::ExecCommandMetadata;
     use codex_protocol::parse_command::ParsedCommand;
     use dirs::home_dir;
     use pretty_assertions::assert_eq;
@@ -1530,6 +1531,7 @@ mod tests {
                 append: false,
                 line_count: Some(2),
             }],
+            metadata: ExecCommandMetadata::default(),
             output: None,
             start_time: Some(Instant::now()),
             duration: None,
@@ -1562,6 +1564,7 @@ mod tests {
                 append: true,
                 line_count: Some(1),
             }],
+            metadata: ExecCommandMetadata::default(),
             output: None,
             start_time: Some(Instant::now()),
             duration: None,
@@ -1592,6 +1595,7 @@ mod tests {
                 program: "python".to_string(),
                 line_count: Some(2),
             }],
+            metadata: ExecCommandMetadata::default(),
             output: None,
             start_time: Some(Instant::now()),
             duration: None,
@@ -1625,6 +1629,7 @@ mod tests {
                 append: false,
                 line_count: Some(1),
             }],
+            metadata: ExecCommandMetadata::default(),
             output: None,
             start_time: Some(Instant::now()),
             duration: None,
@@ -1651,6 +1656,7 @@ mod tests {
                 program: "sqlite3".to_string(),
                 line_count: Some(1),
             }],
+            metadata: ExecCommandMetadata::default(),
             output: None,
             start_time: Some(Instant::now()),
             duration: None,
@@ -2017,6 +2023,7 @@ mod tests {
                     name: "status_indicator_widget.rs".into(),
                 },
             ],
+            metadata: ExecCommandMetadata::default(),
             output: None,
             start_time: Some(Instant::now()),
             duration: None,
@@ -2039,6 +2046,7 @@ mod tests {
                 path: None,
                 cmd: "rg shimmer_spans".into(),
             }],
+            metadata: ExecCommandMetadata::default(),
             output: None,
             start_time: Some(Instant::now()),
             duration: None,
@@ -2054,6 +2062,7 @@ mod tests {
                     cmd: "cat shimmer.rs".into(),
                     name: "shimmer.rs".into(),
                 }],
+                ExecCommandMetadata::default(),
             )
             .unwrap();
         cell.complete_call("c2", empty_command_output(), Duration::from_millis(1));
@@ -2066,6 +2075,7 @@ mod tests {
                     cmd: "cat status_indicator_widget.rs".into(),
                     name: "status_indicator_widget.rs".into(),
                 }],
+                ExecCommandMetadata::default(),
             )
             .unwrap();
         cell.complete_call("c3", empty_command_output(), Duration::from_millis(1));
@@ -2094,6 +2104,7 @@ mod tests {
                     name: "shimmer.rs".into(),
                 },
             ],
+            metadata: ExecCommandMetadata::default(),
             output: None,
             start_time: Some(Instant::now()),
             duration: None,
@@ -2113,6 +2124,7 @@ mod tests {
             call_id: call_id.clone(),
             command: vec!["bash".into(), "-lc".into(), cmd],
             parsed: Vec::new(),
+            metadata: ExecCommandMetadata::default(),
             output: None,
             start_time: Some(Instant::now()),
             duration: None,
@@ -2134,6 +2146,7 @@ mod tests {
             call_id: call_id.clone(),
             command: vec!["echo".into(), "ok".into()],
             parsed: Vec::new(),
+            metadata: ExecCommandMetadata::default(),
             output: None,
             start_time: Some(Instant::now()),
             duration: None,
@@ -2153,6 +2166,7 @@ mod tests {
             call_id: call_id.clone(),
             command: vec!["bash".into(), "-lc".into(), long],
             parsed: Vec::new(),
+            metadata: ExecCommandMetadata::default(),
             output: None,
             start_time: Some(Instant::now()),
             duration: None,
@@ -2171,6 +2185,7 @@ mod tests {
             call_id: call_id.clone(),
             command: vec!["bash".into(), "-lc".into(), cmd],
             parsed: Vec::new(),
+            metadata: ExecCommandMetadata::default(),
             output: None,
             start_time: Some(Instant::now()),
             duration: None,
@@ -2190,6 +2205,7 @@ mod tests {
             call_id: call_id.clone(),
             command: vec!["bash".into(), "-lc".into(), cmd],
             parsed: Vec::new(),
+            metadata: ExecCommandMetadata::default(),
             output: None,
             start_time: Some(Instant::now()),
             duration: None,
@@ -2209,6 +2225,7 @@ mod tests {
             call_id: call_id.clone(),
             command: vec!["bash".into(), "-lc".into(), "seq 1 10 1>&2 && false".into()],
             parsed: Vec::new(),
+            metadata: ExecCommandMetadata::default(),
             output: None,
             start_time: Some(Instant::now()),
             duration: None,
@@ -2248,6 +2265,7 @@ mod tests {
             call_id: call_id.clone(),
             command: vec!["bash".into(), "-lc".into(), long_cmd.to_string()],
             parsed: Vec::new(),
+            metadata: ExecCommandMetadata::default(),
             output: None,
             start_time: Some(Instant::now()),
             duration: None,

@@ -794,6 +794,9 @@ fn stream_style(kind: ExecStreamKind) -> Style {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use codex_core::heredoc::HeredocSummary;
+    use codex_core::heredoc::HeredocSummaryLabel;
+    use codex_protocol::exec_metadata::ExecCommandMetadata;
 
     fn lines_to_strings(lines: &[Line<'static>]) -> Vec<String> {
         lines
@@ -833,6 +836,41 @@ mod tests {
                 .iter()
                 .any(|line| line.contains("/logs stdout hide")),
             "expected expanded hint"
+        );
+    }
+
+    #[test]
+    fn metadata_summary_rendered_when_command_cannot_be_stripped() {
+        let cell = ExecCell {
+            calls: vec![ExecCall {
+                call_id: "c1".into(),
+                command: vec![
+                    "dash".into(),
+                    "-c".into(),
+                    "cat <<'EOF' > ./data.txt\n{\n}\nEOF".into(),
+                ],
+                parsed: Vec::new(),
+                metadata: ExecCommandMetadata {
+                    heredoc_summary: Some(HeredocSummary {
+                        label: HeredocSummaryLabel::Write,
+                        program: None,
+                        targets: vec!["./data.txt".into()],
+                        line_count: Some(2),
+                    }),
+                },
+                output: None,
+                start_time: None,
+                duration: None,
+            }],
+        };
+
+        let lines = cell.command_display_lines(80);
+        let rendered = lines_to_strings(&lines);
+
+        assert!(
+            rendered
+                .iter()
+                .any(|line| line.contains("Write ./data.txt"))
         );
     }
 }

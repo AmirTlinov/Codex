@@ -403,3 +403,49 @@ async fn emit_patch_end(ctx: ToolEventCtx<'_>, stdout: String, stderr: String, s
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::heredoc::HeredocSummaryLabel;
+    use pretty_assertions::assert_eq;
+
+    #[test]
+    fn metadata_includes_summary_for_dash_shell_wrapper() {
+        let script = "cat <<'EOF' >> ./log.txt\nline one\nline two\nEOF";
+        let command = vec!["dash".into(), "-c".into(), script.into()];
+
+        let metadata = build_exec_command_metadata(&command);
+
+        let summary = metadata
+            .heredoc_summary
+            .expect("expected heredoc summary for dash wrapper");
+        assert_eq!(summary.label, HeredocSummaryLabel::Append);
+        assert_eq!(summary.targets, vec!["./log.txt".to_string()]);
+        assert_eq!(summary.line_count, Some(2));
+    }
+
+    #[test]
+    fn metadata_is_empty_when_no_heredoc_detected() {
+        let command = vec!["echo".into(), "hello".into()];
+
+        let metadata = build_exec_command_metadata(&command);
+
+        assert!(metadata.heredoc_summary.is_none());
+    }
+
+    #[test]
+    fn extract_script_body_handles_usr_bin_env_wrappers() {
+        let script = "printf 'hi'";
+        let command = vec![
+            "/usr/bin/env".into(),
+            "zsh".into(),
+            "-c".into(),
+            script.into(),
+        ];
+
+        let extracted = extract_script_body(&command).expect("expected script body");
+
+        assert_eq!(extracted, script);
+    }
+}

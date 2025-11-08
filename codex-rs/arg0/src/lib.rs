@@ -3,6 +3,7 @@ use std::path::Path;
 use std::path::PathBuf;
 
 use codex_core::CODEX_APPLY_PATCH_ARG1;
+use codex_core::spawn::CODEX_FORCE_LINUX_SANDBOX_ENV_VAR;
 #[cfg(unix)]
 use std::os::unix::fs::symlink;
 use tempfile::TempDir;
@@ -50,6 +51,12 @@ where
         codex_linux_sandbox::run_main();
     } else if exe_name == APPLY_PATCH_ARG0 || exe_name == MISSPELLED_APPLY_PATCH_ARG0 {
         codex_apply_patch::main();
+    } else if std::env::var(CODEX_FORCE_LINUX_SANDBOX_ENV_VAR).is_ok() {
+        // Ensure the flag does not leak into child processes that run under the sandbox.
+        unsafe {
+            std::env::remove_var(CODEX_FORCE_LINUX_SANDBOX_ENV_VAR);
+        }
+        codex_linux_sandbox::run_main();
     }
 
     let argv1 = args.next().unwrap_or_default();

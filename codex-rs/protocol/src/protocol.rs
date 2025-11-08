@@ -18,6 +18,7 @@ pub use crate::approvals::SandboxRiskLevel;
 use crate::config_types::ReasoningEffort as ReasoningEffortConfig;
 use crate::config_types::ReasoningSummary as ReasoningSummaryConfig;
 use crate::custom_prompts::CustomPrompt;
+use crate::exec_metadata::ExecCommandMetadata;
 use crate::message_history::HistoryEntry;
 use crate::models::ContentItem;
 use crate::models::ResponseItem;
@@ -1164,6 +1165,8 @@ pub struct ExecCommandBeginEvent {
     /// The command's working directory if not the default cwd for the agent.
     pub cwd: PathBuf,
     pub parsed_cmd: Vec<ParsedCommand>,
+    #[serde(default, skip_serializing_if = "ExecCommandMetadata::is_empty")]
+    pub metadata: ExecCommandMetadata,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, TS)]

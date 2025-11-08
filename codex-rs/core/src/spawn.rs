@@ -22,6 +22,10 @@ pub const CODEX_SANDBOX_NETWORK_DISABLED_ENV_VAR: &str = "CODEX_SANDBOX_NETWORK_
 /// accommodate sandboxing configuration and other sandboxing mechanisms.
 pub const CODEX_SANDBOX_ENV_VAR: &str = "CODEX_SANDBOX";
 
+/// Internal flag used to force arg0 dispatch into the linux sandbox helper when
+/// argv[0] rewriting is ineffective (e.g., due to platform constraints).
+pub const CODEX_FORCE_LINUX_SANDBOX_ENV_VAR: &str = "CODEX_FORCE_LINUX_SANDBOX";
+
 #[derive(Debug, Clone, Copy)]
 pub enum StdioPolicy {
     RedirectForShellTool,
@@ -55,6 +59,11 @@ pub(crate) async fn spawn_child_async(
     cmd.current_dir(cwd);
     cmd.env_clear();
     cmd.envs(env);
+    if let Some(arg0_name) = arg0
+        && arg0_name == "codex-linux-sandbox"
+    {
+        cmd.env(CODEX_FORCE_LINUX_SANDBOX_ENV_VAR, "1");
+    }
 
     if !sandbox_policy.has_full_network_access() {
         cmd.env(CODEX_SANDBOX_NETWORK_DISABLED_ENV_VAR, "1");
