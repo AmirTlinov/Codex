@@ -6,6 +6,7 @@ In the codex-rs folder where the rust code lives:
 - When using format! and you can inline variables into {}, always do that.
 - Install any commands the repo relies on (for example `just`, `rg`, or `cargo-insta`) if they aren't already available before running instructions here.
 - Keep the working tree clean whenever possible; structure work into high-quality, atomic commits and push them as soon as they are ready.
+- Always pause with a clean git tree: break work into reviewable chunks, commit, and push as soon as tests/linters pass.
 - Never add or modify any code related to `CODEX_SANDBOX_NETWORK_DISABLED_ENV_VAR` or `CODEX_SANDBOX_ENV_VAR`.
   - You operate in a sandbox where `CODEX_SANDBOX_NETWORK_DISABLED=1` will be set whenever you use the `shell` tool. Any existing code that uses `CODEX_SANDBOX_NETWORK_DISABLED_ENV_VAR` was authored with this fact in mind. It is often used to early exit out of tests that the author knew you would not be able to run given your sandbox limitations.
   - Similarly, when you spawn a process using Seatbelt (`/usr/bin/sandbox-exec`), `CODEX_SANDBOX=seatbelt` will be set on the child process. Integration tests that want to run Seatbelt themselves cannot be run under Seatbelt, so checks for `CODEX_SANDBOX=seatbelt` are also often used to early exit out of tests, as appropriate.
@@ -15,6 +16,7 @@ In the codex-rs folder where the rust code lives:
 - Do not use unsigned integer even if the number cannot be negative.
 - When writing tests, prefer comparing the equality of entire objects over fields one by one.
 - When making a change that adds or changes an API, ensure that the documentation in the `docs/` folder is up to date if applicable.
+- Tests must never stall silently: instrument long-running cases with timeouts/logging so failures surface with actionable errors rather than hangs.
 
 Run `just fmt` (in `codex-rs` directory) automatically after making Rust code changes; do not ask for approval to run it. Before finalizing a change to `codex-rs`, run `just fix -p <project>` (in `codex-rs` directory) to fix any linter issues in the code. Prefer scoping with `-p` to avoid slow workspace‑wide Clippy builds; only run `just fix` without `-p` if you changed shared crates. Additionally, run the tests:
 

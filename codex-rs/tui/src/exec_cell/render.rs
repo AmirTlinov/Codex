@@ -16,7 +16,11 @@ use crate::wrapping::word_wrap_line;
 use crate::wrapping::word_wrap_lines;
 use codex_ansi_escape::ansi_escape_line;
 use codex_common::elapsed::format_duration;
-use codex_core::heredoc::{self, HeredocAction, HeredocMetadata};
+use codex_core::heredoc::HeredocMetadata;
+use codex_core::heredoc::HeredocSummary;
+use codex_core::heredoc::HeredocSummaryLabel;
+use codex_core::heredoc::{self};
+use codex_protocol::exec_metadata::ExecCommandMetadata;
 use codex_protocol::parse_command::ParsedCommand;
 use itertools::Itertools;
 use ratatui::prelude::*;
@@ -42,11 +46,13 @@ pub(crate) fn new_active_exec_command(
     call_id: String,
     command: Vec<String>,
     parsed: Vec<ParsedCommand>,
+    metadata: ExecCommandMetadata,
 ) -> ExecCell {
     ExecCell::new(ExecCall {
         call_id,
         command,
         parsed,
+        metadata,
         output: None,
         start_time: Some(Instant::now()),
         duration: None,
@@ -169,7 +175,7 @@ impl HistoryCell for ExecCell {
                 lines.push("".into());
             }
             let script = strip_bash_lc_and_escape(&call.command);
-    let heredoc = heredoc::analyze(&script);
+            let heredoc = heredoc::analyze(&script);
             let script_for_display = heredoc
                 .as_ref()
                 .map(|info| info.command_line.as_str())
@@ -341,11 +347,11 @@ impl ExecCell {
                                 if targets.len() > 1 {
                                     spans.push(" ".into());
                                     spans.push(
-                                        Span::from(format!("(+{} more)", targets.len() - 1)).dim()
+                                        Span::from(format!("(+{} more)", targets.len() - 1)).dim(),
                                     );
                                 }
                             }
-                            if let Some(count) = line_count.and_then(|c| pluralize_lines(c)) {
+                            if let Some(count) = line_count.and_then(pluralize_lines) {
                                 spans.push(" ".into());
                                 spans.push(Span::from(format!("({count})")).dim());
                             }
@@ -358,7 +364,7 @@ impl ExecCell {
                             ..
                         } => {
                             let mut spans: Vec<Span<'static>> = vec![program.clone().into()];
-                            if let Some(count) = line_count.and_then(|c| pluralize_lines(c)) {
+                            if let Some(count) = line_count.and_then(pluralize_lines) {
                                 spans.push(" ".into());
                                 spans.push(Span::from(format!("({count})")).dim());
                             }
@@ -412,11 +418,17 @@ impl ExecCell {
         let header_prefix_width = header_line.width();
 
         let raw_script = strip_bash_lc_and_escape(&call.command);
-        let heredoc = heredoc::analyze(&raw_script);
-        let script_for_display = heredoc
+        let heredoc_meta = heredoc::analyze(&raw_script);
+        let script_for_display = heredoc_meta
             .as_ref()
             .map(|info| info.command_line.as_str())
             .unwrap_or(&raw_script);
+        let heredoc_summary = call
+            .metadata
+            .heredoc_summary
+            .as_ref()
+            .cloned()
+            .or_else(|| heredoc_meta.as_ref().map(heredoc::summarize));
         let highlighted_lines = highlight_bash_to_lines(script_for_display);
 
         let continuation_wrap_width = layout.command_continuation.wrap_width(width);
@@ -459,8 +471,8 @@ impl ExecCell {
             ));
         }
 
-        if let Some(info) = heredoc.as_ref() {
-            let summary_line = heredoc_summary_line_from_metadata(info);
+        if let Some(summary) = heredoc_summary.as_ref() {
+            let summary_line = heredoc_summary_line(summary);
             let mut wrapped_block: Vec<Line<'static>> = Vec::new();
             let wrap_width = layout.output_block.wrap_width(width);
             let wrap_opts = RtOptions::new(wrap_width).word_splitter(WordSplitter::NoHyphenation);
@@ -586,79 +598,50 @@ impl ExecCell {
     }
 }
 
-#[derive(Debug)]
-struct HeredocSummary {
-    label: HeredocLabel,
-    detail_spans: Vec<Span<'static>>,
-}
-
-#[derive(Debug, Clone, Copy)]
-enum HeredocLabel {
-    Write,
-    Append,
-    Run,
-}
-
-impl HeredocLabel {
-    fn as_str(self) -> &'static str {
-        match self {
-            HeredocLabel::Write => "Write",
-            HeredocLabel::Append => "Append",
-            HeredocLabel::Run => "Run",
-        }
-    }
+fn heredoc_summary_line_from_metadata(meta: &HeredocMetadata) -> Line<'static> {
+    heredoc_summary_line(&heredoc_summary_from_metadata(meta))
 }
 
 fn heredoc_summary_from_metadata(meta: &HeredocMetadata) -> HeredocSummary {
-    match meta.action {
-        HeredocAction::Run => {
-            let mut detail_spans: Vec<Span<'static>> = Vec::new();
-            detail_spans.push(meta.command.clone().into());
-            if let Some(count) = pluralize_lines(meta.line_count) {
-                detail_spans.push(" ".into());
-                detail_spans.push(Span::from(format!("({count})")).dim());
-            }
-            HeredocSummary {
-                label: HeredocLabel::Run,
-                detail_spans,
-            }
-        }
-        HeredocAction::Write { append } => {
-            let mut detail_spans = heredoc_target_spans(meta);
-            if let Some(count) = pluralize_lines(meta.line_count) {
-                detail_spans.push(" ".into());
-                detail_spans.push(Span::from(format!("({count})")).dim());
-            }
-            let label = if append {
-                HeredocLabel::Append
-            } else {
-                HeredocLabel::Write
-            };
-            HeredocSummary {
-                label,
-                detail_spans,
-            }
-        }
-    }
+    heredoc::summarize(meta)
 }
 
-fn heredoc_summary_line_from_metadata(meta: &HeredocMetadata) -> Line<'static> {
-    let summary = heredoc_summary_from_metadata(meta);
-    let mut spans: Vec<Span<'static>> = vec![summary.label.as_str().cyan()];
-    if !summary.detail_spans.is_empty() {
+fn heredoc_summary_line(summary: &HeredocSummary) -> Line<'static> {
+    let mut spans: Vec<Span<'static>> = vec![heredoc_label_text(summary.label).cyan()];
+    let mut detail_spans: Vec<Span<'static>> = Vec::new();
+    if let Some(program) = summary.program.as_ref() {
+        detail_spans.push(program.clone().into());
+    } else {
+        detail_spans.extend(heredoc_target_spans(summary));
+    }
+    if let Some(count) = summary.line_count.and_then(pluralize_lines) {
+        if !detail_spans.is_empty() {
+            detail_spans.push(" ".into());
+        }
+        detail_spans.push(Span::from(format!("({count})")).dim());
+    }
+    if !detail_spans.is_empty() {
         spans.push(" ".into());
-        spans.extend(summary.detail_spans);
+        spans.extend(detail_spans);
     }
     Line::from(spans)
 }
 
-fn heredoc_target_spans(meta: &HeredocMetadata) -> Vec<Span<'static>> {
+fn heredoc_label_text(label: HeredocSummaryLabel) -> &'static str {
+    match label {
+        HeredocSummaryLabel::Write => "Write",
+        HeredocSummaryLabel::Append => "Append",
+        HeredocSummaryLabel::Run => "Run",
+    }
+}
+
+fn heredoc_target_spans(summary: &HeredocSummary) -> Vec<Span<'static>> {
     let mut detail_spans: Vec<Span<'static>> = Vec::new();
-    if let Some(first) = meta.targets.first() {
-        detail_spans.push(format_path_span(&first.path));
-        if meta.targets.len() > 1 {
+    if let Some(first) = summary.targets.first() {
+        detail_spans.push(format_path_span(first));
+        if summary.targets.len() > 1 {
             detail_spans.push(" ".into());
-            detail_spans.push(Span::from(format!("(+{} more)", meta.targets.len() - 1)).dim());
+            detail_spans.push(Span::from(format!("(+{} more)", summary.targets.len() - 1)).dim());
         }
     }
     detail_spans
@@ -857,9 +840,20 @@ mod tests {
 fn summarize_unknown_command(cmd: &str) -> Option<(&'static str, Vec<Span<'static>>)> {
     let meta = heredoc::analyze(cmd)?;
     let summary = heredoc_summary_from_metadata(&meta);
-    Some((summary.label.as_str(), summary.detail_spans))
+    let label = heredoc_label_text(summary.label);
+    let mut detail_spans: Vec<Span<'static>> = if let Some(program) = summary.program.as_ref() {
+        vec![program.clone().into()]
+    } else {
+        heredoc_target_spans(&summary)
+    };
+    if let Some(count) = summary.line_count.and_then(pluralize_lines) {
+        if !detail_spans.is_empty() {
+            detail_spans.push(" ".into());
+        }
+        detail_spans.push(Span::from(format!("({count})")).dim());
+    }
+    Some((label, detail_spans))
 }
-
 
 fn format_path_span(path: &str) -> Span<'static> {
     let display = format_path_for_display(path);

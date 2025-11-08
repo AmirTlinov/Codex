@@ -2642,17 +2642,13 @@ mod tests {
     use crate::state::TaskKind;
     use crate::tasks::SessionTask;
     use crate::tasks::SessionTaskContext;
+    use crate::test_helpers::fixtures::await_with_timeout;
     use crate::tools::MODEL_FORMAT_HEAD_LINES;
     use crate::tools::MODEL_FORMAT_MAX_BYTES;
     use crate::tools::MODEL_FORMAT_MAX_LINES;
     use crate::tools::MODEL_FORMAT_TAIL_LINES;
     use crate::tools::ToolRouter;
-    use crate::tools::context::SharedTurnDiffTracker;
-    use crate::tools::context::ToolInvocation;
-    use crate::tools::context::ToolPayload;
     use crate::tools::format_exec_output_str;
-    use crate::tools::handlers::ShellHandler;
-    use crate::tools::registry::ToolHandler;
     use crate::turn_diff_tracker::TurnDiffTracker;
     use codex_app_server_protocol::AuthMode;
     use codex_protocol::approvals::SandboxCommandAssessment;
@@ -2660,7 +2656,6 @@ mod tests {
     use codex_protocol::approvals::SandboxRiskLevel;
     use codex_protocol::models::ContentItem;
     use codex_protocol::models::ResponseItem;
-    use codex_protocol::models::ShellToolCallParams;
 
     use mcp_types::ContentBlock;
     use mcp_types::TextContent;
@@ -2671,7 +2666,6 @@ mod tests {
     use std::time::Duration as StdDuration;
     use tokio::time::Duration;
     use tokio::time::sleep;
-    use tokio::time::timeout;
 
     #[test]
     fn reconstruct_history_matches_live_compactions() {
@@ -3208,8 +3202,6 @@ mod tests {
             ..ConfigOverrides::default()
         };
         let (session, turn_context, rx) = make_session_and_context_with_rx_overrides(overrides);
-        let tracker: SharedTurnDiffTracker = Arc::new(Mutex::new(TurnDiffTracker::new()));
-
         session
             .services
             .sandbox_assessment
@@ -3219,57 +3211,89 @@ mod tests {
                 risk_categories: vec![SandboxRiskCategory::DataExfiltration],
             });
 
-        let params = ShellToolCallParams {
-            command: vec![
-                "/bin/sh".to_string(),
-                "-c".to_string(),
-                "cat secret.txt".to_string(),
-            ],
-            workdir: None,
-            timeout_ms: Some(1_000),
-            with_escalated_permissions: Some(true),
-            justification: Some("need full fs access".to_string()),
-            run_in_background: None,
-            description: None,
+        let command = vec![
+            "/bin/sh".to_string(),
+            "-c".to_string(),
+            "cat secret.txt".to_string(),
+        ];
+        let reason = Some("need full fs access".to_string());
+        let call_id = "call-risk".to_string();
+        let sub_id = turn_context.sub_id.clone();
+        let cwd = turn_context.cwd.clone();
+
+        let assessment = SandboxCommandAssessment {
+            description: "upload may leak secrets".to_string(),
+            risk_level: SandboxRiskLevel::High,
+            risk_categories: vec![SandboxRiskCategory::DataExfiltration],
         };
+        session
+            .record_risk_assessment(call_id.clone(), assessment.clone())
+            .await;
 
-        let invocation = ToolInvocation {
-            session: Arc::clone(&session),
-            turn: Arc::clone(&turn_context),
-            tracker: Arc::clone(&tracker),
-            sub_id: "test-sub".to_string(),
-            call_id: "call-risk".to_string(),
-            tool_name: "shell".to_string(),
-            payload: ToolPayload::LocalShell { params },
-        };
-
-        let handler = ShellHandler;
-        let result = handler.handle(invocation).await;
-        assert!(matches!(result, Err(FunctionCallError::RespondToModel(_))));
-
-        let mut risk_payload = None;
-        for _ in 0..5 {
-            if let Ok(event) = timeout(Duration::from_secs(1), rx.recv()).await
-                && let EventMsg::ExecApprovalRequest(req) = event.expect("event").msg
-            {
-                assert!(
-                    req.recent_risks
-                        .iter()
-                        .any(|entry| entry.call_id == "call-risk"),
-                    "expected recent risk history to include current call"
-                );
-                risk_payload = req.risk;
-                break;
+        {
+            let mut active = session.active_turn.lock().await;
+            if active.is_none() {
+                *active = Some(ActiveTurn::default());
             }
         }
 
-        let risk = risk_payload.expect("risk assessment");
+        let approval_sub_id = sub_id.clone();
+        let approval_sub_id_for_task = approval_sub_id.clone();
+        let approval_call_id_for_task = call_id.clone();
+        let approval_command_for_task = command.clone();
+        let approval_reason_for_task = reason.clone();
+        let approval_cwd_for_task = cwd.clone();
+        let assessment_for_task = assessment.clone();
+        let session_for_request = Arc::clone(&session);
+        let approval_handle = tokio::spawn(async move {
+            session_for_request
+                .request_command_approval(
+                    approval_sub_id_for_task,
+                    approval_call_id_for_task,
+                    approval_command_for_task,
+                    approval_cwd_for_task,
+                    approval_reason_for_task,
+                    Some(assessment_for_task),
+                )
+                .await
+        });
+
+        let mut req = None;
+        for _ in 0..10 {
+            let event = await_with_timeout(
+                Duration::from_secs(5),
+                rx.recv(),
+                "waiting for exec approval",
+            )
+            .await
+            .expect("approval request event");
+            if let EventMsg::ExecApprovalRequest(candidate) = event.msg
+                && candidate.call_id == call_id
+            {
+                req = Some(candidate);
+                break;
+            }
+        }
+        let req = req.expect("failed to observe ExecApprovalRequest");
+        assert!(
+            req.recent_risks
+                .iter()
+                .any(|entry| entry.call_id == call_id),
+            "expected recent risk history to include current call"
+        );
+        let risk = req.risk.expect("risk assessment");
         assert_eq!(risk.description, "upload may leak secrets");
         assert_eq!(risk.risk_level, SandboxRiskLevel::High);
         assert_eq!(
             risk.risk_categories,
             vec![SandboxRiskCategory::DataExfiltration]
         );
+
+        session
+            .notify_approval(&approval_sub_id, ReviewDecision::Denied)
+            .await;
+        let decision = approval_handle.await.expect("approval task panicked");
+        assert_eq!(decision, ReviewDecision::Denied);
     }
 
     #[tokio::test]

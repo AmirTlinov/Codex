@@ -28,6 +28,8 @@ use crate::wrapping::RtOptions;
 use crate::wrapping::word_wrap_line;
 use codex_ansi_escape::ansi_escape_line;
 use codex_common::elapsed::format_duration;
+#[cfg(test)]
+use codex_protocol::exec_metadata::ExecCommandMetadata;
 use crossterm::event::KeyCode;
 use crossterm::event::KeyEvent;
 use ratatui::buffer::Buffer;
@@ -1107,6 +1109,7 @@ mod tests {
             "exec-1".into(),
             vec!["bash".into(), "-lc".into(), "ls".into()],
             vec![ParsedCommand::Unknown { cmd: "ls".into() }],
+            ExecCommandMetadata::default(),
         );
         exec_cell.complete_call(
             "exec-1",

@@ -228,10 +228,10 @@ async fn unified_exec_emits_session_snapshots() -> Result<()> {
         })
         .await;
 
-        if let EventMsg::UnifiedExecSessions(event) = snapshot_event {
-            if !event.sessions.is_empty() {
-                break event;
-            }
+        if let EventMsg::UnifiedExecSessions(event) = snapshot_event
+            && !event.sessions.is_empty()
+        {
+            break event;
         }
     };
 

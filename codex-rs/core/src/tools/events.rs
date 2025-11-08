@@ -4,6 +4,7 @@ use crate::error::CodexErr;
 use crate::error::SandboxErr;
 use crate::exec::ExecToolCallOutput;
 use crate::function_tool::FunctionCallError;
+use crate::heredoc;
 use crate::parse_command::parse_command;
 use crate::protocol::Event;
 use crate::protocol::EventMsg;
@@ -15,6 +16,8 @@ use crate::protocol::PatchApplyEndEvent;
 use crate::protocol::TurnDiffEvent;
 use crate::tools::context::SharedTurnDiffTracker;
 use crate::tools::sandboxing::ToolError;
+use codex_protocol::exec_metadata::ExecCommandMetadata;
+use shlex::try_join as shlex_try_join;
 use std::collections::HashMap;
 use std::path::Path;
 use std::path::PathBuf;
@@ -58,6 +61,11 @@ pub(crate) enum ToolEventFailure {
 }
 
 pub(crate) async fn emit_exec_command_begin(ctx: ToolEventCtx<'_>, command: &[String], cwd: &Path) {
+    let metadata = if ctx.turn.tools_config.exec_command_metadata {
+        build_exec_command_metadata(command)
+    } else {
+        ExecCommandMetadata::default()
+    };
     ctx.session
         .send_event(Event {
             id: ctx.turn.sub_id.clone(),
@@ -66,6 +74,7 @@ pub(crate) async fn emit_exec_command_begin(ctx: ToolEventCtx<'_>, command: &[St
                 command: command.to_vec(),
                 cwd: cwd.to_path_buf(),
                 parsed_cmd: parse_command(command),
+                metadata,
             }),
         })
         .await;
@@ -304,6 +313,41 @@ impl ToolEmitter {
         self.emit(ctx, event).await;
         result
     }
+}
+
+fn build_exec_command_metadata(command: &[String]) -> ExecCommandMetadata {
+    let mut metadata = ExecCommandMetadata::default();
+    if let Some(script) = extract_script_body(command)
+        && let Some(summary) = heredoc::summarize_script(&script)
+    {
+        metadata.heredoc_summary = Some(summary);
+    }
+    metadata
+}
+
+fn extract_script_body(command: &[String]) -> Option<String> {
+    match command {
+        [first, second, third] if is_shell_wrapper(first, second) => Some(third.clone()),
+        [first, second, third, fourth]
+            if first == "/usr/bin/env" && is_shell_wrapper(second, third) =>
+        {
+            Some(fourth.clone())
+        }
+        _ => shlex_try_join(command.iter().map(String::as_str)).ok(),
+    }
+}
+
+fn is_shell_wrapper(shell: &str, flag: &str) -> bool {
+    matches!(
+        (shell, flag),
+        ("bash", "-lc")
+            | ("/bin/bash", "-lc")
+            | ("sh", "-c")
+            | ("/bin/sh", "-c")
+            | ("dash", "-c")
+            | ("ksh", "-c")
+            | ("zsh", "-c")
+    )
 }
 
 async fn emit_exec_end(

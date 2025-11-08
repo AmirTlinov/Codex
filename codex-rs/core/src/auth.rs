@@ -509,7 +509,6 @@ mod tests {
     use super::*;
     use base64::Engine;
     use pretty_assertions::assert_eq;
-    use serde::Serialize;
     use serde_json::json;
     use tempfile::tempdir;
 
@@ -522,13 +521,16 @@ mod tests {
             codex_home.path().to_path_buf(),
             AuthCredentialsStoreMode::File,
         );
+        use crate::test_helpers::fixtures::make_test_jwt;
+        let fake_jwt = make_test_jwt(Some("user@example.com"), Some("pro"));
+
         let auth_dot_json = AuthDotJson {
             openai_api_key: None,
             tokens: Some(TokenData {
                 id_token: IdTokenInfo {
                     email: Some("user@example.com".to_string()),
                     chatgpt_plan_type: Some(PlanType::Known(KnownPlan::Pro)),
-                    raw_jwt: "token".to_string(),
+                    raw_jwt: fake_jwt,
                 },
                 access_token: "access".to_string(),
                 refresh_token: "refresh".to_string(),

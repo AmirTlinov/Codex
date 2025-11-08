@@ -120,3 +120,6 @@ pub use unified_exec::UnifiedExecSessionOutput;
 pub use unified_exec::UnifiedExecSessionSnapshot;
 
 pub mod otel_init;
+
+#[cfg(test)]
+pub mod test_helpers;

@@ -1083,7 +1083,7 @@ fn classify_redirection_token(token: &str) -> Option<RedirectionKind> {
         return Some(RedirectionKind::Operator);
     }
 
-    let rest_stripped = rest.trim_matches(&['"', '\'']);
+    let rest_stripped = rest.trim_matches(['"', '\'']);
     if rest_stripped.chars().any(|c| c == '<' || c == '>') {
         return None;
     }
@@ -1098,10 +1098,10 @@ enum FlagParseResult {
     NotFlag,
 }
 
-fn first_positional_arg<'a>(
-    tokens: &'a [String],
+fn first_positional_arg(
+    tokens: &[String],
     parser: impl Fn(&[String], usize) -> FlagParseResult,
-) -> Option<&'a String> {
+) -> Option<&String> {
     let mut i = 0;
     while i < tokens.len() {
         match parser(tokens, i) {
@@ -1572,12 +1572,11 @@ fn summarize_main_tokens(main_cmd: &[String]) -> ParsedCommand {
                         seen_flag.set(true);
                         return FlagParseResult::Consumed(2);
                     }
-                } else if token.starts_with("-n") {
-                    let value = &token[2..];
-                    if is_digits(value) {
-                        seen_flag.set(true);
-                        return FlagParseResult::Consumed(1);
-                    }
+                } else if let Some(value) = token.strip_prefix("-n")
+                    && is_digits(value)
+                {
+                    seen_flag.set(true);
+                    return FlagParseResult::Consumed(1);
                 }
                 FlagParseResult::NotFlag
             };
@@ -1613,12 +1612,11 @@ fn summarize_main_tokens(main_cmd: &[String]) -> ParsedCommand {
                         seen_flag.set(true);
                         return FlagParseResult::Consumed(2);
                     }
-                } else if token.starts_with("-n") {
-                    let value = &token[2..];
-                    if is_tail_offset(value) {
-                        seen_flag.set(true);
-                        return FlagParseResult::Consumed(1);
-                    }
+                } else if let Some(value) = token.strip_prefix("-n")
+                    && is_tail_offset(value)
+                {
+                    seen_flag.set(true);
+                    return FlagParseResult::Consumed(1);
                 }
                 FlagParseResult::NotFlag
             };
@@ -1643,10 +1641,10 @@ fn summarize_main_tokens(main_cmd: &[String]) -> ParsedCommand {
                 if token == "--" {
                     return FlagParseResult::StopParsing;
                 }
-                if matches!(token.as_str(), "-s" | "-w" | "-v" | "-i" | "-b") {
-                    if tokens.get(idx + 1).is_some() {
-                        return FlagParseResult::Consumed(2);
-                    }
+                if matches!(token.as_str(), "-s" | "-w" | "-v" | "-i" | "-b")
+                    && tokens.get(idx + 1).is_some()
+                {
+                    return FlagParseResult::Consumed(2);
                 }
                 FlagParseResult::NotFlag
             };
