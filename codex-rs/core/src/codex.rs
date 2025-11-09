@@ -2810,11 +2810,12 @@ mod tests {
         };
 
         let out = format_exec_output_str(&exec);
-        // Keep strict budget on the truncated body (excluding header)
-        let body = out
+        // Keep strict budget on the truncated body (excluding summary header)
+        let (_, output_section) = out.split_once("Output:\n").expect("missing output section");
+        let body = output_section
             .strip_prefix("Total output lines: ")
             .and_then(|rest| rest.split_once("\n\n").map(|x| x.1))
-            .unwrap_or(out.as_str());
+            .unwrap_or(output_section);
         assert!(body.len() <= MODEL_FORMAT_MAX_BYTES, "exceeds byte budget");
         assert!(out.contains("omitted"), "should contain elision marker");
 
