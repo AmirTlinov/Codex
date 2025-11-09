@@ -14,6 +14,7 @@ use codex_protocol::config_types::ReasoningSummary;
 use codex_protocol::plan_tool::StepStatus;
 use core_test_support::assert_exec_summary;
 use core_test_support::assert_regex_match;
+use core_test_support::parse_exec_summary;
 use core_test_support::responses;
 use core_test_support::responses::ev_apply_patch_function_call;
 use core_test_support::responses::ev_assistant_message;
@@ -369,13 +370,9 @@ async fn apply_patch_tool_executes_and_emits_patch_events() -> anyhow::Result<()
     );
     let output_text = extract_output_text(&output_item).expect("output text present");
 
-    assert_regex_match(
-        r"(?s)^Exit code: 0
-Wall time: [0-9]+(?:\.[0-9]+)? seconds
-Output:
-",
-        output_text,
-    );
+    let summary = parse_exec_summary(output_text);
+    assert_eq!(summary.exit_code, 0);
+    assert!(summary.body.is_empty());
     let expected_ops = vec![format!("- add: {file_name} (+1)")];
     assert_exec_summary(output_text, &expected_ops);
 

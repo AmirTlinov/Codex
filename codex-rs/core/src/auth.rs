@@ -119,7 +119,7 @@ impl CodexAuth {
                 id_token: Default::default(),
                 access_token: "Access Token".to_string(),
                 refresh_token: "test".to_string(),
-                account_id: None,
+                account_id: Some("account_id".to_string()),
             }),
             last_refresh: Some(Utc::now()),
         };

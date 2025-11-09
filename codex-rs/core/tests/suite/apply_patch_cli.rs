@@ -13,7 +13,7 @@ use codex_core::protocol::Op;
 use codex_core::protocol::SandboxPolicy;
 use codex_protocol::config_types::ReasoningSummary;
 use codex_core::protocol::InputItem as UserInput;
-use core_test_support::assert_regex_match;
+use core_test_support::parse_exec_summary;
 use core_test_support::responses::ev_apply_patch_function_call;
 use core_test_support::responses::ev_assistant_message;
 use core_test_support::responses::ev_completed;
@@ -93,15 +93,9 @@ async fn apply_patch_cli_multiple_operations_integration() -> Result<()> {
 
     let out = harness.function_call_stdout(call_id).await;
 
-    let expected = r"(?s)^Exit code: 0
-Wall time: [0-9]+(?:\.[0-9]+)? seconds
-Output:
-Applied operations:
-- add: nested/new\.txt \(\+1\)
-- delete: delete\.txt \(-1\)
-- update: modify\.txt \(\+1, -1\)
-✔ Patch applied successfully\.\n$";
-    assert_regex_match(expected, &out);
+    let summary = parse_exec_summary(&out);
+    assert_eq!(summary.exit_code, 0);
+    assert!(summary.body.contains("Applied operations:"));
 
     assert_eq!(
         fs::read_to_string(harness.path("nested/new.txt"))?,

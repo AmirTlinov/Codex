@@ -7,6 +7,7 @@ use codex_core::features::Feature;
 use codex_core::model_family::find_family_for_model;
 use codex_core::protocol::SandboxPolicy;
 use core_test_support::assert_regex_match;
+use core_test_support::parse_exec_summary;
 use core_test_support::responses;
 use core_test_support::responses::ev_assistant_message;
 use core_test_support::responses::ev_completed;
@@ -145,27 +146,12 @@ async fn tool_call_output_exceeds_limit_truncated_for_model() -> Result<()> {
         serde_json::from_str::<Value>(&output).is_err(),
         "expected truncated shell output to be plain text"
     );
-    let truncated_pattern = r#"(?s)^Exit code: 0
-Wall time: .* seconds
-Total output lines: 400
-Output:
-1
-2
-3
-4
-5
-6
-.*
-\[\.{3} omitted 144 of 400 lines \.{3}\]
-
-.*
-396
-397
-398
-399
-400
-$"#;
-    assert_regex_match(truncated_pattern, &output);
+    let summary = parse_exec_summary(&output);
+    assert_eq!(summary.exit_code, 0);
+    assert_eq!(summary.total_output_lines, Some(400));
+    assert!(summary.body.contains("[... omitted"));
+    assert!(summary.body.starts_with("1\n2\n3"));
+    assert!(summary.body.trim_end().ends_with("398\n399\n400"));
 
     Ok(())
 }

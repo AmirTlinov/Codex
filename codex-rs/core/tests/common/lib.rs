@@ -15,6 +15,66 @@ pub mod responses;
 pub mod test_codex;
 pub mod test_codex_exec;
 
+#[derive(Debug, Clone, Copy)]
+pub struct ParsedExecSummary<'a> {
+    pub exit_code: i32,
+    pub wall_time_secs: f32,
+    pub total_output_lines: Option<u32>,
+    pub body: &'a str,
+}
+
+#[track_caller]
+pub fn parse_exec_summary(output: &str) -> ParsedExecSummary<'_> {
+    fn split_line(input: &str) -> (&str, &str) {
+        if let Some(idx) = input.find('\n') {
+            (&input[..idx], &input[idx + 1..])
+        } else {
+            (input, "")
+        }
+    }
+
+    let (exit_line_raw, rest) = split_line(output);
+    let exit_line = exit_line_raw.trim_end_matches('\r');
+    let exit_code = exit_line
+        .strip_prefix("Exit code: ")
+        .unwrap_or_else(|| panic!("missing exit code header in {output:?}"))
+        .parse::<i32>()
+        .unwrap_or_else(|err| panic!("invalid exit code header in {output:?}: {err}"));
+
+    let (wall_line_raw, mut remainder) = split_line(rest);
+    let wall_line = wall_line_raw.trim_end_matches('\r');
+    let wall_time_secs = wall_line
+        .strip_prefix("Wall time: ")
+        .and_then(|v| v.strip_suffix(" seconds"))
+        .unwrap_or_else(|| panic!("missing wall time header in {output:?}"))
+        .parse::<f32>()
+        .unwrap_or_else(|err| panic!("invalid wall time header in {output:?}: {err}"));
+
+    let mut total_output_lines = None;
+    if remainder.starts_with("Total output lines: ") {
+        let (total_line_raw, after_total) = split_line(remainder);
+        let total_line = total_line_raw.trim_end_matches('\r');
+        let count = total_line
+            .strip_prefix("Total output lines: ")
+            .unwrap_or_else(|| panic!("invalid total output lines header in {output:?}"))
+            .parse::<u32>()
+            .unwrap_or_else(|err| panic!("invalid total output lines header in {output:?}: {err}"));
+        total_output_lines = Some(count);
+        remainder = after_total;
+    }
+
+    let body = remainder
+        .strip_prefix("Output:\n")
+        .unwrap_or_else(|| panic!("missing output body in {output:?}"));
+
+    ParsedExecSummary {
+        exit_code,
+        wall_time_secs,
+        total_output_lines,
+        body,
+    }
+}
+
 #[track_caller]
 pub fn assert_regex_match<'s>(pattern: &str, actual: &'s str) -> regex_lite::Captures<'s> {
     let regex = Regex::new(pattern).unwrap_or_else(|err| {
