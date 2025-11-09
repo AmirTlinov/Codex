@@ -251,6 +251,15 @@ async fn patch_approval_triggers_elicitation() -> anyhow::Result<()> {
     .await??;
 
     let elicitation_request_id = RequestId::Integer(0);
+    let params = elicitation_request
+        .params
+        .clone()
+        .ok_or_else(|| anyhow::anyhow!("elicitation_request.params must be set"))?;
+    let codex_event_id = params
+        .get("codex_event_id")
+        .and_then(|value| value.as_str())
+        .ok_or_else(|| anyhow::anyhow!("codex_event_id missing in elicitation params"))?
+        .to_string();
 
     let mut expected_changes = HashMap::new();
     expected_changes.insert(
@@ -267,7 +276,7 @@ async fn patch_approval_triggers_elicitation() -> anyhow::Result<()> {
         None, // No grant_root expected
         None, // No reason expected
         codex_request_id.to_string(),
-        "1".to_string(),
+        codex_event_id,
     )?;
     assert_eq!(expected_elicitation_request, elicitation_request);
 
@@ -445,7 +454,7 @@ fn create_config_toml(codex_home: &Path, server_uri: &str) -> std::io::Result<()
             r#"
 model = "mock-model"
 approval_policy = "untrusted"
-sandbox_policy = "read-only"
+sandbox_mode = "danger-full-access"
 
 model_provider = "mock_provider"
 

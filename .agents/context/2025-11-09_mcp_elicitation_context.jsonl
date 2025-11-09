@@ -1,0 +1,1 @@
+{"source":"codex-rs","summary":["codex_tool MCP tests now accept actual codex_event_id for approvals and run under sandbox_mode=danger-full-access to avoid permission-denied sandbox failures"],"citation":"apply_patch_background_shell"}
