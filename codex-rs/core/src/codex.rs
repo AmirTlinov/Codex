@@ -2750,11 +2750,17 @@ mod tests {
 
         let out = format_exec_output_str(&exec);
 
-        // Strip truncation header if present for subsequent assertions
-        let body = out
+        // Strip summary header for subsequent assertions
+        let (_, output_section) = out
+            .split_once(
+                "Output:\
+",
+            )
+            .expect("missing output section");
+        let body = output_section
             .strip_prefix("Total output lines: ")
             .and_then(|rest| rest.split_once("\n\n").map(|x| x.1))
-            .unwrap_or(out.as_str());
+            .unwrap_or(output_section);
 
         // Expect elision marker with correct counts
         let omitted = 400 - MODEL_FORMAT_MAX_LINES; // 144
@@ -2771,13 +2777,19 @@ mod tests {
             .map(|i| format!("line{i}"))
             .collect::<Vec<_>>()
             .join("\n");
-        assert!(head.starts_with(&expected_head), "head mismatch");
+        assert!(
+            head.trim_start_matches('\n').starts_with(&expected_head),
+            "head mismatch"
+        );
 
         let expected_tail: String = ((400 - MODEL_FORMAT_TAIL_LINES + 1)..=400)
             .map(|i| format!("line{i}"))
             .collect::<Vec<_>>()
             .join("\n");
-        assert!(tail.ends_with(&expected_tail), "tail mismatch");
+        assert!(
+            tail.trim_end_matches('\n').ends_with(&expected_tail),
+            "tail mismatch"
+        );
     }
 
     #[test]
@@ -2835,10 +2847,16 @@ mod tests {
 
         let out = format_exec_output_str(&exec);
 
-        assert_eq!(
-            out,
-            "command timed out after 1000 milliseconds\nCommand output"
-        );
+        let (header, body) = out
+            .split_once(
+                "Output:\
+",
+            )
+            .expect("missing output section");
+        assert!(header.contains("Exit code: 0"));
+        assert!(header.contains("Wall time: 1 seconds"));
+        assert!(body.contains("command timed out after 1000 milliseconds"));
+        assert!(body.contains("Command output"));
     }
 
     #[test]

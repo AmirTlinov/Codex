@@ -16,6 +16,7 @@ use crate::landlock::create_linux_sandbox_command_args;
 use crate::protocol::SandboxPolicy;
 use crate::seatbelt::MACOS_PATH_TO_SEATBELT_EXECUTABLE;
 use crate::seatbelt::create_seatbelt_command_args;
+use crate::spawn::CODEX_FORCE_LINUX_SANDBOX_ENV_VAR;
 use crate::spawn::CODEX_SANDBOX_ENV_VAR;
 use crate::spawn::CODEX_SANDBOX_NETWORK_DISABLED_ENV_VAR;
 use crate::tools::sandboxing::SandboxablePreference;
@@ -122,9 +123,14 @@ impl SandboxManager {
                 let mut full_command = Vec::with_capacity(1 + args.len());
                 full_command.push(exe.to_string_lossy().to_string());
                 full_command.append(&mut args);
+                let mut sandbox_env = HashMap::new();
+                sandbox_env.insert(
+                    CODEX_FORCE_LINUX_SANDBOX_ENV_VAR.to_string(),
+                    "1".to_string(),
+                );
                 (
                     full_command,
-                    HashMap::new(),
+                    sandbox_env,
                     Some("codex-linux-sandbox".to_string()),
                 )
             }

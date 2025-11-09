@@ -29,21 +29,49 @@ pub(crate) const TELEMETRY_PREVIEW_TRUNCATION_NOTICE: &str =
     "[... telemetry preview truncated ...]";
 
 pub fn format_exec_output_str(exec_output: &ExecToolCallOutput) -> String {
-    let ExecToolCallOutput {
-        aggregated_output, ..
-    } = exec_output;
-
-    let content = aggregated_output.text.as_str();
-
     if exec_output.timed_out {
         let prefixed = format!(
-            "command timed out after {} milliseconds\n{content}",
-            exec_output.duration.as_millis()
+            "command timed out after {} milliseconds\n{}",
+            exec_output.duration.as_millis(),
+            exec_output.aggregated_output.text
         );
-        return format_exec_output(&prefixed);
+        return format_exec_output_with_metadata(
+            exec_output.exit_code,
+            exec_output.duration.as_secs_f32(),
+            &prefixed,
+        );
     }
 
-    format_exec_output(content)
+    format_exec_output_with_metadata(
+        exec_output.exit_code,
+        exec_output.duration.as_secs_f32(),
+        exec_output.aggregated_output.text.as_str(),
+    )
+}
+
+pub fn format_exec_output_with_metadata(
+    exit_code: i32,
+    duration_secs: f32,
+    content: &str,
+) -> String {
+    let formatted = format_exec_output(content);
+
+    let mut sections = Vec::new();
+    sections.push(format!("Exit code: {exit_code}"));
+    sections.push(format!("Wall time: {duration_secs} seconds"));
+
+    let mut output = formatted.as_str();
+    if let Some(total_lines) = extract_total_output_lines(output) {
+        sections.push(format!("Total output lines: {total_lines}"));
+        if let Some(stripped) = strip_total_output_header(output) {
+            output = stripped;
+        }
+    }
+
+    sections.push("Output:".to_string());
+    sections.push(output.to_string());
+
+    sections.join("\n")
 }
 
 #[allow(dead_code)] // Used by regression tests ensuring truncation behavior.
@@ -66,6 +94,21 @@ fn format_exec_output(content: &str) -> String {
     }
     let output = truncate_formatted_exec_output(content, total_lines);
     format!("Total output lines: {total_lines}\n\n{output}")
+}
+
+pub fn extract_total_output_lines(output: &str) -> Option<u32> {
+    let marker_start = output.find("[... omitted ")?;
+    let marker = &output[marker_start..];
+    let (_, after_of) = marker.split_once(" of ")?;
+    let (total_segment, _) = after_of.split_once(' ')?;
+    total_segment.parse::<u32>().ok()
+}
+
+pub fn strip_total_output_header(output: &str) -> Option<&str> {
+    let after_prefix = output.strip_prefix("Total output lines: ")?;
+    let (_, remainder) = after_prefix.split_once('\n')?;
+    let remainder = remainder.strip_prefix('\n').unwrap_or(remainder);
+    Some(remainder)
 }
 
 fn truncate_formatted_exec_output(content: &str, total_lines: usize) -> String {
