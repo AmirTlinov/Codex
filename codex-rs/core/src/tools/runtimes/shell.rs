@@ -68,12 +68,16 @@ impl Approvable<ShellRequest> for ShellBackgroundRuntime<'_> {
         let session = ctx.session;
         let turn = ctx.turn;
         let call_id = ctx.call_id.to_string();
+        let tool_name = ctx.tool_name.to_string();
+        let otel = turn.client.get_otel_event_manager();
         Box::pin(async move {
             with_cached_approval(&session.services, key, move || async move {
                 session
                     .request_command_approval(
                         turn.sub_id.clone(),
                         call_id,
+                        tool_name.clone(),
+                        otel.clone(),
                         command,
                         cwd,
                         reason,

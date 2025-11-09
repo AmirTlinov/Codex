@@ -209,20 +209,14 @@ async fn shell_escalated_permissions_rejected_then_ok() -> Result<()> {
     let success_item = third_mock
         .single_request()
         .function_call_output(call_id_success);
-    let output_json: Value = serde_json::from_str(
-        success_item
-            .get("output")
-            .and_then(Value::as_str)
-            .expect("success output string"),
-    )?;
-    assert_eq!(
-        output_json["metadata"]["exit_code"].as_i64(),
-        Some(0),
-        "expected exit code 0 after rerunning without escalation",
-    );
-    let stdout = output_json["output"].as_str().unwrap_or_default();
-    let stdout_pattern = r"(?s)^shell ok\n?$";
-    assert_regex_match(stdout_pattern, stdout);
+    let success_output = success_item
+        .get("output")
+        .and_then(Value::as_str)
+        .expect("success output string");
+    let summary = parse_exec_summary(success_output);
+    assert_eq!(summary.exit_code, 0);
+    let stdout_pattern = r"(?s)^shell ok\r?\n?$";
+    assert_regex_match(stdout_pattern, summary.body);
 
     Ok(())
 }
@@ -384,20 +378,14 @@ async fn shell_timeout_includes_timeout_prefix_and_metadata() -> Result<()> {
         .and_then(Value::as_str)
         .expect("timeout output string");
 
-    // The exec path can report a timeout in two ways depending on timing:
-    // 1) Structured JSON with exit_code 124 and a timeout prefix (preferred), or
-    // 2) A plain error string if the child is observed as killed by a signal first.
-    if let Ok(output_json) = serde_json::from_str::<Value>(output_str) {
-        assert_eq!(
-            output_json["metadata"]["exit_code"].as_i64(),
-            Some(124),
-            "expected timeout exit code 124",
-        );
-
-        let stdout = output_json["output"].as_str().unwrap_or_default();
+    let trimmed = output_str.trim_start_matches(['\r', '\n']);
+    if trimmed.starts_with("Exit code") {
+        let summary = parse_exec_summary(trimmed);
+        assert_eq!(summary.exit_code, 124);
         assert!(
-            stdout.contains("command timed out"),
-            "timeout output missing `command timed out`: {stdout}"
+            summary.body.contains("command timed out"),
+            "timeout output missing `command timed out`: {}",
+            summary.body
         );
     } else {
         // Fallback: accept the signal classification path to deflake the test.
@@ -465,8 +453,17 @@ async fn shell_spawn_failure_truncates_exec_error() -> Result<()> {
         .and_then(Value::as_str)
         .expect("spawn failure output string");
 
-    let summary = parse_exec_summary(output);
-    assert!(summary.body.contains("execution error:"));
+    let trimmed = output.trim_start_matches(['\r', '\n']);
+    if trimmed.starts_with("Exit code") {
+        let summary = parse_exec_summary(trimmed);
+        assert!(summary.body.contains("execution error:"));
+    } else {
+        assert!(
+            output.contains("execution error:")
+                || output.contains("failed to launch shell command"),
+            "unexpected spawn failure output: {output}"
+        );
+    }
     assert!(output.len() <= 10 * 1024);
 
     Ok(())

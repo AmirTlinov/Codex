@@ -14,6 +14,7 @@ use crate::tools::runtimes::shell::ShellBackgroundRuntime;
 use crate::tools::runtimes::shell::ShellRequest;
 use crate::tools::sandboxing::ToolCtx;
 use crate::unified_exec::MIN_YIELD_TIME_MS;
+use crate::unified_exec::TerminateDisposition;
 use crate::unified_exec::UnifiedExecContext;
 use crate::unified_exec::UnifiedExecSessionManager;
 use regex_lite::Regex;
@@ -381,7 +382,7 @@ impl BackgroundShellManager {
 
         let manager: &UnifiedExecSessionManager = &session.services.unified_exec_manager;
         let kill = manager
-            .terminate_session(entry.session_id)
+            .terminate_session(entry.session_id, TerminateDisposition::Requested)
             .await
             .map_err(|err| {
                 FunctionCallError::RespondToModel(format!(

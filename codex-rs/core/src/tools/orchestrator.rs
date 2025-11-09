@@ -58,6 +58,7 @@ impl ToolOrchestrator {
                 session: tool_ctx.session,
                 turn: turn_ctx,
                 call_id: &tool_ctx.call_id,
+                tool_name: &tool_ctx.tool_name,
                 retry_reason: None,
                 risk: None,
             };
@@ -120,6 +121,7 @@ impl ToolOrchestrator {
                         session: tool_ctx.session,
                         turn: turn_ctx,
                         call_id: &tool_ctx.call_id,
+                        tool_name: &tool_ctx.tool_name,
                         retry_reason: Some(reason_msg),
                         risk,
                     };

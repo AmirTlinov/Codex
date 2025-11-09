@@ -82,6 +82,7 @@ pub(crate) struct ApprovalCtx<'a> {
     pub session: &'a Session,
     pub turn: &'a TurnContext,
     pub call_id: &'a str,
+    pub tool_name: &'a str,
     pub retry_reason: Option<String>,
     pub risk: Option<SandboxCommandAssessment>,
 }

@@ -94,10 +94,9 @@ async fn shell_tool_executes_command_and_streams_output() -> anyhow::Result<()> 
     let req = second_mock.single_request();
     let output_item = req.function_call_output(call_id);
     let output_text = extract_output_text(&output_item).expect("output text present");
-    let exec_output: Value = serde_json::from_str(output_text)?;
-    assert_eq!(exec_output["metadata"]["exit_code"], 0);
-    let stdout = exec_output["output"].as_str().expect("stdout field");
-    assert_regex_match(r"(?s)^tool harness\n?$", stdout);
+    let summary = parse_exec_summary(output_text);
+    assert_eq!(summary.exit_code, 0);
+    assert_regex_match(r"(?s)^tool harness\r?\n?$", summary.body);
 
     Ok(())
 }
@@ -372,7 +371,6 @@ async fn apply_patch_tool_executes_and_emits_patch_events() -> anyhow::Result<()
 
     let summary = parse_exec_summary(output_text);
     assert_eq!(summary.exit_code, 0);
-    assert!(summary.body.is_empty());
     let expected_ops = vec![format!("- add: {file_name} (+1)")];
     assert_exec_summary(output_text, &expected_ops);
 

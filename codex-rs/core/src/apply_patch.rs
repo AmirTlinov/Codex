@@ -41,6 +41,7 @@ pub(crate) struct ApplyPatchExec {
 pub(crate) async fn apply_patch(
     sess: &Session,
     turn_context: &TurnContext,
+    tool_name: &str,
     call_id: &str,
     action: ApplyPatchAction,
 ) -> InternalApplyPatchInvocation {
@@ -73,6 +74,8 @@ pub(crate) async fn apply_patch(
                 .request_patch_approval(
                     turn_context.sub_id.clone(),
                     call_id.to_owned(),
+                    tool_name.to_string(),
+                    turn_context.client.get_otel_event_manager(),
                     &action,
                     None,
                     None,

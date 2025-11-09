@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::time::Duration;
 
 use tokio::select;
 use tokio::sync::Mutex;
@@ -10,6 +11,7 @@ use crate::codex::TurnContext;
 use crate::protocol::BackgroundEventEvent;
 use crate::protocol::Event;
 use crate::protocol::EventMsg;
+use crate::unified_exec::TerminateDisposition;
 
 const AUTO_PROMOTE_THRESHOLD: std::time::Duration = std::time::Duration::from_secs(30);
 
@@ -34,6 +36,7 @@ pub(crate) enum ForegroundCompletion {
         stderr: String,
         aggregated_output: String,
         duration_ms: u128,
+        timed_out: bool,
     },
     Promoted(ForegroundPromotionResult),
     Failed(String),
@@ -138,6 +141,7 @@ pub(crate) async fn drive_foreground_shell(
     call_id: String,
     command_label: String,
     mut initial_output: String,
+    timeout_ms: Option<u64>,
 ) -> ForegroundCompletion {
     use crate::unified_exec::MIN_YIELD_TIME_MS;
     use crate::unified_exec::WriteStdinRequest;
@@ -151,7 +155,10 @@ pub(crate) async fn drive_foreground_shell(
     let mut aggregated_output = String::new();
     let mut stdout = String::new();
     let stderr = String::new();
-    let mut total_wall_time = std::time::Duration::ZERO;
+    let mut total_wall_time = Duration::ZERO;
+    let timeout_limit = timeout_ms
+        .filter(|value| *value > 0)
+        .map(Duration::from_millis);
 
     if !initial_output.is_empty() {
         aggregated_output.push_str(&initial_output);
@@ -183,6 +190,36 @@ pub(crate) async fn drive_foreground_shell(
                         stdout.push_str(&resp.output);
                         state.push_output(&resp.output).await;
                         total_wall_time += resp.wall_time;
+
+                        if let Some(limit) = timeout_limit
+                            && total_wall_time >= limit {
+                                state.set_session_id(session_id).await;
+                                match manager
+                                    .terminate_session(session_id, TerminateDisposition::TimedOut)
+                                    .await
+                                {
+                                Ok(kill) => {
+                                    if !kill.aggregated_output.is_empty() {
+                                        aggregated_output.push_str(&kill.aggregated_output);
+                                        stdout.push_str(&kill.aggregated_output);
+                                        state.push_output(&kill.aggregated_output).await;
+                                    }
+                                    return ForegroundCompletion::Finished {
+                                        exit_code: kill.exit_code,
+                                        stdout,
+                                        stderr,
+                                        aggregated_output,
+                                        duration_ms: total_wall_time.as_millis(),
+                                        timed_out: kill.timed_out,
+                                    };
+                                }
+                                Err(err) => {
+                                    return ForegroundCompletion::Failed(format!(
+                                        "failed to terminate timed out shell {command_label}: {err:?}"
+                                    ));
+                                }
+                            }
+                        }
 
                         if total_wall_time >= AUTO_PROMOTE_THRESHOLD {
                             let sub_id = format!("{}:promotion", turn.sub_id);
@@ -259,6 +296,7 @@ pub(crate) async fn drive_foreground_shell(
                                     stderr,
                                     aggregated_output,
                                     duration_ms: total_wall_time.as_millis(),
+                                    timed_out: false,
                                 };
                             }
                         }

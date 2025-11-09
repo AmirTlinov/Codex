@@ -76,8 +76,14 @@ impl ToolHandler for ApplyPatchHandler {
         let command = vec!["apply_patch".to_string(), patch_input.clone()];
         match codex_apply_patch::maybe_parse_apply_patch_verified(&command, &cwd) {
             codex_apply_patch::MaybeApplyPatchVerified::Body(changes) => {
-                match apply_patch::apply_patch(session.as_ref(), turn.as_ref(), &call_id, changes)
-                    .await
+                match apply_patch::apply_patch(
+                    session.as_ref(),
+                    turn.as_ref(),
+                    tool_name.as_str(),
+                    &call_id,
+                    changes,
+                )
+                .await
                 {
                     InternalApplyPatchInvocation::Output(item) => {
                         let content = item?;

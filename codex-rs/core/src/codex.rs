@@ -101,6 +101,7 @@ use crate::rollout::RolloutRecorderParams;
 use crate::sandboxing::assessment::SandboxAssessmentService;
 use crate::shell;
 use crate::state::ActiveTurn;
+use crate::state::PendingApprovalEntry;
 use crate::state::SessionServices;
 use crate::state::TaskKind;
 use crate::tasks::CompactTask;
@@ -121,6 +122,7 @@ use crate::user_instructions::UserInstructions;
 use crate::user_notification::UserNotification;
 use crate::util::backoff;
 use codex_otel::otel_event_manager::OtelEventManager;
+use codex_otel::otel_event_manager::ToolDecisionSource;
 use codex_protocol::config_types::ReasoningEffort as ReasoningEffortConfig;
 use codex_protocol::config_types::ReasoningSummary as ReasoningSummaryConfig;
 use codex_protocol::custom_prompts::CustomPrompt;
@@ -672,6 +674,8 @@ impl Session {
         &self,
         sub_id: String,
         call_id: String,
+        tool_name: String,
+        otel: OtelEventManager,
         command: Vec<String>,
         cwd: PathBuf,
         reason: Option<String>,
@@ -679,19 +683,28 @@ impl Session {
     ) -> ReviewDecision {
         // Add the tx_approve callback to the map before sending the request.
         let (tx_approve, rx_approve) = oneshot::channel();
-        let event_id = sub_id.clone();
+        let event_id = call_id.clone();
         let prev_entry = {
             let mut active = self.active_turn.lock().await;
             match active.as_mut() {
                 Some(at) => {
                     let mut ts = at.turn_state.lock().await;
-                    ts.insert_pending_approval(sub_id, tx_approve)
+                    ts.insert_pending_approval(
+                        event_id.clone(),
+                        PendingApprovalEntry {
+                            tx: tx_approve,
+                            call_id: call_id.clone(),
+                            submission_id: sub_id,
+                            tool_name: tool_name.clone(),
+                            otel: otel.clone(),
+                        },
+                    )
                 }
                 None => None,
             }
         };
         if prev_entry.is_some() {
-            warn!("Overwriting existing pending approval for sub_id: {event_id}");
+            warn!("Overwriting existing pending approval for call_id: {event_id}");
         }
 
         let parsed_cmd = parse_command(&command);
@@ -723,25 +736,36 @@ impl Session {
         &self,
         sub_id: String,
         call_id: String,
+        tool_name: String,
+        otel: OtelEventManager,
         action: &ApplyPatchAction,
         reason: Option<String>,
         grant_root: Option<PathBuf>,
     ) -> oneshot::Receiver<ReviewDecision> {
         // Add the tx_approve callback to the map before sending the request.
         let (tx_approve, rx_approve) = oneshot::channel();
-        let event_id = sub_id.clone();
+        let event_id = call_id.clone();
         let prev_entry = {
             let mut active = self.active_turn.lock().await;
             match active.as_mut() {
                 Some(at) => {
                     let mut ts = at.turn_state.lock().await;
-                    ts.insert_pending_approval(sub_id, tx_approve)
+                    ts.insert_pending_approval(
+                        event_id.clone(),
+                        PendingApprovalEntry {
+                            tx: tx_approve,
+                            call_id: call_id.clone(),
+                            submission_id: sub_id,
+                            tool_name: tool_name.clone(),
+                            otel: otel.clone(),
+                        },
+                    )
                 }
                 None => None,
             }
         };
         if prev_entry.is_some() {
-            warn!("Overwriting existing pending approval for sub_id: {event_id}");
+            warn!("Overwriting existing pending approval for call_id: {event_id}");
         }
 
         let event = Event {
@@ -764,13 +788,27 @@ impl Session {
                 Some(at) => {
                     let mut ts = at.turn_state.lock().await;
                     ts.remove_pending_approval(sub_id)
+                        .or_else(|| ts.remove_pending_approval_by_submission_id(sub_id))
+                        .or_else(|| {
+                            let fallback = ts.pop_pending_approval();
+                            if fallback.is_some() {
+                                warn!("Falling back to oldest pending approval for id: {sub_id}");
+                            }
+                            fallback
+                        })
                 }
                 None => None,
             }
         };
         match entry {
-            Some(tx_approve) => {
-                tx_approve.send(decision).ok();
+            Some(entry) => {
+                entry.otel.tool_decision(
+                    &entry.tool_name,
+                    &entry.call_id,
+                    decision,
+                    ToolDecisionSource::User,
+                );
+                entry.tx.send(decision).ok();
             }
             None => {
                 warn!("No pending approval found for sub_id: {sub_id}");
@@ -3264,11 +3302,15 @@ mod tests {
         let approval_cwd_for_task = cwd.clone();
         let assessment_for_task = assessment.clone();
         let session_for_request = Arc::clone(&session);
+        let tool_name = "local_shell".to_string();
+        let otel_manager = turn_context.client.get_otel_event_manager();
         let approval_handle = tokio::spawn(async move {
             session_for_request
                 .request_command_approval(
                     approval_sub_id_for_task,
                     approval_call_id_for_task,
+                    tool_name,
+                    otel_manager,
                     approval_command_for_task,
                     approval_cwd_for_task,
                     approval_reason_for_task,
@@ -3344,6 +3386,7 @@ mod tests {
         let result = crate::apply_patch::apply_patch(
             session.as_ref(),
             turn_context.as_ref(),
+            "apply_patch",
             "apply-risk",
             action,
         )

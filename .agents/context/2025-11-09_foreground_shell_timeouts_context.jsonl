@@ -1,0 +1,1 @@
+{"source":"codex-rs","summary":["Foreground shell timeout path now reads UnifiedExecKillResult::timed_out to surface actual disposition","Re-ran fmt/fix plus core/tui/exec test suites to confirm otel/tool harness changes stay green"],"citation":"apply_patch_background_shell"}

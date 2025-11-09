@@ -118,6 +118,8 @@ impl Approvable<ApplyPatchRequest> for ApplyPatchRuntime {
         let retry_reason = ctx.retry_reason.clone();
         let risk = req.risk.clone().or_else(|| ctx.risk.clone());
         let user_explicitly_approved = req.user_explicitly_approved;
+        let tool_name = ctx.tool_name.to_string();
+        let otel = turn.client.get_otel_event_manager();
         Box::pin(async move {
             with_cached_approval(&session.services, key, move || async move {
                 if let Some(reason) = retry_reason {
@@ -125,6 +127,8 @@ impl Approvable<ApplyPatchRequest> for ApplyPatchRuntime {
                         .request_command_approval(
                             turn.sub_id.clone(),
                             call_id,
+                            tool_name.clone(),
+                            otel.clone(),
                             vec!["apply_patch".to_string()],
                             cwd,
                             Some(reason),

@@ -16,6 +16,7 @@ use tracing::warn;
 
 use crate::error::CodexErr;
 use crate::error::SandboxErr;
+use crate::exec::EXEC_TIMEOUT_EXIT_CODE;
 use crate::exec::ExecToolCallOutput;
 use crate::exec::SandboxType;
 use crate::exec::StreamOutput;
@@ -54,6 +55,12 @@ use super::truncate_output_to_tokens;
 pub struct UnifiedExecSessionManager {
     next_session_id: AtomicI32,
     sessions: Mutex<HashMap<i32, SessionEntry>>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum TerminateDisposition {
+    Requested,
+    TimedOut,
 }
 
 impl UnifiedExecSessionManager {
@@ -156,6 +163,7 @@ impl UnifiedExecSessionManager {
                     output.clone(),
                     exit,
                     duration,
+                    false,
                 )
                 .await;
             }
@@ -232,8 +240,14 @@ impl UnifiedExecSessionManager {
 
         if let (Some(exit), Some(entry)) = (response.exit_code, completion_entry) {
             let total_duration = StdInstant::now().saturating_duration_since(entry.started_at);
-            Self::emit_exec_end_from_entry(entry, response.output.clone(), exit, total_duration)
-                .await;
+            Self::emit_exec_end_from_entry(
+                entry,
+                response.output.clone(),
+                exit,
+                total_duration,
+                false,
+            )
+            .await;
         }
 
         Ok(response)
@@ -335,6 +349,7 @@ impl UnifiedExecSessionManager {
         aggregated_output: String,
         exit_code: i32,
         duration: Duration,
+        timed_out: bool,
     ) {
         if let (Some(session_ref), Some(turn_ref), Some(call_id)) = (
             entry.session_ref.as_ref(),
@@ -347,7 +362,7 @@ impl UnifiedExecSessionManager {
                 stderr: StreamOutput::new(String::new()),
                 aggregated_output: StreamOutput::new(aggregated_output),
                 duration,
-                timed_out: false,
+                timed_out,
             };
             let event_ctx =
                 ToolEventCtx::new(session_ref.as_ref(), turn_ref.as_ref(), call_id, None);
@@ -364,6 +379,7 @@ impl UnifiedExecSessionManager {
         aggregated_output: String,
         exit_code: i32,
         duration: Duration,
+        timed_out: bool,
     ) {
         let output = ExecToolCallOutput {
             exit_code,
@@ -371,7 +387,7 @@ impl UnifiedExecSessionManager {
             stderr: StreamOutput::new(String::new()),
             aggregated_output: StreamOutput::new(aggregated_output),
             duration,
-            timed_out: false,
+            timed_out,
         };
         let event_ctx = ToolEventCtx::new(
             context.session.as_ref(),
@@ -446,6 +462,7 @@ impl UnifiedExecSessionManager {
     pub(crate) async fn terminate_session(
         &self,
         session_id: i32,
+        disposition: TerminateDisposition,
     ) -> Result<UnifiedExecKillResult, UnifiedExecError> {
         let entry = {
             let mut sessions = self.sessions.lock().await;
@@ -462,15 +479,28 @@ impl UnifiedExecSessionManager {
         let collected =
             Self::collect_output_until_deadline(&output_buffer, &output_notify, deadline).await;
         let aggregated_output = String::from_utf8_lossy(&collected).to_string();
-        let exit_code = entry.session.exit_code().unwrap_or(-1);
+        let timed_out = matches!(disposition, TerminateDisposition::TimedOut);
+        let exit_code = if timed_out {
+            EXEC_TIMEOUT_EXIT_CODE
+        } else {
+            entry.session.exit_code().unwrap_or(-1)
+        };
         let duration = StdInstant::now().saturating_duration_since(entry.started_at);
 
-        Self::emit_exec_end_from_entry(entry, aggregated_output.clone(), exit_code, duration).await;
+        Self::emit_exec_end_from_entry(
+            entry,
+            aggregated_output.clone(),
+            exit_code,
+            duration,
+            timed_out,
+        )
+        .await;
 
         Ok(UnifiedExecKillResult {
             exit_code,
             aggregated_output,
             call_id,
+            timed_out,
         })
     }
 

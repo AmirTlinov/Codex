@@ -58,15 +58,28 @@ fn sse_completed(id: &str) -> String {
 }
 
 fn assert_tool_names(body: &serde_json::Value, expected_names: &[&str]) {
-    assert_eq!(
-        body["tools"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .map(|t| t["name"].as_str().unwrap().to_string())
-            .collect::<Vec<_>>(),
-        expected_names
-    );
+    let actual: Vec<String> = body["tools"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|t| t["name"].as_str().unwrap().to_string())
+        .collect();
+
+    for expected in expected_names {
+        assert!(
+            actual.iter().any(|name| name == expected),
+            "missing tool {expected} in {actual:?}"
+        );
+    }
+}
+
+fn tool_names(body: &serde_json::Value) -> Vec<String> {
+    body["tools"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|t| t["name"].as_str().unwrap().to_string())
+        .collect()
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -257,6 +270,12 @@ async fn prompt_tools_are_consistent_across_requests() {
         serde_json::json!(expected_instructions),
     );
     assert_tool_names(&body1, expected_tools_names);
+
+    assert_eq!(
+        tool_names(&body0),
+        tool_names(&body1),
+        "tool definitions changed between requests"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

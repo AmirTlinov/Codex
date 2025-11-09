@@ -19,6 +19,7 @@ pub use session::UnifiedExecOutputWindow;
 pub(crate) use session::UnifiedExecSession;
 pub use session::UnifiedExecSessionOutput;
 pub use session::UnifiedExecSessionSnapshot;
+pub(crate) use session_manager::TerminateDisposition;
 pub use session_manager::UnifiedExecSessionManager;
 
 pub const MIN_YIELD_TIME_MS: u64 = 100;
@@ -82,6 +83,7 @@ pub struct UnifiedExecKillResult {
     pub exit_code: i32,
     pub aggregated_output: String,
     pub call_id: String,
+    pub timed_out: bool,
 }
 
 pub(crate) struct SessionEntry {

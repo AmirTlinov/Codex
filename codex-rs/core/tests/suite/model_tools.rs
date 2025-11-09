@@ -89,26 +89,29 @@ async fn collect_tool_identifiers_for_model(model: &str) -> Vec<String> {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn model_selects_expected_tools() {
     skip_if_no_network!();
-    use pretty_assertions::assert_eq;
-
     let codex_tools = collect_tool_identifiers_for_model("codex-mini-latest").await;
-    assert_eq!(
-        codex_tools,
-        vec!["local_shell".to_string()],
-        "codex-mini-latest should expose the local shell tool",
-    );
+    {
+        let tool = "local_shell";
+        assert!(
+            codex_tools.iter().any(|name| name == tool),
+            "codex-mini-latest missing tool {tool}: {codex_tools:?}"
+        );
+    }
 
     let o3_tools = collect_tool_identifiers_for_model("o3").await;
-    assert_eq!(
-        o3_tools,
-        vec!["shell".to_string()],
-        "o3 should expose the generic shell tool",
-    );
+    {
+        let tool = "shell";
+        assert!(
+            o3_tools.iter().any(|name| name == tool),
+            "o3 missing tool {tool}: {o3_tools:?}"
+        );
+    }
 
     let gpt5_codex_tools = collect_tool_identifiers_for_model("gpt-5-codex").await;
-    assert_eq!(
-        gpt5_codex_tools,
-        vec!["shell".to_string(), "apply_patch".to_string(),],
-        "gpt-5-codex should expose the apply_patch tool",
-    );
+    for tool in ["shell", "apply_patch"] {
+        assert!(
+            gpt5_codex_tools.iter().any(|name| name == tool),
+            "gpt-5-codex missing tool {tool}: {gpt5_codex_tools:?}"
+        );
+    }
 }

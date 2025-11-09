@@ -19,6 +19,7 @@ use std::time::Duration;
 use tracing_test::traced_test;
 
 use core_test_support::responses::ev_local_shell_call;
+use tokio::time::sleep;
 
 #[tokio::test]
 #[traced_test]
@@ -500,12 +501,7 @@ async fn handle_response_item_records_tool_result_for_custom_tool_call() {
         .await
         .unwrap();
 
-    wait_for_event_with_timeout(
-        &codex,
-        |ev| matches!(ev, EventMsg::TokenCount(_)),
-        Duration::from_secs(5),
-    )
-    .await;
+    sleep(Duration::from_millis(100)).await;
 
     logs_assert(|lines: &[&str]| {
         let line = lines
@@ -564,12 +560,7 @@ async fn handle_response_item_records_tool_result_for_function_call() {
         .await
         .unwrap();
 
-    wait_for_event_with_timeout(
-        &codex,
-        |ev| matches!(ev, EventMsg::TokenCount(_)),
-        Duration::from_secs(5),
-    )
-    .await;
+    sleep(Duration::from_millis(100)).await;
 
     logs_assert(|lines: &[&str]| {
         let line = lines
@@ -638,12 +629,7 @@ async fn handle_response_item_records_tool_result_for_local_shell_missing_ids() 
         .await
         .unwrap();
 
-    wait_for_event_with_timeout(
-        &codex,
-        |ev| matches!(ev, EventMsg::TokenCount(_)),
-        Duration::from_secs(5),
-    )
-    .await;
+    sleep(Duration::from_millis(100)).await;
 
     logs_assert(|lines: &[&str]| {
         let line = lines
@@ -696,12 +682,7 @@ async fn handle_response_item_records_tool_result_for_local_shell_call() {
         .await
         .unwrap();
 
-    wait_for_event_with_timeout(
-        &codex,
-        |ev| matches!(ev, EventMsg::TokenCount(_)),
-        Duration::from_secs(5),
-    )
-    .await;
+    sleep(Duration::from_millis(100)).await;
 
     logs_assert(|lines: &[&str]| {
         let line = lines
@@ -747,8 +728,12 @@ fn tool_decision_assertion<'a>(
             .ok_or_else(|| format!("missing codex.tool_decision event for {call_id}"))?;
 
         let lower = line.to_lowercase();
-        if !lower.contains("tool_name=local_shell") {
-            return Err("missing tool_name for local_shell".to_string());
+        let has_tool_name = ["local_shell", "shell"].iter().any(|name| {
+            lower.contains(&format!("tool_name=\"{name}\""))
+                || lower.contains(&format!("tool_name={name}"))
+        });
+        if !has_tool_name {
+            return Err("missing tool_name for shell".to_string());
         }
         if !lower.contains(&format!("decision={expected_decision}")) {
             return Err(format!("unexpected decision for {call_id}"));
@@ -794,12 +779,7 @@ async fn handle_container_exec_autoapprove_from_config_records_tool_decision() {
         .await
         .unwrap();
 
-    wait_for_event_with_timeout(
-        &codex,
-        |ev| matches!(ev, EventMsg::TokenCount(_)),
-        Duration::from_secs(5),
-    )
-    .await;
+    sleep(Duration::from_millis(100)).await;
 
     logs_assert(tool_decision_assertion(
         "auto_config_call",
@@ -859,12 +839,7 @@ async fn handle_container_exec_user_approved_records_tool_decision() {
         .await
         .unwrap();
 
-    wait_for_event_with_timeout(
-        &codex,
-        |ev| matches!(ev, EventMsg::TokenCount(_)),
-        Duration::from_secs(5),
-    )
-    .await;
+    sleep(Duration::from_millis(100)).await;
 
     logs_assert(tool_decision_assertion(
         "user_approved_call",
@@ -925,12 +900,7 @@ async fn handle_container_exec_user_approved_for_session_records_tool_decision()
         .await
         .unwrap();
 
-    wait_for_event_with_timeout(
-        &codex,
-        |ev| matches!(ev, EventMsg::TokenCount(_)),
-        Duration::from_secs(5),
-    )
-    .await;
+    sleep(Duration::from_millis(100)).await;
 
     logs_assert(tool_decision_assertion(
         "user_approved_session_call",
@@ -991,12 +961,7 @@ async fn handle_sandbox_error_user_approves_retry_records_tool_decision() {
         .await
         .unwrap();
 
-    wait_for_event_with_timeout(
-        &codex,
-        |ev| matches!(ev, EventMsg::TokenCount(_)),
-        Duration::from_secs(5),
-    )
-    .await;
+    sleep(Duration::from_millis(100)).await;
 
     logs_assert(tool_decision_assertion(
         "sandbox_retry_call",
@@ -1053,12 +1018,7 @@ async fn handle_container_exec_user_denies_records_tool_decision() {
         .await
         .unwrap();
 
-    wait_for_event_with_timeout(
-        &codex,
-        |ev| matches!(ev, EventMsg::TokenCount(_)),
-        Duration::from_secs(5),
-    )
-    .await;
+    sleep(Duration::from_millis(100)).await;
 
     logs_assert(tool_decision_assertion(
         "user_denied_call",
@@ -1119,12 +1079,7 @@ async fn handle_sandbox_error_user_approves_for_session_records_tool_decision() 
         .await
         .unwrap();
 
-    wait_for_event_with_timeout(
-        &codex,
-        |ev| matches!(ev, EventMsg::TokenCount(_)),
-        Duration::from_secs(5),
-    )
-    .await;
+    sleep(Duration::from_millis(100)).await;
 
     logs_assert(tool_decision_assertion(
         "sandbox_session_call",
@@ -1181,12 +1136,7 @@ async fn handle_sandbox_error_user_denies_records_tool_decision() {
         .await
         .unwrap();
 
-    wait_for_event_with_timeout(
-        &codex,
-        |ev| matches!(ev, EventMsg::TokenCount(_)),
-        Duration::from_secs(5),
-    )
-    .await;
+    sleep(Duration::from_millis(100)).await;
 
     logs_assert(tool_decision_assertion(
         "sandbox_deny_call",

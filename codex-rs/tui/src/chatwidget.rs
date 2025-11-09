@@ -1066,8 +1066,7 @@ impl ChatWidget {
 
         match kind {
             BackgroundEventKind::Started => {
-                let normalized_description =
-                    Self::normalize_background_description(description);
+                let normalized_description = Self::normalize_background_description(description);
                 let fallback_description = normalized_description
                     .clone()
                     .or_else(|| self.background_command_label(&shell_id));

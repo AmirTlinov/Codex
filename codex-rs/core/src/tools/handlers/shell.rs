@@ -173,8 +173,14 @@ impl ShellHandler {
             &exec_params.cwd,
         ) {
             codex_apply_patch::MaybeApplyPatchVerified::Body(changes) => {
-                match apply_patch::apply_patch(session.as_ref(), turn.as_ref(), &call_id, changes)
-                    .await
+                match apply_patch::apply_patch(
+                    session.as_ref(),
+                    turn.as_ref(),
+                    tool_name,
+                    &call_id,
+                    changes,
+                )
+                .await
                 {
                     InternalApplyPatchInvocation::Output(item) => {
                         // Programmatic apply_patch path; return its result.
@@ -366,6 +372,7 @@ impl ShellHandler {
             call_id.clone(),
             command_label.clone(),
             initial_output,
+            exec_params.timeout_ms,
         )
         .await;
 
@@ -376,6 +383,7 @@ impl ShellHandler {
                 stderr,
                 aggregated_output,
                 duration_ms,
+                timed_out,
             } => {
                 session.services.foreground_shell.remove(&call_id).await;
                 let exec_output = ExecToolCallOutput {
@@ -384,7 +392,7 @@ impl ShellHandler {
                     stderr: crate::exec::StreamOutput::new(stderr),
                     aggregated_output: crate::exec::StreamOutput::new(aggregated_output),
                     duration: Duration::from_millis(duration_ms as u64),
-                    timed_out: false,
+                    timed_out,
                 };
                 let event_ctx =
                     ToolEventCtx::new(session.as_ref(), turn.as_ref(), &call_id, Some(&tracker));

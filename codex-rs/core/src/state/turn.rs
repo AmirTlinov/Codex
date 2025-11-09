@@ -6,6 +6,7 @@ use std::sync::Arc;
 use tokio::sync::Mutex;
 use tokio::task::AbortHandle;
 
+use codex_otel::otel_event_manager::OtelEventManager;
 use codex_protocol::models::ResponseInputItem;
 use tokio::sync::oneshot;
 
@@ -69,24 +70,45 @@ impl ActiveTurn {
 /// Mutable state for a single turn.
 #[derive(Default)]
 pub(crate) struct TurnState {
-    pending_approvals: HashMap<String, oneshot::Sender<ReviewDecision>>,
+    pending_approvals: HashMap<String, PendingApprovalEntry>,
     pending_input: Vec<ResponseInputItem>,
+}
+
+pub(crate) struct PendingApprovalEntry {
+    pub tx: oneshot::Sender<ReviewDecision>,
+    pub call_id: String,
+    pub submission_id: String,
+    pub tool_name: String,
+    pub otel: OtelEventManager,
 }
 
 impl TurnState {
     pub(crate) fn insert_pending_approval(
         &mut self,
         key: String,
-        tx: oneshot::Sender<ReviewDecision>,
-    ) -> Option<oneshot::Sender<ReviewDecision>> {
-        self.pending_approvals.insert(key, tx)
+        entry: PendingApprovalEntry,
+    ) -> Option<PendingApprovalEntry> {
+        self.pending_approvals.insert(key, entry)
     }
 
-    pub(crate) fn remove_pending_approval(
-        &mut self,
-        key: &str,
-    ) -> Option<oneshot::Sender<ReviewDecision>> {
+    pub(crate) fn remove_pending_approval(&mut self, key: &str) -> Option<PendingApprovalEntry> {
         self.pending_approvals.remove(key)
+    }
+
+    pub(crate) fn remove_pending_approval_by_submission_id(
+        &mut self,
+        sub_id: &str,
+    ) -> Option<PendingApprovalEntry> {
+        let key = self
+            .pending_approvals
+            .iter()
+            .find_map(|(key, entry)| (entry.submission_id == sub_id).then_some(key.clone()))?;
+        self.pending_approvals.remove(&key)
+    }
+
+    pub(crate) fn pop_pending_approval(&mut self) -> Option<PendingApprovalEntry> {
+        let key = self.pending_approvals.keys().next().cloned()?;
+        self.pending_approvals.remove(&key)
     }
 
     pub(crate) fn clear_pending(&mut self) {
