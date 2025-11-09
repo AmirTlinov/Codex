@@ -5,11 +5,21 @@ use std::sync::Arc;
 use rmcp::ErrorData as McpError;
 use rmcp::ServiceExt;
 use rmcp::handler::server::ServerHandler;
+use rmcp::model::AnnotateAble;
 use rmcp::model::CallToolRequestParam;
 use rmcp::model::CallToolResult;
 use rmcp::model::JsonObject;
+use rmcp::model::ListResourceTemplatesResult;
+use rmcp::model::ListResourcesResult;
 use rmcp::model::ListToolsResult;
 use rmcp::model::PaginatedRequestParam;
+use rmcp::model::RawResource;
+use rmcp::model::RawResourceTemplate;
+use rmcp::model::ReadResourceRequestParam;
+use rmcp::model::ReadResourceResult;
+use rmcp::model::Resource;
+use rmcp::model::ResourceContents;
+use rmcp::model::ResourceTemplate;
 use rmcp::model::ServerCapabilities;
 use rmcp::model::ServerInfo;
 use rmcp::model::Tool;
@@ -51,6 +61,41 @@ impl TestToolServer {
             Arc::new(schema),
         )
     }
+
+    fn memo_resource() -> Resource {
+        RawResource {
+            uri: "memo://codex/example-note".to_string(),
+            name: "example-note".to_string(),
+            title: Some("Example Note".to_string()),
+            description: Some("A sample MCP resource exposed for integration tests.".to_string()),
+            mime_type: Some("text/plain".to_string()),
+            size: None,
+            icons: None,
+        }
+        .no_annotation()
+    }
+
+    fn memo_template() -> ResourceTemplate {
+        RawResourceTemplate {
+            uri_template: "memo://codex/{slug}".to_string(),
+            name: "codex-memo".to_string(),
+            title: Some("Codex Memo".to_string()),
+            description: Some(
+                "Template for memo://codex/{slug} resources used in tests.".to_string(),
+            ),
+            mime_type: Some("text/plain".to_string()),
+        }
+        .no_annotation()
+    }
+
+    fn memo_resource_contents() -> ResourceContents {
+        ResourceContents::TextResourceContents {
+            uri: "memo://codex/example-note".to_string(),
+            mime_type: Some("text/plain".to_string()),
+            text: "This is a sample MCP resource served by the rmcp test server.".to_string(),
+            meta: None,
+        }
+    }
 }
 
 #[derive(Deserialize)]
@@ -82,6 +127,42 @@ impl ServerHandler for TestToolServer {
                 tools: (*tools).clone(),
                 next_cursor: None,
             })
+        }
+    }
+
+    fn list_resources(
+        &self,
+        _request: Option<PaginatedRequestParam>,
+        _context: rmcp::service::RequestContext<rmcp::service::RoleServer>,
+    ) -> impl std::future::Future<Output = Result<ListResourcesResult, McpError>> + Send + '_ {
+        let resources = vec![Self::memo_resource()];
+        async move { Ok(ListResourcesResult::with_all_items(resources)) }
+    }
+
+    fn list_resource_templates(
+        &self,
+        _request: Option<PaginatedRequestParam>,
+        _context: rmcp::service::RequestContext<rmcp::service::RoleServer>,
+    ) -> impl std::future::Future<Output = Result<ListResourceTemplatesResult, McpError>> + Send + '_
+    {
+        let templates = vec![Self::memo_template()];
+        async move { Ok(ListResourceTemplatesResult::with_all_items(templates)) }
+    }
+
+    fn read_resource(
+        &self,
+        request: ReadResourceRequestParam,
+        _context: rmcp::service::RequestContext<rmcp::service::RoleServer>,
+    ) -> impl std::future::Future<Output = Result<ReadResourceResult, McpError>> + Send + '_ {
+        let contents = Self::memo_resource_contents();
+        async move {
+            if request.uri == "memo://codex/example-note" {
+                Ok(ReadResourceResult {
+                    contents: vec![contents],
+                })
+            } else {
+                Err(McpError::invalid_params("unknown resource", None))
+            }
         }
     }
 
