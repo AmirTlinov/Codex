@@ -44,7 +44,7 @@ const CLEANUP_AFTER: Duration = Duration::from_secs(60 * 60);
 pub const BACKGROUND_SHELL_AGENT_GUIDANCE: &str = r#"Background shell execution:
 - Use the shell tool's `run_in_background: true` flag for long-running commands (e.g., `{"command":["npm","start"],"run_in_background":true}`). Provide `bookmark` and `description` when possible so you can reference shells by alias.
 - Commands that exceed roughly 10 seconds in the foreground are auto-promoted; use `PromoteShell` proactively when you already know a command will take a while.
-- Read background output via `shell_summary` (compact list) and `poll_background_shell` (incremental logs). Stop work with `kill_background_shell`.
+- Read background output via `shell_summary` (compact list for every shell) and `shell_log`/`poll_background_shell` (tail logs for a specific shell). Stop work with `shell_kill` (maps to `Op::KillBackgroundShell`).
 - At most 10 shells may run concurrently. Each shell retains ~10 MB of stdout/stderr for an hour; summarize logs instead of dumping them into the chat unless explicitly requested.
 "#;
 
@@ -117,6 +117,18 @@ pub struct BackgroundPollResponse {
     pub truncated: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub bookmark: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct BackgroundLogView {
+    pub shell_id: String,
+    pub bookmark: Option<String>,
+    pub description: Option<String>,
+    pub command_preview: String,
+    pub status: BackgroundShellStatus,
+    pub exit_code: Option<i32>,
+    pub truncated: bool,
+    pub lines: Vec<String>,
 }
 
 #[allow(dead_code)]
@@ -386,13 +398,7 @@ impl BackgroundShellManager {
         }
 
         let mut guard = entry.lock().await;
-        let regex = if let Some(pattern) = filter_regex {
-            Some(Regex::new(pattern).map_err(|err| {
-                FunctionCallError::RespondToModel(format!("invalid regex '{pattern}': {err}"))
-            })?)
-        } else {
-            None
-        };
+        let regex = compile_regex(filter_regex)?;
         let lines = self.collect_new_lines(&mut guard, regex.as_ref());
         Ok(BackgroundPollResponse {
             shell_id,
@@ -401,6 +407,33 @@ impl BackgroundShellManager {
             exit_code: guard.exit_code,
             truncated: guard.truncated,
             bookmark: guard.bookmark.clone(),
+        })
+    }
+
+    pub async fn log_snapshot(
+        &self,
+        identifier: &str,
+        max_lines: usize,
+        filter_regex: Option<&str>,
+    ) -> Result<BackgroundLogView, FunctionCallError> {
+        let (shell_id, entry) = self.resolve_identifier(identifier).await.ok_or_else(|| {
+            FunctionCallError::RespondToModel(format!("unknown background shell id: {identifier}"))
+        })?;
+
+        let regex = compile_regex(filter_regex)?;
+        let limit = max_lines.clamp(1, 400);
+        let guard = entry.lock().await;
+        let lines = self.collect_tail_lines(&guard, limit, regex.as_ref());
+
+        Ok(BackgroundLogView {
+            shell_id,
+            bookmark: guard.bookmark.clone(),
+            description: guard.description.clone(),
+            command_preview: guard.command_preview.clone(),
+            status: guard.status.clone(),
+            exit_code: guard.exit_code,
+            truncated: guard.truncated,
+            lines,
         })
     }
 
@@ -658,6 +691,32 @@ impl BackgroundShellManager {
         lines
     }
 
+    fn collect_tail_lines(
+        &self,
+        entry: &BackgroundCommandEntry,
+        limit: usize,
+        regex: Option<&Regex>,
+    ) -> Vec<String> {
+        if limit == 0 {
+            return Vec::new();
+        }
+        let mut lines = Vec::new();
+        for line in entry.buffer.iter().rev() {
+            let formatted = format_line(line);
+            if let Some(re) = regex {
+                if !re.is_match(&formatted) {
+                    continue;
+                }
+            }
+            lines.push(formatted);
+            if lines.len() == limit {
+                break;
+            }
+        }
+        lines.reverse();
+        lines
+    }
+
     fn mark_completed(
         &self,
         shell_id: &str,
@@ -745,6 +804,16 @@ fn stream_prefix(stream: &ExecOutputStream) -> &'static str {
 
 fn format_line(line: &LineEntry) -> String {
     format!("{}{}", stream_prefix(&line.stream), line.text)
+}
+
+fn compile_regex(pattern: Option<&str>) -> Result<Option<Regex>, FunctionCallError> {
+    if let Some(pattern) = pattern {
+        Ok(Some(Regex::new(pattern).map_err(|err| {
+            FunctionCallError::RespondToModel(format!("invalid regex '{pattern}': {err}"))
+        })?))
+    } else {
+        Ok(None)
+    }
 }
 
 #[allow(dead_code)]

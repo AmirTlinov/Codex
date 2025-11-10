@@ -1,4 +1,5 @@
 pub mod apply_patch;
+mod background_shell;
 mod grep_files;
 mod list_dir;
 mod mcp;
@@ -13,6 +14,10 @@ mod view_image;
 pub use plan::PLAN_TOOL;
 
 pub use apply_patch::ApplyPatchHandler;
+pub use background_shell::BackgroundShellToolHandler;
+pub use background_shell::create_shell_kill_tool;
+pub use background_shell::create_shell_log_tool;
+pub use background_shell::create_shell_summary_tool;
 pub use grep_files::GrepFilesHandler;
 pub use list_dir::ListDirHandler;
 pub use mcp::McpHandler;

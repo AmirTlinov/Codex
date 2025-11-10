@@ -858,6 +858,7 @@ pub(crate) fn build_specs(
     mcp_tools: Option<HashMap<String, mcp_types::Tool>>,
 ) -> ToolRegistryBuilder {
     use crate::tools::handlers::ApplyPatchHandler;
+    use crate::tools::handlers::BackgroundShellToolHandler;
     use crate::tools::handlers::GrepFilesHandler;
     use crate::tools::handlers::ListDirHandler;
     use crate::tools::handlers::McpHandler;
@@ -868,6 +869,9 @@ pub(crate) fn build_specs(
     use crate::tools::handlers::TestSyncHandler;
     use crate::tools::handlers::UnifiedExecHandler;
     use crate::tools::handlers::ViewImageHandler;
+    use crate::tools::handlers::create_shell_kill_tool;
+    use crate::tools::handlers::create_shell_log_tool;
+    use crate::tools::handlers::create_shell_summary_tool;
     use std::sync::Arc;
 
     let mut builder = ToolRegistryBuilder::new();
@@ -875,6 +879,7 @@ pub(crate) fn build_specs(
     let shell_handler = Arc::new(ShellHandler);
     let unified_exec_handler = Arc::new(UnifiedExecHandler);
     let plan_handler = Arc::new(PlanHandler);
+    let background_shell_handler = Arc::new(BackgroundShellToolHandler);
     let apply_patch_handler = Arc::new(ApplyPatchHandler);
     let view_image_handler = Arc::new(ViewImageHandler);
     let mcp_handler = Arc::new(McpHandler);
@@ -909,6 +914,13 @@ pub(crate) fn build_specs(
 
     builder.push_spec(PLAN_TOOL.clone());
     builder.register_handler("update_plan", plan_handler);
+
+    builder.push_spec(create_shell_summary_tool());
+    builder.push_spec(create_shell_log_tool());
+    builder.push_spec(create_shell_kill_tool());
+    builder.register_handler("shell_summary", background_shell_handler.clone());
+    builder.register_handler("shell_log", background_shell_handler.clone());
+    builder.register_handler("shell_kill", background_shell_handler.clone());
 
     if let Some(apply_patch_tool_type) = &config.apply_patch_tool_type {
         match apply_patch_tool_type {

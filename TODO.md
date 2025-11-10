@@ -33,7 +33,7 @@ Enable Codex to run every AI-issued shell command asynchronously without freezin
   - Register every foreground exec with the registry so Ctrl+R/auto promotion can function.
   - Enforce the 10-second foreground window: launch a timer and if the command exceeds it, auto-promote (even if `timeout_ms` is larger).
 - [x] Ensure background shells share the same environment + approval flow as foreground commands (including sandbox rewinds, risk metadata).
-- [x] Добавить упрощённые ручки (`BackgroundShellHandler` + `list_background_shells`, `tail_background_shell`, `shell_summary`) чтобы Codex мог перечислять процессы и читать логи одним вызовом.
+- [x] Добавить упрощённые ручки (`BackgroundShellHandler` + `shell_summary`, `shell_log`, `shell_kill`) чтобы Codex мог перечислять процессы, читать логи и завершать задачи одним вызовом.
 - [x] Формировать ответы в компактном формате (краткое состояние + tail) чтобы не засорять контекст модели.
 
 ### 5. Session services & unified exec wiring

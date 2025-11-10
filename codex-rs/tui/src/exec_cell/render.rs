@@ -563,6 +563,8 @@ fn friendly_shell_command_label(script: &str) -> Option<&'static str> {
     let first = tokens.next()?.trim_matches(|c: char| c == ';');
     match first {
         "shell_summary" | "background_shell.summary" => Some("Shell Summary"),
+        "shell_log" => Some("Shell Log"),
+        "shell_kill" | "kill_background_shell" => Some("Shell Kill"),
         _ => None,
     }
 }

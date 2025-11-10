@@ -20,6 +20,40 @@ By comparison, the non-interactive mode (`codex exec`) defaults to `RUST_LOG=err
 
 See the Rust documentation on [`RUST_LOG`](https://docs.rs/env_logger/latest/env_logger/#enabling-logging) for more information on the configuration options.
 
+## Background shell workflow {#background-shell}
+
+Long-running shell commands no longer have to pin the UI. Codex now exposes a
+first-class background shell manager that you can drive from both the agent and
+the TUI:
+
+- **`run_in_background` flag** – Every shell tool call (including `!` user
+  commands) accepts `run_in_background: true|false` plus optional
+  `bookmark=` / `description=` tokens. Example user command:
+  ``! npm start run_in_background: true bookmark=dev description="watch mode"``
+  Codex auto-promotes any foreground command that runs for ~10 seconds,
+  so the flag is mainly for proactively long jobs.
+- **New RPCs & helpers** – `shell_summary` gives the model a compact list of all
+  background shells, `shell_log` returns recent stdout/stderr for a single
+  shell (by id or bookmark), and `shell_kill` terminates a runaway job. Under
+  the hood, these pair with `Op::BackgroundShellSummary`,
+  `Op::PollBackgroundShell`, and `Op::KillBackgroundShell`, so the agent can
+  list, tail, and stop shells without
+  dumping logs into the chat. Summaries include the latest 10 lines, bookmark,
+  and a compact command preview.
+- **Ring buffer + retention** – Each shell keeps ~10 MB of stdout/stderr for up
+  to one hour after completion. Older lines fall off the buffer (FIFO) and the
+  CLI surfaces a `truncated` flag when it happens.
+- **Concurrency guard** – At most 10 shells may run simultaneously. Attempts to
+  exceed the cap receive a friendly error so you can recycle unused sessions.
+- **Ctrl+R / Ctrl+B shortcuts** – Press Ctrl+R to move the most-recent running
+  command into the background immediately. Press Ctrl+B (or focus the mini
+  widget with ↓ / Enter) to open the Background Tasks view for filtering,
+  tailing (`t`), refreshing (`p`), or killing (`k`) processes. Toasts and a
+  pulsing indicator call attention to new completions without adding noise to
+  the chat transcript.
+
+These behaviors are enabled by default; no config changes are required.
+
 ## Model Context Protocol (MCP) {#model-context-protocol}
 
 The Codex CLI and IDE extension is a MCP client which means that it can be configured to connect to MCP servers. For more information, refer to the [`config docs`](./config.md#mcp-integration).
