@@ -4,6 +4,7 @@ use std::fs;
 use std::io::Read;
 use std::io::Write;
 use std::path::Path;
+use tracing::warn;
 
 pub fn load_snapshot(path: &Path) -> Result<Option<IndexSnapshot>> {
     if !path.exists() {
@@ -12,8 +13,22 @@ pub fn load_snapshot(path: &Path) -> Result<Option<IndexSnapshot>> {
     let mut file = fs::File::open(path)?;
     let mut buf = Vec::new();
     file.read_to_end(&mut buf)?;
-    let snapshot: IndexSnapshot = bincode::deserialize(&buf)?;
-    Ok(Some(snapshot))
+    match bincode::deserialize(&buf) {
+        Ok(snapshot) => Ok(Some(snapshot)),
+        Err(err) => {
+            warn!(
+                "code-finder snapshot at {:?} is unreadable ({err}); rebuilding from scratch",
+                path
+            );
+            if let Err(remove_err) = fs::remove_file(path) {
+                warn!(
+                    "failed to remove corrupted snapshot {:?}: {remove_err}",
+                    path
+                );
+            }
+            Ok(None)
+        }
+    }
 }
 
 pub fn save_snapshot(path: &Path, tmp_path: &Path, snapshot: &IndexSnapshot) -> Result<()> {
