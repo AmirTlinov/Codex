@@ -1,3 +1,5 @@
+use crate::planner::CodeFinderSearchArgs;
+use crate::proto::SearchProfile;
 use serde::Deserialize;
 use std::fmt;
 
@@ -13,44 +15,6 @@ pub enum CodeFinderPayload {
         #[serde(default = "default_snippet_context")]
         context: usize,
     },
-}
-
-#[derive(Debug, Clone, Default, Deserialize)]
-pub struct CodeFinderSearchArgs {
-    #[serde(default)]
-    pub query: Option<String>,
-    #[serde(default)]
-    pub limit: Option<usize>,
-    #[serde(default)]
-    pub kinds: Vec<String>,
-    #[serde(default)]
-    pub languages: Vec<String>,
-    #[serde(default)]
-    pub categories: Vec<String>,
-    #[serde(default)]
-    pub path_globs: Vec<String>,
-    #[serde(default)]
-    pub file_substrings: Vec<String>,
-    #[serde(default)]
-    pub symbol_exact: Option<String>,
-    #[serde(default)]
-    pub recent_only: Option<bool>,
-    #[serde(default)]
-    pub only_tests: Option<bool>,
-    #[serde(default)]
-    pub only_docs: Option<bool>,
-    #[serde(default)]
-    pub only_deps: Option<bool>,
-    #[serde(default)]
-    pub with_refs: Option<bool>,
-    #[serde(default)]
-    pub refs_limit: Option<usize>,
-    #[serde(default)]
-    pub help_symbol: Option<String>,
-    #[serde(default)]
-    pub refine: Option<String>,
-    #[serde(default)]
-    pub wait_for_index: Option<bool>,
 }
 
 pub const DEFAULT_SNIPPET_CONTEXT: usize = 8;
@@ -84,6 +48,12 @@ impl fmt::Display for PayloadParseError {
 
 impl std::error::Error for PayloadParseError {}
 
+impl From<serde_json::Error> for PayloadParseError {
+    fn from(err: serde_json::Error) -> Self {
+        Self::new(format!("failed to parse code_finder arguments: {err:?}"))
+    }
+}
+
 pub fn parse_payload(arguments: &str) -> Result<CodeFinderPayload, PayloadParseError> {
     let trimmed = arguments.trim();
     if trimmed.is_empty() {
@@ -93,12 +63,10 @@ pub fn parse_payload(arguments: &str) -> Result<CodeFinderPayload, PayloadParseE
     }
 
     if trimmed.starts_with('{') {
-        return Err(PayloadParseError::new(
-            "code_finder accepts only *** Begin <Action> blocks; JSON payloads are not supported",
-        ));
+        serde_json::from_str::<CodeFinderPayload>(trimmed).map_err(PayloadParseError::from)
+    } else {
+        parse_freeform_payload(trimmed)
     }
-
-    parse_freeform_payload(trimmed)
 }
 
 pub fn parse_freeform_payload(input: &str) -> Result<CodeFinderPayload, PayloadParseError> {
@@ -297,6 +265,20 @@ fn apply_freeform_pair(
         }
         "id" => *symbol_id = Some(raw_value),
         "context" => *snippet_context = Some(parse_usize("context", &raw_value)?),
+        "profile" | "profiles" | "mode" | "modes" | "preset" | "presets" | "focus" | "focuses" => {
+            let tokens = split_list(&raw_value);
+            if tokens.is_empty() {
+                return Err(PayloadParseError::new(
+                    "profile list must contain at least one entry",
+                ));
+            }
+            for token in tokens {
+                let profile = parse_profile(&token)?;
+                if !args.profiles.contains(&profile) {
+                    args.profiles.push(profile);
+                }
+            }
+        }
         other => {
             return Err(PayloadParseError::new(format!(
                 "unsupported code_finder field '{other}'"
@@ -348,6 +330,12 @@ fn clean_value(value: &str) -> String {
     trimmed.to_string()
 }
 
+fn parse_profile(raw: &str) -> Result<SearchProfile, PayloadParseError> {
+    SearchProfile::from_token(raw).ok_or_else(|| {
+        PayloadParseError::new(format!("unsupported code_finder profile '{}'", raw.trim()))
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -369,6 +357,30 @@ mod tests {
         match parse_freeform_payload(input).expect("should parse fenced block") {
             CodeFinderPayload::Search(args) => {
                 assert_eq!(args.query, Some("bar".to_string()));
+            }
+            other => panic!("unexpected payload: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_profiles_list() {
+        let input = "*** Begin Search\nprofile: tests, symbols\n*** End Search";
+        match parse_freeform_payload(input).expect("should parse profiles") {
+            CodeFinderPayload::Search(args) => {
+                assert_eq!(args.profiles.len(), 2);
+                assert!(args.profiles.contains(&SearchProfile::Tests));
+                assert!(args.profiles.contains(&SearchProfile::Symbols));
+            }
+            other => panic!("unexpected payload: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_profile_mode_alias() {
+        let input = "*** Begin Search\nmode: references\n*** End Search";
+        match parse_freeform_payload(input).expect("should parse mode alias") {
+            CodeFinderPayload::Search(args) => {
+                assert_eq!(args.profiles, vec![SearchProfile::References]);
             }
             other => panic!("unexpected payload: {other:?}"),
         }

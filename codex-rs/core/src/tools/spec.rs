@@ -236,10 +236,10 @@ const CODE_FINDER_FREEFORM_USAGE: &str = r#"Blocks follow the apply_patch envelo
 key: value
 *** End <Action>
 
-Actions
-- Search — run a query with filters.
-- Open — download the full file for a hit id.
-- Snippet — show N context lines (default 8) around a hit.
+Use exact headers:
+- `*** Begin Search` … `*** End Search`
+- `*** Begin Open` … `*** End Open`
+- `*** Begin Snippet` … `*** End Snippet`
 
 Rules
 - Action name comes from the header; omit `action:` keys.

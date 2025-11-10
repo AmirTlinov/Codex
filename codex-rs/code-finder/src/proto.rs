@@ -59,6 +59,21 @@ pub enum FileCategory {
     Deps,
 }
 
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, Hash)]
+#[serde(rename_all = "snake_case")]
+pub enum SearchProfile {
+    Balanced,
+    Focused,
+    Broad,
+    Symbols,
+    Files,
+    Tests,
+    Docs,
+    Deps,
+    Recent,
+    References,
+}
+
 #[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub struct Range {
     pub start: u32,
@@ -89,6 +104,7 @@ pub struct SearchRequest {
     pub help_symbol: Option<String>,
     pub refine: Option<QueryId>,
     pub wait_for_index: bool,
+    pub profiles: Vec<SearchProfile>,
     pub schema_version: u32,
 }
 
@@ -103,6 +119,7 @@ impl Default for SearchRequest {
             help_symbol: None,
             refine: None,
             wait_for_index: true,
+            profiles: Vec::new(),
             schema_version: PROTOCOL_VERSION,
         }
     }

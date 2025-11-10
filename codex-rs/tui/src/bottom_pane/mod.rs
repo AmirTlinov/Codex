@@ -65,8 +65,6 @@ pub(crate) enum CodeFinderIndicatorState {
 #[derive(Clone, Debug)]
 pub(crate) struct CodeFinderFooterIndicator {
     state: CodeFinderIndicatorState,
-    symbols: usize,
-    files: usize,
     notice: Option<String>,
 }
 
@@ -79,8 +77,6 @@ impl CodeFinderFooterIndicator {
         };
         Self {
             state,
-            symbols: status.symbols,
-            files: status.files,
             notice: status.notice.clone(),
         }
     }
@@ -88,22 +84,12 @@ impl CodeFinderFooterIndicator {
     pub fn failed_with_notice(notice: String) -> Self {
         Self {
             state: CodeFinderIndicatorState::Failed,
-            symbols: 0,
-            files: 0,
             notice: Some(notice),
         }
     }
 
     pub fn state(&self) -> CodeFinderIndicatorState {
         self.state
-    }
-
-    pub fn symbols(&self) -> usize {
-        self.symbols
-    }
-
-    pub fn files(&self) -> usize {
-        self.files
     }
 
     pub fn notice(&self) -> Option<&str> {

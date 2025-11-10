@@ -1,8 +1,8 @@
 use std::path::PathBuf;
 
 use codex_code_finder::freeform::CodeFinderPayload;
-use codex_code_finder::freeform::CodeFinderSearchArgs;
 use codex_code_finder::freeform::parse_payload as parse_code_finder_payload;
+use codex_code_finder::planner::CodeFinderSearchArgs;
 use codex_code_finder::proto::ErrorPayload;
 use codex_code_finder::proto::IndexStatus;
 use codex_code_finder::proto::NavHit;
@@ -337,6 +337,19 @@ fn build_search_summary(args: &CodeFinderSearchArgs) -> Option<String> {
 
     if let (Some(text), Some(lang)) = (summary.as_ref(), args.languages.first()) {
         summary = Some(format!("{text} ({lang})"));
+    }
+
+    if !args.profiles.is_empty() {
+        let tag_list = args
+            .profiles
+            .iter()
+            .map(codex_code_finder::proto::SearchProfile::badge)
+            .collect::<Vec<_>>()
+            .join(", ");
+        summary = Some(match summary.take() {
+            Some(text) => format!("{text} [{tag_list}]"),
+            None => format!("[{tag_list}]"),
+        });
     }
 
     summary

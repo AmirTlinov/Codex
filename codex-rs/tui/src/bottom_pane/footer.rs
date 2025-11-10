@@ -248,18 +248,16 @@ fn append_code_finder_status(line: &mut Line<'static>, indicator: &CodeFinderFoo
     line.push_span(" · ".dim());
     match indicator.state() {
         CodeFinderIndicatorState::Building => {
-            line.push_span("Indexing code…".cyan());
+            line.push_span("●".yellow());
+            line.push_span(" Indexing".dim());
         }
         CodeFinderIndicatorState::Ready => {
-            let summary = format!(
-                "Index ready ({} syms / {} files)",
-                indicator.symbols(),
-                indicator.files()
-            );
-            line.push_span(summary.dim());
+            line.push_span("●".green());
+            line.push_span(" Index".dim());
         }
         CodeFinderIndicatorState::Failed => {
-            line.push_span("Index failed — run /index-code".red());
+            line.push_span("●".red());
+            line.push_span(" Index failed — run /index-code".red());
         }
     }
     if let Some(notice) = indicator.notice() {

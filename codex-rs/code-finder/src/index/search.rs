@@ -10,7 +10,9 @@ use crate::proto::QueryId;
 use crate::proto::SearchFilters;
 use crate::proto::SearchRequest;
 use crate::proto::SearchStats;
+use crate::proto::SearchProfile;
 use crate::proto::SymbolHelp;
+use crate::proto::SymbolKind;
 use anyhow::Result;
 use globset::GlobBuilder;
 use globset::GlobSet;
@@ -60,11 +62,13 @@ pub fn run_search(
             if let Some(score) = pat.score(haystack, matcher_ref) {
                 let mut total = score as f32;
                 total += heuristic_score(symbol, request.query.as_deref());
+                total += profile_score(symbol, &request.profiles, request.query.as_deref());
                 scored.push((total, symbol.id.clone()));
             }
             continue;
         }
         let mut total = heuristic_score(symbol, request.query.as_deref());
+        total += profile_score(symbol, &request.profiles, request.query.as_deref());
         total += 1.0;
         scored.push((total, symbol.id.clone()));
     }
@@ -153,6 +157,97 @@ fn heuristic_score(symbol: &SymbolRecord, query: Option<&str>) -> f32 {
         }
     }
     score
+}
+
+fn profile_score(symbol: &SymbolRecord, profiles: &[SearchProfile], query: Option<&str>) -> f32 {
+    let mut bonus = 0.0;
+    for profile in profiles {
+        match profile {
+            SearchProfile::Balanced => {}
+            SearchProfile::Focused => {
+                if let Some(q) = query {
+                    if symbol.identifier.eq_ignore_ascii_case(q)
+                        || symbol.path.to_ascii_lowercase().contains(&q.to_ascii_lowercase())
+                    {
+                        bonus += 40.0;
+                    }
+                }
+            }
+            SearchProfile::Broad => {
+                bonus += 5.0;
+            }
+            SearchProfile::Symbols => {
+                if is_symbolic_kind(&symbol.kind) {
+                    bonus += 60.0;
+                } else {
+                    bonus -= 10.0;
+                }
+            }
+            SearchProfile::Files => {
+                bonus += 5.0;
+            }
+            SearchProfile::Tests => {
+                if has_category(symbol, FileCategory::Tests) {
+                    bonus += 30.0;
+                } else {
+                    bonus -= 5.0;
+                }
+            }
+            SearchProfile::Docs => {
+                if has_category(symbol, FileCategory::Docs) {
+                    bonus += 25.0;
+                } else {
+                    bonus -= 5.0;
+                }
+            }
+            SearchProfile::Deps => {
+                if is_dependency_path(&symbol.path) {
+                    bonus += 35.0;
+                } else {
+                    bonus -= 5.0;
+                }
+            }
+            SearchProfile::Recent => {
+                if symbol.recent {
+                    bonus += 15.0;
+                } else {
+                    bonus -= 5.0;
+                }
+            }
+            SearchProfile::References => {
+                if is_symbolic_kind(&symbol.kind) {
+                    bonus += 10.0;
+                }
+            }
+        }
+    }
+    bonus
+}
+
+fn is_symbolic_kind(kind: &SymbolKind) -> bool {
+    matches!(
+        kind,
+        SymbolKind::Function
+            | SymbolKind::Method
+            | SymbolKind::Struct
+            | SymbolKind::Enum
+            | SymbolKind::Trait
+            | SymbolKind::Class
+            | SymbolKind::Interface
+            | SymbolKind::Impl
+    )
+}
+
+fn has_category(symbol: &SymbolRecord, category: FileCategory) -> bool {
+    symbol.categories.iter().any(|cat| cat == &category)
+}
+
+fn is_dependency_path(path: &str) -> bool {
+    let lower = path.to_ascii_lowercase();
+    lower.ends_with("cargo.toml")
+        || lower.ends_with("package.json")
+        || lower.contains("/deps/")
+        || lower.contains("/dependencies")
 }
 
 fn build_hit(

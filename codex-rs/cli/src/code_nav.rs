@@ -8,11 +8,9 @@ use codex_code_finder::DaemonOptions;
 use codex_code_finder::client::ClientOptions;
 use codex_code_finder::client::CodeFinderClient;
 use codex_code_finder::client::DaemonSpawn;
-use codex_code_finder::proto::FileCategory;
-use codex_code_finder::proto::Language;
-use codex_code_finder::proto::SearchFilters;
-use codex_code_finder::proto::SearchRequest;
-use codex_code_finder::proto::SymbolKind;
+use codex_code_finder::plan_search_request;
+use codex_code_finder::planner::CodeFinderSearchArgs;
+use codex_code_finder::planner::SearchProfile;
 use codex_code_finder::proto::{self};
 use codex_code_finder::run_daemon;
 use codex_common::CliConfigOverrides;
@@ -65,6 +63,10 @@ pub struct NavCommand {
     /// Restrict to dependency manifests (Cargo.toml, package.json, ...).
     #[arg(long = "deps")]
     pub only_deps: bool,
+
+    /// Apply a high-level search profile.
+    #[arg(long = "profile", value_enum, action = ArgAction::Append)]
+    pub profiles: Vec<ProfileArg>,
 
     /// Include reference locations.
     #[arg(long = "with-refs")]
@@ -133,17 +135,8 @@ pub struct DaemonCommand {
 
 pub async fn run_nav(cmd: NavCommand) -> Result<()> {
     let client = build_client(cmd.project_root.clone()).await?;
-    let mut request = SearchRequest::default();
-    if !cmd.query.is_empty() {
-        request.query = Some(cmd.query.join(" "));
-    }
-    request.filters = build_filters(&cmd);
-    request.limit = cmd.limit;
-    request.with_refs = cmd.with_refs;
-    request.refs_limit = cmd.refs_limit;
-    request.help_symbol = cmd.help_symbol.clone();
-    request.refine = cmd.refine;
-    request.wait_for_index = !cmd.no_wait;
+    let args = nav_command_to_search_args(&cmd);
+    let request = plan_search_request(args)?;
     let response = client.search(&request).await?;
     print_json(&response)
 }
@@ -177,25 +170,44 @@ pub async fn run_daemon_cmd(cmd: DaemonCommand) -> Result<()> {
     .await
 }
 
-fn build_filters(cmd: &NavCommand) -> SearchFilters {
-    let mut categories = Vec::new();
-    if cmd.only_tests {
-        categories.push(FileCategory::Tests);
-    }
-    if cmd.only_docs {
-        categories.push(FileCategory::Docs);
-    }
-    if cmd.only_deps {
-        categories.push(FileCategory::Deps);
-    }
-    SearchFilters {
-        kinds: cmd.kinds.iter().map(KindArg::to_proto).collect(),
-        languages: cmd.languages.iter().map(LangArg::to_proto).collect(),
-        categories,
+fn nav_command_to_search_args(cmd: &NavCommand) -> CodeFinderSearchArgs {
+    let query = if cmd.query.is_empty() {
+        None
+    } else {
+        Some(cmd.query.join(" "))
+    };
+
+    CodeFinderSearchArgs {
+        query,
+        limit: Some(cmd.limit),
+        kinds: cmd
+            .kinds
+            .iter()
+            .map(|k| format_kind(k).to_string())
+            .collect(),
+        languages: cmd
+            .languages
+            .iter()
+            .map(|lang| format_lang(lang).to_string())
+            .collect(),
+        categories: Vec::new(),
         path_globs: cmd.path_globs.clone(),
         file_substrings: cmd.file_substrings.clone(),
         symbol_exact: cmd.symbol_exact.clone(),
-        recent_only: cmd.recent_only,
+        recent_only: cmd.recent_only.then_some(true),
+        only_tests: cmd.only_tests.then_some(true),
+        only_docs: cmd.only_docs.then_some(true),
+        only_deps: cmd.only_deps.then_some(true),
+        with_refs: cmd.with_refs.then_some(true),
+        refs_limit: cmd.refs_limit,
+        help_symbol: cmd.help_symbol.clone(),
+        refine: cmd.refine.map(|id| id.to_string()),
+        wait_for_index: cmd.no_wait.then_some(false),
+        profiles: cmd
+            .profiles
+            .iter()
+            .map(ProfileArg::to_profile)
+            .collect(),
     }
 }
 
@@ -252,6 +264,7 @@ mod tests {
             only_tests: true,
             only_docs: false,
             only_deps: true,
+            profiles: vec![ProfileArg::Symbols],
             with_refs: true,
             refs_limit: Some(7),
             help_symbol: Some("SessionManager".into()),
@@ -263,27 +276,23 @@ mod tests {
     }
 
     #[test]
-    fn build_filters_applies_all_axes() {
+    fn nav_command_to_search_args_maps_fields() {
         let cmd = sample_nav_command();
-        let filters = build_filters(&cmd);
-        assert_eq!(filters.kinds, vec![SymbolKind::Function]);
-        assert_eq!(filters.languages, vec![Language::Rust]);
-        assert_eq!(filters.path_globs, vec!["core/**/*.rs".to_string()]);
-        assert_eq!(filters.symbol_exact.as_deref(), Some("session_id"));
-        assert_eq!(filters.file_substrings, vec!["mod.rs".to_string()]);
-        assert!(filters.recent_only);
-        assert_eq!(
-            filters.categories,
-            vec![FileCategory::Tests, FileCategory::Deps]
-        );
-    }
-
-    #[test]
-    fn build_filters_adds_docs_category_when_requested() {
-        let mut cmd = sample_nav_command();
-        cmd.only_docs = true;
-        let filters = build_filters(&cmd);
-        assert!(filters.categories.contains(&FileCategory::Docs));
+        let args = nav_command_to_search_args(&cmd);
+        assert_eq!(args.query.as_deref(), Some("SessionID"));
+        assert_eq!(args.limit, Some(25));
+        assert_eq!(args.kinds, vec!["function".to_string()]);
+        assert_eq!(args.languages, vec!["rust".to_string()]);
+        assert_eq!(args.path_globs, vec!["core/**/*.rs".to_string()]);
+        assert_eq!(args.file_substrings, vec!["mod.rs".to_string()]);
+        assert_eq!(args.symbol_exact.as_deref(), Some("session_id"));
+        assert_eq!(args.recent_only, Some(true));
+        assert_eq!(args.only_tests, Some(true));
+        assert_eq!(args.only_deps, Some(true));
+        assert_eq!(args.with_refs, Some(true));
+        assert_eq!(args.refs_limit, Some(7));
+        assert_eq!(args.help_symbol.as_deref(), Some("SessionManager"));
+        assert_eq!(args.profiles, vec![SearchProfile::Symbols]);
     }
 }
 
@@ -302,26 +311,6 @@ pub enum KindArg {
     TypeAlias,
     Test,
     Document,
-}
-
-impl KindArg {
-    fn to_proto(&self) -> SymbolKind {
-        match self {
-            Self::Function => SymbolKind::Function,
-            Self::Method => SymbolKind::Method,
-            Self::Struct => SymbolKind::Struct,
-            Self::Enum => SymbolKind::Enum,
-            Self::Trait => SymbolKind::Trait,
-            Self::Impl => SymbolKind::Impl,
-            Self::Module => SymbolKind::Module,
-            Self::Class => SymbolKind::Class,
-            Self::Interface => SymbolKind::Interface,
-            Self::Constant => SymbolKind::Constant,
-            Self::TypeAlias => SymbolKind::TypeAlias,
-            Self::Test => SymbolKind::Test,
-            Self::Document => SymbolKind::Document,
-        }
-    }
 }
 
 impl ValueEnum for KindArg {
@@ -383,25 +372,6 @@ pub enum LangArg {
     Unknown,
 }
 
-impl LangArg {
-    fn to_proto(&self) -> Language {
-        match self {
-            Self::Rust => Language::Rust,
-            Self::Typescript => Language::Typescript,
-            Self::Tsx => Language::Tsx,
-            Self::Javascript => Language::Javascript,
-            Self::Python => Language::Python,
-            Self::Go => Language::Go,
-            Self::Bash => Language::Bash,
-            Self::Markdown => Language::Markdown,
-            Self::Json => Language::Json,
-            Self::Yaml => Language::Yaml,
-            Self::Toml => Language::Toml,
-            Self::Unknown => Language::Unknown,
-        }
-    }
-}
-
 impl ValueEnum for LangArg {
     fn value_variants<'a>() -> &'a [Self] {
         const VARIANTS: &[LangArg] = &[
@@ -423,6 +393,74 @@ impl ValueEnum for LangArg {
 
     fn to_possible_value(&self) -> Option<PossibleValue> {
         Some(PossibleValue::new(format_lang(self)))
+    }
+}
+
+#[derive(Clone, Debug)]
+pub enum ProfileArg {
+    Balanced,
+    Focused,
+    Broad,
+    Symbols,
+    Files,
+    Tests,
+    Docs,
+    Deps,
+    Recent,
+    References,
+}
+
+impl ProfileArg {
+    fn to_profile(&self) -> SearchProfile {
+        match self {
+            Self::Balanced => SearchProfile::Balanced,
+            Self::Focused => SearchProfile::Focused,
+            Self::Broad => SearchProfile::Broad,
+            Self::Symbols => SearchProfile::Symbols,
+            Self::Files => SearchProfile::Files,
+            Self::Tests => SearchProfile::Tests,
+            Self::Docs => SearchProfile::Docs,
+            Self::Deps => SearchProfile::Deps,
+            Self::Recent => SearchProfile::Recent,
+            Self::References => SearchProfile::References,
+        }
+    }
+}
+
+impl ValueEnum for ProfileArg {
+    fn value_variants<'a>() -> &'a [Self] {
+        const VARIANTS: &[ProfileArg] = &[
+            ProfileArg::Balanced,
+            ProfileArg::Focused,
+            ProfileArg::Broad,
+            ProfileArg::Symbols,
+            ProfileArg::Files,
+            ProfileArg::Tests,
+            ProfileArg::Docs,
+            ProfileArg::Deps,
+            ProfileArg::Recent,
+            ProfileArg::References,
+        ];
+        VARIANTS
+    }
+
+    fn to_possible_value(&self) -> Option<PossibleValue> {
+        Some(PossibleValue::new(format_profile(self)))
+    }
+}
+
+fn format_profile(profile: &ProfileArg) -> &'static str {
+    match profile {
+        ProfileArg::Balanced => "balanced",
+        ProfileArg::Focused => "focused",
+        ProfileArg::Broad => "broad",
+        ProfileArg::Symbols => "symbols",
+        ProfileArg::Files => "files",
+        ProfileArg::Tests => "tests",
+        ProfileArg::Docs => "docs",
+        ProfileArg::Deps => "deps",
+        ProfileArg::Recent => "recent",
+        ProfileArg::References => "references",
     }
 }
 

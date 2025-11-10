@@ -300,25 +300,6 @@ impl ExecCell {
                 );
                 push_owned_lines(&wrapped, &mut out_indented);
             }
-
-            if let Some(output) = call.output.as_ref() {
-                let rendered = output_lines(
-                    Some(output),
-                    OutputLinesParams {
-                        line_limit: TOOL_CALL_MAX_LINES,
-                        only_err: false,
-                        include_angle_pipe: true,
-                        include_prefix: true,
-                    },
-                );
-                let OutputLines { lines, omitted } = rendered;
-                if !lines.is_empty() {
-                    out_indented.extend(prefix_lines(lines, "    ".into(), "    ".into()));
-                    if let Some(omitted) = omitted {
-                        out_indented.push(format!("    … +{omitted} more lines").dim().into());
-                    }
-                }
-            }
         }
 
         out.extend(prefix_lines(out_indented, "  └ ".dim(), "    ".into()));
