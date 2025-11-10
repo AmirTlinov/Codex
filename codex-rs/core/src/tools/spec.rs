@@ -230,41 +230,38 @@ fn create_write_stdin_tool() -> ToolSpec {
     })
 }
 
-const CODE_FINDER_FREEFORM_USAGE: &str = r#"Code Finder uses the same envelopes as apply_patch. Each block is:
+const CODE_FINDER_FREEFORM_USAGE: &str = r#"Blocks follow the apply_patch envelope:
 
 *** Begin <Action>
 key: value
 *** End <Action>
 
-Supported actions:
-- *** Begin Search ... *** End Search – run a query with filters and scoring hints.
-- *** Begin Open ... *** End Open – fetch the entire file for a hit `id`.
-- *** Begin Snippet ... *** End Snippet – fetch only N context lines (default 8).
+Actions
+- Search — run a query with filters.
+- Open — download the full file for a hit id.
+- Snippet — show N context lines (default 8) around a hit.
 
-Formatting rules:
-- Action name comes from the header; do **not** include an `action:` field.
-- Use `key: value` or `key = value`. Repeating a key appends (for lists).
-- Comma-separate multi-value entries and quote values containing spaces.
-- Unknown keys are rejected; stay within the list below.
-- Do **not** wrap the block in JSON (e.g., `{"command": ...}`); only the *** Begin/*** End envelope is accepted.
+Rules
+- Action name comes from the header; omit `action:` keys.
+- Use `key: value`; repeat a key to append list items. Quote values containing spaces.
+- Unknown keys abort parsing.
 
-Search keys:
-- `query`/`q` (free-form text), `limit` (default 40, minimum 1).
-- `kinds`, `languages`, `categories` (comma-separated; categories accept `source`, `tests`, `docs`, `deps`).
-- `path`/`path_globs`, `file`/`file_substrings`, `symbol`/`symbol_exact`.
-- `recent`, `tests`, `docs`, `deps` (booleans) toggle recency/category shortcuts.
-- `with_refs` + `refs_limit` attach reference previews; `help`/`help_symbol` adds module/layer/dependency metadata to the top hit.
-- `refine`/`query_id` reuse a cached candidate list from a previous response.
-- `wait`/`wait_for_index` (true by default) chooses whether to block until the daemon finishes indexing.
+Search keys
+- `query`/`q`, `limit` (default 40, min 1).
+- `kinds`, `languages`, `categories` (`source/tests/docs/deps`).
+- `path_globs`, `file_substrings`, `symbol_exact`.
+- `recent`, `tests`, `docs`, `deps` booleans.
+- `with_refs` + `refs_limit`, `help_symbol`.
+- `refine` (`query_id` from a previous response), `wait`/`wait_for_index`.
 
-Open/Snippet keys:
-- `id` (required) — must match the `hits[].id` from a previous Search response.
-- `context` (Snippet only, defaults to 8) — symmetric line window around the symbol.
+Open & Snippet keys
+- `id` — required, taken from `hits[].id`.
+- `context` — snippet window (default 8).
 
-Example multi-action block:
+Examples
 
 *** Begin Search
-query: SessionManager resolver
+query: session manager resolver
 kinds: function,method
 languages: rust
 path_globs: core/**
@@ -284,7 +281,7 @@ id: cf_6d053bc1
 context: 16
 *** End Snippet
 
-Responses always return deterministic JSON (`query_id`, `hits`, `index.state`). Use `query_id` with `refine` to iterate without repeating heavy scans. Codex now keeps the daemon running in the background while the CLI/TUI is open, so `wait: true` typically returns a fresh index immediately.
+Responses always return deterministic JSON (`query_id`, `hits`, `index.state`). Use `query_id` with `refine` when iterating on the same search.
 "#;
 
 fn create_code_finder_tool() -> ToolSpec {
