@@ -173,7 +173,8 @@ wait_for_index: false
 #[test]
 fn malformed_request_shows_parse_error() {
     const BAD_REQUEST: &str = r#"{"command":"*** Begin Search\nquery: oops\n*** End Search"}"#;
-    const ERROR_OUTPUT: &str = "code_finder block must start with *** Begin <Action>";
+    const ERROR_OUTPUT: &str =
+        "code_finder accepts only *** Begin <Action> blocks; JSON payloads are not supported";
 
     let screen = render_history(code_finder_history_lines_for_test(
         BAD_REQUEST,

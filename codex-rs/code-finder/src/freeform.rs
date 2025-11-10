@@ -84,12 +84,6 @@ impl fmt::Display for PayloadParseError {
 
 impl std::error::Error for PayloadParseError {}
 
-impl From<serde_json::Error> for PayloadParseError {
-    fn from(err: serde_json::Error) -> Self {
-        Self::new(format!("failed to parse code_finder arguments: {err:?}"))
-    }
-}
-
 pub fn parse_payload(arguments: &str) -> Result<CodeFinderPayload, PayloadParseError> {
     let trimmed = arguments.trim();
     if trimmed.is_empty() {
@@ -99,10 +93,12 @@ pub fn parse_payload(arguments: &str) -> Result<CodeFinderPayload, PayloadParseE
     }
 
     if trimmed.starts_with('{') {
-        serde_json::from_str::<CodeFinderPayload>(trimmed).map_err(PayloadParseError::from)
-    } else {
-        parse_freeform_payload(trimmed)
+        return Err(PayloadParseError::new(
+            "code_finder accepts only *** Begin <Action> blocks; JSON payloads are not supported",
+        ));
     }
+
+    parse_freeform_payload(trimmed)
 }
 
 pub fn parse_freeform_payload(input: &str) -> Result<CodeFinderPayload, PayloadParseError> {

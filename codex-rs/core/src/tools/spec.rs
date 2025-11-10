@@ -230,7 +230,7 @@ fn create_write_stdin_tool() -> ToolSpec {
     })
 }
 
-const CODE_FINDER_FREEFORM_USAGE: &str = r"Code Finder uses the same envelopes as apply_patch. Each block is:
+const CODE_FINDER_FREEFORM_USAGE: &str = r#"Code Finder uses the same envelopes as apply_patch. Each block is:
 
 *** Begin <Action>
 key: value
@@ -246,6 +246,7 @@ Formatting rules:
 - Use `key: value` or `key = value`. Repeating a key appends (for lists).
 - Comma-separate multi-value entries and quote values containing spaces.
 - Unknown keys are rejected; stay within the list below.
+- Do **not** wrap the block in JSON (e.g., `{"command": ...}`); only the *** Begin/*** End envelope is accepted.
 
 Search keys:
 - `query`/`q` (free-form text), `limit` (default 40, minimum 1).
@@ -284,7 +285,7 @@ context: 16
 *** End Snippet
 
 Responses always return deterministic JSON (`query_id`, `hits`, `index.state`). Use `query_id` with `refine` to iterate without repeating heavy scans. Codex now keeps the daemon running in the background while the CLI/TUI is open, so `wait: true` typically returns a fresh index immediately.
-";
+"#;
 
 fn create_code_finder_tool() -> ToolSpec {
     let description = format!(

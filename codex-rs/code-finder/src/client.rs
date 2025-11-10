@@ -210,10 +210,7 @@ async fn spawn_daemon(spawn: &DaemonSpawn, log_path: &Path) -> Result<()> {
     let formatted = timestamp
         .format(&Rfc3339)
         .unwrap_or_else(|_| timestamp.unix_timestamp().to_string());
-    let _ = writeln!(
-        log_file,
-        "===== code-finder daemon start {formatted} =====",
-    );
+    let _ = writeln!(log_file, "===== code-finder daemon start {formatted} =====",);
     log_file.flush().ok();
     let stderr = log_file.try_clone()?;
     cmd.args(&spawn.args)
