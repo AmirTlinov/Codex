@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::collections::HashSet;
 use std::collections::VecDeque;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -31,6 +32,7 @@ use codex_core::protocol::McpToolCallEndEvent;
 use codex_core::protocol::Op;
 use codex_core::protocol::PatchApplyBeginEvent;
 use codex_core::protocol::RateLimitSnapshot;
+use codex_core::protocol::RawResponseItemEvent;
 use codex_core::protocol::ReviewRequest;
 use codex_core::protocol::StreamErrorEvent;
 use codex_core::protocol::TaskCompleteEvent;
@@ -46,6 +48,7 @@ use codex_core::protocol::WarningEvent;
 use codex_core::protocol::WebSearchBeginEvent;
 use codex_core::protocol::WebSearchEndEvent;
 use codex_protocol::ConversationId;
+use codex_protocol::models::ResponseItem;
 use codex_protocol::parse_command::ParsedCommand;
 use codex_protocol::user_input::UserInput;
 use crossterm::event::KeyCode;
@@ -85,8 +88,10 @@ use crate::exec_cell::new_active_exec_command;
 use crate::get_git_diff::get_git_diff;
 use crate::history_cell;
 use crate::history_cell::AgentMessageCell;
+use crate::history_cell::CodeFinderCallCell;
 use crate::history_cell::HistoryCell;
 use crate::history_cell::McpToolCallCell;
+use crate::history_cell::new_code_finder_call;
 use crate::markdown::append_markdown;
 #[cfg(target_os = "windows")]
 use crate::onboarding::WSL_INSTRUCTIONS;
@@ -287,6 +292,7 @@ pub(crate) struct ChatWidget {
     // Whether to add a final message separator after the last message
     needs_final_message_separator: bool,
     code_finder_last_state: Option<IndexState>,
+    code_finder_call_ids: HashSet<String>,
 
     last_rendered_width: std::cell::Cell<Option<usize>>,
     // Feedback sink for /feedback
@@ -1084,6 +1090,7 @@ impl ChatWidget {
             is_review_mode: false,
             needs_final_message_separator: false,
             code_finder_last_state: None,
+            code_finder_call_ids: HashSet::new(),
             last_rendered_width: std::cell::Cell::new(None),
             feedback,
             current_rollout_path: None,
@@ -1152,6 +1159,7 @@ impl ChatWidget {
             is_review_mode: false,
             needs_final_message_separator: false,
             code_finder_last_state: None,
+            code_finder_call_ids: HashSet::new(),
             last_rendered_width: std::cell::Cell::new(None),
             feedback,
             current_rollout_path: None,
@@ -1607,8 +1615,8 @@ impl ChatWidget {
                 self.on_entered_review_mode(review_request)
             }
             EventMsg::ExitedReviewMode(review) => self.on_exited_review_mode(review),
-            EventMsg::RawResponseItem(_)
-            | EventMsg::ItemStarted(_)
+            EventMsg::RawResponseItem(ev) => self.on_raw_response_item(ev),
+            EventMsg::ItemStarted(_)
             | EventMsg::ItemCompleted(_)
             | EventMsg::AgentMessageContentDelta(_)
             | EventMsg::ReasoningContentDelta(_)
@@ -1662,6 +1670,64 @@ impl ChatWidget {
         self.add_to_history(history_cell::new_review_status_line(
             "<< Code review finished >>".to_string(),
         ));
+        self.request_redraw();
+    }
+
+    fn on_raw_response_item(&mut self, event: RawResponseItemEvent) {
+        match event.item {
+            ResponseItem::CustomToolCall {
+                name,
+                call_id,
+                input,
+                ..
+            } => {
+                if name == "code_finder" {
+                    self.on_code_finder_tool_call(call_id, input);
+                }
+            }
+            ResponseItem::CustomToolCallOutput { call_id, output } => {
+                self.on_code_finder_tool_call_output(call_id, output);
+            }
+            _ => {}
+        }
+    }
+
+    fn on_code_finder_tool_call(&mut self, call_id: String, input: String) {
+        self.flush_answer_stream_with_separator();
+        self.flush_active_cell();
+        self.code_finder_call_ids.insert(call_id.clone());
+        self.active_cell = Some(Box::new(new_code_finder_call(call_id, input)));
+        self.request_redraw();
+    }
+
+    fn on_code_finder_tool_call_output(&mut self, call_id: String, output: String) {
+        self.flush_answer_stream_with_separator();
+
+        if !self.code_finder_call_ids.remove(&call_id) {
+            return;
+        }
+
+        let mut handled = false;
+        let mut remaining_output = Some(output);
+        if let Some(cell) = self
+            .active_cell
+            .as_mut()
+            .and_then(|cell| cell.as_any_mut().downcast_mut::<CodeFinderCallCell>())
+            && cell.call_id() == call_id
+        {
+            if let Some(value) = remaining_output.take() {
+                cell.complete(value);
+            }
+            handled = true;
+        }
+
+        if !handled && let Some(value) = remaining_output.take() {
+            let mut cell = new_code_finder_call(call_id, String::new());
+            cell.complete(value);
+            self.active_cell = Some(Box::new(cell));
+        }
+
+        self.flush_active_cell();
         self.request_redraw();
     }
 

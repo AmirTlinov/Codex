@@ -22,6 +22,20 @@ use crate::wrapping::RtOptions;
 use crate::wrapping::word_wrap_line;
 use crate::wrapping::word_wrap_lines;
 use base64::Engine;
+use codex_code_finder::freeform::CodeFinderPayload;
+use codex_code_finder::freeform::CodeFinderSearchArgs;
+use codex_code_finder::freeform::parse_payload as parse_code_finder_payload;
+use codex_code_finder::proto::ErrorPayload;
+use codex_code_finder::proto::FileCategory;
+use codex_code_finder::proto::IndexStatus as FinderIndexStatus;
+use codex_code_finder::proto::Language;
+use codex_code_finder::proto::NavHit;
+use codex_code_finder::proto::OpenResponse;
+use codex_code_finder::proto::SearchResponse;
+use codex_code_finder::proto::SearchStats;
+use codex_code_finder::proto::SnippetResponse;
+use codex_code_finder::proto::SymbolKind;
+use codex_common::elapsed::format_duration;
 use codex_common::format_env_display::format_env_display;
 use codex_core::config::Config;
 use codex_core::config::types::McpServerTransportConfig;
@@ -55,6 +69,7 @@ use std::path::PathBuf;
 use std::time::Duration;
 use std::time::Instant;
 use tracing::error;
+use tracing::warn;
 use unicode_width::UnicodeWidthStr;
 
 /// Represents an event to display in the conversation history. Returns its
@@ -1014,6 +1029,647 @@ fn try_new_completed_mcp_tool_call_with_image_output(
         }
         _ => None,
     }
+}
+
+const CODE_FINDER_MAX_HITS: usize = 5;
+const CODE_FINDER_MAX_PREVIEW_CHARS: usize = 160;
+const CODE_FINDER_MAX_RAW_PREVIEW: usize = 200;
+const CODE_FINDER_SNIPPET_MAX_LINES: usize = 12;
+
+#[derive(Debug)]
+pub(crate) struct CodeFinderCallCell {
+    call_id: String,
+    action: CodeFinderActionSummary,
+    raw_preview: Option<String>,
+    start_time: Instant,
+    duration: Option<Duration>,
+    outcome: Option<CodeFinderOutcome>,
+}
+
+impl CodeFinderCallCell {
+    fn new(call_id: String, raw_input: String) -> Self {
+        let trimmed = raw_input.trim();
+        let (action, preview) = if trimmed.is_empty() {
+            (CodeFinderActionSummary::Unknown, None)
+        } else {
+            match parse_code_finder_payload(trimmed) {
+                Ok(payload) => (CodeFinderActionSummary::from_payload(payload), None),
+                Err(err) => {
+                    warn!("failed to parse code_finder payload: {}", err);
+                    (CodeFinderActionSummary::Unknown, preview_from_raw(trimmed))
+                }
+            }
+        };
+
+        Self {
+            call_id,
+            action,
+            raw_preview: preview.or_else(|| preview_from_raw(trimmed)),
+            start_time: Instant::now(),
+            duration: None,
+            outcome: None,
+        }
+    }
+
+    pub(crate) fn call_id(&self) -> &str {
+        &self.call_id
+    }
+
+    pub(crate) fn complete(&mut self, output: String) {
+        self.duration = Some(self.start_time.elapsed());
+        self.outcome = Some(parse_code_finder_output(&output));
+    }
+
+    fn success(&self) -> Option<bool> {
+        self.outcome.as_ref().map(CodeFinderOutcome::is_success)
+    }
+
+    fn render_header(&self) -> Line<'static> {
+        let status = match self.success() {
+            Some(true) => "•".green().bold(),
+            Some(false) => "•".red().bold(),
+            None => spinner(Some(self.start_time)),
+        };
+
+        let mut spans: Vec<Span<'static>> = vec![
+            status,
+            " ".into(),
+            padded_emoji("🔎").into(),
+            " ".into(),
+            "code_finder".bold(),
+            " ".into(),
+            self.action.label().dim(),
+        ];
+
+        if let Some(suffix) = self.action.header_suffix() {
+            spans.push(" ".into());
+            spans.push(suffix.into());
+        }
+
+        if let Some(duration) = self.duration {
+            spans.push(" ".into());
+            spans.push(format!("({})", format_duration(duration)).dim());
+        }
+
+        Line::from(spans)
+    }
+
+    fn render_request_lines(&self, width: usize) -> Vec<Line<'static>> {
+        let mut lines = self.action.request_lines(width);
+        if lines.is_empty()
+            && let Some(preview) = &self.raw_preview
+        {
+            lines.extend(wrap_line_owned(
+                Line::from(vec!["payload: ".dim(), preview.clone().into()]),
+                width,
+            ));
+        }
+        lines
+    }
+
+    fn render_outcome_lines(&self, width: usize) -> Vec<Line<'static>> {
+        self.outcome
+            .as_ref()
+            .map(|outcome| outcome.render(width))
+            .unwrap_or_default()
+    }
+}
+
+impl HistoryCell for CodeFinderCallCell {
+    fn display_lines(&self, width: u16) -> Vec<Line<'static>> {
+        let mut lines: Vec<Line<'static>> = Vec::new();
+        lines.push(self.render_header());
+
+        let detail_width = width.saturating_sub(4).max(1) as usize;
+        let mut sections: Vec<Vec<Line<'static>>> = Vec::new();
+        let request_lines = self.render_request_lines(detail_width);
+        if !request_lines.is_empty() {
+            sections.push(request_lines);
+        }
+        let outcome_lines = self.render_outcome_lines(detail_width);
+        if !outcome_lines.is_empty() {
+            sections.push(outcome_lines);
+        }
+
+        let total_sections = sections.len();
+        for (idx, section) in sections.into_iter().enumerate() {
+            let is_last = idx + 1 == total_sections;
+            let (initial, subsequent) = if total_sections == 1 {
+                ("  └ ".dim(), "    ".into())
+            } else if !is_last {
+                ("  ├ ".dim(), "  │ ".dim())
+            } else {
+                ("  └ ".dim(), "    ".into())
+            };
+            lines.extend(prefix_lines(section, initial, subsequent));
+        }
+
+        lines
+    }
+}
+
+pub(crate) fn new_code_finder_call(call_id: String, raw_input: String) -> CodeFinderCallCell {
+    CodeFinderCallCell::new(call_id, raw_input)
+}
+
+fn preview_from_raw(raw: &str) -> Option<String> {
+    let first = raw.lines().find(|line| !line.trim().is_empty())?;
+    Some(truncate_text(first.trim(), CODE_FINDER_MAX_RAW_PREVIEW))
+}
+
+fn wrap_line_owned(line: Line<'_>, width: usize) -> Vec<Line<'static>> {
+    let wrapped = word_wrap_line(
+        &line,
+        RtOptions::new(width.max(1)).wrap_algorithm(textwrap::WrapAlgorithm::FirstFit),
+    );
+    wrapped
+        .into_iter()
+        .map(|line| line_to_static(&line))
+        .collect()
+}
+
+fn sanitize_preview(text: &str) -> String {
+    let collapsed = text
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .collect::<Vec<_>>()
+        .join(" ");
+    let normalized = collapsed.split_whitespace().collect::<Vec<_>>().join(" ");
+    truncate_text(&normalized, CODE_FINDER_MAX_PREVIEW_CHARS)
+}
+
+fn render_string_list(label: &str, values: &[String], width: usize) -> Vec<Line<'static>> {
+    if values.is_empty() {
+        return Vec::new();
+    }
+    let joined = truncate_text(&values.join(", "), CODE_FINDER_MAX_PREVIEW_CHARS);
+    wrap_line_owned(
+        Line::from(vec![format!("{label}: ").dim(), joined.into()]),
+        width,
+    )
+}
+
+fn render_error_line(error: &ErrorPayload, width: usize) -> Vec<Line<'static>> {
+    let text = format!("error: {} ({})", error.message, error.code);
+    wrap_line_owned(Line::from(text.red()), width)
+}
+
+fn render_index_status(status: &FinderIndexStatus, width: usize) -> Vec<Line<'static>> {
+    let mut parts = vec![format!("index: {:?}", status.state)];
+    parts.push(format!("files: {}", status.files));
+    parts.push(format!("symbols: {}", status.symbols));
+    if let Some(progress) = status.progress {
+        parts.push(format!("progress: {}%", (progress * 100.0).round() as i64));
+    }
+    wrap_line_owned(Line::from(parts.join(" · ").dim()), width)
+}
+
+fn render_search_stats(stats: &SearchStats, width: usize) -> Vec<Line<'static>> {
+    let mut summary = vec![format!("took {} ms", stats.took_ms)];
+    summary.push(format!("candidates: {}", stats.candidate_size));
+    if stats.cache_hit {
+        summary.push("cache hit".to_string());
+    }
+    wrap_line_owned(Line::from(summary.join(" · ").dim()), width)
+}
+
+#[derive(Debug)]
+enum CodeFinderActionSummary {
+    Search(Box<CodeFinderSearchArgs>),
+    Open {
+        id: Option<String>,
+    },
+    Snippet {
+        id: Option<String>,
+        context: Option<usize>,
+    },
+    Unknown,
+}
+
+impl CodeFinderActionSummary {
+    fn from_payload(payload: CodeFinderPayload) -> Self {
+        match payload {
+            CodeFinderPayload::Search(args) => Self::Search(args),
+            CodeFinderPayload::Open { id } => Self::Open { id: Some(id) },
+            CodeFinderPayload::Snippet { id, context } => Self::Snippet {
+                id: Some(id),
+                context: Some(context),
+            },
+        }
+    }
+
+    fn label(&self) -> &'static str {
+        match self {
+            Self::Search(_) => "search",
+            Self::Open { .. } => "open",
+            Self::Snippet { .. } => "snippet",
+            Self::Unknown => "custom",
+        }
+    }
+
+    fn header_suffix(&self) -> Option<String> {
+        match self {
+            Self::Search(args) => args
+                .query
+                .as_deref()
+                .map(|q| format!("query=\"{}\"", truncate_text(q, 60))),
+            Self::Open { id } | Self::Snippet { id, .. } => id
+                .as_deref()
+                .map(|value| format!("id={}", truncate_text(value, 40))),
+            Self::Unknown => None,
+        }
+    }
+
+    fn request_lines(&self, width: usize) -> Vec<Line<'static>> {
+        match self {
+            Self::Search(args) => render_search_request_lines(args, width),
+            Self::Open { id } => render_identifier_line("id", id.as_deref(), width),
+            Self::Snippet { id, context } => {
+                let mut lines = render_identifier_line("id", id.as_deref(), width);
+                if let Some(ctx) = context {
+                    lines.extend(wrap_line_owned(
+                        Line::from(vec!["context: ".dim(), ctx.to_string().into()]),
+                        width,
+                    ));
+                }
+                lines
+            }
+            Self::Unknown => Vec::new(),
+        }
+    }
+}
+
+fn render_identifier_line(label: &str, value: Option<&str>, width: usize) -> Vec<Line<'static>> {
+    let text = value
+        .map(|val| truncate_text(val, CODE_FINDER_MAX_PREVIEW_CHARS))
+        .unwrap_or_else(|| "<missing>".to_string());
+    wrap_line_owned(
+        Line::from(vec![format!("{label}: ").dim(), text.into()]),
+        width,
+    )
+}
+
+fn render_search_request_lines(args: &CodeFinderSearchArgs, width: usize) -> Vec<Line<'static>> {
+    let mut lines: Vec<Line<'static>> = Vec::new();
+    let query = args
+        .query
+        .as_deref()
+        .map(|q| truncate_text(q, CODE_FINDER_MAX_PREVIEW_CHARS))
+        .unwrap_or_else(|| "<empty>".to_string());
+    lines.extend(wrap_line_owned(
+        Line::from(vec!["query: ".dim(), query.into()]),
+        width,
+    ));
+
+    if let Some(help) = args.help_symbol.as_deref() {
+        lines.extend(wrap_line_owned(
+            Line::from(vec!["help_symbol: ".dim(), truncate_text(help, 80).into()]),
+            width,
+        ));
+    }
+
+    let mut flags: Vec<String> = Vec::new();
+    if let Some(limit) = args.limit {
+        flags.push(format!("limit={limit}"));
+    }
+    if args.with_refs.unwrap_or(false) {
+        flags.push("with_refs".to_string());
+    }
+    if let Some(limit) = args.refs_limit {
+        flags.push(format!("refs_limit={limit}"));
+    }
+    if args.recent_only.unwrap_or(false) {
+        flags.push("recent".to_string());
+    }
+    if args.only_tests.unwrap_or(false) {
+        flags.push("tests".to_string());
+    }
+    if args.only_docs.unwrap_or(false) {
+        flags.push("docs".to_string());
+    }
+    if args.only_deps.unwrap_or(false) {
+        flags.push("deps".to_string());
+    }
+    if args.wait_for_index == Some(false) {
+        flags.push("wait_for_index=false".to_string());
+    }
+    if let Some(refine) = args.refine.as_deref() {
+        flags.push(format!("refine={}", truncate_text(refine, 48)));
+    }
+
+    if !flags.is_empty() {
+        lines.extend(wrap_line_owned(
+            Line::from(vec![
+                "options: ".dim(),
+                truncate_text(&flags.join(", "), CODE_FINDER_MAX_PREVIEW_CHARS).into(),
+            ]),
+            width,
+        ));
+    }
+
+    if let Some(symbol) = args.symbol_exact.as_deref() {
+        lines.extend(wrap_line_owned(
+            Line::from(vec!["symbol: ".dim(), truncate_text(symbol, 80).into()]),
+            width,
+        ));
+    }
+
+    lines.extend(render_string_list("kinds", &args.kinds, width));
+    lines.extend(render_string_list("languages", &args.languages, width));
+    lines.extend(render_string_list("categories", &args.categories, width));
+    lines.extend(render_string_list("paths", &args.path_globs, width));
+    lines.extend(render_string_list("files", &args.file_substrings, width));
+
+    lines
+}
+
+#[derive(Debug)]
+enum CodeFinderOutcome {
+    Search(SearchResponse),
+    Open(OpenResponse),
+    Snippet(SnippetResponse),
+    Raw(String),
+}
+
+impl CodeFinderOutcome {
+    fn is_success(&self) -> bool {
+        match self {
+            Self::Search(resp) => resp.error.is_none(),
+            Self::Open(resp) => resp.error.is_none(),
+            Self::Snippet(resp) => resp.error.is_none(),
+            Self::Raw(_) => true,
+        }
+    }
+
+    fn render(&self, width: usize) -> Vec<Line<'static>> {
+        match self {
+            Self::Search(resp) => render_search_outcome(resp, width),
+            Self::Open(resp) => render_open_outcome(resp, width),
+            Self::Snippet(resp) => render_snippet_outcome(resp, width),
+            Self::Raw(text) => render_raw_outcome(text, width),
+        }
+    }
+}
+
+fn render_search_outcome(resp: &SearchResponse, width: usize) -> Vec<Line<'static>> {
+    let mut lines: Vec<Line<'static>> = Vec::new();
+    lines.extend(wrap_line_owned(
+        Line::from(format!("hits: {}", resp.hits.len()).dim()),
+        width,
+    ));
+    if let Some(stats) = &resp.stats {
+        lines.extend(render_search_stats(stats, width));
+    }
+    if let Some(query_id) = resp.query_id {
+        lines.extend(wrap_line_owned(
+            Line::from(vec!["query_id: ".dim(), query_id.to_string().into()]),
+            width,
+        ));
+    }
+    lines.extend(render_index_status(&resp.index, width));
+    if let Some(error) = &resp.error {
+        lines.extend(render_error_line(error, width));
+    }
+
+    for (idx, hit) in resp.hits.iter().take(CODE_FINDER_MAX_HITS).enumerate() {
+        if idx > 0 {
+            lines.push(Line::from(""));
+        }
+        lines.extend(render_nav_hit(hit, width));
+    }
+
+    if resp.hits.len() > CODE_FINDER_MAX_HITS {
+        lines.push(
+            format!("… +{} more hits", resp.hits.len() - CODE_FINDER_MAX_HITS)
+                .dim()
+                .into(),
+        );
+    }
+
+    lines
+}
+
+fn render_open_outcome(resp: &OpenResponse, width: usize) -> Vec<Line<'static>> {
+    let mut lines = Vec::new();
+    lines.extend(wrap_line_owned(
+        Line::from(vec!["path: ".dim(), resp.path.clone().into()]),
+        width,
+    ));
+    lines.extend(wrap_line_owned(
+        Line::from(format!("range: {}-{}", resp.range.start + 1, resp.range.end + 1).dim()),
+        width,
+    ));
+    lines.extend(wrap_line_owned(
+        Line::from(vec![
+            "language: ".dim(),
+            format_language(&resp.language).into(),
+        ]),
+        width,
+    ));
+    lines.extend(render_index_status(&resp.index, width));
+    if let Some(error) = &resp.error {
+        lines.extend(render_error_line(error, width));
+    } else if !resp.contents.is_empty() {
+        lines.push(Line::from(""));
+        lines.extend(render_snippet_block(&resp.contents, width));
+    }
+    lines
+}
+
+fn render_snippet_outcome(resp: &SnippetResponse, width: usize) -> Vec<Line<'static>> {
+    let mut lines = Vec::new();
+    lines.extend(wrap_line_owned(
+        Line::from(vec!["path: ".dim(), resp.path.clone().into()]),
+        width,
+    ));
+    lines.extend(wrap_line_owned(
+        Line::from(format!("range: {}-{}", resp.range.start + 1, resp.range.end + 1).dim()),
+        width,
+    ));
+    lines.extend(render_index_status(&resp.index, width));
+    if let Some(error) = &resp.error {
+        lines.extend(render_error_line(error, width));
+    } else {
+        lines.push(Line::from(""));
+        lines.extend(render_snippet_block(&resp.snippet, width));
+    }
+    lines
+}
+
+fn render_raw_outcome(text: &str, width: usize) -> Vec<Line<'static>> {
+    let trimmed = truncate_text(text.trim(), CODE_FINDER_MAX_RAW_PREVIEW);
+    wrap_line_owned(Line::from(trimmed.dim()), width)
+}
+
+fn render_snippet_block(text: &str, width: usize) -> Vec<Line<'static>> {
+    let mut lines = Vec::new();
+    for (idx, raw_line) in text.lines().enumerate() {
+        if idx >= CODE_FINDER_SNIPPET_MAX_LINES {
+            lines.push(Line::from("…".dim()));
+            break;
+        }
+        let snippet = truncate_text(raw_line, CODE_FINDER_MAX_PREVIEW_CHARS);
+        lines.extend(wrap_line_owned(
+            Line::from(vec!["  ".into(), snippet.into()]),
+            width,
+        ));
+    }
+    lines
+}
+
+fn render_nav_hit(hit: &NavHit, width: usize) -> Vec<Line<'static>> {
+    let mut lines = Vec::new();
+    let mut header: Vec<Span<'static>> = Vec::new();
+    header.push(hit.path.clone().into());
+    header.push(format!(":{}", hit.line).dim());
+    header.push(" ".into());
+    header.push(format_symbol_kind(&hit.kind).dim());
+    header.push(" ".into());
+    header.push(format_language(&hit.language).dim());
+    if hit.recent {
+        header.push(" ".into());
+        header.push("recent".green());
+    }
+    if !hit.categories.is_empty()
+        && let Some(cats) = format_categories(&hit.categories)
+    {
+        header.push(" ".into());
+        header.push(cats.dim());
+    }
+    lines.push(Line::from(header));
+
+    if let Some(layer) = hit.layer.as_deref() {
+        lines.extend(wrap_line_owned(
+            Line::from(vec!["layer: ".dim(), truncate_text(layer, 80).into()]),
+            width,
+        ));
+    }
+    if let Some(module) = hit.module.as_deref() {
+        lines.extend(wrap_line_owned(
+            Line::from(vec!["module: ".dim(), truncate_text(module, 80).into()]),
+            width,
+        ));
+    }
+    if let Some(help) = hit.help.as_ref() {
+        if let Some(doc) = help.doc_summary.as_deref() {
+            lines.extend(wrap_line_owned(
+                Line::from(vec!["doc: ".dim(), truncate_text(doc, 120).into()]),
+                width,
+            ));
+        }
+        if !help.dependencies.is_empty() {
+            lines.extend(wrap_line_owned(
+                Line::from(vec![
+                    "deps: ".dim(),
+                    truncate_text(&help.dependencies.join(", "), CODE_FINDER_MAX_PREVIEW_CHARS)
+                        .into(),
+                ]),
+                width,
+            ));
+        }
+    }
+
+    if !hit.preview.trim().is_empty() {
+        let preview = sanitize_preview(&hit.preview);
+        lines.extend(wrap_line_owned(
+            Line::from(vec!["» ".dim(), preview.into()]),
+            width,
+        ));
+    }
+
+    if let Some(refs) = &hit.references
+        && !refs.is_empty()
+    {
+        let mut summary: Vec<String> = refs
+            .iter()
+            .take(3)
+            .map(|r| format!("{}:{}", r.path, r.line))
+            .collect();
+        if refs.len() > 3 {
+            summary.push(format!("+{} more", refs.len() - 3));
+        }
+        lines.extend(wrap_line_owned(
+            Line::from(vec!["refs: ".dim(), summary.join(", ").into()]),
+            width,
+        ));
+    }
+
+    lines
+}
+
+fn format_symbol_kind(kind: &SymbolKind) -> &'static str {
+    match kind {
+        SymbolKind::Function => "fn",
+        SymbolKind::Method => "method",
+        SymbolKind::Struct => "struct",
+        SymbolKind::Enum => "enum",
+        SymbolKind::Trait => "trait",
+        SymbolKind::Impl => "impl",
+        SymbolKind::Module => "mod",
+        SymbolKind::Class => "class",
+        SymbolKind::Interface => "interface",
+        SymbolKind::Constant => "const",
+        SymbolKind::TypeAlias => "type",
+        SymbolKind::Test => "test",
+        SymbolKind::Document => "doc",
+    }
+}
+
+fn format_language(language: &Language) -> &'static str {
+    match language {
+        Language::Rust => "rust",
+        Language::Typescript => "ts",
+        Language::Tsx => "tsx",
+        Language::Javascript => "js",
+        Language::Python => "py",
+        Language::Go => "go",
+        Language::Bash => "bash",
+        Language::Markdown => "md",
+        Language::Json => "json",
+        Language::Yaml => "yaml",
+        Language::Toml => "toml",
+        Language::Unknown => "other",
+    }
+}
+
+fn format_categories(categories: &[FileCategory]) -> Option<String> {
+    if categories.is_empty() {
+        return None;
+    }
+    let joined = categories
+        .iter()
+        .map(|cat| match cat {
+            FileCategory::Source => "src",
+            FileCategory::Tests => "tests",
+            FileCategory::Docs => "docs",
+            FileCategory::Deps => "deps",
+        })
+        .collect::<Vec<_>>()
+        .join("/");
+    Some(joined)
+}
+
+fn parse_code_finder_output(output: &str) -> CodeFinderOutcome {
+    let trimmed = output.trim();
+    if trimmed.is_empty() {
+        return CodeFinderOutcome::Raw(String::new());
+    }
+    if let Ok(resp) = serde_json::from_str::<SearchResponse>(trimmed) {
+        return CodeFinderOutcome::Search(resp);
+    }
+    if let Ok(resp) = serde_json::from_str::<OpenResponse>(trimmed) {
+        return CodeFinderOutcome::Open(resp);
+    }
+    if let Ok(resp) = serde_json::from_str::<SnippetResponse>(trimmed) {
+        return CodeFinderOutcome::Snippet(resp);
+    }
+    if let Ok(value) = serde_json::from_str::<serde_json::Value>(trimmed)
+        && let Ok(pretty) = serde_json::to_string_pretty(&value)
+    {
+        return CodeFinderOutcome::Raw(pretty);
+    }
+    CodeFinderOutcome::Raw(truncate_text(trimmed, CODE_FINDER_MAX_RAW_PREVIEW))
 }
 
 #[allow(clippy::disallowed_methods)]
