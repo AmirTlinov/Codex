@@ -736,7 +736,14 @@ mod tests {
             "-c".to_string(),
             "sleep 60 & echo $!; sleep 60".to_string(),
         ];
-        let env: HashMap<String, String> = std::env::vars().collect();
+        let env: HashMap<String, String> = std::env::vars_os()
+            .map(|(k, v)| {
+                (
+                    k.to_string_lossy().into_owned(),
+                    v.to_string_lossy().into_owned(),
+                )
+            })
+            .collect();
         let params = ExecParams {
             command,
             cwd: std::env::current_dir()?,

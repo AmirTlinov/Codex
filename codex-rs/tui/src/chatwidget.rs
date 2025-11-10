@@ -2048,8 +2048,11 @@ impl ChatWidget {
                         // Compute sample paths for the warning popup.
                         let mut env_map: std::collections::HashMap<String, String> =
                             std::collections::HashMap::new();
-                        for (k, v) in std::env::vars() {
-                            env_map.insert(k, v);
+                        for (k, v) in std::env::vars_os() {
+                            env_map.insert(
+                                k.to_string_lossy().into_owned(),
+                                v.to_string_lossy().into_owned(),
+                            );
                         }
                         let (sample_paths, extra_count, failed_scan) =
                             match codex_windows_sandbox::preflight_audit_everyone_writable(
@@ -2142,8 +2145,11 @@ impl ChatWidget {
     fn windows_world_writable_flagged(&self) -> bool {
         use std::collections::HashMap;
         let mut env_map: HashMap<String, String> = HashMap::new();
-        for (k, v) in std::env::vars() {
-            env_map.insert(k, v);
+        for (k, v) in std::env::vars_os() {
+            env_map.insert(
+                k.to_string_lossy().into_owned(),
+                v.to_string_lossy().into_owned(),
+            );
         }
         match codex_windows_sandbox::preflight_audit_everyone_writable(
             &self.config.cwd,

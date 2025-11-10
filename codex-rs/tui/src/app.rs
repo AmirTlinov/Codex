@@ -190,7 +190,14 @@ impl App {
                     .unwrap_or(false);
             if should_check {
                 let cwd = app.config.cwd.clone();
-                let env_map: std::collections::HashMap<String, String> = std::env::vars().collect();
+                let env_map: std::collections::HashMap<String, String> = std::env::vars_os()
+                    .map(|(k, v)| {
+                        (
+                            k.to_string_lossy().into_owned(),
+                            v.to_string_lossy().into_owned(),
+                        )
+                    })
+                    .collect();
                 let tx = app.app_event_tx.clone();
                 let logs_base_dir = app.config.codex_home.clone();
                 Self::spawn_world_writable_scan(cwd, env_map, logs_base_dir, tx);
@@ -482,7 +489,14 @@ impl App {
                     if should_check {
                         let cwd = self.config.cwd.clone();
                         let env_map: std::collections::HashMap<String, String> =
-                            std::env::vars().collect();
+                            std::env::vars_os()
+                                .map(|(k, v)| {
+                                    (
+                                        k.to_string_lossy().into_owned(),
+                                        v.to_string_lossy().into_owned(),
+                                    )
+                                })
+                                .collect();
                         let tx = self.app_event_tx.clone();
                         let logs_base_dir = self.config.codex_home.clone();
                         Self::spawn_world_writable_scan(cwd, env_map, logs_base_dir, tx);
