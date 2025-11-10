@@ -137,6 +137,9 @@ pub async fn run_nav(cmd: NavCommand) -> Result<()> {
     let client = build_client(cmd.project_root.clone()).await?;
     let args = nav_command_to_search_args(&cmd);
     let request = plan_search_request(args)?;
+    if std::env::var("CODE_FINDER_DEBUG_REQUEST").is_ok() {
+        eprintln!("code_finder.nav request: {request:#?}");
+    }
     let response = client.search(&request).await?;
     print_json(&response)
 }

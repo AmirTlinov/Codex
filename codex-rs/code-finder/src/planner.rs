@@ -78,6 +78,7 @@ impl std::error::Error for SearchPlannerError {}
 pub fn plan_search_request(
     mut args: CodeFinderSearchArgs,
 ) -> Result<SearchRequest, SearchPlannerError> {
+    let user_specified_kinds = !args.kinds.is_empty();
     let mut filters = SearchFilters::default();
     for kind in args.kinds.drain(..) {
         let parsed = parse_symbol_kind(&kind)?;
@@ -132,12 +133,15 @@ pub fn plan_search_request(
         selected_profiles.push(SearchProfile::Balanced);
     }
 
+    let allow_kind_overrides = !user_specified_kinds;
+
     apply_profiles(
         &selected_profiles,
         &mut filters,
         &mut limit,
         &mut with_refs,
         &mut refs_limit,
+        allow_kind_overrides,
     );
 
     validate_query_requirements(
@@ -264,6 +268,7 @@ fn apply_profiles(
     limit: &mut usize,
     with_refs: &mut bool,
     refs_limit: &mut Option<usize>,
+    allow_kind_overrides: bool,
 ) {
     for profile in profiles {
         match profile {
@@ -276,9 +281,11 @@ fn apply_profiles(
                 *with_refs = false;
             }
             SearchProfile::Symbols => {
-                for kind in SYMBOL_FOCUS_KINDS.iter() {
-                    if !filters.kinds.contains(kind) {
-                        filters.kinds.push(kind.clone());
+                if allow_kind_overrides {
+                    for kind in SYMBOL_FOCUS_KINDS.iter() {
+                        if !filters.kinds.contains(kind) {
+                            filters.kinds.push(kind.clone());
+                        }
                     }
                 }
                 *with_refs = true;
@@ -290,7 +297,9 @@ fn apply_profiles(
                 }
             }
             SearchProfile::Files => {
-                filters.kinds.clear();
+                if allow_kind_overrides {
+                    filters.kinds.clear();
+                }
                 *with_refs = false;
                 *limit = (*limit).max(80);
             }
@@ -340,7 +349,7 @@ fn infer_profiles(
             push_profile(&mut profiles, SearchProfile::Symbols);
         }
         let lowered = trimmed.to_ascii_lowercase();
-        if lowered.contains("test") || contains_test_path(filters) {
+        if query_mentions_tests(trimmed) || contains_test_path(filters) {
             push_profile(&mut profiles, SearchProfile::Tests);
         }
         if lowered.contains("docs/") || lowered.contains(".md") || lowered.contains("readme") {
@@ -366,6 +375,16 @@ fn infer_profiles(
     }
 
     profiles
+}
+
+fn query_mentions_tests(query: &str) -> bool {
+    let lowered = query.to_ascii_lowercase();
+    if lowered.contains("/test") || lowered.contains("tests/") {
+        return true;
+    }
+    lowered
+        .split_whitespace()
+        .any(|word| matches!(word, "test" | "tests"))
 }
 
 fn contains_test_path(filters: &SearchFilters) -> bool {
@@ -465,5 +484,10 @@ mod tests {
         })
         .expect("build request");
         assert_eq!(req.filters.categories, vec![FileCategory::Tests]);
+    }
+
+    #[test]
+    fn query_mentions_tests_ignores_snake_case_suffix() {
+        assert!(!super::query_mentions_tests("code_finder_history_lines_for_test"));
     }
 }

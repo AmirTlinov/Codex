@@ -5,7 +5,7 @@ use std::fmt;
 use time::OffsetDateTime;
 use uuid::Uuid;
 
-pub const PROTOCOL_VERSION: u32 = 1;
+pub const PROTOCOL_VERSION: u32 = 2;
 
 pub type QueryId = Uuid;
 

@@ -27,6 +27,8 @@ use std::path::Path;
 use std::time::Instant;
 use uuid::Uuid;
 
+const SUBSTRING_FALLBACK_BONUS: f32 = 60.0;
+
 pub struct SearchComputation {
     pub hits: Vec<NavHit>,
     pub stats: SearchStats,
@@ -44,6 +46,15 @@ pub fn run_search(
     let (candidates, cache_hit) = load_candidates(snapshot, request, cache)?;
     let filters = FilterSet::new(&request.filters)?;
     let pattern = request.query.as_ref().map(|query| create_pattern(query));
+    let query_variants = request
+        .query
+        .as_ref()
+        .map(|query| build_query_variants(query));
+    let substring_only = request
+        .query
+        .as_ref()
+        .map(|q| q.trim().len() > 48)
+        .unwrap_or(false);
     let mut matcher = pattern
         .as_ref()
         .map(|_| Matcher::new(nucleo_matcher::Config::DEFAULT));
@@ -56,15 +67,36 @@ pub fn run_search(
         if !filters.matches(symbol, request.filters.recent_only) {
             continue;
         }
-        if let (Some(pat), Some(matcher_ref)) = (pattern.as_ref(), matcher.as_mut()) {
-            let haystack_str = format!("{} {} {}", symbol.identifier, symbol.path, symbol.preview);
-            let haystack: Utf32Str<'_> = Utf32Str::new(&haystack_str, &mut utf32buf);
+        let mut haystack_cache: Option<String> = None;
+        if !substring_only
+            && let (Some(pat), Some(matcher_ref)) = (pattern.as_ref(), matcher.as_mut())
+        {
+            let haystack_str = ensure_haystack(&mut haystack_cache, symbol);
+            let haystack: Utf32Str<'_> = Utf32Str::new(haystack_str, &mut utf32buf);
             if let Some(score) = pat.score(haystack, matcher_ref) {
                 let mut total = score as f32;
                 total += heuristic_score(symbol, request.query.as_deref());
                 total += profile_score(symbol, &request.profiles, request.query.as_deref());
                 scored.push((total, symbol.id.clone()));
+                continue;
             }
+        }
+        if let Some(variants) = &query_variants
+            && !variants.is_empty()
+        {
+            let haystack_lower = ensure_haystack(&mut haystack_cache, symbol).to_ascii_lowercase();
+            if variants
+                .iter()
+                .any(|variant| haystack_lower.contains(variant))
+            {
+                let mut total = heuristic_score(symbol, request.query.as_deref());
+                total += profile_score(symbol, &request.profiles, request.query.as_deref());
+                total += SUBSTRING_FALLBACK_BONUS;
+                scored.push((total, symbol.id.clone()));
+                continue;
+            }
+        }
+        if pattern.is_some() {
             continue;
         }
         let mut total = heuristic_score(symbol, request.query.as_deref());
@@ -140,6 +172,64 @@ fn create_pattern(query: &str) -> Pattern {
         Normalization::Smart,
         AtomKind::Fuzzy,
     )
+}
+
+fn build_query_variants(query: &str) -> Vec<String> {
+    let trimmed = query.trim();
+    if trimmed.is_empty() {
+        return Vec::new();
+    }
+    let lower = trimmed.to_ascii_lowercase();
+    let mut variants = Vec::new();
+    push_query_variant(&mut variants, lower.clone());
+    let replaced: String = lower
+        .chars()
+        .map(|ch| match ch {
+            ' ' | '\t' | '-' | '.' | '/' | '\\' | ':' | ';' => '_',
+            _ => ch,
+        })
+        .collect();
+    push_query_variant(&mut variants, replaced);
+    let collapsed: String = lower.chars().filter(|c| !c.is_whitespace()).collect();
+    push_query_variant(&mut variants, collapsed);
+    variants
+}
+
+fn push_query_variant(target: &mut Vec<String>, value: String) {
+    let normalized = normalize_variant(value);
+    if normalized.len() < 3 {
+        return;
+    }
+    if !target.contains(&normalized) {
+        target.push(normalized);
+    }
+}
+
+fn normalize_variant(value: String) -> String {
+    let mut normalized = String::with_capacity(value.len());
+    let mut prev_underscore = false;
+    for ch in value.chars() {
+        if ch == '_' {
+            if !prev_underscore {
+                normalized.push(ch);
+                prev_underscore = true;
+            }
+        } else {
+            prev_underscore = false;
+            normalized.push(ch);
+        }
+    }
+    normalized.trim_matches('_').to_string()
+}
+
+fn ensure_haystack<'a>(cache: &'a mut Option<String>, symbol: &SymbolRecord) -> &'a str {
+    if cache.is_none() {
+        *cache = Some(format!(
+            "{} {} {}",
+            symbol.identifier, symbol.path, symbol.preview
+        ));
+    }
+    cache.as_deref().unwrap_or("")
 }
 
 fn heuristic_score(symbol: &SymbolRecord, query: Option<&str>) -> f32 {

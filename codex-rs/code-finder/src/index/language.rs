@@ -54,8 +54,11 @@ pub fn extract_symbols(language: Language, lines: &[&str]) -> Vec<SymbolCandidat
 }
 
 fn extract_rust(lines: &[&str]) -> Vec<SymbolCandidate> {
-    static FN_REGEX: Lazy<Regex> =
-        Lazy::new(|| compile_regex(r"^\s*(?:pub(?:\([^)]*\))?\s+)?fn\s+([A-Za-z0-9_]+)"));
+    static FN_REGEX: Lazy<Regex> = Lazy::new(|| {
+        compile_regex(
+            r#"^\s*(?:pub(?:\([^)]*\))?\s+)?(?:(?:async|const|unsafe)\s+|extern\s+(?:"[^"]+"|\w+)\s+)*fn\s+([A-Za-z0-9_]+)"#,
+        )
+    });
     static STRUCT_REGEX: Lazy<Regex> =
         Lazy::new(|| compile_regex(r"^\s*(?:pub(?:\([^)]*\))?\s+)?struct\s+([A-Za-z0-9_]+)"));
     static ENUM_REGEX: Lazy<Regex> =
@@ -341,5 +344,12 @@ mod tests {
         assert_eq!(symbols.len(), 2);
         assert_eq!(symbols[0].identifier, "Title");
         assert_eq!(symbols[1].identifier, "Details");
+    }
+
+    #[test]
+    fn detects_async_rust_function() {
+        let lines = vec!["pub(crate) async fn fetch_data() {}", "fn helper() {}"];
+        let symbols = extract_rust(&lines);
+        assert!(symbols.iter().any(|sym| sym.identifier == "fetch_data"));
     }
 }
