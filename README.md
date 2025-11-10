@@ -69,6 +69,22 @@ Codex can access MCP servers. To configure them, refer to the [config docs](./do
 
 Codex CLI supports a rich set of configuration options, with preferences stored in `~/.codex/config.toml`. For full configuration options, see [Configuration](./docs/config.md).
 
+### Managing background processes
+
+- Any shell command (including `!` user commands) can be launched with the
+  `run_in_background: true` directive plus optional `bookmark=` / `description=`
+  tokens – Codex will auto-promote foreground commands that run for more than ~10
+  seconds.
+- Press **Ctrl+R** to immediately promote the most recently running command, and
+  **Ctrl+B** (or arrow down → Enter on the BG widget) to open the Background
+  Tasks manager for filtering, tailing, and killing processes without filling
+  the chat with logs.
+- The manager keeps a 10 MB rolling buffer per shell for an hour and caps the
+  number of concurrent shells at 10 so the agent remains responsive.
+
+See the [background shell workflow guide](./docs/advanced.md#background-shell)
+for the full RPC list (`shell_summary`, poll/kill) and UX details.
+
 ---
 
 ### Docs & FAQ

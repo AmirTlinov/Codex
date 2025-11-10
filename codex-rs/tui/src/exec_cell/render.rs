@@ -332,7 +332,11 @@ impl ExecCell {
         let header_prefix_width = header_line.width();
 
         let cmd_display = strip_bash_lc_and_escape(&call.command);
-        let highlighted_lines = highlight_bash_to_lines(&cmd_display);
+        let highlighted_lines = if let Some(label) = friendly_shell_command_label(&cmd_display) {
+            vec![Line::from(label)]
+        } else {
+            highlight_bash_to_lines(&cmd_display)
+        };
 
         let continuation_wrap_width = layout.command_continuation.wrap_width(width);
         let continuation_opts =
@@ -553,3 +557,12 @@ const EXEC_DISPLAY_LAYOUT: ExecDisplayLayout = ExecDisplayLayout::new(
     PrefixedBlock::new("  └ ", "    "),
     5,
 );
+
+fn friendly_shell_command_label(script: &str) -> Option<&'static str> {
+    let mut tokens = script.split_whitespace();
+    let first = tokens.next()?.trim_matches(|c: char| c == ';');
+    match first {
+        "shell_summary" | "background_shell.summary" => Some("Shell Summary"),
+        _ => None,
+    }
+}
