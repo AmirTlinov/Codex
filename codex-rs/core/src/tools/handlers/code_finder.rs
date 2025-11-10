@@ -91,22 +91,27 @@ impl ToolHandler for CodeFinderHandler {
         ToolKind::Function
     }
 
+    fn matches_kind(&self, payload: &crate::tools::context::ToolPayload) -> bool {
+        matches!(
+            payload,
+            crate::tools::context::ToolPayload::Function { .. }
+                | crate::tools::context::ToolPayload::Custom { .. }
+        )
+    }
+
     async fn handle(&self, invocation: ToolInvocation) -> Result<ToolOutput, FunctionCallError> {
         let ToolInvocation { turn, payload, .. } = invocation;
-        let arguments = match payload {
-            crate::tools::context::ToolPayload::Function { arguments } => arguments,
+        let request = match payload {
+            crate::tools::context::ToolPayload::Function { arguments } => {
+                parse_function_payload(&arguments)?
+            }
+            crate::tools::context::ToolPayload::Custom { input } => parse_freeform_payload(&input)?,
             _ => {
                 return Err(FunctionCallError::RespondToModel(
-                    "code_finder expects function payloads".to_string(),
+                    "code_finder received unsupported payload".to_string(),
                 ));
             }
         };
-
-        let request: CodeFinderPayload = serde_json::from_str(&arguments).map_err(|err| {
-            FunctionCallError::RespondToModel(format!(
-                "failed to parse code_finder arguments: {err:?}"
-            ))
-        })?;
 
         let config = turn.client.config();
         let project_root = turn.cwd.clone();
@@ -241,6 +246,204 @@ fn build_search_request(args: CodeFinderSearchArgs) -> Result<SearchRequest, Fun
     };
 
     Ok(request)
+}
+
+fn parse_function_payload(arguments: &str) -> Result<CodeFinderPayload, FunctionCallError> {
+    let trimmed = arguments.trim();
+    if trimmed.is_empty() {
+        return Err(FunctionCallError::RespondToModel(
+            "code_finder payload must not be empty".to_string(),
+        ));
+    }
+    if trimmed.starts_with('{') {
+        serde_json::from_str::<CodeFinderPayload>(trimmed).map_err(|err| {
+            FunctionCallError::RespondToModel(format!(
+                "failed to parse code_finder arguments: {err:?}"
+            ))
+        })
+    } else {
+        parse_freeform_payload(trimmed)
+    }
+}
+
+fn parse_freeform_payload(input: &str) -> Result<CodeFinderPayload, FunctionCallError> {
+    let mut action: Option<String> = None;
+    let mut search_args = CodeFinderSearchArgs::default();
+    let mut symbol_id: Option<String> = None;
+    let mut snippet_context: Option<usize> = None;
+
+    for raw_line in input.lines() {
+        let line = raw_line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+
+        if action.is_none() && !line.contains(':') && !line.contains('=') {
+            let mut tokens = line.split_whitespace();
+            let verb = tokens
+                .next()
+                .ok_or_else(|| FunctionCallError::RespondToModel("missing action".to_string()))?
+                .to_ascii_lowercase();
+            let remainder = tokens.collect::<Vec<_>>().join(" ");
+            if !remainder.is_empty() {
+                if matches!(verb.as_str(), "open" | "snippet") {
+                    symbol_id = Some(remainder.clone());
+                } else {
+                    search_args.query = Some(remainder.clone());
+                }
+            }
+            action = Some(verb);
+            continue;
+        }
+
+        let (key, value) = parse_key_value(line)?;
+        apply_freeform_pair(
+            key,
+            value,
+            &mut action,
+            &mut search_args,
+            &mut symbol_id,
+            &mut snippet_context,
+        )?;
+    }
+
+    let verb = action.ok_or_else(|| {
+        FunctionCallError::RespondToModel("code_finder freeform input missing action".to_string())
+    })?;
+
+    match verb.as_str() {
+        "search" => Ok(CodeFinderPayload::Search(Box::new(search_args))),
+        "open" => {
+            let target = symbol_id.ok_or_else(|| {
+                FunctionCallError::RespondToModel("code_finder open requires an id".to_string())
+            })?;
+            Ok(CodeFinderPayload::Open { id: target })
+        }
+        "snippet" => {
+            let target = symbol_id.ok_or_else(|| {
+                FunctionCallError::RespondToModel("code_finder snippet requires an id".to_string())
+            })?;
+            Ok(CodeFinderPayload::Snippet {
+                id: target,
+                context: snippet_context.unwrap_or(DEFAULT_SNIPPET_CONTEXT),
+            })
+        }
+        other => Err(FunctionCallError::RespondToModel(format!(
+            "unknown code_finder action '{other}'"
+        ))),
+    }
+}
+
+fn parse_key_value(line: &str) -> Result<(String, String), FunctionCallError> {
+    if let Some(idx) = line.find(':') {
+        Ok((
+            line[..idx].trim().to_ascii_lowercase(),
+            clean_value(&line[idx + 1..]),
+        ))
+    } else if let Some(idx) = line.find('=') {
+        Ok((
+            line[..idx].trim().to_ascii_lowercase(),
+            clean_value(&line[idx + 1..]),
+        ))
+    } else {
+        Err(FunctionCallError::RespondToModel(format!(
+            "could not parse line '{line}'"
+        )))
+    }
+}
+
+fn apply_freeform_pair(
+    key: String,
+    raw_value: String,
+    action: &mut Option<String>,
+    args: &mut CodeFinderSearchArgs,
+    symbol_id: &mut Option<String>,
+    snippet_context: &mut Option<usize>,
+) -> Result<(), FunctionCallError> {
+    match key.as_str() {
+        "action" => {
+            *action = Some(raw_value.to_ascii_lowercase());
+        }
+        "query" | "q" => args.query = Some(raw_value),
+        "limit" => args.limit = Some(parse_usize("limit", &raw_value)?),
+        "kind" | "kinds" => args.kinds.extend(split_list(&raw_value)),
+        "language" | "languages" | "lang" => {
+            args.languages.extend(split_list(&raw_value));
+        }
+        "category" | "categories" => args.categories.extend(split_list(&raw_value)),
+        "path" | "paths" | "glob" | "globs" | "path_globs" => {
+            args.path_globs.extend(split_list(&raw_value));
+        }
+        "file" | "files" | "file_substrings" => {
+            args.file_substrings.extend(split_list(&raw_value));
+        }
+        "symbol" | "symbol_exact" => args.symbol_exact = Some(raw_value),
+        "recent" => args.recent_only = Some(parse_bool("recent", &raw_value)?),
+        "tests" => args.only_tests = Some(parse_bool("tests", &raw_value)?),
+        "docs" | "documentation" => args.only_docs = Some(parse_bool("docs", &raw_value)?),
+        "deps" | "dependencies" => {
+            args.only_deps = Some(parse_bool("deps", &raw_value)?);
+        }
+        "with_refs" | "refs" => args.with_refs = Some(parse_bool("with_refs", &raw_value)?),
+        "refs_limit" | "references_limit" => {
+            args.refs_limit = Some(parse_usize("refs_limit", &raw_value)?);
+        }
+        "help" | "help_symbol" => args.help_symbol = Some(raw_value),
+        "refine" | "query_id" => args.refine = Some(raw_value),
+        "wait" | "wait_for_index" => {
+            args.wait_for_index = Some(parse_bool("wait_for_index", &raw_value)?);
+        }
+        "id" => *symbol_id = Some(raw_value),
+        "context" => *snippet_context = Some(parse_usize("context", &raw_value)?),
+        other => {
+            return Err(FunctionCallError::RespondToModel(format!(
+                "unsupported code_finder field '{other}'"
+            )));
+        }
+    }
+    Ok(())
+}
+
+fn parse_bool(field: &str, value: &str) -> Result<bool, FunctionCallError> {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "true" | "yes" | "on" | "1" => Ok(true),
+        "false" | "no" | "off" | "0" => Ok(false),
+        other => Err(FunctionCallError::RespondToModel(format!(
+            "invalid boolean for {field}: {other}"
+        ))),
+    }
+}
+
+fn parse_usize(field: &str, value: &str) -> Result<usize, FunctionCallError> {
+    value
+        .trim()
+        .parse()
+        .map_err(|err| FunctionCallError::RespondToModel(format!("invalid {field} value: {err}")))
+}
+
+fn split_list(value: &str) -> Vec<String> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return Vec::new();
+    }
+    trimmed
+        .split(',')
+        .map(clean_value)
+        .filter(|s| !s.is_empty())
+        .collect()
+}
+
+fn clean_value(value: &str) -> String {
+    let trimmed = value.trim();
+    if trimmed.len() >= 2 {
+        let bytes = trimmed.as_bytes();
+        if (bytes[0] == b'"' && bytes[trimmed.len() - 1] == b'"')
+            || (bytes[0] == b'\'' && bytes[trimmed.len() - 1] == b'\'')
+        {
+            return trimmed[1..trimmed.len() - 1].trim().to_string();
+        }
+    }
+    trimmed.to_string()
 }
 
 fn parse_symbol_kind(raw: &str) -> Result<SymbolKind, FunctionCallError> {

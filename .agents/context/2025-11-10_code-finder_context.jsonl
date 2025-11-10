@@ -10,3 +10,4 @@
 {"source":"agent","summary":["Created CLI unit tests covering filter construction for codex nav variants"],"citation":"codex-rs/cli/src/code_nav.rs"}
 {"source":"agent","summary":["Added code_finder tool handler wired to codex-code-finder daemon so GPT-5 Codex can run search/open/snippet actions via tool calls"],"citation":"codex-rs/core/src/tools/handlers/code_finder.rs"}
 {"source":"agent","summary":["Registered code_finder tool for gpt-5-codex in tool registry/model families and documented schema in tool spec"],"citation":"codex-rs/core/src/tools/spec.rs"}
+{"source":"agent","summary":["Swapped code_finder tool to freeform syntax (akin to apply_patch) so agents provide simple action blocks instead of JSON"],"citation":"codex-rs/core/src/tools/spec.rs"}

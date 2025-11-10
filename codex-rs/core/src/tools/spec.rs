@@ -1,3 +1,5 @@
+use crate::client_common::tools::FreeformTool;
+use crate::client_common::tools::FreeformToolFormat;
 use crate::client_common::tools::ResponsesApiTool;
 use crate::client_common::tools::ToolSpec;
 use crate::features::Feature;
@@ -229,138 +231,47 @@ fn create_write_stdin_tool() -> ToolSpec {
     })
 }
 
-fn array_of_strings(description: Option<String>) -> JsonSchema {
-    JsonSchema::Array {
-        items: Box::new(JsonSchema::String { description: None }),
-        description,
-    }
-}
+const CODE_FINDER_FREEFORM_SPEC: &str = r"code_finder accepts a short block of text.
+
+The first non-empty line declares the action:
+  search
+  open <symbol_id>
+  snippet <symbol_id>
+
+Subsequent lines are optional key/value pairs (key: value or key = value).
+Lists are comma-separated; quote values containing spaces.
+
+Supported keys:
+- query, limit
+- kinds, languages, categories
+- path/path_globs, file/file_substrings, symbol/symbol_exact
+- recent, tests, docs, deps (true/false)
+- with_refs, refs_limit
+- help/help_symbol, refine/query_id, wait/wait_for_index
+- id, context (snippet context lines)
+
+Example:
+search
+query: SessionManager
+kinds: function
+languages: rust, ts
+path: core/**
+recent: true
+with_refs: true
+
+snippet cf_deadbeef
+context: 12
+";
 
 fn create_code_finder_tool() -> ToolSpec {
-    let mut properties = BTreeMap::new();
-    properties.insert(
-        "action".to_string(),
-        JsonSchema::String {
-            description: Some("Operation to run: search, open, or snippet.".to_string()),
-        },
-    );
-    properties.insert(
-        "query".to_string(),
-        JsonSchema::String {
-            description: Some("Free-form query string for search.".to_string()),
-        },
-    );
-    properties.insert(
-        "limit".to_string(),
-        JsonSchema::Number {
-            description: Some("Maximum number of hits to return (default 40).".to_string()),
-        },
-    );
-    properties.insert(
-        "kinds".to_string(),
-        array_of_strings(Some(
-            "Symbol kinds: function, struct, test, ...".to_string(),
-        )),
-    );
-    properties.insert(
-        "languages".to_string(),
-        array_of_strings(Some("Languages: rust, ts, py, go, ...".to_string())),
-    );
-    properties.insert(
-        "categories".to_string(),
-        array_of_strings(Some(
-            "File categories: source, tests, docs, deps.".to_string(),
-        )),
-    );
-    properties.insert(
-        "path_globs".to_string(),
-        array_of_strings(Some("Restrict matches to globbed paths.".to_string())),
-    );
-    properties.insert(
-        "file_substrings".to_string(),
-        array_of_strings(Some("Require substrings in file paths.".to_string())),
-    );
-    properties.insert(
-        "symbol_exact".to_string(),
-        JsonSchema::String {
-            description: Some("Exact symbol identifier to match.".to_string()),
-        },
-    );
-    properties.insert(
-        "recent_only".to_string(),
-        JsonSchema::Boolean {
-            description: Some("Only include files with pending git changes.".to_string()),
-        },
-    );
-    properties.insert(
-        "only_tests".to_string(),
-        JsonSchema::Boolean {
-            description: Some("Shortcut to filter to test files.".to_string()),
-        },
-    );
-    properties.insert(
-        "only_docs".to_string(),
-        JsonSchema::Boolean {
-            description: Some("Shortcut to filter to docs.".to_string()),
-        },
-    );
-    properties.insert(
-        "only_deps".to_string(),
-        JsonSchema::Boolean {
-            description: Some("Shortcut to filter dependency manifests.".to_string()),
-        },
-    );
-    properties.insert(
-        "with_refs".to_string(),
-        JsonSchema::Boolean {
-            description: Some("Include code references for each hit.".to_string()),
-        },
-    );
-    properties.insert(
-        "refs_limit".to_string(),
-        JsonSchema::Number {
-            description: Some("Maximum references to include (default 12).".to_string()),
-        },
-    );
-    properties.insert(
-        "help_symbol".to_string(),
-        JsonSchema::String {
-            description: Some("Return module/layer/docs for this symbol.".to_string()),
-        },
-    );
-    properties.insert(
-        "refine".to_string(),
-        JsonSchema::String {
-            description: Some("Reuse a previous query_id for refinement.".to_string()),
-        },
-    );
-    properties.insert(
-        "wait_for_index".to_string(),
-        JsonSchema::Boolean {
-            description: Some("Skip waiting for background indexing when false.".to_string()),
-        },
-    );
-    properties.insert(
-        "id".to_string(),
-        JsonSchema::String {
-            description: Some("Jump id returned by a previous search.".to_string()),
-        },
-    );
-    properties.insert(
-        "context".to_string(),
-        JsonSchema::Number {
-            description: Some("Context lines for snippets (default 8).".to_string()),
-        },
-    );
-
-    ToolSpec::Function(ResponsesApiTool {
+    ToolSpec::Freeform(FreeformTool {
         name: "code_finder".to_string(),
-        description: "Interact with the Code Finder daemon: search symbols, open full files, or grab snippets using deterministic JSON results.".to_string(),
-        strict: false,
-        parameters: JsonSchema::Object {
-            properties,
-            required: Some(vec!["action".to_string()]),
-            additional_properties: Some(false.into()),
+        description: "Search indexed symbols, fetch full files, or grab snippets via Code Finder."
+            .to_string(),
+        format: FreeformToolFormat {
+            r#type: "text".to_string(),
+            syntax: "code_finder_v1".to_string(),
+            definition: CODE_FINDER_FREEFORM_SPEC.trim().to_string(),
         },
     })
 }
