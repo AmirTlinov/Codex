@@ -39,6 +39,7 @@ pub struct DaemonSpawn {
     pub env: Vec<(String, String)>,
 }
 
+#[derive(Clone)]
 pub struct CodeFinderClient {
     project: ProjectProfile,
     http: reqwest::Client,

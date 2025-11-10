@@ -10,7 +10,9 @@ use codex_code_finder::client::DaemonSpawn;
 use codex_code_finder::proto::IndexState;
 use codex_code_finder::proto::IndexStatus;
 use codex_core::config::Config;
+use once_cell::sync::Lazy;
 use once_cell::sync::OnceCell;
+use tokio::sync::RwLock;
 use tokio::time::sleep;
 use tracing::warn;
 
@@ -26,45 +28,57 @@ const RETRY_DELAY: Duration = Duration::from_secs(3);
 struct CodeFinderContext {
     project_root: PathBuf,
     codex_home: PathBuf,
+    spawn: DaemonSpawn,
 }
 
 impl CodeFinderContext {
-    fn client_options(&self) -> Result<ClientOptions> {
-        if !self.project_root.exists() {
+    fn new(config: &Config) -> Result<Self> {
+        let project_root = config.cwd.clone();
+        if !project_root.exists() {
             anyhow::bail!(
                 "code_finder cannot index missing cwd {}",
-                self.project_root.display()
+                project_root.display()
             );
         }
+        let codex_home = config.codex_home.clone();
         let exe = std::env::current_exe().context("resolve current executable for code_finder")?;
         let spawn = DaemonSpawn {
             program: exe,
             args: vec![
                 "code-finder-daemon".to_string(),
                 "--project-root".to_string(),
-                self.project_root.display().to_string(),
+                project_root.display().to_string(),
             ],
-            env: vec![(
-                "CODEX_HOME".to_string(),
-                self.codex_home.display().to_string(),
-            )],
+            env: vec![("CODEX_HOME".to_string(), codex_home.display().to_string())],
         };
-
-        Ok(ClientOptions {
-            project_root: Some(self.project_root.clone()),
-            codex_home: Some(self.codex_home.clone()),
-            spawn: Some(spawn),
+        Ok(Self {
+            project_root,
+            codex_home,
+            spawn,
         })
     }
+
+    fn client_options_with_spawn(&self) -> ClientOptions {
+        ClientOptions {
+            project_root: Some(self.project_root.clone()),
+            codex_home: Some(self.codex_home.clone()),
+            spawn: Some(self.spawn.clone()),
+        }
+    }
+
 }
 
 static CONTEXT: OnceCell<Arc<CodeFinderContext>> = OnceCell::new();
+static ACTIVE_CLIENT: Lazy<RwLock<Option<CodeFinderClient>>> = Lazy::new(|| RwLock::new(None));
 
 pub fn spawn_background_indexer(config: &Config, app_event_tx: AppEventSender) {
-    let ctx = Arc::new(CodeFinderContext {
-        project_root: config.cwd.clone(),
-        codex_home: config.codex_home.clone(),
-    });
+    let ctx = match CodeFinderContext::new(config) {
+        Ok(ctx) => Arc::new(ctx),
+        Err(err) => {
+            warn!("code_finder bootstrap skipped: {err:?}");
+            return;
+        }
+    };
     let _ = CONTEXT.set(ctx.clone());
     tokio::spawn(async move {
         if let Err(err) = monitor_daemon(ctx, app_event_tx).await {
@@ -74,21 +88,31 @@ pub fn spawn_background_indexer(config: &Config, app_event_tx: AppEventSender) {
 }
 
 pub async fn request_reindex() -> Result<IndexStatus> {
-    let ctx = CONTEXT
-        .get()
-        .context("code_finder context not initialized yet")?
-        .clone();
-    let client = CodeFinderClient::new(ctx.client_options()?).await?;
+    let client = {
+        let guard = ACTIVE_CLIENT.read().await;
+        guard.clone()
+    };
+    let Some(client) = client else {
+        anyhow::bail!(
+            "code_finder daemon is still starting; wait for the footer status to appear before reindexing."
+        );
+    };
     client.reindex().await
 }
 
 async fn monitor_daemon(ctx: Arc<CodeFinderContext>, app_event_tx: AppEventSender) -> Result<()> {
     loop {
-        match CodeFinderClient::new(ctx.client_options()?).await {
+        match CodeFinderClient::new(ctx.client_options_with_spawn()).await {
             Ok(client) => {
-                if let Err(err) = emit_status_loop(client, app_event_tx.clone()).await {
+                {
+                    let mut guard = ACTIVE_CLIENT.write().await;
+                    *guard = Some(client.clone());
+                }
+                if let Err(err) = emit_status_loop(client.clone(), app_event_tx.clone()).await {
                     warn!("code_finder status loop ended: {err:?}");
                 }
+                let mut guard = ACTIVE_CLIENT.write().await;
+                guard.take();
             }
             Err(err) => warn!("code_finder daemon init failed: {err:?}"),
         }
