@@ -362,7 +362,7 @@ impl ExecCell {
 
         let mut lines: Vec<Line<'static>> = vec![header_line];
 
-        if self.is_active() && call.is_user_shell_command {
+        if self.is_active() {
             let hint = Line::from(vec!["    ".into(), "Ctrl+R to run in background".dim()]);
             lines.push(hint);
         }
