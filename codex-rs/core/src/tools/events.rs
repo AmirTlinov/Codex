@@ -5,6 +5,7 @@ use crate::error::SandboxErr;
 use crate::exec::ExecToolCallOutput;
 use crate::function_tool::FunctionCallError;
 use crate::parse_command::parse_command;
+use crate::protocol::ApplyPatchReport;
 use crate::protocol::EventMsg;
 use crate::protocol::ExecCommandBeginEvent;
 use crate::protocol::ExecCommandEndEvent;
@@ -14,6 +15,7 @@ use crate::protocol::PatchApplyEndEvent;
 use crate::protocol::TurnDiffEvent;
 use crate::tools::context::SharedTurnDiffTracker;
 use crate::tools::sandboxing::ToolError;
+use serde::Deserialize;
 use std::collections::HashMap;
 use std::path::Path;
 use std::path::PathBuf;
@@ -342,16 +344,20 @@ async fn emit_exec_end(
         .await;
 }
 
+const APPLY_PATCH_MACHINE_SCHEMA: &str = "apply_patch/v2";
+
 async fn emit_patch_end(ctx: ToolEventCtx<'_>, stdout: String, stderr: String, success: bool) {
+    let report = extract_apply_patch_report(&stdout);
     ctx.session
         .send_event(
             ctx.turn,
-            EventMsg::PatchApplyEnd(PatchApplyEndEvent {
+            EventMsg::PatchApplyEnd(Box::new(PatchApplyEndEvent {
                 call_id: ctx.call_id.to_string(),
                 stdout,
                 stderr,
                 success,
-            }),
+                report,
+            })),
         )
         .await;
 
@@ -365,5 +371,55 @@ async fn emit_patch_end(ctx: ToolEventCtx<'_>, stdout: String, stderr: String, s
                 .send_event(ctx.turn, EventMsg::TurnDiff(TurnDiffEvent { unified_diff }))
                 .await;
         }
+    }
+}
+
+#[derive(Deserialize)]
+struct ApplyPatchMachineEnvelope {
+    schema: String,
+    report: ApplyPatchReport,
+}
+
+fn extract_apply_patch_report(stdout: &str) -> Option<ApplyPatchReport> {
+    stdout
+        .lines()
+        .rev()
+        .filter_map(|line| {
+            let trimmed = line.trim();
+            if trimmed.is_empty() {
+                return None;
+            }
+            serde_json::from_str::<ApplyPatchMachineEnvelope>(trimmed).ok()
+        })
+        .find_map(|env| {
+            if env.schema == APPLY_PATCH_MACHINE_SCHEMA {
+                Some(env.report)
+            } else {
+                None
+            }
+        })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::protocol::ApplyPatchReportStatus;
+
+    #[test]
+    fn extract_report_returns_struct_when_schema_matches() {
+        let stdout = r#"
+Applied operations:
+- add: foo (+1)
+{"schema":"apply_patch/v2","report":{"status":"success","mode":"apply","duration_ms":1,"operations":[],"errors":[],"options":{"encoding":"utf-8","newline":"lf","strip_trailing_whitespace":false,"ensure_final_newline":null,"preserve_mode":true,"preserve_times":true,"new_file_mode":null,"symbol_fallback_mode":"fuzzy"},"formatting":[],"post_checks":[],"diagnostics":[],"batch":null,"artifacts":{"log":null,"conflicts":[],"unapplied":[]},"amendment_template":null}}
+"#;
+
+        let report = extract_apply_patch_report(stdout).expect("report");
+        assert_eq!(report.status, ApplyPatchReportStatus::Success);
+    }
+
+    #[test]
+    fn extract_report_ignores_non_matching_schema() {
+        let stdout = r#"{"schema":"apply_patch/v1","report":{"status":"success","mode":"apply","duration_ms":0,"operations":[],"errors":[],"options":{"encoding":"utf-8","newline":"lf","strip_trailing_whitespace":false,"ensure_final_newline":null,"preserve_mode":true,"preserve_times":true,"new_file_mode":null,"symbol_fallback_mode":"fuzzy"},"formatting":[],"post_checks":[],"diagnostics":[],"batch":null,"artifacts":{"log":null,"conflicts":[],"unapplied":[]},"amendment_template":null}}"#;
+        assert!(extract_apply_patch_report(stdout).is_none());
     }
 }

@@ -342,7 +342,7 @@ async fn apply_patch_tool_executes_and_emits_patch_events() -> anyhow::Result<()
             false
         }
         EventMsg::PatchApplyEnd(end) => {
-            assert_eq!(end.call_id, call_id);
+            assert_eq!(end.call_id.as_str(), call_id);
             patch_end_success = Some(end.success);
             false
         }

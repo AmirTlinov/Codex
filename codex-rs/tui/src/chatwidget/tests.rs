@@ -18,6 +18,16 @@ use codex_core::protocol::AgentMessageEvent;
 use codex_core::protocol::AgentReasoningDeltaEvent;
 use codex_core::protocol::AgentReasoningEvent;
 use codex_core::protocol::ApplyPatchApprovalRequestEvent;
+use codex_core::protocol::ApplyPatchArtifactSummary;
+use codex_core::protocol::ApplyPatchNewlineMode;
+use codex_core::protocol::ApplyPatchOperationAction;
+use codex_core::protocol::ApplyPatchOperationStatus;
+use codex_core::protocol::ApplyPatchOperationSummary;
+use codex_core::protocol::ApplyPatchReport;
+use codex_core::protocol::ApplyPatchReportMode;
+use codex_core::protocol::ApplyPatchReportOptions;
+use codex_core::protocol::ApplyPatchReportStatus;
+use codex_core::protocol::ApplyPatchSymbolFallbackMode;
 use codex_core::protocol::Event;
 use codex_core::protocol::EventMsg;
 use codex_core::protocol::ExecApprovalRequestEvent;
@@ -70,6 +80,54 @@ fn test_config() -> Config {
         std::env::temp_dir(),
     )
     .expect("config")
+}
+
+fn sample_patch_report(status: ApplyPatchReportStatus) -> ApplyPatchReport {
+    let is_failed = matches!(status, ApplyPatchReportStatus::Failed);
+    let op_status = match status {
+        ApplyPatchReportStatus::Success => ApplyPatchOperationStatus::Applied,
+        ApplyPatchReportStatus::Failed => ApplyPatchOperationStatus::Failed,
+    };
+    ApplyPatchReport {
+        status,
+        mode: ApplyPatchReportMode::Apply,
+        duration_ms: 1,
+        operations: vec![ApplyPatchOperationSummary {
+            action: ApplyPatchOperationAction::Add,
+            path: PathBuf::from("foo.txt"),
+            renamed_to: None,
+            added: 1,
+            removed: 0,
+            status: op_status,
+            message: None,
+            symbol: None,
+        }],
+        errors: if is_failed {
+            vec!["Failed to apply".to_string()]
+        } else {
+            Vec::new()
+        },
+        options: ApplyPatchReportOptions {
+            encoding: "utf-8".to_string(),
+            newline: ApplyPatchNewlineMode::Lf,
+            strip_trailing_whitespace: false,
+            ensure_final_newline: None,
+            preserve_mode: true,
+            preserve_times: true,
+            new_file_mode: None,
+            symbol_fallback_mode: ApplyPatchSymbolFallbackMode::Fuzzy,
+        },
+        formatting: Vec::new(),
+        post_checks: Vec::new(),
+        diagnostics: Vec::new(),
+        batch: None,
+        artifacts: ApplyPatchArtifactSummary {
+            log: None,
+            conflicts: Vec::new(),
+            unapplied: Vec::new(),
+        },
+        amendment_template: None,
+    }
 }
 
 // Backward-compat shim for older session logs that predate the
@@ -2191,15 +2249,18 @@ fn apply_patch_events_emit_history_cells() {
         stdout: "ok\n".into(),
         stderr: String::new(),
         success: true,
+        report: Some(sample_patch_report(ApplyPatchReportStatus::Success)),
     };
     chat.handle_codex_event(Event {
         id: "s1".into(),
-        msg: EventMsg::PatchApplyEnd(end),
+        msg: EventMsg::PatchApplyEnd(Box::new(end)),
     });
     let cells = drain_insert_history(&mut rx);
+    assert_eq!(cells.len(), 1, "expected success summary cell");
+    let blob = lines_to_single_string(&cells[0]);
     assert!(
-        cells.is_empty(),
-        "no success cell should be emitted anymore"
+        blob.contains("Patch applied successfully"),
+        "expected success text in history cell: {blob:?}"
     );
 }
 
@@ -2399,12 +2460,13 @@ fn apply_patch_full_flow_integration_like() {
     });
     chat.handle_codex_event(Event {
         id: "sub-xyz".into(),
-        msg: EventMsg::PatchApplyEnd(PatchApplyEndEvent {
+        msg: EventMsg::PatchApplyEnd(Box::new(PatchApplyEndEvent {
             call_id: "call-1".into(),
             stdout: String::from("ok"),
             stderr: String::new(),
             success: true,
-        }),
+            report: Some(sample_patch_report(ApplyPatchReportStatus::Success)),
+        })),
     });
 }
 

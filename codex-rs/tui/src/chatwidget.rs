@@ -875,10 +875,26 @@ impl ChatWidget {
         &mut self,
         event: codex_core::protocol::PatchApplyEndEvent,
     ) {
-        // If the patch was successful, just let the "Edited" block stand.
-        // Otherwise, add a failure block.
-        if !event.success {
-            self.add_to_history(history_cell::new_patch_apply_failure(event.stderr));
+        let codex_core::protocol::PatchApplyEndEvent {
+            report,
+            success,
+            stderr,
+            ..
+        } = event;
+
+        if let Some(report) = report {
+            let stderr_opt = if success || stderr.trim().is_empty() {
+                None
+            } else {
+                Some(stderr)
+            };
+            self.add_to_history(history_cell::new_patch_apply_report(
+                report,
+                &self.config.cwd,
+                stderr_opt,
+            ));
+        } else if !success {
+            self.add_to_history(history_cell::new_patch_apply_failure(stderr));
         }
     }
 
@@ -1528,7 +1544,7 @@ impl ChatWidget {
             EventMsg::ExecCommandBegin(ev) => self.on_exec_command_begin(ev),
             EventMsg::ExecCommandOutputDelta(delta) => self.on_exec_command_output_delta(delta),
             EventMsg::PatchApplyBegin(ev) => self.on_patch_apply_begin(ev),
-            EventMsg::PatchApplyEnd(ev) => self.on_patch_apply_end(ev),
+            EventMsg::PatchApplyEnd(ev) => self.on_patch_apply_end(*ev),
             EventMsg::ExecCommandEnd(ev) => self.on_exec_command_end(ev),
             EventMsg::ViewImageToolCall(ev) => self.on_view_image_tool_call(ev),
             EventMsg::McpToolCallBegin(ev) => self.on_mcp_tool_call_begin(ev),

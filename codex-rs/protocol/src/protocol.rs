@@ -34,6 +34,7 @@ use serde_with::serde_as;
 use strum_macros::Display;
 use ts_rs::TS;
 
+pub use crate::apply_patch_report::*;
 pub use crate::approvals::ApplyPatchApprovalRequestEvent;
 pub use crate::approvals::ExecApprovalRequestEvent;
 pub use crate::approvals::SandboxCommandAssessment;
@@ -519,7 +520,7 @@ pub enum EventMsg {
     PatchApplyBegin(PatchApplyBeginEvent),
 
     /// Notification that a patch application has finished.
-    PatchApplyEnd(PatchApplyEndEvent),
+    PatchApplyEnd(Box<PatchApplyEndEvent>),
 
     TurnDiff(TurnDiffEvent),
 
@@ -1324,6 +1325,9 @@ pub struct PatchApplyEndEvent {
     pub stderr: String,
     /// Whether the patch was applied successfully.
     pub success: bool,
+    /// Structured machine-readable report emitted by apply_patch (v2 schema).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub report: Option<ApplyPatchReport>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, JsonSchema, TS)]

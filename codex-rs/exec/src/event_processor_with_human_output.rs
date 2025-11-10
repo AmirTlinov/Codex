@@ -387,13 +387,14 @@ impl EventProcessor for EventProcessorWithHumanOutput {
                     }
                 }
             }
-            EventMsg::PatchApplyEnd(PatchApplyEndEvent {
-                call_id,
-                stdout,
-                stderr,
-                success,
-                ..
-            }) => {
+            EventMsg::PatchApplyEnd(end) => {
+                let PatchApplyEndEvent {
+                    call_id,
+                    stdout,
+                    stderr,
+                    success,
+                    ..
+                } = *end;
                 let patch_begin = self.call_id_to_patch.remove(&call_id);
 
                 // Compute duration and summary label similar to exec commands.

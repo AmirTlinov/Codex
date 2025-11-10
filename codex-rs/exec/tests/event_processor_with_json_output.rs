@@ -797,12 +797,13 @@ fn patch_apply_success_produces_item_completed_patchapply() {
     // End (success) -> item.completed (item_0)
     let end = event(
         "p2",
-        EventMsg::PatchApplyEnd(PatchApplyEndEvent {
+        EventMsg::PatchApplyEnd(Box::new(PatchApplyEndEvent {
             call_id: "call-1".to_string(),
             stdout: "applied 3 changes".to_string(),
             stderr: String::new(),
             success: true,
-        }),
+            report: None,
+        })),
     );
     let out_end = ep.collect_thread_events(&end);
     assert_eq!(out_end.len(), 1);
@@ -865,12 +866,13 @@ fn patch_apply_failure_produces_item_completed_patchapply_failed() {
     // End (failure) -> item.completed (item_0) with Failed status
     let end = event(
         "p2",
-        EventMsg::PatchApplyEnd(PatchApplyEndEvent {
+        EventMsg::PatchApplyEnd(Box::new(PatchApplyEndEvent {
             call_id: "call-2".to_string(),
             stdout: String::new(),
             stderr: "failed to apply".to_string(),
             success: false,
-        }),
+            report: None,
+        })),
     );
     let out_end = ep.collect_thread_events(&end);
     assert_eq!(out_end.len(), 1);

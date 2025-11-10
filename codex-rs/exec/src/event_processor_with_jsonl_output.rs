@@ -112,7 +112,7 @@ impl EventProcessorWithJsonOutput {
             EventMsg::McpToolCallBegin(ev) => self.handle_mcp_tool_call_begin(ev),
             EventMsg::McpToolCallEnd(ev) => self.handle_mcp_tool_call_end(ev),
             EventMsg::PatchApplyBegin(ev) => self.handle_patch_apply_begin(ev),
-            EventMsg::PatchApplyEnd(ev) => self.handle_patch_apply_end(ev),
+            EventMsg::PatchApplyEnd(ev) => self.handle_patch_apply_end(ev.as_ref()),
             EventMsg::WebSearchBegin(_) => Vec::new(),
             EventMsg::WebSearchEnd(ev) => self.handle_web_search_end(ev),
             EventMsg::TokenCount(ev) => {

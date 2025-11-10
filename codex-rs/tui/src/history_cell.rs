@@ -26,6 +26,14 @@ use codex_common::format_env_display::format_env_display;
 use codex_core::config::Config;
 use codex_core::config::types::McpServerTransportConfig;
 use codex_core::config::types::ReasoningSummaryFormat;
+use codex_core::protocol::ApplyPatchOperationAction;
+use codex_core::protocol::ApplyPatchOperationStatus;
+use codex_core::protocol::ApplyPatchOperationSummary;
+use codex_core::protocol::ApplyPatchReport;
+use codex_core::protocol::ApplyPatchReportStatus;
+use codex_core::protocol::ApplyPatchSymbolEditKind;
+use codex_core::protocol::ApplyPatchSymbolFallbackStrategy;
+use codex_core::protocol::ApplyPatchTaskStatus;
 use codex_core::protocol::FileChange;
 use codex_core::protocol::McpAuthStatus;
 use codex_core::protocol::McpInvocation;
@@ -470,6 +478,299 @@ pub(crate) struct PatchHistoryCell {
 impl HistoryCell for PatchHistoryCell {
     fn display_lines(&self, width: u16) -> Vec<Line<'static>> {
         create_diff_summary(&self.changes, &self.cwd, width as usize)
+    }
+}
+
+#[derive(Debug)]
+pub(crate) struct PatchApplyReportCell {
+    report: ApplyPatchReport,
+    cwd: PathBuf,
+    stderr: Option<String>,
+}
+
+impl PatchApplyReportCell {
+    fn display(&self) -> Vec<Line<'static>> {
+        let mut lines = Vec::new();
+        lines.push(self.render_header());
+        lines.extend(self.render_operations());
+        lines.extend(self.render_formatting());
+        lines.extend(self.render_post_checks());
+        lines.extend(self.render_diagnostics());
+        lines.extend(self.render_errors());
+        lines.extend(self.render_stderr());
+        lines
+    }
+
+    fn render_header(&self) -> Line<'static> {
+        let (text, color) = match self.report.status {
+            ApplyPatchReportStatus::Success => (
+                format!(
+                    "✔ Patch applied successfully ({} ops, {} ms)",
+                    self.report.operations.len(),
+                    self.report.duration_ms
+                ),
+                Color::Green,
+            ),
+            ApplyPatchReportStatus::Failed => ("✘ Patch apply failed".to_string(), Color::Magenta),
+        };
+        Line::from(vec![Span::styled(
+            text,
+            Style::default().fg(color).add_modifier(Modifier::BOLD),
+        )])
+    }
+
+    fn render_operations(&self) -> Vec<Line<'static>> {
+        if self.report.operations.is_empty() {
+            return Vec::new();
+        }
+        let mut lines = vec![Line::from(vec![Span::styled(
+            "Operations:",
+            Style::default().add_modifier(Modifier::BOLD),
+        )])];
+        let total = self.report.operations.len();
+        for (idx, op) in self.report.operations.iter().enumerate() {
+            let is_last = idx + 1 == total;
+            lines.push(self.render_operation_line(op, is_last));
+            if let Some(message) = op.message.as_ref().filter(|m| !m.trim().is_empty()) {
+                lines.push(self.render_indented_line(is_last, message));
+            }
+            if let Some(symbol) = &op.symbol {
+                let mut symbol_line = format!(
+                    "symbol({}): {} [{}]",
+                    Self::symbol_kind_str(&symbol.kind),
+                    symbol.symbol,
+                    Self::symbol_strategy_str(&symbol.strategy)
+                );
+                if let Some(reason) = symbol.reason.as_ref().filter(|r| !r.trim().is_empty()) {
+                    symbol_line.push_str(&format!(" – {reason}"));
+                }
+                lines.push(self.render_indented_line(is_last, &symbol_line));
+            }
+        }
+        lines
+    }
+
+    fn render_operation_line(
+        &self,
+        op: &ApplyPatchOperationSummary,
+        is_last: bool,
+    ) -> Line<'static> {
+        let branch = if is_last { "  └ " } else { "  ├ " };
+        let mut spans = vec![Span::styled(branch, Style::default().fg(Color::DarkGray))];
+        spans.push(Self::operation_status_span(&op.status));
+        spans.push(Span::raw(" "));
+        spans.push(Self::operation_action_span(&op.action));
+        spans.push(Span::raw(" "));
+        let display_path = self.render_path(&op.path);
+        spans.push(Span::raw(display_path));
+        if let Some(rename) = &op.renamed_to {
+            spans.push(Span::raw(format!(" → {}", self.render_path(rename))));
+        }
+        spans.push(Span::raw(" "));
+        spans.push(Span::styled(
+            format!("(+{}, -{})", op.added, op.removed),
+            Style::default().fg(Color::DarkGray),
+        ));
+        Line::from(spans)
+    }
+
+    fn render_indented_line(&self, is_last: bool, text: &str) -> Line<'static> {
+        let branch = if is_last { "    " } else { "  │ " };
+        Line::from(vec![
+            Span::styled(branch, Style::default().fg(Color::DarkGray)),
+            Span::raw(text.to_string()),
+        ])
+    }
+
+    fn render_path(&self, path: &PathBuf) -> String {
+        let full = if path.is_absolute() {
+            path.clone()
+        } else {
+            self.cwd.join(path)
+        };
+        display_path_for(&full, &self.cwd)
+    }
+
+    fn render_formatting(&self) -> Vec<Line<'static>> {
+        if self.report.formatting.is_empty() {
+            return Vec::new();
+        }
+        let mut lines = vec![Line::from(vec![Span::styled(
+            "Formatting:",
+            Style::default().add_modifier(Modifier::BOLD),
+        )])];
+        for item in &self.report.formatting {
+            let description = match item.scope.as_ref() {
+                Some(scope) => format!("{} ({scope})", item.tool),
+                None => item.tool.clone(),
+            };
+            let mut spans = vec![
+                Self::task_status_span(&item.status),
+                Span::raw(format!(" {description} ({} ms)", item.duration_ms)),
+            ];
+            if let Some(note) = item.note.as_ref().filter(|note| !note.is_empty()) {
+                spans.push(Span::raw(format!(" – {note}")));
+            }
+            lines.push(Line::from(spans));
+        }
+        lines
+    }
+
+    fn render_post_checks(&self) -> Vec<Line<'static>> {
+        if self.report.post_checks.is_empty() {
+            return Vec::new();
+        }
+        let mut lines = vec![Line::from(vec![Span::styled(
+            "Post-checks:",
+            Style::default().add_modifier(Modifier::BOLD),
+        )])];
+        for item in &self.report.post_checks {
+            let mut content = vec![Self::task_status_span(&item.status)];
+            content.push(Span::raw(format!(
+                " {} ({} ms)",
+                item.name, item.duration_ms
+            )));
+            if let Some(note) = item.note.as_ref().filter(|n| !n.is_empty()) {
+                content.push(Span::raw(format!(" – {note}")));
+            }
+            lines.push(Line::from(content));
+        }
+        lines
+    }
+
+    fn render_diagnostics(&self) -> Vec<Line<'static>> {
+        if self.report.diagnostics.is_empty() {
+            return Vec::new();
+        }
+        let mut lines = vec![Line::from(vec![Span::styled(
+            "Diagnostics:",
+            Style::default().add_modifier(Modifier::BOLD),
+        )])];
+        for diag in &self.report.diagnostics {
+            lines.push(Line::from(format!("  - {}: {}", diag.code, diag.message)));
+        }
+        lines
+    }
+
+    fn render_errors(&self) -> Vec<Line<'static>> {
+        if self.report.errors.is_empty() {
+            return Vec::new();
+        }
+        let mut lines = vec![Line::from(vec![Span::styled(
+            "Errors:",
+            Style::default()
+                .add_modifier(Modifier::BOLD)
+                .fg(Color::Magenta),
+        )])];
+        for err in &self.report.errors {
+            lines.push(Line::from(format!("  - {err}")));
+        }
+        lines
+    }
+
+    fn render_stderr(&self) -> Vec<Line<'static>> {
+        self.stderr
+            .as_ref()
+            .filter(|s| !s.trim().is_empty())
+            .map(|stderr| {
+                let mut lines = vec![Line::from(vec![Span::styled(
+                    "stderr:",
+                    Style::default()
+                        .add_modifier(Modifier::BOLD)
+                        .fg(Color::Magenta),
+                )])];
+                for line in stderr.lines() {
+                    lines.push(Line::from(format!("  {line}")));
+                }
+                lines
+            })
+            .unwrap_or_default()
+    }
+
+    fn operation_status_span(status: &ApplyPatchOperationStatus) -> Span<'static> {
+        match status {
+            ApplyPatchOperationStatus::Applied => {
+                Span::styled("✔", Style::default().fg(Color::Green))
+            }
+            ApplyPatchOperationStatus::Failed => {
+                Span::styled("✘", Style::default().fg(Color::Magenta))
+            }
+            ApplyPatchOperationStatus::Planned => {
+                Span::styled("…", Style::default().fg(Color::Yellow))
+            }
+        }
+    }
+
+    fn operation_action_span(action: &ApplyPatchOperationAction) -> Span<'static> {
+        match action {
+            ApplyPatchOperationAction::Add => Span::styled(
+                "A",
+                Style::default()
+                    .fg(Color::Green)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            ApplyPatchOperationAction::Update => Span::styled(
+                "M",
+                Style::default()
+                    .fg(Color::Yellow)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            ApplyPatchOperationAction::Move => Span::styled(
+                "R",
+                Style::default()
+                    .fg(Color::Cyan)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            ApplyPatchOperationAction::Delete => Span::styled(
+                "D",
+                Style::default()
+                    .fg(Color::Magenta)
+                    .add_modifier(Modifier::BOLD),
+            ),
+        }
+    }
+
+    fn task_status_span(status: &ApplyPatchTaskStatus) -> Span<'static> {
+        match status {
+            ApplyPatchTaskStatus::Applied => Span::styled("✔", Style::default().fg(Color::Green)),
+            ApplyPatchTaskStatus::Skipped => Span::styled("⏭", Style::default().fg(Color::Yellow)),
+            ApplyPatchTaskStatus::Failed => Span::styled("✘", Style::default().fg(Color::Magenta)),
+        }
+    }
+
+    fn symbol_kind_str(kind: &ApplyPatchSymbolEditKind) -> &'static str {
+        match kind {
+            ApplyPatchSymbolEditKind::InsertBefore => "insert-before",
+            ApplyPatchSymbolEditKind::InsertAfter => "insert-after",
+            ApplyPatchSymbolEditKind::ReplaceBody => "replace-body",
+        }
+    }
+
+    fn symbol_strategy_str(strategy: &ApplyPatchSymbolFallbackStrategy) -> &'static str {
+        match strategy {
+            ApplyPatchSymbolFallbackStrategy::Ast => "ast",
+            ApplyPatchSymbolFallbackStrategy::Scoped => "scoped",
+            ApplyPatchSymbolFallbackStrategy::Identifier => "identifier",
+            ApplyPatchSymbolFallbackStrategy::Substring => "substring",
+        }
+    }
+}
+
+impl HistoryCell for PatchApplyReportCell {
+    fn display_lines(&self, _width: u16) -> Vec<Line<'static>> {
+        self.display()
+    }
+}
+
+pub(crate) fn new_patch_apply_report(
+    report: ApplyPatchReport,
+    cwd: &Path,
+    stderr: Option<String>,
+) -> PatchApplyReportCell {
+    PatchApplyReportCell {
+        report,
+        cwd: cwd.to_path_buf(),
+        stderr,
     }
 }
 
