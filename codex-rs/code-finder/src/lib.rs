@@ -1,9 +1,9 @@
-mod metadata;
-mod project;
-
 pub mod client;
 pub mod daemon;
+pub mod freeform;
 pub mod index;
+mod metadata;
+mod project;
 pub mod proto;
 
 pub use client::ClientOptions;
