@@ -1,0 +1,26 @@
+{
+  "duration_ms": 6,
+  "errors": [],
+  "mode": "apply",
+  "operations": [
+    {
+      "action": "add",
+      "added": 1,
+      "message": null,
+      "path": "foo.txt",
+      "removed": 0,
+      "renamed_to": null,
+      "status": "applied"
+    }
+  ],
+  "options": {
+    "encoding": "utf-8",
+    "ensure_final_newline": null,
+    "new_file_mode": null,
+    "newline": "preserve",
+    "preserve_mode": true,
+    "preserve_times": true,
+    "strip_trailing_whitespace": false
+  },
+  "status": "success"
+}

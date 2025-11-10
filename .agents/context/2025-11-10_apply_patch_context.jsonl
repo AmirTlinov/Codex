@@ -1,0 +1,1 @@
+{"source":"/home/amir/Документы/Contributing/1/codex-rs/apply-patch","summary":["Enhanced crate adds AST-aware symbol editing, formatting hooks, begin_patch CLI with machine-readable reports, and artifact tracking"],"citation":"local diff"}
