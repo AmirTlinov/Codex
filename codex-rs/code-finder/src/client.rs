@@ -1,5 +1,6 @@
 use crate::metadata::DaemonMetadata;
 use crate::project::ProjectProfile;
+use crate::proto::IndexStatus;
 use crate::proto::OpenRequest;
 use crate::proto::OpenResponse;
 use crate::proto::SearchRequest;
@@ -114,6 +115,38 @@ impl CodeFinderClient {
             let status = resp.status();
             let body = resp.text().await.unwrap_or_default();
             return Err(anyhow!("snippet request failed: {status} - {body}"));
+        }
+        Ok(resp.json().await?)
+    }
+
+    pub async fn health(&self) -> Result<IndexStatus> {
+        let url = format!("{}/health", self.base_url);
+        let resp = self
+            .http
+            .get(url)
+            .headers(self.auth_headers()?)
+            .send()
+            .await?;
+        if !resp.status().is_success() {
+            let status = resp.status();
+            let body = resp.text().await.unwrap_or_default();
+            return Err(anyhow!("health request failed: {status} - {body}"));
+        }
+        Ok(resp.json().await?)
+    }
+
+    pub async fn reindex(&self) -> Result<IndexStatus> {
+        let url = format!("{}/v1/nav/reindex", self.base_url);
+        let resp = self
+            .http
+            .post(url)
+            .headers(self.auth_headers()?)
+            .send()
+            .await?;
+        if !resp.status().is_success() {
+            let status = resp.status();
+            let body = resp.text().await.unwrap_or_default();
+            return Err(anyhow!("reindex request failed: {status} - {body}"));
         }
         Ok(resp.json().await?)
     }

@@ -12,3 +12,5 @@
 {"source":"agent","summary":["Registered code_finder tool for gpt-5-codex in tool registry/model families and documented schema in tool spec"],"citation":"codex-rs/core/src/tools/spec.rs"}
 {"source":"agent","summary":["Swapped code_finder tool to freeform syntax (akin to apply_patch) so agents provide simple action blocks instead of JSON"],"citation":"codex-rs/core/src/tools/spec.rs"}
 {"source":"agent","summary":["Defined code_finder envelope syntax matching apply_patch headers (*** Begin Search/Open/Snippet ... *** End ...) so Codex agents see deterministic key/value blocks"],"citation":"codex-rs/core/src/tools/spec.rs"}
+{"source":"agent","summary":["Expanded code_finder instructions with full envelope guide, examples, and wait/refine semantics plus auto-indexing note","Updated README/docs to teach the same syntax","TUI now auto-spawns the Code Finder daemon for every trusted workspace"],"citation":"codex-rs/core/src/tools/spec.rs"}
+{"source":"agent","summary":["TUI now polls the code-finder daemon, shows Index ready/indexing status in the footer, and exposes /index-code to trigger reindex"],"citation":"codex-rs/tui/src/chatwidget.rs"}

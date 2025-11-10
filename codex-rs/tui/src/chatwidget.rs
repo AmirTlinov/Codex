@@ -69,6 +69,7 @@ use crate::bottom_pane::ApprovalRequest;
 use crate::bottom_pane::BottomPane;
 use crate::bottom_pane::BottomPaneParams;
 use crate::bottom_pane::CancellationEvent;
+use crate::bottom_pane::CodeFinderFooterIndicator;
 use crate::bottom_pane::InputResult;
 use crate::bottom_pane::SelectionAction;
 use crate::bottom_pane::SelectionItem;
@@ -76,6 +77,7 @@ use crate::bottom_pane::SelectionViewParams;
 use crate::bottom_pane::custom_prompt_view::CustomPromptView;
 use crate::bottom_pane::popup_consts::standard_popup_hint_line;
 use crate::clipboard_paste::paste_image_to_temp_png;
+use crate::code_finder_bootstrap;
 use crate::diff_render::display_path_for;
 use crate::exec_cell::CommandOutput;
 use crate::exec_cell::ExecCell;
@@ -106,6 +108,8 @@ use self::agent::spawn_agent_from_existing;
 mod session_header;
 use self::session_header::SessionHeader;
 use crate::streaming::controller::StreamController;
+use codex_code_finder::proto::IndexState;
+use codex_code_finder::proto::IndexStatus;
 use std::path::Path;
 
 use chrono::Local;
@@ -282,6 +286,7 @@ pub(crate) struct ChatWidget {
     is_review_mode: bool,
     // Whether to add a final message separator after the last message
     needs_final_message_separator: bool,
+    code_finder_last_state: Option<IndexState>,
 
     last_rendered_width: std::cell::Cell<Option<usize>>,
     // Feedback sink for /feedback
@@ -489,6 +494,32 @@ impl ChatWidget {
             });
             self.bottom_pane.set_context_window_percent(percent);
             self.token_info = Some(info);
+        }
+    }
+
+    pub(crate) fn update_code_finder_status(&mut self, status: IndexStatus) {
+        let indicator = CodeFinderFooterIndicator::from_status(&status);
+        self.bottom_pane.set_code_finder_status(Some(indicator));
+
+        let previous = self.code_finder_last_state.replace(status.state.clone());
+        match status.state {
+            IndexState::Failed if previous != Some(IndexState::Failed) => {
+                self.add_error_message(
+                    "Code Finder indexing failed. Run /index-code to retry.".to_string(),
+                );
+            }
+            IndexState::Ready if matches!(previous, Some(IndexState::Building)) => {
+                self.add_info_message("Code Finder index is ready.".to_string(), None);
+            }
+            IndexState::Building
+                if matches!(previous, Some(IndexState::Ready) | Some(IndexState::Failed)) =>
+            {
+                self.add_info_message(
+                    "Code Finder reindex started – hang tight.".to_string(),
+                    None,
+                );
+            }
+            _ => {}
         }
     }
 
@@ -1052,6 +1083,7 @@ impl ChatWidget {
             pending_notification: None,
             is_review_mode: false,
             needs_final_message_separator: false,
+            code_finder_last_state: None,
             last_rendered_width: std::cell::Cell::new(None),
             feedback,
             current_rollout_path: None,
@@ -1119,6 +1151,7 @@ impl ChatWidget {
             pending_notification: None,
             is_review_mode: false,
             needs_final_message_separator: false,
+            code_finder_last_state: None,
             last_rendered_width: std::cell::Cell::new(None),
             feedback,
             current_rollout_path: None,
@@ -1277,6 +1310,24 @@ impl ChatWidget {
                         Err(e) => format!("Failed to compute diff: {e}"),
                     };
                     tx.send(AppEvent::DiffResult(text));
+                });
+            }
+            SlashCommand::IndexCode => {
+                self.add_info_message("Requesting Code Finder reindex…".to_string(), None);
+                let tx = self.app_event_tx.clone();
+                tokio::spawn(async move {
+                    match code_finder_bootstrap::request_reindex().await {
+                        Ok(status) => {
+                            tx.send(AppEvent::CodeFinderStatus(status));
+                        }
+                        Err(err) => {
+                            tx.send(AppEvent::InsertHistoryCell(Box::new(
+                                history_cell::new_error_event(format!(
+                                    "Code Finder reindex failed: {err}"
+                                )),
+                            )));
+                        }
+                    }
                 });
             }
             SlashCommand::Mention => {

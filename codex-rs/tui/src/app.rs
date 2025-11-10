@@ -3,6 +3,7 @@ use crate::app_event::AppEvent;
 use crate::app_event_sender::AppEventSender;
 use crate::bottom_pane::ApprovalRequest;
 use crate::chatwidget::ChatWidget;
+use crate::code_finder_bootstrap;
 use crate::diff_render::DiffSummary;
 use crate::exec_command::strip_bash_lc_and_escape;
 use crate::file_search::FileSearchManager;
@@ -99,6 +100,7 @@ impl App {
         use tokio_stream::StreamExt;
         let (app_event_tx, mut app_event_rx) = unbounded_channel();
         let app_event_tx = AppEventSender::new(app_event_tx);
+        code_finder_bootstrap::spawn_background_indexer(&config, app_event_tx.clone());
 
         let conversation_manager = Arc::new(ConversationManager::new(
             auth_manager.clone(),
@@ -346,6 +348,9 @@ impl App {
             }
             AppEvent::CodexEvent(event) => {
                 self.chat_widget.handle_codex_event(event);
+            }
+            AppEvent::CodeFinderStatus(status) => {
+                self.chat_widget.update_code_finder_status(status);
             }
             AppEvent::ConversationHistory(ev) => {
                 self.on_conversation_history_for_backtrack(tui, ev).await?;

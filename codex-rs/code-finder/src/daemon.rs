@@ -60,6 +60,7 @@ pub async fn run_daemon(opts: DaemonOptions) -> Result<()> {
         .route("/v1/nav/search", post(search_handler))
         .route("/v1/nav/open", post(open_handler))
         .route("/v1/nav/snippet", post(snippet_handler))
+        .route("/v1/nav/reindex", post(reindex_handler))
         .with_state(state);
     axum::serve(listener, app).await?;
     Ok(())
@@ -113,6 +114,19 @@ async fn snippet_handler(
         .await
         .map_err(AppError::internal)?;
     Ok(Json(response))
+}
+
+async fn reindex_handler(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<crate::proto::IndexStatus>, AppError> {
+    ensure_authorized(&state, &headers)?;
+    let status = state
+        .coordinator
+        .rebuild_index()
+        .await
+        .map_err(AppError::internal)?;
+    Ok(Json(status))
 }
 
 fn ensure_authorized(state: &AppState, headers: &HeaderMap) -> Result<(), AppError> {

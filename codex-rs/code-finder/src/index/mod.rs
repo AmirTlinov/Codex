@@ -152,6 +152,11 @@ impl IndexCoordinator {
         })
     }
 
+    pub async fn rebuild_index(&self) -> Result<IndexStatus> {
+        self.rebuild_all().await?;
+        Ok(self.current_status().await)
+    }
+
     async fn symbol_with_contents(&self, id: &str) -> Result<(SymbolRecord, String)> {
         let snapshot = self.inner.snapshot.read().await;
         let symbol = snapshot
@@ -167,26 +172,39 @@ impl IndexCoordinator {
     async fn rebuild_all(&self) -> Result<()> {
         let _guard = self.inner.build_lock.lock().await;
         self.update_status(IndexState::Building, None).await;
-        let root = self.inner.profile.project_root().to_path_buf();
-        let recent = recent_paths(&root);
-        let build_root = root.clone();
-        let snapshot = tokio::task::spawn_blocking(move || {
-            IndexBuilder::new(build_root.as_path(), recent).build()
-        })
-        .await??;
-        save_snapshot(
+        let snapshot = match self.build_snapshot().await {
+            Ok(snapshot) => snapshot,
+            Err(err) => {
+                self.update_status(IndexState::Failed, None).await;
+                return Err(err);
+            }
+        };
+
+        if let Err(err) = save_snapshot(
             &self.inner.profile.index_path(),
             &self.inner.profile.temp_index_path(),
             &snapshot,
-        )?;
-        {
+        ) {
+            self.update_status(IndexState::Failed, None).await;
+            return Err(err);
+        }
+
+        let counts = {
             let mut guard = self.inner.snapshot.write().await;
             *guard = snapshot;
-            let counts = (guard.symbols.len(), guard.files.len());
-            drop(guard);
-            self.update_status(IndexState::Ready, Some(counts)).await;
-        }
+            (guard.symbols.len(), guard.files.len())
+        };
+        self.update_status(IndexState::Ready, Some(counts)).await;
         Ok(())
+    }
+
+    async fn build_snapshot(&self) -> Result<IndexSnapshot> {
+        let root = self.inner.profile.project_root().to_path_buf();
+        let recent = recent_paths(&root);
+        Ok(tokio::task::spawn_blocking(move || {
+            IndexBuilder::new(root.as_path(), recent).build()
+        })
+        .await??)
     }
 
     pub async fn current_status(&self) -> IndexStatus {

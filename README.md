@@ -71,11 +71,31 @@ Codex CLI supports a rich set of configuration options, with preferences stored 
 
 ### Code Finder navigation
 
-Codex ships with a background indexer and deterministic search surface called **Code Finder**. Once `codex nav` runs inside a project, it spawns a daemon that keeps symbol metadata, recency signals, and file fingerprints up to date. Agents (and humans) can then:
+Codex ships with a background indexer and deterministic search surface called **Code Finder**. The daemon now starts automatically when the CLI/TUI launches, and the footer shows a live `Index ready/indexing/failed` pill so you always know the state. Agents and humans can then:
 
 - `codex nav "SymbolName" --kind function --with-refs` → fuzzy search with JSON output, refs, filters such as `--recent`, `--docs`, `--deps`, globbed paths, or cached query refinement via `--from <query_id>`.
 - `codex open <id>` → download the full file for a search hit and reuse IDs for downstream tooling.
 - `codex snippet <id> --context 12` → stream only the relevant window around a definition.
+- `/index-code` → rebuild the index on demand (helpful after big refactors or if the indicator shows a failure).
+
+Agents that call the `code_finder` tool directly should wrap requests in the same envelopes as `apply_patch`:
+
+```
+*** Begin Search
+query: SessionManager resolver
+kinds: function,method
+languages: rust
+path_globs: core/**
+recent: true
+with_refs: true
+help_symbol: SessionManager
+*** End Search
+
+*** Begin Snippet
+id: cf_6d053bc1
+context: 16
+*** End Snippet
+```
 
 See the dedicated [Code Finder guide](./docs/code-finder.md) for the protocol, schema, and watchdog details.
 

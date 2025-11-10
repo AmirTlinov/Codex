@@ -27,6 +27,24 @@ Looking for something specific? Jump ahead:
 
 All commands emit deterministic JSON so other tools can parse them. For schema details see [docs/code-finder.md](./code-finder.md).
 
+Codex now launches the Code Finder daemon in the background as soon as the CLI/TUI starts, so indexing happens continuously without running `codex nav` first. The footer shows `Index ready/indexing/failed`, and you can force a rebuild anytime by typing `/index-code`. Tool calls share the same apply_patch-style envelopes:
+
+```
+*** Begin Search
+query: SessionManager resolver
+kinds: function,method
+languages: rust
+with_refs: true
+wait: true
+*** End Search
+
+*** Begin Open
+id: cf_6d053bc1
+*** End Open
+```
+
+Use `id` values from the search response with `Open` or `Snippet`, and pass `refine: <query_id>` to narrow a cached result set without re-running the expensive search.
+
 Key flags: `--model/-m`, `--ask-for-approval/-a`.
 
 ### Resuming interactive sessions

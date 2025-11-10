@@ -39,6 +39,7 @@ mod bottom_pane;
 mod chatwidget;
 mod cli;
 mod clipboard_paste;
+mod code_finder_bootstrap;
 mod color;
 pub mod custom_terminal;
 mod diff_render;

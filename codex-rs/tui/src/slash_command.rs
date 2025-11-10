@@ -20,6 +20,7 @@ pub enum SlashCommand {
     Compact,
     Undo,
     Diff,
+    IndexCode,
     Mention,
     Status,
     Mcp,
@@ -43,6 +44,7 @@ impl SlashCommand {
             SlashCommand::Undo => "ask Codex to undo a turn",
             SlashCommand::Quit | SlashCommand::Exit => "exit Codex",
             SlashCommand::Diff => "show git diff (including untracked files)",
+            SlashCommand::IndexCode => "rebuild the Code Finder index",
             SlashCommand::Mention => "mention a file",
             SlashCommand::Status => "show current session configuration and token usage",
             SlashCommand::Model => "choose what model and reasoning effort to use",
@@ -72,6 +74,7 @@ impl SlashCommand {
             | SlashCommand::Review
             | SlashCommand::Logout => false,
             SlashCommand::Diff
+            | SlashCommand::IndexCode
             | SlashCommand::Mention
             | SlashCommand::Status
             | SlashCommand::Mcp

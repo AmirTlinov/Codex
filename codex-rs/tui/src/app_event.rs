@@ -1,5 +1,6 @@
 use std::path::PathBuf;
 
+use codex_code_finder::proto::IndexStatus;
 use codex_common::approval_presets::ApprovalPreset;
 use codex_common::model_presets::ModelPreset;
 use codex_core::protocol::ConversationPathResponseEvent;
@@ -143,6 +144,9 @@ pub(crate) enum AppEvent {
     OpenFeedbackConsent {
         category: FeedbackCategory,
     },
+
+    /// Latest Code Finder index status (from background daemon).
+    CodeFinderStatus(IndexStatus),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

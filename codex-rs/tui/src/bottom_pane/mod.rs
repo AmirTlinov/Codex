@@ -8,6 +8,8 @@ use crate::render::renderable::Renderable;
 use crate::render::renderable::RenderableItem;
 use crate::tui::FrameRequester;
 use bottom_pane_view::BottomPaneView;
+use codex_code_finder::proto::IndexState as FinderIndexState;
+use codex_code_finder::proto::IndexStatus;
 use codex_file_search::FileMatch;
 use crossterm::event::KeyCode;
 use crossterm::event::KeyEvent;
@@ -53,6 +55,47 @@ use crate::status_indicator_widget::StatusIndicatorWidget;
 pub(crate) use list_selection_view::SelectionAction;
 pub(crate) use list_selection_view::SelectionItem;
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum CodeFinderIndicatorState {
+    Building,
+    Ready,
+    Failed,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct CodeFinderFooterIndicator {
+    state: CodeFinderIndicatorState,
+    symbols: usize,
+    files: usize,
+}
+
+impl CodeFinderFooterIndicator {
+    pub fn from_status(status: &IndexStatus) -> Self {
+        let state = match status.state {
+            FinderIndexState::Building => CodeFinderIndicatorState::Building,
+            FinderIndexState::Ready => CodeFinderIndicatorState::Ready,
+            FinderIndexState::Failed => CodeFinderIndicatorState::Failed,
+        };
+        Self {
+            state,
+            symbols: status.symbols,
+            files: status.files,
+        }
+    }
+
+    pub fn state(&self) -> CodeFinderIndicatorState {
+        self.state
+    }
+
+    pub fn symbols(&self) -> usize {
+        self.symbols
+    }
+
+    pub fn files(&self) -> usize {
+        self.files
+    }
+}
+
 /// Pane displayed in the lower half of the chat UI.
 pub(crate) struct BottomPane {
     /// Composer is retained even when a BottomPaneView is displayed so the
@@ -75,6 +118,7 @@ pub(crate) struct BottomPane {
     /// Queued user messages to show above the composer while a turn is running.
     queued_user_messages: QueuedUserMessages,
     context_window_percent: Option<i64>,
+    code_finder_indicator: Option<CodeFinderFooterIndicator>,
 }
 
 pub(crate) struct BottomPaneParams {
@@ -107,6 +151,7 @@ impl BottomPane {
             queued_user_messages: QueuedUserMessages::new(),
             esc_backtrack_hint: false,
             context_window_percent: None,
+            code_finder_indicator: None,
         }
     }
 
@@ -330,6 +375,12 @@ impl BottomPane {
 
         self.context_window_percent = percent;
         self.composer.set_context_window_percent(percent);
+        self.request_redraw();
+    }
+
+    pub(crate) fn set_code_finder_status(&mut self, indicator: Option<CodeFinderFooterIndicator>) {
+        self.code_finder_indicator = indicator.clone();
+        self.composer.set_code_finder_status(indicator);
         self.request_redraw();
     }
 

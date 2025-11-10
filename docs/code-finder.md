@@ -193,8 +193,13 @@ Outputs only the requested window (default: 8 lines around the definition).
 
 ## Integration points
 
-- `codex_tui::run_main` invokes `CodeFinderClient::spawn_if_needed` once the
-  working directory is trusted so indexing happens proactively in the background.
+- `codex_tui::run_main` now spawns the daemon as soon as the working directory
+  is trusted, so every interactive session keeps an index warm without waiting
+  for the first `codex nav` invocation.
+- The footer renders the current index status (ready/indexing/failed) so users
+  and agents can tell when search results are fresh.
+- The `/index-code` slash command hits the daemon's `/v1/nav/reindex` endpoint
+  to force a rebuild after sweeping edits.
 - Slash commands and MCP tools can reuse the same client to jump straight to a
   snippet without shelling out.
 

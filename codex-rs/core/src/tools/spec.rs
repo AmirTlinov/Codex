@@ -230,39 +230,60 @@ fn create_write_stdin_tool() -> ToolSpec {
     })
 }
 
-const CODE_FINDER_FREEFORM_USAGE: &str = r"code_finder uses envelopes like apply_patch.
+const CODE_FINDER_FREEFORM_USAGE: &str = r"Code Finder uses the same envelopes as apply_patch. Each block is:
 
-Wrap every request in matching headers:
+*** Begin <Action>
+key: value
+*** End <Action>
+
+Supported actions:
+- *** Begin Search ... *** End Search – run a query with filters and scoring hints.
+- *** Begin Open ... *** End Open – fetch the entire file for a hit `id`.
+- *** Begin Snippet ... *** End Snippet – fetch only N context lines (default 8).
+
+Formatting rules:
+- Action name comes from the header; do **not** include an `action:` field.
+- Use `key: value` or `key = value`. Repeating a key appends (for lists).
+- Comma-separate multi-value entries and quote values containing spaces.
+- Unknown keys are rejected; stay within the list below.
+
+Search keys:
+- `query`/`q` (free-form text), `limit` (default 40, minimum 1).
+- `kinds`, `languages`, `categories` (comma-separated; categories accept `source`, `tests`, `docs`, `deps`).
+- `path`/`path_globs`, `file`/`file_substrings`, `symbol`/`symbol_exact`.
+- `recent`, `tests`, `docs`, `deps` (booleans) toggle recency/category shortcuts.
+- `with_refs` + `refs_limit` attach reference previews; `help`/`help_symbol` adds module/layer/dependency metadata to the top hit.
+- `refine`/`query_id` reuse a cached candidate list from a previous response.
+- `wait`/`wait_for_index` (true by default) chooses whether to block until the daemon finishes indexing.
+
+Open/Snippet keys:
+- `id` (required) — must match the `hits[].id` from a previous Search response.
+- `context` (Snippet only, defaults to 8) — symmetric line window around the symbol.
+
+Example multi-action block:
 
 *** Begin Search
-query: SessionManager
-kinds: function
-languages: rust, ts
+query: SessionManager resolver
+kinds: function,method
+languages: rust
 path_globs: core/**
 recent: true
 with_refs: true
+refs_limit: 6
+help_symbol: SessionManager
+wait: true
 *** End Search
 
 *** Begin Open
-id: cf_deadbeef
+id: cf_6d053bc1
 *** End Open
 
 *** Begin Snippet
-id: cf_deadbeef
-context: 12
+id: cf_6d053bc1
+context: 16
 *** End Snippet
 
-Between the headers, provide optional key/value pairs (key: value or key = value).
-Lists are comma-separated; quote values containing spaces.
-
-Supported keys:
-- query, limit
-- kinds, languages, categories
-- path/path_globs, file/file_substrings, symbol/symbol_exact
-- recent, tests, docs, deps (true/false)
-- with_refs, refs_limit
-- help/help_symbol, refine/query_id, wait/wait_for_index
-- id, context (snippet context lines)
+Responses always return deterministic JSON (`query_id`, `hits`, `index.state`). Use `query_id` with `refine` to iterate without repeating heavy scans. Codex now keeps the daemon running in the background while the CLI/TUI is open, so `wait: true` typically returns a fresh index immediately.
 ";
 
 fn create_code_finder_tool() -> ToolSpec {
