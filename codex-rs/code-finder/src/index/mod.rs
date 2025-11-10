@@ -9,7 +9,7 @@ mod references;
 mod search;
 mod storage;
 
-use crate::index::filter::path_in_skipped_dir;
+use crate::index::filter::PathFilter;
 use crate::project::ProjectProfile;
 use crate::proto::IndexState;
 use crate::proto::IndexStatus;
@@ -32,7 +32,6 @@ use notify::RecommendedWatcher;
 use notify::RecursiveMode;
 use notify::Watcher;
 use search::run_search;
-use std::path::Path;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::mpsc as std_mpsc;
@@ -60,6 +59,7 @@ struct Inner {
     status: RwLock<IndexStatusInternal>,
     cache: QueryCache,
     build_lock: Mutex<()>,
+    filter: std::sync::Arc<PathFilter>,
 }
 
 #[derive(Clone, Debug)]
@@ -118,12 +118,14 @@ impl IndexCoordinator {
                 },
             ),
         };
+        let filter = Arc::new(PathFilter::new(profile.project_root())?);
         let inner = Arc::new(Inner {
             cache: QueryCache::new(profile.queries_dir()),
             profile,
             snapshot: RwLock::new(loaded_snapshot),
             status: RwLock::new(status),
             build_lock: Mutex::new(()),
+            filter,
         });
         let coordinator = Self { inner };
         coordinator.spawn_initial_build();
@@ -241,9 +243,11 @@ impl IndexCoordinator {
     async fn build_snapshot(&self) -> Result<IndexSnapshot> {
         let root = self.inner.profile.project_root().to_path_buf();
         let recent = recent_paths(&root);
-        let snapshot =
-            tokio::task::spawn_blocking(move || IndexBuilder::new(root.as_path(), recent).build())
-                .await??;
+        let filter = self.inner.filter.clone();
+        let snapshot = tokio::task::spawn_blocking(move || {
+            IndexBuilder::new(root.as_path(), recent, filter).build()
+        })
+        .await??;
         Ok(snapshot)
     }
 
@@ -289,8 +293,9 @@ impl IndexCoordinator {
         let this = self.clone();
         tokio::spawn(async move {
             let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+            let filter = this.inner.filter.clone();
             std::thread::spawn(move || {
-                if let Err(err) = watch_project(profile.project_root().to_path_buf(), tx) {
+                if let Err(err) = watch_project(profile.project_root().to_path_buf(), filter, tx) {
                     error!("code-finder watcher error: {err:?}");
                 }
             });
@@ -307,14 +312,18 @@ impl IndexCoordinator {
     }
 }
 
-fn watch_project(root: PathBuf, tx: mpsc::UnboundedSender<()>) -> notify::Result<()> {
+fn watch_project(
+    root: PathBuf,
+    filter: Arc<PathFilter>,
+    tx: mpsc::UnboundedSender<()>,
+) -> notify::Result<()> {
     let (watch_tx, watch_rx) = std_mpsc::channel();
     let mut watcher = RecommendedWatcher::new(watch_tx, NotifyConfig::default())?;
     watcher.watch(&root, RecursiveMode::Recursive)?;
     for res in watch_rx {
         match res {
             Ok(event) => {
-                if event_only_ignored(&root, &event) {
+                if event_only_ignored(&filter, &event) {
                     continue;
                 }
                 let _ = tx.send(());
@@ -325,12 +334,12 @@ fn watch_project(root: PathBuf, tx: mpsc::UnboundedSender<()>) -> notify::Result
     Ok(())
 }
 
-fn event_only_ignored(root: &Path, event: &Event) -> bool {
+fn event_only_ignored(filter: &PathFilter, event: &Event) -> bool {
     !event.paths.is_empty()
         && event
             .paths
             .iter()
-            .all(|path| path_in_skipped_dir(path, root))
+            .all(|path| filter.is_ignored_path(path, None))
 }
 
 fn build_snippet(symbol: &SymbolRecord, contents: &str, context: usize) -> String {

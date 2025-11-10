@@ -1,6 +1,7 @@
 use crate::index::classify::classify_categories;
 use crate::index::classify::layer_from_path;
 use crate::index::classify::module_path;
+use crate::index::filter::PathFilter;
 use crate::index::language::detect_language;
 use crate::index::language::extract_symbols;
 use crate::index::model::FileEntry;
@@ -17,6 +18,7 @@ use std::collections::HashMap;
 use std::collections::HashSet;
 use std::fs;
 use std::path::Path;
+use std::sync::Arc;
 use tracing::warn;
 
 use regex::Regex;
@@ -27,20 +29,33 @@ const MAX_TOKENS_PER_FILE: usize = 256;
 pub struct IndexBuilder<'a> {
     root: &'a Path,
     recent: HashSet<String>,
+    filter: Arc<PathFilter>,
 }
 
 impl<'a> IndexBuilder<'a> {
-    pub fn new(root: &'a Path, recent: HashSet<String>) -> Self {
-        Self { root, recent }
+    pub fn new(root: &'a Path, recent: HashSet<String>, filter: Arc<PathFilter>) -> Self {
+        Self {
+            root,
+            recent,
+            filter,
+        }
     }
 
     pub fn build(&self) -> Result<IndexSnapshot> {
         let mut snapshot = IndexSnapshot::default();
         let mut token_map: HashMap<String, HashSet<String>> = HashMap::new();
+        let filter = self.filter.clone();
         let walker = WalkBuilder::new(self.root)
             .hidden(false)
             .follow_links(true)
             .standard_filters(true)
+            .filter_entry(move |entry| {
+                let is_dir_hint = entry.file_type().map(|ft| ft.is_dir()).or_else(|| {
+                    // Entry may point to a deleted path; treat as file.
+                    Some(entry.path().is_dir())
+                });
+                !filter.is_ignored_path(entry.path(), is_dir_hint)
+            })
             .build();
 
         for entry in walker {
@@ -58,7 +73,7 @@ impl<'a> IndexBuilder<'a> {
                 Some(r) => r,
                 None => continue,
             };
-            if should_skip(&rel) {
+            if self.filter.is_ignored_rel(&rel) {
                 continue;
             }
             match self.process_file(entry.path(), &rel) {
@@ -151,10 +166,6 @@ impl<'a> IndexBuilder<'a> {
 fn relative_path(root: &Path, path: &Path) -> Option<String> {
     let rel = path.strip_prefix(root).ok()?;
     Some(rel.to_string_lossy().replace('\\', "/"))
-}
-
-fn should_skip(rel: &str) -> bool {
-    rel.contains("/target/") || rel.contains("/.git/") || rel.contains("/node_modules/")
 }
 
 fn update_token_map(map: &mut HashMap<String, HashSet<String>>, path: &str, tokens: Vec<String>) {
