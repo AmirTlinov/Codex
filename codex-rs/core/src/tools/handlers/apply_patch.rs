@@ -4,7 +4,6 @@ use crate::apply_patch;
 use crate::apply_patch::InternalApplyPatchInvocation;
 use crate::apply_patch::convert_apply_patch_to_protocol;
 use crate::client_common::tools::FreeformTool;
-use crate::client_common::tools::FreeformToolFormat;
 use crate::client_common::tools::ResponsesApiTool;
 use crate::client_common::tools::ToolSpec;
 use crate::function_tool::FunctionCallError;
@@ -210,18 +209,15 @@ pub enum ApplyPatchToolType {
 /// https://platform.openai.com/docs/guides/function-calling#custom-tools
 pub(crate) fn create_apply_patch_freeform_tool() -> ToolSpec {
     let description = format!(
-        "{}\n\n{}",
+        "{}\n\n{}\n\nGrammar:\n{}",
         "Use the `apply_patch` tool to edit files. This is a FREEFORM tool, so do not wrap the patch in JSON.",
-        APPLY_PATCH_FREEFORM_USAGE.trim()
+        APPLY_PATCH_FREEFORM_USAGE.trim(),
+        APPLY_PATCH_LARK_GRAMMAR.trim()
     );
     ToolSpec::Freeform(FreeformTool {
         name: "apply_patch".to_string(),
         description,
-        format: Some(FreeformToolFormat {
-            r#type: "grammar".to_string(),
-            syntax: Some("lark".to_string()),
-            definition: APPLY_PATCH_LARK_GRAMMAR.to_string(),
-        }),
+        format: None,
     })
 }
 
