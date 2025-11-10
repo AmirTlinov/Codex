@@ -57,15 +57,15 @@ fn extract_rust(lines: &[&str]) -> Vec<SymbolCandidate> {
     static FN_REGEX: Lazy<Regex> =
         Lazy::new(|| compile_regex(r"^\s*(?:pub(?:\([^)]*\))?\s+)?fn\s+([A-Za-z0-9_]+)"));
     static STRUCT_REGEX: Lazy<Regex> =
-        Lazy::new(|| compile_regex(r"^\s*(?:pub\s+)?struct\s+([A-Za-z0-9_]+)"));
+        Lazy::new(|| compile_regex(r"^\s*(?:pub(?:\([^)]*\))?\s+)?struct\s+([A-Za-z0-9_]+)"));
     static ENUM_REGEX: Lazy<Regex> =
-        Lazy::new(|| compile_regex(r"^\s*(?:pub\s+)?enum\s+([A-Za-z0-9_]+)"));
+        Lazy::new(|| compile_regex(r"^\s*(?:pub(?:\([^)]*\))?\s+)?enum\s+([A-Za-z0-9_]+)"));
     static TRAIT_REGEX: Lazy<Regex> =
-        Lazy::new(|| compile_regex(r"^\s*(?:pub\s+)?trait\s+([A-Za-z0-9_]+)"));
+        Lazy::new(|| compile_regex(r"^\s*(?:pub(?:\([^)]*\))?\s+)?trait\s+([A-Za-z0-9_]+)"));
     static MOD_REGEX: Lazy<Regex> =
-        Lazy::new(|| compile_regex(r"^\s*(?:pub\s+)?mod\s+([A-Za-z0-9_]+)"));
+        Lazy::new(|| compile_regex(r"^\s*(?:pub(?:\([^)]*\))?\s+)?mod\s+([A-Za-z0-9_]+)"));
     static CONST_REGEX: Lazy<Regex> =
-        Lazy::new(|| compile_regex(r"^\s*(?:pub\s+)?const\s+([A-Za-z0-9_]+)"));
+        Lazy::new(|| compile_regex(r"^\s*(?:pub(?:\([^)]*\))?\s+)?const\s+([A-Za-z0-9_]+)"));
 
     let mut symbols = Vec::new();
     for (idx, line) in lines.iter().enumerate() {

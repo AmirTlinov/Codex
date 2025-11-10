@@ -11,6 +11,7 @@ mod storage;
 
 use crate::index::filter::PathFilter;
 use crate::project::ProjectProfile;
+use crate::proto::ErrorPayload;
 use crate::proto::IndexState;
 use crate::proto::IndexStatus;
 use crate::proto::OpenRequest;
@@ -72,6 +73,9 @@ struct IndexStatusInternal {
 }
 
 const RESET_NOTICE: &str = "Index reset after detecting corruption; rebuilding from scratch";
+const OPEN_CONTEXT_LINES: u32 = 40;
+const OPEN_MAX_BYTES: usize = 16 * 1024;
+const SNIPPET_MAX_BYTES: usize = 8 * 1024;
 
 impl IndexCoordinator {
     pub async fn new(profile: ProjectProfile) -> Result<Self> {
@@ -157,23 +161,55 @@ impl IndexCoordinator {
             self.inner.cache.store(id, payload)?;
         }
 
+        let mut error = None;
+        if outcome.hits.is_empty() {
+            if !request.filters.languages.is_empty() {
+                let langs = request
+                    .filters
+                    .languages
+                    .iter()
+                    .map(|lang| format!("{lang:?}"))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                error = Some(ErrorPayload {
+                    code: crate::proto::ErrorCode::NotFound,
+                    message: format!("No symbols match languages: {langs}"),
+                });
+            } else if request.filters.recent_only {
+                error = Some(ErrorPayload {
+                    code: crate::proto::ErrorCode::NotFound,
+                    message: "No recently modified symbols match this query".to_string(),
+                });
+            }
+        }
+
         Ok(SearchResponse {
             query_id,
             hits: outcome.hits,
             index: self.current_status().await,
             stats: Some(outcome.stats),
-            error: None,
+            error,
         })
     }
 
     pub async fn handle_open(&self, request: OpenRequest) -> Result<OpenResponse> {
         let (symbol, contents) = self.symbol_with_contents(&request.id).await?;
+        let (body, display_start, truncated) = slice_for_range(
+            &contents,
+            symbol.range.start,
+            symbol.range.end,
+            OPEN_CONTEXT_LINES,
+            OPEN_CONTEXT_LINES,
+            OPEN_MAX_BYTES,
+        );
         Ok(OpenResponse {
             id: symbol.id.clone(),
             path: symbol.path.clone(),
             language: symbol.language.clone(),
             range: symbol.range.clone(),
-            contents,
+            contents: body,
+            display_start,
+            truncated,
             index: self.current_status().await,
             error: None,
         })
@@ -181,13 +217,23 @@ impl IndexCoordinator {
 
     pub async fn handle_snippet(&self, request: SnippetRequest) -> Result<SnippetResponse> {
         let (symbol, contents) = self.symbol_with_contents(&request.id).await?;
-        let snippet = build_snippet(&symbol, &contents, request.context);
+        let context_lines = request.context as u32;
+        let (snippet, display_start, truncated) = slice_for_range(
+            &contents,
+            symbol.range.start,
+            symbol.range.end,
+            context_lines,
+            context_lines,
+            SNIPPET_MAX_BYTES,
+        );
         Ok(SnippetResponse {
             id: symbol.id.clone(),
             path: symbol.path.clone(),
             language: symbol.language.clone(),
             range: symbol.range.clone(),
             snippet,
+            display_start,
+            truncated,
             index: self.current_status().await,
             error: None,
         })
@@ -342,14 +388,41 @@ fn event_only_ignored(filter: &PathFilter, event: &Event) -> bool {
             .all(|path| filter.is_ignored_path(path, None))
 }
 
-fn build_snippet(symbol: &SymbolRecord, contents: &str, context: usize) -> String {
+fn slice_for_range(
+    contents: &str,
+    start: u32,
+    end: u32,
+    context_before: u32,
+    context_after: u32,
+    max_bytes: usize,
+) -> (String, u32, bool) {
     let lines: Vec<&str> = contents.lines().collect();
     if lines.is_empty() {
-        return String::new();
+        return (String::new(), 1, false);
     }
-    let start_line = symbol.range.start.saturating_sub(context as u32).max(1);
-    let end_line = (symbol.range.end + context as u32).min(lines.len() as u32);
-    let start_idx = (start_line - 1) as usize;
-    let end_idx = end_line as usize;
-    lines[start_idx..end_idx].join("\n")
+    let total_lines = lines.len() as u32;
+    let normalized_start = start.clamp(1, total_lines);
+    let normalized_end = end.max(normalized_start).min(total_lines);
+    let slice_start = normalized_start.saturating_sub(context_before).max(1);
+    let slice_end = (normalized_end + context_after).min(total_lines);
+    let segment = &lines[(slice_start - 1) as usize..slice_end as usize];
+    let (body, truncated) = collect_lines(segment, max_bytes);
+    (body, slice_start, truncated)
+}
+
+fn collect_lines(lines: &[&str], max_bytes: usize) -> (String, bool) {
+    let mut buf = String::new();
+    let mut truncated = false;
+    for (idx, line) in lines.iter().enumerate() {
+        let separator = if idx == 0 { 0 } else { 1 };
+        if buf.len() + separator + line.len() > max_bytes {
+            truncated = true;
+            break;
+        }
+        if idx > 0 {
+            buf.push('\n');
+        }
+        buf.push_str(line);
+    }
+    (buf, truncated)
 }

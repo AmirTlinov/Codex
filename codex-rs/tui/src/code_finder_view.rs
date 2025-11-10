@@ -172,11 +172,20 @@ fn render_open_outcome(resp: &OpenResponse) -> Vec<String> {
         resp.range.start + 1,
         resp.range.end + 1
     ));
+    let displayed_lines = resp.contents.lines().count() as u32;
+    if displayed_lines > 0 {
+        let end = resp.display_start + displayed_lines.saturating_sub(1);
+        lines.push(format!(
+            "displaying lines {}-{}",
+            resp.display_start,
+            end.max(resp.display_start)
+        ));
+    }
     lines.push(format_index_status(&resp.index));
     if let Some(error) = &resp.error {
         lines.push(format_error_line(error));
     }
-    lines.extend(render_snippet_body(&resp.contents));
+    lines.extend(render_snippet_body(&resp.contents, resp.truncated));
     lines.extend(render_index_counters(&resp.index));
     lines
 }
@@ -191,16 +200,24 @@ fn render_snippet_outcome(resp: &SnippetResponse) -> Vec<String> {
         resp.range.end + 1,
         snippet_line_count
     ));
+    if snippet_line_count > 0 {
+        let end = resp.display_start + snippet_line_count.saturating_sub(1) as u32;
+        lines.push(format!(
+            "displaying lines {}-{}",
+            resp.display_start,
+            end.max(resp.display_start)
+        ));
+    }
     lines.push(format_index_status(&resp.index));
     if let Some(error) = &resp.error {
         lines.push(format_error_line(error));
     }
-    lines.extend(render_snippet_body(&resp.snippet));
+    lines.extend(render_snippet_body(&resp.snippet, resp.truncated));
     lines.extend(render_index_counters(&resp.index));
     lines
 }
 
-fn render_snippet_body(body: &str) -> Vec<String> {
+fn render_snippet_body(body: &str, truncated: bool) -> Vec<String> {
     if body.trim().is_empty() {
         return vec!["(empty snippet)".to_string()];
     }
@@ -221,6 +238,9 @@ fn render_snippet_body(body: &str) -> Vec<String> {
             ));
             break;
         }
+    }
+    if truncated {
+        lines.push("  … output truncated".to_string());
     }
     lines
 }

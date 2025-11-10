@@ -240,6 +240,8 @@ pub struct OpenResponse {
     pub language: Language,
     pub range: Range,
     pub contents: String,
+    pub display_start: u32,
+    pub truncated: bool,
     pub index: IndexStatus,
     pub error: Option<ErrorPayload>,
 }
@@ -259,6 +261,8 @@ pub struct SnippetResponse {
     pub language: Language,
     pub range: Range,
     pub snippet: String,
+    pub display_start: u32,
+    pub truncated: bool,
     pub index: IndexStatus,
     pub error: Option<ErrorPayload>,
 }

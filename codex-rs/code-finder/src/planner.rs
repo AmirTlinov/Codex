@@ -92,6 +92,8 @@ pub fn plan_search_request(
         }
     }
 
+    let has_explicit_profile = !args.profiles.is_empty();
+
     if !args.categories.is_empty() {
         for cat in args.categories.drain(..) {
             let parsed = parse_category(&cat)?;
@@ -138,6 +140,14 @@ pub fn plan_search_request(
         &mut refs_limit,
     );
 
+    validate_query_requirements(
+        args.query.as_deref(),
+        filters.symbol_exact.is_some(),
+        !filters.path_globs.is_empty(),
+        !filters.file_substrings.is_empty(),
+        has_explicit_profile || !filters.categories.is_empty(),
+    )?;
+
     let refine = match args.refine {
         Some(value) => Some(parse_query_id(&value)?),
         None => None,
@@ -157,6 +167,37 @@ pub fn plan_search_request(
     };
 
     Ok(request)
+}
+
+fn validate_query_requirements(
+    query: Option<&str>,
+    has_symbol_exact: bool,
+    has_path_globs: bool,
+    has_file_substrings: bool,
+    has_category_filter: bool,
+) -> Result<(), SearchPlannerError> {
+    let query_is_empty = query.map(|text| text.trim().is_empty()).unwrap_or(true);
+
+    if query_is_empty
+        && !has_symbol_exact
+        && !has_path_globs
+        && !has_file_substrings
+        && !has_category_filter
+    {
+        return Err(SearchPlannerError::new(
+            "query text or filters (symbol_exact, path_globs, file_substrings) are required",
+        ));
+    }
+
+    if let Some(text) = query
+        && text.trim().is_empty()
+    {
+        return Err(SearchPlannerError::new(
+            "query must contain non-whitespace characters",
+        ));
+    }
+
+    Ok(())
 }
 
 fn parse_symbol_kind(raw: &str) -> Result<SymbolKind, SearchPlannerError> {

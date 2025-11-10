@@ -101,7 +101,7 @@ pub fn run_search(
         cache_hit,
     };
 
-    let cache_entry = if !ordered_ids.is_empty() {
+    let cache_entry = {
         let query_id = Uuid::new_v4();
         Some((
             query_id,
@@ -111,8 +111,6 @@ pub fn run_search(
                 filters: request.filters.clone(),
             },
         ))
-    } else {
-        None
     };
 
     Ok(SearchComputation {
@@ -171,9 +169,9 @@ fn profile_score(symbol: &SymbolRecord, profiles: &[SearchProfile], query: Optio
                             .path
                             .to_ascii_lowercase()
                             .contains(&q.to_ascii_lowercase()))
-                    {
-                        bonus += 40.0;
-                    }
+                {
+                    bonus += 40.0;
+                }
             }
             SearchProfile::Broad => {
                 bonus += 5.0;
