@@ -320,7 +320,7 @@ fn make_chatwidget_manual() -> (
         feedback: codex_feedback::CodexFeedback::new(),
         current_rollout_path: None,
         code_finder_last_state: None,
-        code_finder_call_ids: HashSet::new(),
+        code_finder_calls: HashMap::new(),
     };
     (widget, rx, op_rx)
 }

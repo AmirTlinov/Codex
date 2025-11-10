@@ -40,6 +40,7 @@ mod chatwidget;
 mod cli;
 mod clipboard_paste;
 mod code_finder_bootstrap;
+mod code_finder_view;
 mod color;
 pub mod custom_terminal;
 mod diff_render;
@@ -82,7 +83,7 @@ mod wrapping;
 pub mod test_backend;
 
 #[cfg(any(test, feature = "vt100-tests"))]
-pub use history_cell::test_support as history_cell_test_support;
+pub use code_finder_view::test_support as history_cell_test_support;
 
 use crate::onboarding::TrustDirectorySelection;
 use crate::onboarding::WSL_INSTRUCTIONS;

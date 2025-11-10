@@ -1,8 +1,8 @@
 use std::collections::HashMap;
-use std::collections::HashSet;
 use std::collections::VecDeque;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::Instant;
 
 use codex_core::config::Config;
 use codex_core::config::types::Notifications;
@@ -81,6 +81,8 @@ use crate::bottom_pane::custom_prompt_view::CustomPromptView;
 use crate::bottom_pane::popup_consts::standard_popup_hint_line;
 use crate::clipboard_paste::paste_image_to_temp_png;
 use crate::code_finder_bootstrap;
+use crate::code_finder_view::summarize_code_finder_request;
+use crate::code_finder_view::summarize_code_finder_response;
 use crate::diff_render::display_path_for;
 use crate::exec_cell::CommandOutput;
 use crate::exec_cell::ExecCell;
@@ -88,10 +90,8 @@ use crate::exec_cell::new_active_exec_command;
 use crate::get_git_diff::get_git_diff;
 use crate::history_cell;
 use crate::history_cell::AgentMessageCell;
-use crate::history_cell::CodeFinderCallCell;
 use crate::history_cell::HistoryCell;
 use crate::history_cell::McpToolCallCell;
-use crate::history_cell::new_code_finder_call;
 use crate::markdown::append_markdown;
 #[cfg(target_os = "windows")]
 use crate::onboarding::WSL_INSTRUCTIONS;
@@ -138,6 +138,12 @@ struct RunningCommand {
     command: Vec<String>,
     parsed_cmd: Vec<ParsedCommand>,
     is_user_shell_command: bool,
+}
+
+struct CodeFinderInFlight {
+    command: Vec<String>,
+    parsed: Vec<ParsedCommand>,
+    started_at: Instant,
 }
 
 const RATE_LIMIT_WARNING_THRESHOLDS: [f64; 3] = [75.0, 90.0, 95.0];
@@ -292,7 +298,7 @@ pub(crate) struct ChatWidget {
     // Whether to add a final message separator after the last message
     needs_final_message_separator: bool,
     code_finder_last_state: Option<IndexState>,
-    code_finder_call_ids: HashSet<String>,
+    code_finder_calls: HashMap<String, CodeFinderInFlight>,
 
     last_rendered_width: std::cell::Cell<Option<usize>>,
     // Feedback sink for /feedback
@@ -1090,7 +1096,7 @@ impl ChatWidget {
             is_review_mode: false,
             needs_final_message_separator: false,
             code_finder_last_state: None,
-            code_finder_call_ids: HashSet::new(),
+            code_finder_calls: HashMap::new(),
             last_rendered_width: std::cell::Cell::new(None),
             feedback,
             current_rollout_path: None,
@@ -1159,7 +1165,7 @@ impl ChatWidget {
             is_review_mode: false,
             needs_final_message_separator: false,
             code_finder_last_state: None,
-            code_finder_call_ids: HashSet::new(),
+            code_finder_calls: HashMap::new(),
             last_rendered_width: std::cell::Cell::new(None),
             feedback,
             current_rollout_path: None,
@@ -1694,40 +1700,93 @@ impl ChatWidget {
 
     fn on_code_finder_tool_call(&mut self, call_id: String, input: String) {
         self.flush_answer_stream_with_separator();
-        self.flush_active_cell();
-        self.code_finder_call_ids.insert(call_id.clone());
-        self.active_cell = Some(Box::new(new_code_finder_call(call_id, input)));
+        let summary = summarize_code_finder_request(&input);
+
+        let mut joined = false;
+        if let Some(cell) = self
+            .active_cell
+            .as_mut()
+            .and_then(|c| c.as_any_mut().downcast_mut::<ExecCell>())
+            && let Some(new_exec) = cell.with_added_call(
+                call_id.clone(),
+                summary.command.clone(),
+                summary.parsed.clone(),
+                false,
+            )
+        {
+            *cell = new_exec;
+            joined = true;
+        }
+
+        if !joined {
+            self.flush_active_cell();
+            self.active_cell = Some(Box::new(new_active_exec_command(
+                call_id.clone(),
+                summary.command.clone(),
+                summary.parsed.clone(),
+                false,
+            )));
+        }
+
+        self.code_finder_calls.insert(
+            call_id,
+            CodeFinderInFlight {
+                command: summary.command,
+                parsed: summary.parsed,
+                started_at: Instant::now(),
+            },
+        );
         self.request_redraw();
     }
 
     fn on_code_finder_tool_call_output(&mut self, call_id: String, output: String) {
         self.flush_answer_stream_with_separator();
-
-        if !self.code_finder_call_ids.remove(&call_id) {
+        let Some(state) = self.code_finder_calls.remove(&call_id) else {
             return;
-        }
+        };
 
-        let mut handled = false;
-        let mut remaining_output = Some(output);
+        let result = summarize_code_finder_response(&output);
+        let aggregated = if result.lines.is_empty() {
+            String::new()
+        } else {
+            result.lines.join("\n")
+        };
+        let exit_code = if result.success { 0 } else { 1 };
+        let duration = state.started_at.elapsed();
+
         if let Some(cell) = self
             .active_cell
             .as_mut()
-            .and_then(|cell| cell.as_any_mut().downcast_mut::<CodeFinderCallCell>())
-            && cell.call_id() == call_id
+            .and_then(|cell| cell.as_any_mut().downcast_mut::<ExecCell>())
         {
-            if let Some(value) = remaining_output.take() {
-                cell.complete(value);
+            cell.complete_call(
+                &call_id,
+                CommandOutput {
+                    exit_code,
+                    aggregated_output: aggregated.clone(),
+                    formatted_output: aggregated,
+                },
+                duration,
+            );
+            if cell.should_flush() {
+                self.flush_active_cell();
+            } else {
+                self.request_redraw();
             }
-            handled = true;
+            return;
         }
 
-        if !handled && let Some(value) = remaining_output.take() {
-            let mut cell = new_code_finder_call(call_id, String::new());
-            cell.complete(value);
-            self.active_cell = Some(Box::new(cell));
-        }
-
-        self.flush_active_cell();
+        let mut exec = new_active_exec_command(call_id.clone(), state.command, state.parsed, false);
+        exec.complete_call(
+            &call_id,
+            CommandOutput {
+                exit_code,
+                aggregated_output: aggregated.clone(),
+                formatted_output: aggregated,
+            },
+            duration,
+        );
+        self.add_boxed_history(Box::new(exec));
         self.request_redraw();
     }
 

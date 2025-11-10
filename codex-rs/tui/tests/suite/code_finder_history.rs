@@ -19,7 +19,7 @@ fn render_history(lines: Vec<Line<'static>>) -> String {
 }
 
 #[test]
-fn search_request_renders_filters() {
+fn search_request_renders_summary() {
     const SEARCH_REQUEST: &str = r#"*** Begin Search
 query: SessionID
 kinds: function
@@ -36,20 +36,16 @@ limit: 3
     ));
 
     assert!(
+        screen.contains("• Explored") || screen.contains("• Exploring"),
+        "missing explored header:\n{screen}"
+    );
+    assert!(
         screen.contains("Search SessionID (rust)"),
         "header missing summary:\n{screen}"
     );
     assert!(
-        screen.contains("filters:"),
-        "filters line missing:\n{screen}"
-    );
-    assert!(
-        screen.contains("kind=function"),
-        "kinds filter missing:\n{screen}"
-    );
-    assert!(
-        screen.contains("refs_limit=1"),
-        "refs_limit filter missing:\n{screen}"
+        screen.contains("SessionID (rust)"),
+        "summary missing query/language:\n{screen}"
     );
 }
 
@@ -105,6 +101,10 @@ limit: 3
         WIDTH,
     ));
 
+    assert!(
+        screen.contains("• Explored") || screen.contains("• Exploring"),
+        "missing explored header:\n{screen}"
+    );
     assert!(screen.contains("hits: 1"), "missing hit summary:\n{screen}");
     assert!(
         screen.contains("index: Ready"),
@@ -157,11 +157,15 @@ wait_for_index: false
     ));
 
     assert!(
+        screen.contains("• Explored"),
+        "missing explored header:\n{screen}"
+    );
+    assert!(
         screen.contains("index: Building"),
         "missing building status:\n{screen}"
     );
     assert!(
-        screen.contains("error: Index is still building (INDEX_NOT_READY)"),
+        screen.contains("Index is still building"),
         "error line missing:\n{screen}"
     );
 }
@@ -169,11 +173,16 @@ wait_for_index: false
 #[test]
 fn malformed_request_shows_parse_error() {
     const BAD_REQUEST: &str = r#"{"command":"*** Begin Search\nquery: oops\n*** End Search"}"#;
+    const ERROR_OUTPUT: &str = "code_finder block must start with *** Begin <Action>";
 
-    let screen = render_history(code_finder_history_lines_for_test(BAD_REQUEST, None, WIDTH));
+    let screen = render_history(code_finder_history_lines_for_test(
+        BAD_REQUEST,
+        Some(ERROR_OUTPUT),
+        WIDTH,
+    ));
 
     assert!(
-        screen.contains("Failed to parse request"),
+        screen.contains("code_finder block must start"),
         "parse error not surfaced:\n{screen}"
     );
 }
