@@ -22,6 +22,7 @@ use crate::tools::sandboxing::ToolCtx;
 use crate::tools::spec::ApplyPatchToolArgs;
 use crate::tools::spec::JsonSchema;
 use async_trait::async_trait;
+use codex_apply_patch::APPLY_PATCH_TOOL_INSTRUCTIONS;
 use serde::Deserialize;
 use serde::Serialize;
 
@@ -163,9 +164,16 @@ pub enum ApplyPatchToolType {
 /// Returns a custom tool that can be used to edit files. Well-suited for GPT-5 models
 /// https://platform.openai.com/docs/guides/function-calling#custom-tools
 pub(crate) fn create_apply_patch_freeform_tool() -> ToolSpec {
+    let description = format!(
+        "Use `apply_patch` to edit files. Provide the raw patch exactly as described below:
+
+{}",
+        APPLY_PATCH_TOOL_INSTRUCTIONS,
+    );
+
     ToolSpec::Freeform(FreeformTool {
         name: "apply_patch".to_string(),
-        description: "Use `apply_patch` to edit files by streaming a complete *** Begin Patch / *** End Patch block. Mix *** Add/Delete/Update (with optional *** Move to) and symbol-aware directives (Insert/After/Replace Symbol). Every new line starts with '+', paths stay workspace-relative, and the raw patch text must be sent verbatim (no JSON wrapper).".to_string(),
+        description,
         format: FreeformToolFormat {
             r#type: "grammar".to_string(),
             syntax: "lark".to_string(),
@@ -184,48 +192,16 @@ pub(crate) fn create_apply_patch_json_tool() -> ToolSpec {
         },
     );
 
+    let description = format!(
+        "Use `apply_patch` to edit files. Provide the raw patch exactly as described below:
+
+{}",
+        APPLY_PATCH_TOOL_INSTRUCTIONS,
+    );
+
     ToolSpec::Function(ResponsesApiTool {
         name: "apply_patch".to_string(),
-        description: r#"Use `apply_patch` to edit files by streaming a complete *** Begin Patch / *** End Patch block.
-
-You can mix the following operations (each prefixed by a header):
-• `*** Add File: <path>` – create or replace a file (each added line starts with `+`).
-• `*** Delete File: <path>` – remove an existing file.
-• `*** Update File: <path>` – apply diff hunks to an existing file; pair with `*** Move to: <new path>` to rename.
-• Symbol-aware edits:
-  - `*** Insert Before Symbol: <path::SymbolPath>`
-  - `*** Insert After Symbol: <path::SymbolPath>`
-  - `*** Replace Symbol Body: <path::SymbolPath>`
-  Symbol paths use `::` separators (e.g., `src/lib.rs::Greeter::build`).
-
-Each Update/Symbol section must include one or more `@@` hunks with ~3 lines of context; add extra `@@` headers (class/function) when needed to disambiguate repeated code. Lines start with `+` (added), `-` (removed), or space (context). Paths are workspace-relative only.
-
-Examples:
-
-// Add + Update + rename
-*** Begin Patch
-*** Add File: docs/hello.md
-+Hello world!
-*** Update File: src/lib.rs
-*** Move to: src/main.rs
-@@ fn greet(name: &str)
--println!("Hi");
-+println!("Hello, {name}!");
-*** End Patch
-
-// Symbol edit (insert and replace)
-*** Begin Patch
-*** Insert After Symbol: src/main.rs::App::run
-+println!("starting");
-*** Replace Symbol Body: src/lib.rs::Greeter::make_message
-+{
-+    format!("Hi, {name}!")
-+}
-*** End Patch
-
-On failure the CLI prints diagnostics plus an amendment-only block; rerun `apply_patch` (or `apply_patch amend`) with those hunks. Successful runs emit both a human summary and a trailing JSON line `{ "schema": "apply_patch/v2", "report": { ... } }` describing operations, formatting tasks, diagnostics, and artifacts.
-"#
-            .to_string(),
+        description,
         strict: false,
         parameters: JsonSchema::Object {
             properties,
