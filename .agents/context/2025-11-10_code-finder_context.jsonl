@@ -8,3 +8,5 @@
 {"source":"agent","summary":["Added serde and uuid workspace deps required by code finder CLI commands"],"citation":"codex-rs/cli/Cargo.toml"}
 {"source":"agent","summary":["Documented Code Finder commands in README and getting-started guide plus aligned CLI synopsis"],"citation":"README.md"}
 {"source":"agent","summary":["Created CLI unit tests covering filter construction for codex nav variants"],"citation":"codex-rs/cli/src/code_nav.rs"}
+{"source":"agent","summary":["Added code_finder tool handler wired to codex-code-finder daemon so GPT-5 Codex can run search/open/snippet actions via tool calls"],"citation":"codex-rs/core/src/tools/handlers/code_finder.rs"}
+{"source":"agent","summary":["Registered code_finder tool for gpt-5-codex in tool registry/model families and documented schema in tool spec"],"citation":"codex-rs/core/src/tools/spec.rs"}

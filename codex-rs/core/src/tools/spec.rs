@@ -7,6 +7,7 @@ use crate::tools::handlers::PLAN_TOOL;
 use crate::tools::handlers::apply_patch::ApplyPatchToolType;
 use crate::tools::handlers::apply_patch::create_apply_patch_freeform_tool;
 use crate::tools::handlers::apply_patch::create_apply_patch_json_tool;
+use crate::tools::handlers::code_finder::CodeFinderHandler;
 use crate::tools::registry::ToolRegistryBuilder;
 use serde::Deserialize;
 use serde::Serialize;
@@ -223,6 +224,142 @@ fn create_write_stdin_tool() -> ToolSpec {
         parameters: JsonSchema::Object {
             properties,
             required: Some(vec!["session_id".to_string()]),
+            additional_properties: Some(false.into()),
+        },
+    })
+}
+
+fn array_of_strings(description: Option<String>) -> JsonSchema {
+    JsonSchema::Array {
+        items: Box::new(JsonSchema::String { description: None }),
+        description,
+    }
+}
+
+fn create_code_finder_tool() -> ToolSpec {
+    let mut properties = BTreeMap::new();
+    properties.insert(
+        "action".to_string(),
+        JsonSchema::String {
+            description: Some("Operation to run: search, open, or snippet.".to_string()),
+        },
+    );
+    properties.insert(
+        "query".to_string(),
+        JsonSchema::String {
+            description: Some("Free-form query string for search.".to_string()),
+        },
+    );
+    properties.insert(
+        "limit".to_string(),
+        JsonSchema::Number {
+            description: Some("Maximum number of hits to return (default 40).".to_string()),
+        },
+    );
+    properties.insert(
+        "kinds".to_string(),
+        array_of_strings(Some(
+            "Symbol kinds: function, struct, test, ...".to_string(),
+        )),
+    );
+    properties.insert(
+        "languages".to_string(),
+        array_of_strings(Some("Languages: rust, ts, py, go, ...".to_string())),
+    );
+    properties.insert(
+        "categories".to_string(),
+        array_of_strings(Some(
+            "File categories: source, tests, docs, deps.".to_string(),
+        )),
+    );
+    properties.insert(
+        "path_globs".to_string(),
+        array_of_strings(Some("Restrict matches to globbed paths.".to_string())),
+    );
+    properties.insert(
+        "file_substrings".to_string(),
+        array_of_strings(Some("Require substrings in file paths.".to_string())),
+    );
+    properties.insert(
+        "symbol_exact".to_string(),
+        JsonSchema::String {
+            description: Some("Exact symbol identifier to match.".to_string()),
+        },
+    );
+    properties.insert(
+        "recent_only".to_string(),
+        JsonSchema::Boolean {
+            description: Some("Only include files with pending git changes.".to_string()),
+        },
+    );
+    properties.insert(
+        "only_tests".to_string(),
+        JsonSchema::Boolean {
+            description: Some("Shortcut to filter to test files.".to_string()),
+        },
+    );
+    properties.insert(
+        "only_docs".to_string(),
+        JsonSchema::Boolean {
+            description: Some("Shortcut to filter to docs.".to_string()),
+        },
+    );
+    properties.insert(
+        "only_deps".to_string(),
+        JsonSchema::Boolean {
+            description: Some("Shortcut to filter dependency manifests.".to_string()),
+        },
+    );
+    properties.insert(
+        "with_refs".to_string(),
+        JsonSchema::Boolean {
+            description: Some("Include code references for each hit.".to_string()),
+        },
+    );
+    properties.insert(
+        "refs_limit".to_string(),
+        JsonSchema::Number {
+            description: Some("Maximum references to include (default 12).".to_string()),
+        },
+    );
+    properties.insert(
+        "help_symbol".to_string(),
+        JsonSchema::String {
+            description: Some("Return module/layer/docs for this symbol.".to_string()),
+        },
+    );
+    properties.insert(
+        "refine".to_string(),
+        JsonSchema::String {
+            description: Some("Reuse a previous query_id for refinement.".to_string()),
+        },
+    );
+    properties.insert(
+        "wait_for_index".to_string(),
+        JsonSchema::Boolean {
+            description: Some("Skip waiting for background indexing when false.".to_string()),
+        },
+    );
+    properties.insert(
+        "id".to_string(),
+        JsonSchema::String {
+            description: Some("Jump id returned by a previous search.".to_string()),
+        },
+    );
+    properties.insert(
+        "context".to_string(),
+        JsonSchema::Number {
+            description: Some("Context lines for snippets (default 8).".to_string()),
+        },
+    );
+
+    ToolSpec::Function(ResponsesApiTool {
+        name: "code_finder".to_string(),
+        description: "Interact with the Code Finder daemon: search symbols, open full files, or grab snippets using deterministic JSON results.".to_string(),
+        strict: false,
+        parameters: JsonSchema::Object {
+            properties,
+            required: Some(vec!["action".to_string()]),
             additional_properties: Some(false.into()),
         },
     })
@@ -879,6 +1016,7 @@ pub(crate) fn build_specs(
     let view_image_handler = Arc::new(ViewImageHandler);
     let mcp_handler = Arc::new(McpHandler);
     let mcp_resource_handler = Arc::new(McpResourceHandler);
+    let code_finder_handler = Arc::new(CodeFinderHandler);
 
     match &config.shell_type {
         ConfigShellToolType::Default => {
@@ -920,6 +1058,14 @@ pub(crate) fn build_specs(
             }
         }
         builder.register_handler("apply_patch", apply_patch_handler);
+    }
+
+    if config
+        .experimental_supported_tools
+        .contains(&"code_finder".to_string())
+    {
+        builder.push_spec_with_parallel_support(create_code_finder_tool(), true);
+        builder.register_handler("code_finder", code_finder_handler);
     }
 
     if config
@@ -1122,6 +1268,7 @@ mod tests {
             create_read_mcp_resource_tool(),
             PLAN_TOOL.clone(),
             create_apply_patch_freeform_tool(),
+            create_code_finder_tool(),
             ToolSpec::WebSearch {},
             create_view_image_tool(),
         ] {
@@ -1167,6 +1314,7 @@ mod tests {
                 "read_mcp_resource",
                 "update_plan",
                 "apply_patch",
+                "code_finder",
                 "view_image",
             ],
         );
@@ -1187,6 +1335,7 @@ mod tests {
                 "read_mcp_resource",
                 "update_plan",
                 "apply_patch",
+                "code_finder",
                 "web_search",
                 "view_image",
             ],
