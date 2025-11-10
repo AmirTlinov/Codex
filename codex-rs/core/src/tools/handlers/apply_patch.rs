@@ -165,7 +165,7 @@ pub enum ApplyPatchToolType {
 pub(crate) fn create_apply_patch_freeform_tool() -> ToolSpec {
     ToolSpec::Freeform(FreeformTool {
         name: "apply_patch".to_string(),
-        description: "Use `apply_patch` to edit files via *** Begin Patch / *** End Patch blocks. Declare each section with *** Add File, *** Delete File, *** Update File (optionally followed by *** Move to) or the symbol directives (Insert/After/Replace Symbol). All new lines start with '+', paths are workspace-relative, and you must send the raw patch text (no JSON).".to_string(),
+        description: "Use `apply_patch` to edit files by streaming a complete *** Begin Patch / *** End Patch block. Mix *** Add/Delete/Update (with optional *** Move to) and symbol-aware directives (Insert/After/Replace Symbol). Every new line starts with '+', paths stay workspace-relative, and the raw patch text must be sent verbatim (no JSON wrapper).".to_string(),
         format: FreeformToolFormat {
             r#type: "grammar".to_string(),
             syntax: "lark".to_string(),
@@ -188,29 +188,42 @@ pub(crate) fn create_apply_patch_json_tool() -> ToolSpec {
         name: "apply_patch".to_string(),
         description: r#"Use `apply_patch` to edit files by streaming a complete *** Begin Patch / *** End Patch block.
 
-Inside the envelope you may mix:
-• `*** Add File: <path>` – create or replace a file (every new line begins with `+`).
+You can mix the following operations (each prefixed by a header):
+• `*** Add File: <path>` – create or replace a file (each added line starts with `+`).
 • `*** Delete File: <path>` – remove an existing file.
-• `*** Update File: <path>` – apply textual hunks to an existing file; pair with `*** Move to: <new path>` to rename.
-• Symbol-aware edits: `*** Insert Before Symbol: <path::SymbolPath>`, `*** Insert After Symbol: <…>`, `*** Replace Symbol Body: <…>`.
+• `*** Update File: <path>` – apply diff hunks to an existing file; pair with `*** Move to: <new path>` to rename.
+• Symbol-aware edits:
+  - `*** Insert Before Symbol: <path::SymbolPath>`
+  - `*** Insert After Symbol: <path::SymbolPath>`
+  - `*** Replace Symbol Body: <path::SymbolPath>`
+  Symbol paths use `::` separators (e.g., `src/lib.rs::Greeter::build`).
 
-Each Update/Symbol section must include one or more `@@` hunks. Provide ~3 lines of context around each change; add extra `@@` headers (e.g., class/function) when necessary to disambiguate repeated code. Lines start with `+` (added), `-` (removed), or space (context). Paths are workspace-relative only.
+Each Update/Symbol section must include one or more `@@` hunks with ~3 lines of context; add extra `@@` headers (class/function) when needed to disambiguate repeated code. Lines start with `+` (added), `-` (removed), or space (context). Paths are workspace-relative only.
 
-Example:
+Examples:
 
+// Add + Update + rename
 *** Begin Patch
 *** Add File: docs/hello.md
-+Hello world
++Hello world!
 *** Update File: src/lib.rs
 *** Move to: src/main.rs
 @@ fn greet(name: &str)
-+-println!("Hi");
+-println!("Hi");
 +println!("Hello, {name}!");
-*** Insert After Symbol: src/main.rs::run
-+println!("done");
 *** End Patch
 
-On failure the CLI prints diagnostics plus an amendment block; rerun `apply_patch` (or `apply_patch amend`) with those hunks. Successful runs emit both a human summary and a trailing JSON line `{ "schema": "apply_patch/v2", "report": { ... } }` describing operations, formatting tasks, diagnostics, and artifacts.
+// Symbol edit (insert and replace)
+*** Begin Patch
+*** Insert After Symbol: src/main.rs::App::run
++println!("starting");
+*** Replace Symbol Body: src/lib.rs::Greeter::make_message
++{
++    format!("Hi, {name}!")
++}
+*** End Patch
+
+On failure the CLI prints diagnostics plus an amendment-only block; rerun `apply_patch` (or `apply_patch amend`) with those hunks. Successful runs emit both a human summary and a trailing JSON line `{ "schema": "apply_patch/v2", "report": { ... } }` describing operations, formatting tasks, diagnostics, and artifacts.
 "#
             .to_string(),
         strict: false,
