@@ -1672,6 +1672,26 @@ fn parse_code_finder_output(output: &str) -> CodeFinderOutcome {
     CodeFinderOutcome::Raw(truncate_text(trimmed, CODE_FINDER_MAX_RAW_PREVIEW))
 }
 
+#[cfg(any(test, feature = "vt100-tests"))]
+pub mod test_support {
+    use super::*;
+
+    /// Render the code finder history cell for integration tests. When
+    /// `response_json` is `Some`, the cell is completed with that payload.
+    pub fn code_finder_history_lines_for_test(
+        request_block: &str,
+        response_json: Option<&str>,
+        width: u16,
+    ) -> Vec<Line<'static>> {
+        let mut cell =
+            CodeFinderCallCell::new("integration-call".into(), request_block.to_string());
+        if let Some(payload) = response_json {
+            cell.complete(payload.to_string());
+        }
+        cell.display_lines(width)
+    }
+}
+
 #[allow(clippy::disallowed_methods)]
 pub(crate) fn new_warning_event(message: String) -> PlainHistoryCell {
     PlainHistoryCell {

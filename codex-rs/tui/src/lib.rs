@@ -81,6 +81,9 @@ mod wrapping;
 #[cfg(test)]
 pub mod test_backend;
 
+#[cfg(any(test, feature = "vt100-tests"))]
+pub use history_cell::test_support as history_cell_test_support;
+
 use crate::onboarding::TrustDirectorySelection;
 use crate::onboarding::WSL_INSTRUCTIONS;
 use crate::onboarding::onboarding_screen::OnboardingScreenArgs;
