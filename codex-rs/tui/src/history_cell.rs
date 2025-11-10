@@ -1106,11 +1106,6 @@ impl CodeFinderCallCell {
         let mut spans: Vec<Span<'static>> =
             vec![status, " ".into(), self.action.header_label().bold()];
 
-        if let Some(hint) = self.summary.as_deref().or(self.raw_preview.as_deref()) {
-            spans.push(" ".into());
-            spans.push(hint.to_string().dim());
-        }
-
         if self.request_error.is_some() {
             spans.push(" ".into());
             spans.push("[invalid]".red());
@@ -1132,7 +1127,7 @@ impl CodeFinderCallCell {
             );
         }
 
-        let mut lines = self.action.request_lines(width);
+        let mut lines = self.action.request_lines(self.summary.as_deref(), width);
         if lines.is_empty()
             && let Some(preview) = &self.raw_preview
         {
@@ -1286,36 +1281,52 @@ impl CodeFinderActionSummary {
         }
     }
 
-    fn request_lines(&self, width: usize) -> Vec<Line<'static>> {
+    fn request_lines(&self, summary: Option<&str>, width: usize) -> Vec<Line<'static>> {
         match self {
-            Self::Search(args) => render_search_request_lines(args, width),
-            Self::Open { id } => render_identifier_line("id", id.as_deref(), width),
-            Self::Snippet { id, context } => {
-                let mut lines = render_identifier_line("id", id.as_deref(), width);
-                if let Some(ctx) = context {
-                    lines.extend(wrap_line_owned(
-                        Line::from(vec!["context: ".dim(), ctx.to_string().into()]),
-                        width,
-                    ));
-                }
+            Self::Search(args) => render_search_request_lines(args, summary, width),
+            Self::Open { id } => {
+                let lines = vec![Line::from(vec![
+                    "Open".bold(),
+                    " ".into(),
+                    truncate_text(
+                        id.as_deref().unwrap_or("<missing>"),
+                        CODE_FINDER_MAX_PREVIEW_CHARS,
+                    )
+                    .into(),
+                ])];
                 lines
+            }
+            Self::Snippet { id, context } => {
+                let mut text = truncate_text(
+                    id.as_deref().unwrap_or("<missing>"),
+                    CODE_FINDER_MAX_PREVIEW_CHARS,
+                );
+                if let Some(ctx) = context {
+                    text.push_str(&format!(" (context {ctx})"));
+                }
+                vec![Line::from(vec!["Snippet".bold(), " ".into(), text.into()])]
             }
             Self::Unknown => Vec::new(),
         }
     }
 }
 
-fn render_identifier_line(label: &str, value: Option<&str>, width: usize) -> Vec<Line<'static>> {
-    let text = value
-        .map(|val| truncate_text(val, CODE_FINDER_MAX_PREVIEW_CHARS))
-        .unwrap_or_else(|| "<missing>".to_string());
-    wrap_line_owned(
-        Line::from(vec![format!("{label}: ").dim(), text.into()]),
-        width,
-    )
-}
+fn render_search_request_lines(
+    args: &CodeFinderSearchArgs,
+    summary: Option<&str>,
+    width: usize,
+) -> Vec<Line<'static>> {
+    let mut lines: Vec<Line<'static>> = Vec::new();
+    let title_text = summary
+        .or(args.query.as_deref())
+        .map(|text| truncate_text(text, CODE_FINDER_MAX_PREVIEW_CHARS))
+        .unwrap_or_else(|| "<empty>".to_string());
+    lines.push(Line::from(vec![
+        "Search".bold(),
+        " ".into(),
+        title_text.into(),
+    ]));
 
-fn render_search_request_lines(args: &CodeFinderSearchArgs, width: usize) -> Vec<Line<'static>> {
     let mut filters: Vec<String> = Vec::new();
     if !args.kinds.is_empty() {
         filters.push(format!("kind={}", args.kinds.join("/")));
@@ -1356,17 +1367,17 @@ fn render_search_request_lines(args: &CodeFinderSearchArgs, width: usize) -> Vec
         filters.push(format!("refine={}", truncate_text(refine, 48)));
     }
 
-    if filters.is_empty() {
-        Vec::new()
-    } else {
-        wrap_line_owned(
+    if !filters.is_empty() {
+        lines.extend(wrap_line_owned(
             Line::from(vec![
                 "filters: ".dim(),
                 truncate_text(&filters.join(", "), CODE_FINDER_MAX_PREVIEW_CHARS).into(),
             ]),
             width,
-        )
+        ));
     }
+
+    lines
 }
 
 fn build_search_summary(args: &CodeFinderSearchArgs) -> Option<String> {
@@ -1383,10 +1394,10 @@ fn build_search_summary(args: &CodeFinderSearchArgs) -> Option<String> {
         args.path_globs
             .first()
             .or_else(|| args.file_substrings.first()),
-    )
-        && !text.contains(path) {
-            summary = Some(format!("{text} in {path}"));
-        }
+    ) && !text.contains(path)
+    {
+        summary = Some(format!("{text} in {path}"));
+    }
 
     if let (Some(text), Some(lang)) = (summary.as_ref(), args.languages.first()) {
         summary = Some(format!("{text} ({lang})"));
