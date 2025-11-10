@@ -176,7 +176,7 @@ pub(crate) fn create_apply_patch_freeform_tool() -> ToolSpec {
         description,
         format: FreeformToolFormat {
             r#type: "grammar".to_string(),
-            syntax: "lark".to_string(),
+            syntax: None,
             definition: APPLY_PATCH_LARK_GRAMMAR.to_string(),
         },
     })
