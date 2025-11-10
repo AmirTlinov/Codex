@@ -163,6 +163,32 @@ impl<'a> IndexBuilder<'a> {
     }
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::HashSet;
+    use std::fs;
+    use tempfile::tempdir;
+
+    #[test]
+    fn builder_respects_gitignore_patterns() {
+        let dir = tempdir().unwrap();
+        let root = dir.path();
+        fs::create_dir_all(root.join("src")).unwrap();
+        fs::create_dir_all(root.join("ignored_dir")).unwrap();
+        fs::write(root.join(".gitignore"), "ignored_dir/\n").unwrap();
+        fs::write(root.join("src/lib.rs"), "pub fn visible() {}\n").unwrap();
+        fs::write(root.join("ignored_dir/lib.rs"), "pub fn hidden() {}\n").unwrap();
+
+        let filter = Arc::new(PathFilter::new(root).unwrap());
+        let builder = IndexBuilder::new(root, HashSet::new(), filter);
+        let snapshot = builder.build().unwrap();
+
+        assert!(snapshot.files.contains_key("src/lib.rs"));
+        assert!(!snapshot.files.contains_key("ignored_dir/lib.rs"));
+    }
+}
+
 fn relative_path(root: &Path, path: &Path) -> Option<String> {
     let rel = path.strip_prefix(root).ok()?;
     Some(rel.to_string_lossy().replace('\\', "/"))
