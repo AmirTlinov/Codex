@@ -313,14 +313,22 @@ impl ExecCell {
         let layout = EXEC_DISPLAY_LAYOUT;
         let success = call.output.as_ref().map(|o| o.exit_code == 0);
         let bullet = match success {
-            Some(true) => "•".green().bold(),
-            Some(false) => "•".red().bold(),
-            None => spinner(call.start_time),
+            Some(false) => "●".red().bold(),
+            Some(true) => "●".green().bold(),
+            None => {
+                if self.is_active() {
+                    "●".green().bold()
+                } else {
+                    "●".dim()
+                }
+            }
         };
-        let title = if self.is_active() { "Running" } else { "Ran" };
 
-        let mut header_line =
-            Line::from(vec![bullet.clone(), " ".into(), title.bold(), " ".into()]);
+        let mut header_line = Line::from(vec![
+            bullet.clone(),
+            " ".into(),
+            Span::from("Shell ").bold(),
+        ]);
         let header_prefix_width = header_line.width();
 
         let cmd_display = strip_bash_lc_and_escape(&call.command);
@@ -353,6 +361,11 @@ impl ExecCell {
         }
 
         let mut lines: Vec<Line<'static>> = vec![header_line];
+
+        if self.is_active() && call.is_user_shell_command {
+            let hint = Line::from(vec!["    ".into(), "Ctrl+R to run in background".dim()]);
+            lines.push(hint);
+        }
 
         let continuation_lines = Self::limit_lines_from_start(
             &continuation_lines,

@@ -1255,6 +1255,54 @@ pub(crate) fn new_error_event(message: String) -> PlainHistoryCell {
     PlainHistoryCell { lines }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ShellEventStatus {
+    Info,
+    Success,
+    Failure,
+}
+
+#[derive(Debug)]
+struct ShellEventHistoryCell {
+    headline: String,
+    details: Vec<Line<'static>>,
+    status: ShellEventStatus,
+}
+
+impl HistoryCell for ShellEventHistoryCell {
+    fn display_lines(&self, _width: u16) -> Vec<Line<'static>> {
+        let bullet = match self.status {
+            ShellEventStatus::Info | ShellEventStatus::Success => "●".green().bold(),
+            ShellEventStatus::Failure => "●".red().bold(),
+        };
+        let mut lines = vec![Line::from(vec![
+            bullet,
+            " ".into(),
+            Span::from(self.headline.clone()).bold(),
+        ])];
+        if !self.details.is_empty() {
+            lines.extend(prefix_lines(
+                self.details.clone(),
+                "  └ ".dim(),
+                "    ".into(),
+            ));
+        }
+        lines
+    }
+}
+
+pub(crate) fn new_shell_event_cell(
+    headline: String,
+    details: Vec<Line<'static>>,
+    status: ShellEventStatus,
+) -> impl HistoryCell {
+    ShellEventHistoryCell {
+        headline,
+        details,
+        status,
+    }
+}
+
 /// Render a user‑friendly plan update styled like a checkbox todo list.
 pub(crate) fn new_plan_update(update: UpdatePlanArgs) -> PlanUpdateCell {
     let UpdatePlanArgs { explanation, plan } = update;

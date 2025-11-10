@@ -1,7 +1,10 @@
+use std::cell::RefCell;
 use std::collections::HashMap;
 use std::collections::VecDeque;
 use std::path::PathBuf;
+use std::rc::Rc;
 use std::sync::Arc;
+use std::time::Instant;
 
 use codex_core::config::Config;
 use codex_core::config::types::Notifications;
@@ -16,6 +19,8 @@ use codex_core::protocol::AgentReasoningRawContentDeltaEvent;
 use codex_core::protocol::AgentReasoningRawContentEvent;
 use codex_core::protocol::ApplyPatchApprovalRequestEvent;
 use codex_core::protocol::BackgroundEventEvent;
+use codex_core::protocol::BackgroundShellPollEvent;
+use codex_core::protocol::BackgroundShellSummaryEvent;
 use codex_core::protocol::DeprecationNoticeEvent;
 use codex_core::protocol::ErrorEvent;
 use codex_core::protocol::Event;
@@ -32,6 +37,7 @@ use codex_core::protocol::Op;
 use codex_core::protocol::PatchApplyBeginEvent;
 use codex_core::protocol::RateLimitSnapshot;
 use codex_core::protocol::ReviewRequest;
+use codex_core::protocol::ShellPromotedEvent;
 use codex_core::protocol::StreamErrorEvent;
 use codex_core::protocol::TaskCompleteEvent;
 use codex_core::protocol::TokenUsage;
@@ -58,6 +64,7 @@ use ratatui::layout::Rect;
 use ratatui::style::Color;
 use ratatui::style::Stylize;
 use ratatui::text::Line;
+use ratatui::text::Span;
 use ratatui::widgets::Paragraph;
 use ratatui::widgets::Wrap;
 use tokio::sync::mpsc::UnboundedSender;
@@ -65,6 +72,9 @@ use tracing::debug;
 
 use crate::app_event::AppEvent;
 use crate::app_event_sender::AppEventSender;
+use crate::background_process::BackgroundProcessStore;
+use crate::background_process::ParsedBackgroundEventKind;
+use crate::background_process::parse_background_event;
 use crate::bottom_pane::ApprovalRequest;
 use crate::bottom_pane::BottomPane;
 use crate::bottom_pane::BottomPaneParams;
@@ -77,6 +87,10 @@ use crate::bottom_pane::custom_prompt_view::CustomPromptView;
 use crate::bottom_pane::popup_consts::standard_popup_hint_line;
 use crate::clipboard_paste::paste_image_to_temp_png;
 use crate::diff_render::display_path_for;
+#[cfg(target_os = "windows")]
+use crate::env_utils::env_map_lossy;
+#[cfg(target_os = "windows")]
+use crate::env_utils::env_vars_lossy;
 use crate::exec_cell::CommandOutput;
 use crate::exec_cell::ExecCell;
 use crate::exec_cell::new_active_exec_command;
@@ -85,6 +99,7 @@ use crate::history_cell;
 use crate::history_cell::AgentMessageCell;
 use crate::history_cell::HistoryCell;
 use crate::history_cell::McpToolCallCell;
+use crate::history_cell::ShellEventStatus;
 use crate::markdown::append_markdown;
 #[cfg(target_os = "windows")]
 use crate::onboarding::WSL_INSTRUCTIONS;
@@ -124,16 +139,26 @@ use strum::IntoEnumIterator;
 
 const USER_SHELL_COMMAND_HELP_TITLE: &str = "Prefix a command with ! to run it locally";
 const USER_SHELL_COMMAND_HELP_HINT: &str = "Example: !ls";
+const BACKGROUND_CTRL_HINT: &str = "Ctrl+B to manage background tasks";
 // Track information about an in-flight exec command.
 struct RunningCommand {
     command: Vec<String>,
     parsed_cmd: Vec<ParsedCommand>,
     is_user_shell_command: bool,
+    started_at: Instant,
 }
 
 const RATE_LIMIT_WARNING_THRESHOLDS: [f64; 3] = [75.0, 90.0, 95.0];
 const NUDGE_MODEL_SLUG: &str = "gpt-5-codex-mini";
 const RATE_LIMIT_SWITCH_PROMPT_THRESHOLD: f64 = 90.0;
+const BACKGROUND_SUMMARY_LIMIT: usize = 25;
+
+#[cfg(target_os = "windows")]
+#[cfg(target_os = "windows")]
+use crate::env_utils::env_map_lossy;
+#[cfg(target_os = "windows")]
+#[cfg(target_os = "windows")]
+use crate::env_utils::env_vars_lossy;
 
 #[derive(Default)]
 struct RateLimitWarningState {
@@ -288,6 +313,8 @@ pub(crate) struct ChatWidget {
     feedback: codex_feedback::CodexFeedback,
     // Current session rollout path (if known)
     current_rollout_path: Option<PathBuf>,
+    background_store: Rc<RefCell<BackgroundProcessStore>>,
+    background_hint_shown: bool,
 }
 
 struct UserMessage {
@@ -335,6 +362,74 @@ impl ChatWidget {
         self.bottom_pane.update_status_header(header);
     }
 
+    fn refresh_background_indicator(&mut self) {
+        let indicator = self.background_store.borrow().indicator();
+        self.bottom_pane.set_background_indicator(indicator);
+    }
+
+    fn request_background_summary(&self) {
+        self.submit_op(Op::BackgroundShellSummary {
+            limit: Some(BACKGROUND_SUMMARY_LIMIT),
+        });
+    }
+
+    fn promote_recent_command(&mut self) {
+        if let Some((call_id, running)) = self.most_recent_running_command() {
+            let description = Self::command_preview(&running.command);
+            self.submit_op(Op::PromoteShell {
+                call_id: call_id.clone(),
+                description: Some(description),
+                bookmark: None,
+            });
+            self.request_background_summary();
+        } else {
+            self.add_info_message(
+                "No running shell commands to move to the background.".to_string(),
+                None,
+            );
+        }
+    }
+
+    fn most_recent_running_command(&self) -> Option<(&String, &RunningCommand)> {
+        self.running_commands
+            .iter()
+            .max_by_key(|(_, cmd)| cmd.started_at)
+    }
+
+    fn command_preview(args: &[String]) -> String {
+        shlex::try_join(args.iter().map(String::as_str)).unwrap_or_else(|_| args.join(" "))
+    }
+
+    fn handle_background_indicator_key(&mut self, key_event: KeyEvent) -> bool {
+        if !self.bottom_pane.has_background_indicator() {
+            return false;
+        }
+        match key_event.code {
+            KeyCode::Down if key_event.kind == KeyEventKind::Press => {
+                if !self.bottom_pane.background_indicator_focus()
+                    && (self.bottom_pane.composer_is_empty()
+                        || key_event.modifiers.contains(KeyModifiers::ALT))
+                {
+                    return self.bottom_pane.set_background_indicator_focus(true);
+                }
+            }
+            KeyCode::Up if key_event.kind == KeyEventKind::Press => {
+                if self.bottom_pane.background_indicator_focus() {
+                    self.bottom_pane.set_background_indicator_focus(false);
+                    return true;
+                }
+            }
+            KeyCode::Enter if key_event.kind == KeyEventKind::Press => {
+                if self.bottom_pane.background_indicator_focus() {
+                    self.app_event_tx.send(AppEvent::OpenBackgroundShellManager);
+                    return true;
+                }
+            }
+            _ => {}
+        }
+        false
+    }
+
     // --- Small event handlers ---
     fn on_session_configured(&mut self, event: codex_core::protocol::SessionConfiguredEvent) {
         self.bottom_pane
@@ -354,6 +449,7 @@ impl ChatWidget {
         }
         // Ask codex-core to enumerate custom prompts for this session.
         self.submit_op(Op::ListCustomPrompts);
+        self.request_background_summary();
         if let Some(user_message) = self.initial_user_message.take() {
             self.submit_user_message(user_message);
         }
@@ -722,6 +818,71 @@ impl ChatWidget {
 
     fn on_background_event(&mut self, message: String) {
         debug!("BackgroundEvent: {message}");
+        if let Some(event) = parse_background_event(&message) {
+            let (toast_message, label) = {
+                let mut store = self.background_store.borrow_mut();
+                store.apply_event(event.clone());
+                let label = store.label_for(&event.shell_id);
+                let toast = label
+                    .as_ref()
+                    .map(|label| format_background_toast(label, &event.kind));
+                (toast, label)
+            };
+
+            if let Some(msg) = toast_message {
+                self.bottom_pane.push_background_toast(msg);
+                self.bottom_pane
+                    .request_redraw_in(std::time::Duration::from_secs(3));
+            }
+
+            if let Some(label) = label {
+                if let Some((headline, details, status)) =
+                    shell_event_display_for_kind(&label, &event.kind)
+                {
+                    self.add_shell_event_message(headline, details, status);
+                }
+            }
+
+            self.refresh_background_indicator();
+            self.request_background_summary();
+            self.request_redraw();
+        }
+    }
+
+    fn on_shell_promoted_event(&mut self, event: ShellPromotedEvent) {
+        self.background_store.borrow_mut().on_shell_promoted(&event);
+        let label = self.background_store.borrow().label_for(&event.shell_id);
+        if let Some(label_str) = &label {
+            self.bottom_pane
+                .push_background_toast(format!("Moved to background: {label_str}"));
+        }
+        if !self.background_hint_shown {
+            self.background_hint_shown = true;
+            self.bottom_pane
+                .push_background_toast(BACKGROUND_CTRL_HINT.to_string());
+        }
+        if let Some(label) = label {
+            let (headline, details, status) =
+                shell_event_display_for_promotion(&label, event.description.clone());
+            self.add_shell_event_message(headline, details, status);
+        }
+        self.refresh_background_indicator();
+        self.request_background_summary();
+        self.request_redraw();
+    }
+
+    fn on_background_summary(&mut self, event: BackgroundShellSummaryEvent) {
+        self.background_store
+            .borrow_mut()
+            .update_summary(&event.entries);
+        self.refresh_background_indicator();
+        self.request_redraw();
+    }
+
+    fn on_background_poll_event(&mut self, event: BackgroundShellPollEvent) {
+        self.background_store.borrow_mut().on_poll_event(&event);
+        self.refresh_background_indicator();
+        self.request_redraw();
     }
 
     fn on_undo_started(&mut self, event: UndoStartedEvent) {
@@ -927,6 +1088,7 @@ impl ChatWidget {
                 command: ev.command.clone(),
                 parsed_cmd: ev.parsed_cmd.clone(),
                 is_user_shell_command: ev.is_user_shell_command,
+                started_at: Instant::now(),
             },
         );
         if let Some(cell) = self
@@ -1012,6 +1174,7 @@ impl ChatWidget {
         let mut rng = rand::rng();
         let placeholder = EXAMPLE_PROMPTS[rng.random_range(0..EXAMPLE_PROMPTS.len())].to_string();
         let codex_op_tx = spawn_agent(config.clone(), app_event_tx.clone(), conversation_manager);
+        let background_store = Rc::new(RefCell::new(BackgroundProcessStore::new()));
 
         Self {
             app_event_tx: app_event_tx.clone(),
@@ -1055,6 +1218,8 @@ impl ChatWidget {
             last_rendered_width: std::cell::Cell::new(None),
             feedback,
             current_rollout_path: None,
+            background_store,
+            background_hint_shown: false,
         }
     }
 
@@ -1079,6 +1244,7 @@ impl ChatWidget {
 
         let codex_op_tx =
             spawn_agent_from_existing(conversation, session_configured, app_event_tx.clone());
+        let background_store = Rc::new(RefCell::new(BackgroundProcessStore::new()));
 
         Self {
             app_event_tx: app_event_tx.clone(),
@@ -1122,6 +1288,8 @@ impl ChatWidget {
             last_rendered_width: std::cell::Cell::new(None),
             feedback,
             current_rollout_path: None,
+            background_store,
+            background_hint_shown: false,
         }
     }
 
@@ -1147,10 +1315,32 @@ impl ChatWidget {
                 }
                 return;
             }
+            KeyEvent {
+                code: KeyCode::Char(c),
+                modifiers,
+                kind: KeyEventKind::Press,
+                ..
+            } if modifiers.contains(KeyModifiers::CONTROL) && c.eq_ignore_ascii_case(&'b') => {
+                self.app_event_tx.send(AppEvent::OpenBackgroundShellManager);
+                return;
+            }
+            KeyEvent {
+                code: KeyCode::Char(c),
+                modifiers,
+                kind: KeyEventKind::Press,
+                ..
+            } if modifiers.contains(KeyModifiers::CONTROL) && c.eq_ignore_ascii_case(&'r') => {
+                self.promote_recent_command();
+                return;
+            }
             other if other.kind == KeyEventKind::Press => {
                 self.bottom_pane.clear_ctrl_c_quit_hint();
             }
             _ => {}
+        }
+
+        if self.handle_background_indicator_key(key_event) {
+            return;
         }
 
         match key_event {
@@ -1544,6 +1734,9 @@ impl ChatWidget {
             EventMsg::BackgroundEvent(BackgroundEventEvent { message }) => {
                 self.on_background_event(message)
             }
+            EventMsg::ShellPromoted(ev) => self.on_shell_promoted_event(ev),
+            EventMsg::BackgroundShellSummary(ev) => self.on_background_summary(ev),
+            EventMsg::BackgroundShellPoll(ev) => self.on_background_poll_event(ev),
             EventMsg::UndoStarted(ev) => self.on_undo_started(ev),
             EventMsg::UndoCompleted(ev) => self.on_undo_completed(ev),
             EventMsg::StreamError(StreamErrorEvent { message }) => self.on_stream_error(message),
@@ -2046,11 +2239,7 @@ impl ChatWidget {
                     {
                         let preset_clone = preset.clone();
                         // Compute sample paths for the warning popup.
-                        let mut env_map: std::collections::HashMap<String, String> =
-                            std::collections::HashMap::new();
-                        for (k, v) in std::env::vars() {
-                            env_map.insert(k, v);
-                        }
+                        let mut env_map = env_map_lossy();
                         let (sample_paths, extra_count, failed_scan) =
                             match codex_windows_sandbox::preflight_audit_everyone_writable(
                                 &self.config.cwd,
@@ -2142,7 +2331,7 @@ impl ChatWidget {
     fn windows_world_writable_flagged(&self) -> bool {
         use std::collections::HashMap;
         let mut env_map: HashMap<String, String> = HashMap::new();
-        for (k, v) in std::env::vars() {
+        for (k, v) in env_vars_lossy() {
             env_map.insert(k, v);
         }
         match codex_windows_sandbox::preflight_audit_everyone_writable(
@@ -2410,6 +2599,18 @@ impl ChatWidget {
         self.request_redraw();
     }
 
+    pub(crate) fn add_shell_event_message(
+        &mut self,
+        headline: String,
+        details: Vec<Line<'static>>,
+        status: ShellEventStatus,
+    ) {
+        self.add_to_history(history_cell::new_shell_event_cell(
+            headline, details, status,
+        ));
+        self.request_redraw();
+    }
+
     pub(crate) fn add_error_message(&mut self, message: String) {
         self.add_to_history(history_cell::new_error_event(message));
         self.request_redraw();
@@ -2664,6 +2865,10 @@ impl ChatWidget {
             .unwrap_or_default()
     }
 
+    pub(crate) fn background_store(&self) -> Rc<RefCell<BackgroundProcessStore>> {
+        self.background_store.clone()
+    }
+
     pub(crate) fn conversation_id(&self) -> Option<ConversationId> {
         self.conversation_id
     }
@@ -2710,6 +2915,133 @@ impl Renderable for ChatWidget {
     fn cursor_pos(&self, area: Rect) -> Option<(u16, u16)> {
         self.as_renderable().cursor_pos(area)
     }
+}
+
+fn format_background_toast(label: &str, kind: &ParsedBackgroundEventKind) -> String {
+    match kind {
+        ParsedBackgroundEventKind::Started { .. } => format!("▶ Started: {label}"),
+        ParsedBackgroundEventKind::Terminated { exit_code, .. } => {
+            if *exit_code == 0 {
+                format!("✔ Completed: {label}")
+            } else {
+                format!("✖ Failed ({exit_code}): {label}")
+            }
+        }
+    }
+}
+
+fn shell_event_display_for_kind(
+    label: &str,
+    kind: &ParsedBackgroundEventKind,
+) -> Option<(String, Vec<Line<'static>>, ShellEventStatus)> {
+    match kind {
+        ParsedBackgroundEventKind::Started { description } => {
+            Some(shell_event_for_start(label, description.clone()))
+        }
+        ParsedBackgroundEventKind::Terminated {
+            exit_code,
+            description,
+        } => Some(shell_event_for_terminated(
+            label,
+            *exit_code,
+            description.clone(),
+        )),
+    }
+}
+
+fn shell_event_display_for_promotion(
+    label: &str,
+    description: Option<String>,
+) -> (String, Vec<Line<'static>>, ShellEventStatus) {
+    let mut details = vec![detail_line(format!("{label} moved to background"))];
+    if let Some(desc) = description.and_then(non_empty_string) {
+        details.push(detail_line(format!("Command: {desc}")));
+    }
+    details.push(dim_detail_line(BACKGROUND_CTRL_HINT.to_string()));
+    (
+        format!("Shell Promoted({label})"),
+        details,
+        ShellEventStatus::Info,
+    )
+}
+
+fn shell_event_for_start(
+    label: &str,
+    description: Option<String>,
+) -> (String, Vec<Line<'static>>, ShellEventStatus) {
+    let mut details = vec![detail_line(format!("{label} is running"))];
+    if let Some(desc) = description.and_then(non_empty_string) {
+        details.push(detail_line(format!("Command: {desc}")));
+    }
+    details.push(dim_detail_line(BACKGROUND_CTRL_HINT.to_string()));
+    (
+        format!("Shell Started({label})"),
+        details,
+        ShellEventStatus::Info,
+    )
+}
+
+fn shell_event_for_terminated(
+    label: &str,
+    exit_code: i32,
+    description: Option<String>,
+) -> (String, Vec<Line<'static>>, ShellEventStatus) {
+    if let Some(desc) = description
+        .as_ref()
+        .and_then(|d| non_empty_string(d.clone()))
+    {
+        if is_kill_description(&desc) {
+            let mut details = vec![detail_line(format!("{label} killed"))];
+            if exit_code != 0 {
+                details.push(detail_line(format!("Exit code {exit_code}")));
+            }
+            return (
+                format!("Kill Shell({desc})"),
+                details,
+                ShellEventStatus::Success,
+            );
+        }
+    }
+
+    let success = exit_code == 0;
+    let mut details = vec![detail_line(format!(
+        "{label} {} (exit code {exit_code})",
+        if success { "completed" } else { "failed" }
+    ))];
+    if let Some(desc) = description.and_then(non_empty_string) {
+        details.push(dim_detail_line(format!("Notes: {desc}")));
+    }
+    let status = if success {
+        ShellEventStatus::Success
+    } else {
+        ShellEventStatus::Failure
+    };
+    let headline = if success {
+        format!("Shell Completed({label})")
+    } else {
+        format!("Shell Failed({label})")
+    };
+    (headline, details, status)
+}
+
+fn detail_line(text: String) -> Line<'static> {
+    Line::from(text)
+}
+
+fn dim_detail_line(text: String) -> Line<'static> {
+    Line::from(vec![Span::from(text).dim()])
+}
+
+fn non_empty_string(value: String) -> Option<String> {
+    if value.trim().is_empty() {
+        None
+    } else {
+        Some(value)
+    }
+}
+
+fn is_kill_description(desc: &str) -> bool {
+    desc.trim().to_ascii_lowercase().starts_with("kill shell")
 }
 
 enum Notification {
