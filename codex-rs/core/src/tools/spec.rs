@@ -1,5 +1,4 @@
 use crate::client_common::tools::FreeformTool;
-use crate::client_common::tools::FreeformToolFormat;
 use crate::client_common::tools::ResponsesApiTool;
 use crate::client_common::tools::ToolSpec;
 use crate::features::Feature;
@@ -231,7 +230,7 @@ fn create_write_stdin_tool() -> ToolSpec {
     })
 }
 
-const CODE_FINDER_FREEFORM_SPEC: &str = r"code_finder uses envelopes like apply_patch.
+const CODE_FINDER_FREEFORM_USAGE: &str = r"code_finder uses envelopes like apply_patch.
 
 Wrap every request in matching headers:
 
@@ -267,15 +266,15 @@ Supported keys:
 ";
 
 fn create_code_finder_tool() -> ToolSpec {
+    let description = format!(
+        "{}\n\n{}",
+        "Search indexed symbols, fetch full files, or grab snippets via Code Finder.",
+        CODE_FINDER_FREEFORM_USAGE.trim()
+    );
     ToolSpec::Freeform(FreeformTool {
         name: "code_finder".to_string(),
-        description: "Search indexed symbols, fetch full files, or grab snippets via Code Finder."
-            .to_string(),
-        format: FreeformToolFormat {
-            r#type: "text".to_string(),
-            syntax: None,
-            definition: CODE_FINDER_FREEFORM_SPEC.trim().to_string(),
-        },
+        description,
+        format: None,
     })
 }
 

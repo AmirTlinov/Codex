@@ -320,7 +320,8 @@ pub(crate) mod tools {
     pub struct FreeformTool {
         pub(crate) name: String,
         pub(crate) description: String,
-        pub(crate) format: FreeformToolFormat,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        pub(crate) format: Option<FreeformToolFormat>,
     }
 
     #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
