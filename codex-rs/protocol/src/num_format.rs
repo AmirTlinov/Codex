@@ -56,9 +56,12 @@ fn format_si_suffix_with_formatter(n: i64, formatter: &DecimalFormatter) -> Stri
     }
 
     // Above 1000G, keep whole‑G precision.
+    let rounded_gigabytes = ((n as f64) / 1e9).round() as i64;
     format!(
         "{}G",
-        format_with_separators(((n as f64) / 1e9).round() as i64)
+        formatter
+            .format(&Decimal::from(rounded_gigabytes))
+            .to_string()
     )
 }
 
