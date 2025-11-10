@@ -8,6 +8,14 @@ use codex_chatgpt::apply_command::run_apply_command;
 use codex_cli::LandlockCommand;
 use codex_cli::SeatbeltCommand;
 use codex_cli::WindowsCommand;
+use codex_cli::code_nav::DaemonCommand as CodeFinderDaemonCommand;
+use codex_cli::code_nav::NavCommand as CodeNavCommand;
+use codex_cli::code_nav::OpenCommand as CodeOpenCommand;
+use codex_cli::code_nav::SnippetCommand as CodeSnippetCommand;
+use codex_cli::code_nav::run_daemon_cmd;
+use codex_cli::code_nav::run_nav;
+use codex_cli::code_nav::run_open;
+use codex_cli::code_nav::run_snippet;
 use codex_cli::login::read_api_key_from_stdin;
 use codex_cli::login::run_login_status;
 use codex_cli::login::run_login_with_api_key;
@@ -65,6 +73,18 @@ struct MultitoolCli {
 
 #[derive(Debug, clap::Subcommand)]
 enum Subcommand {
+    /// Navigate code symbols and references.
+    #[clap(name = "nav")]
+    Nav(CodeNavCommand),
+
+    /// Fetch the full contents of a symbol's file.
+    #[clap(name = "open")]
+    Open(CodeOpenCommand),
+
+    /// Print a focused snippet around a symbol.
+    #[clap(name = "snippet")]
+    Snippet(CodeSnippetCommand),
+
     /// Run Codex non-interactively.
     #[clap(visible_alias = "e")]
     Exec(ExecCli),
@@ -101,6 +121,9 @@ enum Subcommand {
     /// Internal: generate TypeScript protocol bindings.
     #[clap(hide = true)]
     GenerateTs(GenerateTsCommand),
+    /// Internal: run the code-finder daemon.
+    #[clap(hide = true, name = "code-finder-daemon")]
+    CodeFinderDaemon(CodeFinderDaemonCommand),
     /// [EXPERIMENTAL] Browse tasks from Codex Cloud and apply changes locally.
     #[clap(name = "cloud", alias = "cloud-tasks")]
     Cloud(CloudTasksCli),
@@ -378,6 +401,24 @@ async fn cli_main(codex_linux_sandbox_exe: Option<PathBuf>) -> anyhow::Result<()
             let exit_info = codex_tui::run_main(interactive, codex_linux_sandbox_exe).await?;
             handle_app_exit(exit_info)?;
         }
+        Some(Subcommand::Nav(mut nav_cli)) => {
+            prepend_config_flags(&mut nav_cli.config_overrides, root_config_overrides.clone());
+            run_nav(nav_cli).await?;
+        }
+        Some(Subcommand::Open(mut open_cli)) => {
+            prepend_config_flags(
+                &mut open_cli.config_overrides,
+                root_config_overrides.clone(),
+            );
+            run_open(open_cli).await?;
+        }
+        Some(Subcommand::Snippet(mut snippet_cli)) => {
+            prepend_config_flags(
+                &mut snippet_cli.config_overrides,
+                root_config_overrides.clone(),
+            );
+            run_snippet(snippet_cli).await?;
+        }
         Some(Subcommand::Exec(mut exec_cli)) => {
             prepend_config_flags(
                 &mut exec_cli.config_overrides,
@@ -512,6 +553,9 @@ async fn cli_main(codex_linux_sandbox_exe: Option<PathBuf>) -> anyhow::Result<()
         }
         Some(Subcommand::GenerateTs(gen_cli)) => {
             codex_protocol_ts::generate_ts(&gen_cli.out_dir, gen_cli.prettier.as_deref())?;
+        }
+        Some(Subcommand::CodeFinderDaemon(daemon_cli)) => {
+            run_daemon_cmd(daemon_cli).await?;
         }
         Some(Subcommand::Features(FeaturesCli { sub })) => match sub {
             FeaturesSubcommand::List => {

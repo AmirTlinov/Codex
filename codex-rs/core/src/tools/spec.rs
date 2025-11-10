@@ -1,3 +1,5 @@
+use crate::client_common::tools::FreeformTool;
+use crate::client_common::tools::FreeformToolFormat;
 use crate::client_common::tools::ResponsesApiTool;
 use crate::client_common::tools::ToolSpec;
 use crate::features::Feature;
@@ -7,6 +9,7 @@ use crate::tools::handlers::PLAN_TOOL;
 use crate::tools::handlers::apply_patch::ApplyPatchToolType;
 use crate::tools::handlers::apply_patch::create_apply_patch_freeform_tool;
 use crate::tools::handlers::apply_patch::create_apply_patch_json_tool;
+use crate::tools::handlers::code_finder::CodeFinderHandler;
 use crate::tools::registry::ToolRegistryBuilder;
 use serde::Deserialize;
 use serde::Serialize;
@@ -224,6 +227,51 @@ fn create_write_stdin_tool() -> ToolSpec {
             properties,
             required: Some(vec!["session_id".to_string()]),
             additional_properties: Some(false.into()),
+        },
+    })
+}
+
+const CODE_FINDER_FREEFORM_SPEC: &str = r"code_finder accepts a short block of text.
+
+The first non-empty line declares the action:
+  search
+  open <symbol_id>
+  snippet <symbol_id>
+
+Subsequent lines are optional key/value pairs (key: value or key = value).
+Lists are comma-separated; quote values containing spaces.
+
+Supported keys:
+- query, limit
+- kinds, languages, categories
+- path/path_globs, file/file_substrings, symbol/symbol_exact
+- recent, tests, docs, deps (true/false)
+- with_refs, refs_limit
+- help/help_symbol, refine/query_id, wait/wait_for_index
+- id, context (snippet context lines)
+
+Example:
+search
+query: SessionManager
+kinds: function
+languages: rust, ts
+path: core/**
+recent: true
+with_refs: true
+
+snippet cf_deadbeef
+context: 12
+";
+
+fn create_code_finder_tool() -> ToolSpec {
+    ToolSpec::Freeform(FreeformTool {
+        name: "code_finder".to_string(),
+        description: "Search indexed symbols, fetch full files, or grab snippets via Code Finder."
+            .to_string(),
+        format: FreeformToolFormat {
+            r#type: "text".to_string(),
+            syntax: "code_finder_v1".to_string(),
+            definition: CODE_FINDER_FREEFORM_SPEC.trim().to_string(),
         },
     })
 }
@@ -879,6 +927,7 @@ pub(crate) fn build_specs(
     let view_image_handler = Arc::new(ViewImageHandler);
     let mcp_handler = Arc::new(McpHandler);
     let mcp_resource_handler = Arc::new(McpResourceHandler);
+    let code_finder_handler = Arc::new(CodeFinderHandler);
 
     match &config.shell_type {
         ConfigShellToolType::Default => {
@@ -920,6 +969,14 @@ pub(crate) fn build_specs(
             }
         }
         builder.register_handler("apply_patch", apply_patch_handler);
+    }
+
+    if config
+        .experimental_supported_tools
+        .contains(&"code_finder".to_string())
+    {
+        builder.push_spec_with_parallel_support(create_code_finder_tool(), true);
+        builder.register_handler("code_finder", code_finder_handler);
     }
 
     if config
@@ -1122,6 +1179,7 @@ mod tests {
             create_read_mcp_resource_tool(),
             PLAN_TOOL.clone(),
             create_apply_patch_freeform_tool(),
+            create_code_finder_tool(),
             ToolSpec::WebSearch {},
             create_view_image_tool(),
         ] {
@@ -1167,6 +1225,7 @@ mod tests {
                 "read_mcp_resource",
                 "update_plan",
                 "apply_patch",
+                "code_finder",
                 "view_image",
             ],
         );
@@ -1187,6 +1246,7 @@ mod tests {
                 "read_mcp_resource",
                 "update_plan",
                 "apply_patch",
+                "code_finder",
                 "web_search",
                 "view_image",
             ],

@@ -13,6 +13,19 @@ Looking for something specific? Jump ahead:
 | `codex`            | Interactive TUI                    | `codex`                         |
 | `codex "..."`      | Initial prompt for interactive TUI | `codex "fix lint errors"`       |
 | `codex exec "..."` | Non-interactive "automation mode"  | `codex exec "explain utils.ts"` |
+| `codex nav`        | JSON search across indexed symbols | `codex nav "SessionId" --kind function --with-refs` |
+| `codex open`       | Return full file for a symbol id   | `codex open cf_6d053bc1`        |
+| `codex snippet`    | Grab context around an id          | `codex snippet cf_6d053bc1 --context 12` |
+
+#### Code Finder quick recipes
+
+- Prioritize hot files: `codex nav "init workspace" --recent --path "cli/src/**"`.
+- Filter by layer: `codex nav SessionManager --deps --with-refs-limit 5`.
+- Jump back to cached candidates: `codex nav --from <QUERY_ID> --tests --lang rust`.
+- Retrieve full content: `codex open cf_deadbeef`.
+- Preview without the whole file: `codex snippet cf_deadbeef --context 6`.
+
+All commands emit deterministic JSON so other tools can parse them. For schema details see [docs/code-finder.md](./code-finder.md).
 
 Key flags: `--model/-m`, `--ask-for-approval/-a`.
 

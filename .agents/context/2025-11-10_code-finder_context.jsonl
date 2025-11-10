@@ -1,0 +1,13 @@
+{"source":"agent","summary":["Created branch code-finder from main2 (5f1fab0e)","Created branch feature/code-finder tracking same commit"],"citation":"git-branch"}
+{"source":"agent","summary":["Deleted local branch code-finder after switching to feature/code-finder"],"citation":"git-branch -d"}
+{"source":"agent","summary":["Documented Code Finder architecture and UX in docs/code-finder.md"],"citation":"docs/code-finder.md"}
+{"source":"agent","summary":["Initialized codex-code-finder crate and added it to workspace"],"citation":"codex-rs/code-finder"}
+{"source":"agent","summary":["Stabilized codex-code-finder client HTTP builder timeout and query cache capacity without unsafe paths"],"citation":"codex-rs/code-finder/src/client.rs"}
+{"source":"agent","summary":["Eliminated unwrap/expect usage across index classifiers, regex extraction helpers, and search matcher by introducing safe compile_regex helper"],"citation":"codex-rs/code-finder/src/index"}
+{"source":"agent","summary":["Hooked codex nav CLI to new code-finder client, removed unused timeout option, and added serde/uuid deps"],"citation":"codex-rs/cli/src/code_nav.rs"}
+{"source":"agent","summary":["Added serde and uuid workspace deps required by code finder CLI commands"],"citation":"codex-rs/cli/Cargo.toml"}
+{"source":"agent","summary":["Documented Code Finder commands in README and getting-started guide plus aligned CLI synopsis"],"citation":"README.md"}
+{"source":"agent","summary":["Created CLI unit tests covering filter construction for codex nav variants"],"citation":"codex-rs/cli/src/code_nav.rs"}
+{"source":"agent","summary":["Added code_finder tool handler wired to codex-code-finder daemon so GPT-5 Codex can run search/open/snippet actions via tool calls"],"citation":"codex-rs/core/src/tools/handlers/code_finder.rs"}
+{"source":"agent","summary":["Registered code_finder tool for gpt-5-codex in tool registry/model families and documented schema in tool spec"],"citation":"codex-rs/core/src/tools/spec.rs"}
+{"source":"agent","summary":["Swapped code_finder tool to freeform syntax (akin to apply_patch) so agents provide simple action blocks instead of JSON"],"citation":"codex-rs/core/src/tools/spec.rs"}
