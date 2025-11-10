@@ -2,12 +2,22 @@ start: begin_patch hunk+ end_patch
 begin_patch: "*** Begin Patch" LF
 end_patch: "*** End Patch" LF?
 
-hunk: add_hunk | delete_hunk | update_hunk
+hunk: add_hunk
+    | delete_hunk
+    | update_hunk
+    | insert_before_symbol
+    | insert_after_symbol
+    | replace_symbol_body
+
 add_hunk: "*** Add File: " filename LF add_line+
 delete_hunk: "*** Delete File: " filename LF
-update_hunk: "*** Update File: " filename LF change_move? change?
+update_hunk: "*** Update File: " filename LF change_move? change+
+insert_before_symbol: "*** Insert Before Symbol: " target LF add_line+
+insert_after_symbol: "*** Insert After Symbol: " target LF add_line+
+replace_symbol_body: "*** Replace Symbol Body: " target LF add_line+
 
 filename: /(.+)/
+target: /(.+)/
 add_line: "+" /(.*)/ LF -> line
 
 change_move: "*** Move to: " filename LF

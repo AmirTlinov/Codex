@@ -28,8 +28,52 @@ use serde::Serialize;
 pub struct ApplyPatchHandler;
 
 const APPLY_PATCH_LARK_GRAMMAR: &str = include_str!("tool_apply_patch.lark");
-const APPLY_PATCH_FREEFORM_USAGE: &str =
-    include_str!("../../../apply-patch/apply_patch_tool_instructions.md");
+const APPLY_PATCH_FREEFORM_USAGE: &str = r#"Codex `apply_patch` performs deterministic workspace edits. Always send one envelope:
+
+*** Begin Patch
+[operations]
+*** End Patch
+
+Supported operations (repeat as needed):
+- *** Add File: <path> — create/replace a file; every body line must start with `+` until the next header.
+- *** Delete File: <path> — delete a file; nothing follows.
+- *** Update File: <path> — apply textual hunks in place. Immediately add `*** Move to: <new/path>` when renaming.
+- Symbol-aware directives keep indentation and braces aligned. Paths stay relative; symbol segments use `::` (e.g., `src/lib.rs::api::Session::new`). Bodies are `+` lines only:
+  *** Insert Before Symbol: …
+  *** Insert After Symbol: …
+  *** Replace Symbol Body: … (only the body changes; signature/comments remain).
+
+Update hunks:
+- Start chunks with `@@` (repeat to scope into modules/classes/functions).
+- Provide minimal but unique context (≈3 lines). Prefix context with a leading space, removals with `-`, additions with `+`.
+- Append `*** End of File` when the change must touch EOF exactly.
+
+Guidelines:
+- Paths must be workspace-relative; never emit absolute paths or `..` escapes.
+- Keep one file per header; do not interleave operations.
+- Prefer the symbol directives for imports, helper functions, or long bodies rather than giant textual diffs.
+- Ensure the final line is exactly `*** End Patch` followed by a newline—no commentary afterward.
+
+Examples:
+1) Rename + edit + delete:
+*** Begin Patch
+*** Update File: src/main.rs
+*** Move to: src/bin/app.rs
+@@ fn greet()
+-println!("Hi");
++println!("Hello, world!");
+*** Delete File: README.old.md
+*** End Patch
+
+2) Insert logging before a constructor via symbol directive:
+*** Begin Patch
+*** Insert Before Symbol: src/lib.rs::api::Session::new
++log::info!("session created");
+*** End Patch
+
+3) CLI heredoc reminder:
+shell {"command":["apply_patch","*** Begin Patch\n*** Add File: notes.txt\n+Draft\n*** End Patch\n"]}
+"#;
 
 #[async_trait]
 impl ToolHandler for ApplyPatchHandler {

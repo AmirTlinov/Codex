@@ -1,1 +1,2 @@
 {"source":"agent","summary":["Embedded the full apply_patch syntax/usage guide directly into the tool description so Codex agents always see the FREEFORM envelope and operation semantics"],"citation":"codex-rs/core/src/tools/handlers/apply_patch.rs"}
+{"source":"agent","summary":["Replaced handler docs with inline envelope+symbol guidance so Codex agents learn Insert Before/After/Replace operations without referencing external markdown"],"citation":"codex-rs/core/src/tools/handlers/apply_patch.rs"}

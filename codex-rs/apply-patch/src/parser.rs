@@ -5,17 +5,20 @@
 //!
 //! start: begin_patch hunk+ end_patch
 //! begin_patch: "*** Begin Patch" LF
-//! end_patch: "*** End Patch" LF?
+//! end_patch: "*** End Patch" LF
 //!
-//! hunk: add_hunk | delete_hunk | update_hunk
+//! hunk: add_hunk | delete_hunk | update_hunk | insert_before_symbol | insert_after_symbol | replace_symbol_body
 //! add_hunk: "*** Add File: " filename LF add_line+
 //! delete_hunk: "*** Delete File: " filename LF
-//! update_hunk: "*** Update File: " filename LF change_move? change?
+//! update_hunk: "*** Update File: " filename LF move_to? change+
+//! insert_before_symbol: "*** Insert Before Symbol: " target LF add_line+
+//! insert_after_symbol: "*** Insert After Symbol: " target LF add_line+
+//! replace_symbol_body: "*** Replace Symbol Body: " target LF add_line+
 //! filename: /(.+)/
+//! target: /(.+)/
 //! add_line: "+" /(.+)/ LF -> line
-//!
-//! change_move: "*** Move to: " filename LF
-//! change: (change_context | change_line)+ eof_line?
+//! move_to: "*** Move to: " filename LF
+//! change: change_context? change_line+ eof_line?
 //! change_context: ("@@" | "@@ " /(.+)/) LF
 //! change_line: ("+" | "-" | " ") /(.+)/ LF
 //! eof_line: "*** End of File" LF
@@ -23,6 +26,8 @@
 //! The parser below is a little more lenient than the explicit spec and allows for
 //! leading/trailing whitespace around patch markers.
 use crate::ApplyPatchArgs;
+use crate::ast::SymbolPath;
+use crate::ast::symbol_path_from_str;
 use std::path::Path;
 use std::path::PathBuf;
 
@@ -33,6 +38,9 @@ const END_PATCH_MARKER: &str = "*** End Patch";
 const ADD_FILE_MARKER: &str = "*** Add File: ";
 const DELETE_FILE_MARKER: &str = "*** Delete File: ";
 const UPDATE_FILE_MARKER: &str = "*** Update File: ";
+const INSERT_BEFORE_SYMBOL_MARKER: &str = "*** Insert Before Symbol: ";
+const INSERT_AFTER_SYMBOL_MARKER: &str = "*** Insert After Symbol: ";
+const REPLACE_SYMBOL_BODY_MARKER: &str = "*** Replace Symbol Body: ";
 const MOVE_TO_MARKER: &str = "*** Move to: ";
 const EOF_MARKER: &str = "*** End of File";
 const CHANGE_CONTEXT_MARKER: &str = "@@ ";
@@ -73,6 +81,21 @@ pub enum Hunk {
         /// should occur later in the file than the previous chunk.
         chunks: Vec<UpdateFileChunk>,
     },
+    InsertBeforeSymbol {
+        path: PathBuf,
+        symbol: SymbolPath,
+        new_lines: Vec<String>,
+    },
+    InsertAfterSymbol {
+        path: PathBuf,
+        symbol: SymbolPath,
+        new_lines: Vec<String>,
+    },
+    ReplaceSymbolBody {
+        path: PathBuf,
+        symbol: SymbolPath,
+        new_lines: Vec<String>,
+    },
 }
 
 impl Hunk {
@@ -81,6 +104,9 @@ impl Hunk {
             Hunk::AddFile { path, .. } => cwd.join(path),
             Hunk::DeleteFile { path } => cwd.join(path),
             Hunk::UpdateFile { path, .. } => cwd.join(path),
+            Hunk::InsertBeforeSymbol { path, .. } => cwd.join(path),
+            Hunk::InsertAfterSymbol { path, .. } => cwd.join(path),
+            Hunk::ReplaceSymbolBody { path, .. } => cwd.join(path),
         }
     }
 }
@@ -109,9 +135,83 @@ pub fn parse_patch(patch: &str) -> Result<ApplyPatchArgs, ParseError> {
     } else {
         ParseMode::Lenient
     };
-    parse_patch_text(patch, mode)
+    let trimmed = patch.trim();
+    if trimmed.is_empty() {
+        return parse_patch_text(trimmed, mode);
+    }
+
+    let begin_count = trimmed
+        .lines()
+        .filter(|line| line.trim_start().starts_with("*** Begin Patch"))
+        .count();
+    if begin_count <= 1 {
+        return parse_patch_text(trimmed, mode);
+    }
+
+    let blocks = split_patch_blocks(trimmed)?;
+    let mut all_hunks: Vec<Hunk> = Vec::new();
+    for block in blocks {
+        let parsed = parse_patch_text(&block, mode)?;
+        all_hunks.extend(parsed.hunks);
+    }
+    let normalized_patch = trimmed.lines().collect::<Vec<_>>().join("\n");
+    Ok(ApplyPatchArgs {
+        patch: normalized_patch,
+        hunks: all_hunks,
+        workdir: None,
+    })
 }
 
+fn split_patch_blocks(patch: &str) -> Result<Vec<String>, ParseError> {
+    let mut blocks: Vec<String> = Vec::new();
+    let mut current: Vec<&str> = Vec::new();
+    let mut inside = false;
+
+    for (idx, line) in patch.lines().enumerate() {
+        let trimmed = line.trim_start();
+        if trimmed.starts_with("*** Begin Patch") {
+            if inside {
+                return Err(InvalidPatchError(format!(
+                    "Nested *** Begin Patch at line {}",
+                    idx + 1
+                )));
+            }
+            inside = true;
+            current.clear();
+        }
+        if inside {
+            current.push(line);
+        }
+        if trimmed.starts_with("*** End Patch") {
+            if !inside {
+                return Err(InvalidPatchError(format!(
+                    "*** End Patch without matching begin at line {}",
+                    idx + 1
+                )));
+            }
+            inside = false;
+            let block = current.join("\n");
+            blocks.push(block);
+            current.clear();
+        }
+    }
+
+    if inside {
+        return Err(InvalidPatchError(
+            "Patch ended before *** End Patch".to_string(),
+        ));
+    }
+
+    if blocks.is_empty() {
+        return Err(InvalidPatchError(
+            "Patch does not contain any *** Begin Patch blocks.".to_string(),
+        ));
+    }
+
+    Ok(blocks)
+}
+
+#[derive(Clone, Copy)]
 enum ParseMode {
     /// Parse the patch text argument as is.
     Strict,
@@ -168,6 +268,12 @@ fn parse_patch_text(patch: &str, mode: ParseMode) -> Result<ApplyPatchArgs, Pars
     let last_line_index = lines.len().saturating_sub(1);
     let mut remaining_lines = &lines[1..last_line_index];
     let mut line_number = 2;
+
+    while !remaining_lines.is_empty() && remaining_lines[0].trim().is_empty() {
+        remaining_lines = &remaining_lines[1..];
+        line_number += 1;
+    }
+
     while !remaining_lines.is_empty() {
         let (hunk, hunk_lines) = parse_one_hunk(remaining_lines, line_number)?;
         hunks.push(hunk);
@@ -327,6 +433,42 @@ fn parse_one_hunk(lines: &[&str], line_number: usize) -> Result<(Hunk, usize), P
             },
             parsed_lines,
         ));
+    } else if let Some(target) = first_line.strip_prefix(INSERT_BEFORE_SYMBOL_MARKER) {
+        let (path, symbol) = parse_symbol_header(target, line_number)?;
+        let (new_lines, consumed) =
+            parse_symbol_lines(&lines[1..], line_number + 1, "Insert Before Symbol")?;
+        return Ok((
+            InsertBeforeSymbol {
+                path,
+                symbol,
+                new_lines,
+            },
+            consumed + 1,
+        ));
+    } else if let Some(target) = first_line.strip_prefix(INSERT_AFTER_SYMBOL_MARKER) {
+        let (path, symbol) = parse_symbol_header(target, line_number)?;
+        let (new_lines, consumed) =
+            parse_symbol_lines(&lines[1..], line_number + 1, "Insert After Symbol")?;
+        return Ok((
+            InsertAfterSymbol {
+                path,
+                symbol,
+                new_lines,
+            },
+            consumed + 1,
+        ));
+    } else if let Some(target) = first_line.strip_prefix(REPLACE_SYMBOL_BODY_MARKER) {
+        let (path, symbol) = parse_symbol_header(target, line_number)?;
+        let (new_lines, consumed) =
+            parse_symbol_lines(&lines[1..], line_number + 1, "Replace Symbol Body")?;
+        return Ok((
+            ReplaceSymbolBody {
+                path,
+                symbol,
+                new_lines,
+            },
+            consumed + 1,
+        ));
     }
 
     Err(InvalidHunkError {
@@ -335,6 +477,60 @@ fn parse_one_hunk(lines: &[&str], line_number: usize) -> Result<(Hunk, usize), P
         ),
         line_number,
     })
+}
+
+fn parse_symbol_header(raw: &str, line_number: usize) -> Result<(PathBuf, SymbolPath), ParseError> {
+    let target = raw.trim();
+    let (path_part, symbol_part) = target.split_once("::").ok_or_else(|| InvalidHunkError {
+        message: format!(
+            "Symbol hunk header '{target}' must include a symbol path (use 'file::Symbol')"
+        ),
+        line_number,
+    })?;
+
+    let path = PathBuf::from(path_part.trim());
+    if path.as_os_str().is_empty() {
+        return Err(InvalidHunkError {
+            message: "Symbol hunk header must include a file path".to_string(),
+            line_number,
+        });
+    }
+
+    let symbol_path = symbol_path_from_str(symbol_part.trim());
+    if symbol_path.is_empty() {
+        return Err(InvalidHunkError {
+            message: format!("Symbol path for '{target}' is empty"),
+            line_number,
+        });
+    }
+
+    Ok((path, symbol_path))
+}
+
+fn parse_symbol_lines(
+    lines: &[&str],
+    line_number: usize,
+    op_name: &str,
+) -> Result<(Vec<String>, usize), ParseError> {
+    let mut collected = Vec::new();
+    let mut consumed = 0;
+    for line in lines.iter() {
+        if let Some(rest) = line.strip_prefix('+') {
+            collected.push(rest.to_string());
+            consumed += 1;
+        } else {
+            break;
+        }
+    }
+
+    if collected.is_empty() {
+        return Err(InvalidHunkError {
+            message: format!("{op_name} hunk must include at least one '+ line'"),
+            line_number,
+        });
+    }
+
+    Ok((collected, consumed))
 }
 
 fn parse_update_file_chunk(
@@ -438,17 +634,23 @@ fn test_parse_patch() {
             "The first line of the patch must be '*** Begin Patch'".to_string()
         ))
     );
+
     assert_eq!(
-        parse_patch_text("*** Begin Patch\nbad", ParseMode::Strict),
+        parse_patch_text(
+            r"*** Begin Patch
+bad",
+            ParseMode::Strict
+        ),
         Err(InvalidPatchError(
             "The last line of the patch must be '*** End Patch'".to_string()
         ))
     );
+
     assert_eq!(
         parse_patch_text(
-            "*** Begin Patch\n\
-             *** Update File: test.py\n\
-             *** End Patch",
+            r"*** Begin Patch
+*** Update File: test.py
+*** End Patch",
             ParseMode::Strict
         ),
         Err(InvalidHunkError {
@@ -456,29 +658,31 @@ fn test_parse_patch() {
             line_number: 2,
         })
     );
+
     assert_eq!(
         parse_patch_text(
-            "*** Begin Patch\n\
-             *** End Patch",
+            r"*** Begin Patch
+*** End Patch",
             ParseMode::Strict
         )
         .unwrap()
         .hunks,
         Vec::new()
     );
+
     assert_eq!(
         parse_patch_text(
-            "*** Begin Patch\n\
-             *** Add File: path/add.py\n\
-             +abc\n\
-             +def\n\
-             *** Delete File: path/delete.py\n\
-             *** Update File: path/update.py\n\
-             *** Move to: path/update2.py\n\
-             @@ def f():\n\
-             -    pass\n\
-             +    return 123\n\
-             *** End Patch",
+            r"*** Begin Patch
+*** Add File: path/add.py
++abc
++def
+*** Delete File: path/delete.py
+*** Update File: path/update.py
+*** Move to: path/update2.py
+@@ def f():
+-    pass
++    return 123
+*** End Patch",
             ParseMode::Strict
         )
         .unwrap()
@@ -503,16 +707,16 @@ fn test_parse_patch() {
             }
         ]
     );
-    // Update hunk followed by another hunk (Add File).
+
     assert_eq!(
         parse_patch_text(
-            "*** Begin Patch\n\
-             *** Update File: file.py\n\
-             @@\n\
-             +line\n\
-             *** Add File: other.py\n\
-             +content\n\
-             *** End Patch",
+            r"*** Begin Patch
+*** Update File: file.py
+@@
++line
+*** Add File: other.py
++content
+*** End Patch",
             ParseMode::Strict
         )
         .unwrap()
@@ -539,11 +743,11 @@ fn test_parse_patch() {
     // Use a raw string to preserve the leading space diff marker on the context line.
     assert_eq!(
         parse_patch_text(
-            r#"*** Begin Patch
+            r"*** Begin Patch
 *** Update File: file2.py
  import foo
 +bar
-*** End Patch"#,
+*** End Patch",
             ParseMode::Strict
         )
         .unwrap()
@@ -633,8 +837,9 @@ fn test_parse_patch_lenient() {
         Err(expected_error.clone())
     );
 
-    let patch_text_with_missing_closing_heredoc =
-        "<<EOF\n*** Begin Patch\n*** Update File: file2.py\nEOF\n".to_string();
+    let patch_text_with_missing_closing_heredoc = "<<EOF\n*** Begin Patch
+*** Update File: file2.py\nEOF\n"
+        .to_string();
     assert_eq!(
         parse_patch_text(&patch_text_with_missing_closing_heredoc, ParseMode::Strict),
         Err(expected_error)
@@ -738,4 +943,108 @@ fn test_update_file_chunk() {
             3
         ))
     );
+}
+
+#[test]
+fn parse_symbol_insert_before_hunk() {
+    let patch = [
+        "*** Begin Patch",
+        "*** Insert Before Symbol: lib.rs::greet",
+        "+// comment",
+        "*** End Patch",
+    ]
+    .join("\n");
+
+    let parsed = parse_patch(&patch).unwrap();
+    pretty_assertions::assert_eq!(
+        parsed.hunks,
+        vec![InsertBeforeSymbol {
+            path: PathBuf::from("lib.rs"),
+            symbol: symbol_path_from_str("greet"),
+            new_lines: vec!["// comment".to_string()],
+        }]
+    );
+}
+
+#[test]
+fn parse_symbol_insert_after_hunk() {
+    let patch = [
+        "*** Begin Patch",
+        "*** Insert After Symbol: main.py::Greeter::greet",
+        "+print('ok')",
+        "*** End Patch",
+    ]
+    .join("\n");
+
+    let parsed = parse_patch(&patch).unwrap();
+    pretty_assertions::assert_eq!(
+        parsed.hunks,
+        vec![InsertAfterSymbol {
+            path: PathBuf::from("main.py"),
+            symbol: symbol_path_from_str("Greeter::greet"),
+            new_lines: vec!["print('ok')".to_string()],
+        }]
+    );
+}
+
+#[test]
+fn parse_symbol_replace_body_hunk() {
+    let patch = [
+        "*** Begin Patch",
+        "*** Replace Symbol Body: service.ts::Service::run",
+        "+{",
+        "+  return true;",
+        "+}",
+        "*** End Patch",
+    ]
+    .join("\n");
+
+    let parsed = parse_patch(&patch).unwrap();
+    pretty_assertions::assert_eq!(
+        parsed.hunks,
+        vec![ReplaceSymbolBody {
+            path: PathBuf::from("service.ts"),
+            symbol: symbol_path_from_str("Service::run"),
+            new_lines: vec![
+                "{".to_string(),
+                "  return true;".to_string(),
+                "}".to_string()
+            ],
+        }]
+    );
+}
+
+#[test]
+fn parse_symbol_header_requires_symbol_path() {
+    match parse_symbol_header("lib.rs", 42) {
+        Err(InvalidHunkError {
+            message,
+            line_number,
+        }) => {
+            pretty_assertions::assert_eq!(
+                message,
+                "Symbol hunk header 'lib.rs' must include a symbol path (use 'file::Symbol')"
+                    .to_string()
+            );
+            pretty_assertions::assert_eq!(line_number, 42);
+        }
+        other => panic!("ожидалась ошибка, получено: {other:?}"),
+    }
+}
+
+#[test]
+fn parse_symbol_lines_require_changes() {
+    match parse_symbol_lines(&["context"], 10, "Insert Before Symbol") {
+        Err(InvalidHunkError {
+            message,
+            line_number,
+        }) => {
+            pretty_assertions::assert_eq!(
+                message,
+                "Insert Before Symbol hunk must include at least one '+ line'".to_string()
+            );
+            pretty_assertions::assert_eq!(line_number, 10);
+        }
+        other => panic!("ожидалась ошибка, получено: {other:?}"),
+    }
 }
