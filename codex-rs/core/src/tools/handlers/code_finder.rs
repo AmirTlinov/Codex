@@ -267,8 +267,9 @@ fn parse_function_payload(arguments: &str) -> Result<CodeFinderPayload, Function
 }
 
 fn parse_freeform_payload(input: &str) -> Result<CodeFinderPayload, FunctionCallError> {
-    let mut lines = input.lines();
-    let header_line = lines.find(|line| !line.trim().is_empty()).ok_or_else(|| {
+    let normalized = normalize_freeform_input(input)?;
+    let mut lines = normalized.lines();
+    let header_line = lines.next().ok_or_else(|| {
         FunctionCallError::RespondToModel("code_finder block is empty".to_string())
     })?;
     let (action, mut symbol_id) = parse_header_line(header_line)?;
@@ -358,6 +359,27 @@ fn parse_header_line(line: &str) -> Result<(String, Option<String>), FunctionCal
         .filter(|value| !value.is_empty())
         .map(std::string::ToString::to_string);
     Ok((action, header_id))
+}
+
+fn normalize_freeform_input(raw: &str) -> Result<String, FunctionCallError> {
+    let mut trimmed = raw.trim();
+    if trimmed.starts_with("```")
+        && let Some(end) = trimmed.rfind("```")
+            && end > 3 {
+                trimmed = &trimmed[3..end];
+                trimmed = trimmed.trim_start();
+                if let Some(pos) = trimmed.find('\n') {
+                    trimmed = trimmed[pos + 1..].trim_start();
+                }
+            }
+
+    if let Some(idx) = trimmed.find("*** Begin ") {
+        Ok(trimmed[idx..].trim_start().to_string())
+    } else {
+        Err(FunctionCallError::RespondToModel(
+            "code_finder block must start with *** Begin <Action>".to_string(),
+        ))
+    }
 }
 
 fn split_first_word(input: &str) -> (&str, Option<&str>) {
@@ -564,4 +586,31 @@ fn make_json_output<T: serde::Serialize>(resp: T) -> Result<ToolOutput, Function
         content_items: None,
         success: Some(true),
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_freeform_with_leading_text() {
+        let input = "Please search this repo\n\n*** Begin Search\nquery: foo\n*** End Search";
+        match parse_freeform_payload(input).expect("should parse search block") {
+            CodeFinderPayload::Search(args) => {
+                assert_eq!(args.query, Some("foo".to_string()));
+            }
+            other => panic!("unexpected payload: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_freeform_inside_code_fence() {
+        let input = "```text\n*** Begin Search\nquery: bar\n*** End Search\n```";
+        match parse_freeform_payload(input).expect("should parse fenced block") {
+            CodeFinderPayload::Search(args) => {
+                assert_eq!(args.query, Some("bar".to_string()));
+            }
+            other => panic!("unexpected payload: {other:?}"),
+        }
+    }
 }

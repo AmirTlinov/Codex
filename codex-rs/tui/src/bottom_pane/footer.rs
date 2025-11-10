@@ -415,17 +415,17 @@ mod tests {
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
 
-fn snapshot_footer(name: &str, props: FooterProps) {
-    let height = footer_height(&props).max(1);
-    let mut terminal = Terminal::new(TestBackend::new(80, height)).unwrap();
-    terminal
-        .draw(|f| {
-            let area = Rect::new(0, 0, f.area().width, height);
-            render_footer(area, f.buffer_mut(), props.clone());
-        })
-        .unwrap();
-    assert_snapshot!(name, terminal.backend());
-}
+    fn snapshot_footer(name: &str, props: FooterProps) {
+        let height = footer_height(&props).max(1);
+        let mut terminal = Terminal::new(TestBackend::new(80, height)).unwrap();
+        terminal
+            .draw(|f| {
+                let area = Rect::new(0, 0, f.area().width, height);
+                render_footer(area, f.buffer_mut(), props.clone());
+            })
+            .unwrap();
+        assert_snapshot!(name, terminal.backend());
+    }
 
     #[test]
     fn footer_snapshots() {
