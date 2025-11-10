@@ -67,6 +67,7 @@ pub(crate) struct CodeFinderFooterIndicator {
     state: CodeFinderIndicatorState,
     symbols: usize,
     files: usize,
+    notice: Option<String>,
 }
 
 impl CodeFinderFooterIndicator {
@@ -80,6 +81,16 @@ impl CodeFinderFooterIndicator {
             state,
             symbols: status.symbols,
             files: status.files,
+            notice: status.notice.clone(),
+        }
+    }
+
+    pub fn failed_with_notice(notice: String) -> Self {
+        Self {
+            state: CodeFinderIndicatorState::Failed,
+            symbols: 0,
+            files: 0,
+            notice: Some(notice),
         }
     }
 
@@ -93,6 +104,10 @@ impl CodeFinderFooterIndicator {
 
     pub fn files(&self) -> usize {
         self.files
+    }
+
+    pub fn notice(&self) -> Option<&str> {
+        self.notice.as_deref()
     }
 }
 

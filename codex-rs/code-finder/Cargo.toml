@@ -28,7 +28,7 @@ serde_with = { workspace = true }
 smallvec = "1.13.2"
 textwrap = { workspace = true }
 thiserror = { workspace = true }
-time = { workspace = true, features = ["macros", "serde"] }
+time = { workspace = true, features = ["formatting", "macros", "serde"] }
 tokio = { workspace = true, features = [
     "fs",
     "io-std",

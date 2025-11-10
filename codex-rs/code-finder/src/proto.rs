@@ -159,6 +159,7 @@ pub struct IndexStatus {
     pub updated_at: Option<OffsetDateTime>,
     pub progress: Option<f32>,
     pub schema_version: u32,
+    pub notice: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]

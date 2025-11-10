@@ -14,10 +14,20 @@ use reqwest::header::AUTHORIZATION;
 use reqwest::header::CONTENT_TYPE;
 use reqwest::header::HeaderMap;
 use reqwest::header::HeaderValue;
+use std::cmp::min;
+use std::fs::File;
+use std::fs::OpenOptions;
+use std::io::Read as _;
+use std::io::Seek;
+use std::io::SeekFrom;
+use std::io::Write as _;
+use std::path::Path;
 use std::path::PathBuf;
 use std::process::Stdio;
 use std::time::Duration;
 use std::time::Instant;
+use time::OffsetDateTime;
+use time::format_description::well_known::Rfc3339;
 use tokio::process::Command;
 use tokio::time::sleep;
 
@@ -174,21 +184,42 @@ async fn ensure_daemon(
         return Ok(meta);
     }
 
+    let log_path = daemon_log_path(project);
     let spawner = spawn.ok_or_else(|| {
         anyhow!("code-finder daemon is not running and no spawn command was provided")
     })?;
-    spawn_daemon(project, spawner).await?;
-    let meta = wait_for_metadata(project).await?;
-    ping(&meta).await?;
+    spawn_daemon(spawner, &log_path).await?;
+    let meta = wait_for_metadata(project, &log_path).await?;
+    ping(&meta)
+        .await
+        .map_err(|err| attach_log(err, &log_path))?;
     Ok(meta)
 }
 
-async fn spawn_daemon(_project: &ProjectProfile, spawn: &DaemonSpawn) -> Result<()> {
+async fn spawn_daemon(spawn: &DaemonSpawn, log_path: &Path) -> Result<()> {
     let mut cmd = Command::new(&spawn.program);
+    if let Some(parent) = log_path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let mut log_file = OpenOptions::new()
+        .create(true)
+        .write(true)
+        .truncate(true)
+        .open(log_path)?;
+    let timestamp = OffsetDateTime::now_utc();
+    let formatted = timestamp
+        .format(&Rfc3339)
+        .unwrap_or_else(|_| timestamp.unix_timestamp().to_string());
+    let _ = writeln!(
+        log_file,
+        "===== code-finder daemon start {formatted} =====",
+    );
+    log_file.flush().ok();
+    let stderr = log_file.try_clone()?;
     cmd.args(&spawn.args)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
-        .stderr(Stdio::null());
+        .stderr(Stdio::from(stderr));
     for (key, value) in &spawn.env {
         cmd.env(key, value);
     }
@@ -196,7 +227,7 @@ async fn spawn_daemon(_project: &ProjectProfile, spawn: &DaemonSpawn) -> Result<
     Ok(())
 }
 
-async fn wait_for_metadata(project: &ProjectProfile) -> Result<DaemonMetadata> {
+async fn wait_for_metadata(project: &ProjectProfile, log_path: &Path) -> Result<DaemonMetadata> {
     let deadline = Instant::now() + METADATA_WAIT;
     loop {
         if let Ok(meta) = DaemonMetadata::load(&project.metadata_path())
@@ -209,7 +240,7 @@ async fn wait_for_metadata(project: &ProjectProfile) -> Result<DaemonMetadata> {
         }
         sleep(METADATA_POLL_INTERVAL).await;
     }
-    Err(anyhow!("timed out waiting for code-finder daemon metadata"))
+    Err(timeout_error_with_log(log_path))
 }
 
 async fn ping(meta: &DaemonMetadata) -> Result<()> {
@@ -223,4 +254,49 @@ async fn ping(meta: &DaemonMetadata) -> Result<()> {
     } else {
         Err(anyhow!("daemon health check failed"))
     }
+}
+
+fn daemon_log_path(project: &ProjectProfile) -> PathBuf {
+    project.logs_dir().join("code-finder-daemon.log")
+}
+
+fn timeout_error_with_log(log_path: &Path) -> anyhow::Error {
+    let base = anyhow!("timed out waiting for code-finder daemon metadata");
+    attach_log(base, log_path)
+}
+
+fn attach_log(err: anyhow::Error, log_path: &Path) -> anyhow::Error {
+    if let Some(tail) = read_log_tail(log_path) {
+        err.context(format!(
+            "See {} for daemon stderr. Last lines:\n{}",
+            log_path.display(),
+            tail
+        ))
+    } else {
+        err.context(format!(
+            "See {} for daemon stderr (log is empty)",
+            log_path.display()
+        ))
+    }
+}
+
+fn read_log_tail(path: &Path) -> Option<String> {
+    let mut file = File::open(path).ok()?;
+    let metadata = file.metadata().ok()?;
+    let len = metadata.len();
+    let tail_bytes = 8192u64;
+    let start = len.saturating_sub(tail_bytes);
+    file.seek(SeekFrom::Start(start)).ok()?;
+    let mut buf = String::new();
+    file.read_to_string(&mut buf).ok()?;
+    if buf.is_empty() {
+        return None;
+    }
+    let lines: Vec<&str> = buf.lines().collect();
+    if lines.is_empty() {
+        return Some(buf);
+    }
+    let tail_line_count = min(lines.len(), 40);
+    let start_idx = lines.len() - tail_line_count;
+    Some(lines[start_idx..].join("\n"))
 }

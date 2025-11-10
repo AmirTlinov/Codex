@@ -6,15 +6,21 @@ use std::io::Write;
 use std::path::Path;
 use tracing::warn;
 
-pub fn load_snapshot(path: &Path) -> Result<Option<IndexSnapshot>> {
+pub enum SnapshotLoad {
+    Missing,
+    Loaded(IndexSnapshot),
+    ResetAfterCorruption,
+}
+
+pub fn load_snapshot(path: &Path) -> Result<SnapshotLoad> {
     if !path.exists() {
-        return Ok(None);
+        return Ok(SnapshotLoad::Missing);
     }
     let mut file = fs::File::open(path)?;
     let mut buf = Vec::new();
     file.read_to_end(&mut buf)?;
     match bincode::deserialize(&buf) {
-        Ok(snapshot) => Ok(Some(snapshot)),
+        Ok(snapshot) => Ok(SnapshotLoad::Loaded(snapshot)),
         Err(err) => {
             warn!(
                 "code-finder snapshot at {:?} is unreadable ({err}); rebuilding from scratch",
@@ -26,7 +32,7 @@ pub fn load_snapshot(path: &Path) -> Result<Option<IndexSnapshot>> {
                     path
                 );
             }
-            Ok(None)
+            Ok(SnapshotLoad::ResetAfterCorruption)
         }
     }
 }

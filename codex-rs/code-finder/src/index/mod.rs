@@ -1,6 +1,7 @@
 mod builder;
 mod cache;
 mod classify;
+mod filter;
 mod git;
 mod language;
 mod model;
@@ -8,6 +9,7 @@ mod references;
 mod search;
 mod storage;
 
+use crate::index::filter::path_in_skipped_dir;
 use crate::project::ProjectProfile;
 use crate::proto::IndexState;
 use crate::proto::IndexStatus;
@@ -25,14 +27,17 @@ use git::recent_paths;
 use model::IndexSnapshot;
 use model::SymbolRecord;
 use notify::Config as NotifyConfig;
+use notify::Event;
 use notify::RecommendedWatcher;
 use notify::RecursiveMode;
 use notify::Watcher;
 use search::run_search;
+use std::path::Path;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::mpsc as std_mpsc;
 use std::time::Duration;
+use storage::SnapshotLoad;
 use storage::load_snapshot;
 use storage::save_snapshot;
 use time::OffsetDateTime;
@@ -63,21 +68,55 @@ struct IndexStatusInternal {
     symbols: usize,
     files: usize,
     updated_at: Option<OffsetDateTime>,
+    notice: Option<String>,
 }
+
+const RESET_NOTICE: &str = "Index reset after detecting corruption; rebuilding from scratch";
 
 impl IndexCoordinator {
     pub async fn new(profile: ProjectProfile) -> Result<Self> {
         profile.ensure_dirs()?;
-        let loaded_snapshot = load_snapshot(&profile.index_path())?.unwrap_or_default();
-        let status = IndexStatusInternal {
-            state: if loaded_snapshot.symbols.is_empty() {
-                IndexState::Building
-            } else {
-                IndexState::Ready
-            },
-            symbols: loaded_snapshot.symbols.len(),
-            files: loaded_snapshot.files.len(),
-            updated_at: None,
+        let load_outcome = load_snapshot(&profile.index_path())?;
+        let (loaded_snapshot, status) = match load_outcome {
+            SnapshotLoad::Loaded(snapshot) => {
+                let symbol_count = snapshot.symbols.len();
+                let file_count = snapshot.files.len();
+                let state = if symbol_count == 0 {
+                    IndexState::Building
+                } else {
+                    IndexState::Ready
+                };
+                (
+                    snapshot,
+                    IndexStatusInternal {
+                        state,
+                        symbols: symbol_count,
+                        files: file_count,
+                        updated_at: None,
+                        notice: None,
+                    },
+                )
+            }
+            SnapshotLoad::Missing => (
+                IndexSnapshot::default(),
+                IndexStatusInternal {
+                    state: IndexState::Building,
+                    symbols: 0,
+                    files: 0,
+                    updated_at: None,
+                    notice: None,
+                },
+            ),
+            SnapshotLoad::ResetAfterCorruption => (
+                IndexSnapshot::default(),
+                IndexStatusInternal {
+                    state: IndexState::Building,
+                    symbols: 0,
+                    files: 0,
+                    updated_at: None,
+                    notice: Some(RESET_NOTICE.to_string()),
+                },
+            ),
         };
         let inner = Arc::new(Inner {
             cache: QueryCache::new(profile.queries_dir()),
@@ -195,6 +234,7 @@ impl IndexCoordinator {
             (guard.symbols.len(), guard.files.len())
         };
         self.update_status(IndexState::Ready, Some(counts)).await;
+        self.set_notice(None).await;
         Ok(())
     }
 
@@ -216,6 +256,7 @@ impl IndexCoordinator {
             updated_at: guard.updated_at,
             progress: None,
             schema_version: crate::proto::PROTOCOL_VERSION,
+            notice: guard.notice.clone(),
         }
     }
 
@@ -227,6 +268,11 @@ impl IndexCoordinator {
             guard.files = files;
             guard.updated_at = Some(OffsetDateTime::now_utc());
         }
+    }
+
+    async fn set_notice(&self, notice: Option<String>) {
+        let mut guard = self.inner.status.write().await;
+        guard.notice = notice;
     }
 
     fn spawn_initial_build(&self) {
@@ -266,11 +312,25 @@ fn watch_project(root: PathBuf, tx: mpsc::UnboundedSender<()>) -> notify::Result
     let mut watcher = RecommendedWatcher::new(watch_tx, NotifyConfig::default())?;
     watcher.watch(&root, RecursiveMode::Recursive)?;
     for res in watch_rx {
-        if res.is_ok() {
-            let _ = tx.send(());
+        match res {
+            Ok(event) => {
+                if event_only_ignored(&root, &event) {
+                    continue;
+                }
+                let _ = tx.send(());
+            }
+            Err(err) => warn!("code-finder watcher error: {err:?}"),
         }
     }
     Ok(())
+}
+
+fn event_only_ignored(root: &Path, event: &Event) -> bool {
+    !event.paths.is_empty()
+        && event
+            .paths
+            .iter()
+            .all(|path| path_in_skipped_dir(path, root))
 }
 
 fn build_snippet(symbol: &SymbolRecord, contents: &str, context: usize) -> String {

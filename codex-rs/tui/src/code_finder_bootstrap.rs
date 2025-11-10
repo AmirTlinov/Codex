@@ -65,7 +65,6 @@ impl CodeFinderContext {
             spawn: Some(self.spawn.clone()),
         }
     }
-
 }
 
 static CONTEXT: OnceCell<Arc<CodeFinderContext>> = OnceCell::new();
@@ -101,9 +100,11 @@ pub async fn request_reindex() -> Result<IndexStatus> {
 }
 
 async fn monitor_daemon(ctx: Arc<CodeFinderContext>, app_event_tx: AppEventSender) -> Result<()> {
+    let mut last_error: Option<String> = None;
     loop {
         match CodeFinderClient::new(ctx.client_options_with_spawn()).await {
             Ok(client) => {
+                last_error = None;
                 {
                     let mut guard = ACTIVE_CLIENT.write().await;
                     *guard = Some(client.clone());
@@ -114,7 +115,14 @@ async fn monitor_daemon(ctx: Arc<CodeFinderContext>, app_event_tx: AppEventSende
                 let mut guard = ACTIVE_CLIENT.write().await;
                 guard.take();
             }
-            Err(err) => warn!("code_finder daemon init failed: {err:?}"),
+            Err(err) => {
+                let message = err.to_string();
+                if last_error.as_ref() != Some(&message) {
+                    app_event_tx.send(AppEvent::CodeFinderWarning(message.clone()));
+                    last_error = Some(message);
+                }
+                warn!("code_finder daemon init failed: {err:?}");
+            }
         }
         sleep(RETRY_DELAY).await;
     }

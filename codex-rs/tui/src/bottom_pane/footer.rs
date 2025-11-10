@@ -1,6 +1,7 @@
 use crate::key_hint;
 use crate::key_hint::KeyBinding;
 use crate::render::line_utils::prefix_lines;
+use crate::text_formatting::truncate_text;
 use crate::ui_consts::FOOTER_INDENT_COLS;
 use crossterm::event::KeyCode;
 use ratatui::buffer::Buffer;
@@ -260,6 +261,10 @@ fn append_code_finder_status(line: &mut Line<'static>, indicator: &CodeFinderFoo
         CodeFinderIndicatorState::Failed => {
             line.push_span("Index failed — run /index-code".red());
         }
+    }
+    if let Some(notice) = indicator.notice() {
+        line.push_span(" — ".dim());
+        line.push_span(Span::from(truncate_text(notice, 80)));
     }
 }
 

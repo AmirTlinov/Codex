@@ -352,6 +352,9 @@ impl App {
             AppEvent::CodeFinderStatus(status) => {
                 self.chat_widget.update_code_finder_status(status);
             }
+            AppEvent::CodeFinderWarning(message) => {
+                self.chat_widget.handle_code_finder_warning(message);
+            }
             AppEvent::ConversationHistory(ev) => {
                 self.on_conversation_history_for_backtrack(tui, ev).await?;
             }

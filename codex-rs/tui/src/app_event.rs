@@ -147,6 +147,9 @@ pub(crate) enum AppEvent {
 
     /// Latest Code Finder index status (from background daemon).
     CodeFinderStatus(IndexStatus),
+
+    /// Background Code Finder failure/warning message.
+    CodeFinderWarning(String),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

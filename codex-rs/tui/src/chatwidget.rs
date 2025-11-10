@@ -298,6 +298,7 @@ pub(crate) struct ChatWidget {
     // Whether to add a final message separator after the last message
     needs_final_message_separator: bool,
     code_finder_last_state: Option<IndexState>,
+    code_finder_last_notice: Option<String>,
     code_finder_calls: HashMap<String, CodeFinderInFlight>,
 
     last_rendered_width: std::cell::Cell<Option<usize>>,
@@ -514,6 +515,16 @@ impl ChatWidget {
         self.bottom_pane.set_code_finder_status(Some(indicator));
 
         let previous = self.code_finder_last_state.replace(status.state.clone());
+        match status.notice.as_deref() {
+            Some(notice) if self.code_finder_last_notice.as_deref() != Some(notice) => {
+                self.add_info_message(notice.to_string(), None);
+                self.code_finder_last_notice = Some(notice.to_string());
+            }
+            None => {
+                self.code_finder_last_notice = None;
+            }
+            _ => {}
+        }
         match status.state {
             IndexState::Failed if previous != Some(IndexState::Failed) => {
                 self.add_error_message(
@@ -533,6 +544,15 @@ impl ChatWidget {
             }
             _ => {}
         }
+    }
+
+    pub(crate) fn handle_code_finder_warning(&mut self, message: String) {
+        self.add_error_message(message.clone());
+        self.bottom_pane.set_code_finder_status(Some(
+            CodeFinderFooterIndicator::failed_with_notice(message.clone()),
+        ));
+        self.code_finder_last_state = Some(IndexState::Failed);
+        self.code_finder_last_notice = Some(message);
     }
 
     fn on_rate_limit_snapshot(&mut self, snapshot: Option<RateLimitSnapshot>) {
@@ -1096,6 +1116,7 @@ impl ChatWidget {
             is_review_mode: false,
             needs_final_message_separator: false,
             code_finder_last_state: None,
+            code_finder_last_notice: None,
             code_finder_calls: HashMap::new(),
             last_rendered_width: std::cell::Cell::new(None),
             feedback,
@@ -1165,6 +1186,7 @@ impl ChatWidget {
             is_review_mode: false,
             needs_final_message_separator: false,
             code_finder_last_state: None,
+            code_finder_last_notice: None,
             code_finder_calls: HashMap::new(),
             last_rendered_width: std::cell::Cell::new(None),
             feedback,

@@ -74,7 +74,6 @@ pub(crate) fn summarize_code_finder_response(raw_output: &str) -> CodeFinderExec
 fn summarize_search_request(args: &CodeFinderSearchArgs) -> CodeFinderExecRequest {
     let summary = build_search_summary(args);
     let query = summary
-        
         .or_else(|| args.query.clone())
         .or_else(|| args.symbol_exact.clone())
         .or_else(|| args.help_symbol.clone());
@@ -306,6 +305,9 @@ fn format_index_status(status: &IndexStatus) -> String {
     let mut parts = vec![format!("index: {:?}", status.state)];
     if let Some(progress) = status.progress {
         parts.push(format!("progress: {}%", (progress * 100.0).round() as i32));
+    }
+    if let Some(notice) = &status.notice {
+        parts.push(notice.clone());
     }
     parts.join(" · ")
 }
