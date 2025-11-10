@@ -28,6 +28,8 @@ use serde::Serialize;
 pub struct ApplyPatchHandler;
 
 const APPLY_PATCH_LARK_GRAMMAR: &str = include_str!("tool_apply_patch.lark");
+const APPLY_PATCH_FREEFORM_USAGE: &str =
+    include_str!("../../../apply-patch/apply_patch_tool_instructions.md");
 
 #[async_trait]
 impl ToolHandler for ApplyPatchHandler {
@@ -163,9 +165,14 @@ pub enum ApplyPatchToolType {
 /// Returns a custom tool that can be used to edit files. Well-suited for GPT-5 models
 /// https://platform.openai.com/docs/guides/function-calling#custom-tools
 pub(crate) fn create_apply_patch_freeform_tool() -> ToolSpec {
+    let description = format!(
+        "{}\n\n{}",
+        "Use the `apply_patch` tool to edit files. This is a FREEFORM tool, so do not wrap the patch in JSON.",
+        APPLY_PATCH_FREEFORM_USAGE.trim()
+    );
     ToolSpec::Freeform(FreeformTool {
         name: "apply_patch".to_string(),
-        description: "Use the `apply_patch` tool to edit files. This is a FREEFORM tool, so do not wrap the patch in JSON.".to_string(),
+        description,
         format: Some(FreeformToolFormat {
             r#type: "grammar".to_string(),
             syntax: Some("lark".to_string()),

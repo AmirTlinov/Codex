@@ -1,0 +1,1 @@
+{"source":"agent","summary":["Embedded the full apply_patch syntax/usage guide directly into the tool description so Codex agents always see the FREEFORM envelope and operation semantics"],"citation":"codex-rs/core/src/tools/handlers/apply_patch.rs"}
