@@ -270,7 +270,7 @@ fn create_code_finder_tool() -> ToolSpec {
             .to_string(),
         format: FreeformToolFormat {
             r#type: "text".to_string(),
-            syntax: "code_finder_v1".to_string(),
+            syntax: None,
             definition: CODE_FINDER_FREEFORM_SPEC.trim().to_string(),
         },
     })
