@@ -13,7 +13,7 @@ pub use client::DaemonSpawn;
 pub use daemon::DaemonOptions;
 pub use daemon::run_daemon;
 pub use index::IndexCoordinator;
-pub use planner::plan_search_request;
 pub use planner::CodeFinderSearchArgs;
 pub use planner::SearchPlannerError;
+pub use planner::plan_search_request;
 pub use proto::SearchProfile;

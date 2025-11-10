@@ -1,11 +1,11 @@
 use crate::proto::FileCategory;
 use crate::proto::Language;
+use crate::proto::PROTOCOL_VERSION;
 use crate::proto::QueryId;
 use crate::proto::SearchFilters;
 use crate::proto::SearchProfile;
 use crate::proto::SearchRequest;
 use crate::proto::SymbolKind;
-use crate::proto::PROTOCOL_VERSION;
 use serde::Deserialize;
 use std::fmt;
 use uuid::Uuid;
@@ -228,7 +228,7 @@ fn apply_profiles(
         match profile {
             SearchProfile::Balanced => {}
             SearchProfile::Focused => {
-                *limit = (*limit).min(25).max(5);
+                *limit = (*limit).clamp(5, 25);
             }
             SearchProfile::Broad => {
                 *limit = (*limit).max(80);
@@ -343,7 +343,7 @@ fn looks_like_symbol_query(query: &str) -> bool {
         return true;
     }
     let trimmed = query.trim();
-    trimmed.split_whitespace().count() == 1 && trimmed.chars().any(|ch| ch.is_uppercase())
+    trimmed.split_whitespace().count() == 1 && trimmed.chars().any(char::is_uppercase)
 }
 
 fn push_profile(target: &mut Vec<SearchProfile>, profile: SearchProfile) {

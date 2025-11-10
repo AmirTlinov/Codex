@@ -10,7 +10,7 @@ use codex_code_finder::client::CodeFinderClient;
 use codex_code_finder::client::DaemonSpawn;
 use codex_code_finder::plan_search_request;
 use codex_code_finder::planner::CodeFinderSearchArgs;
-use codex_code_finder::planner::SearchProfile;
+use codex_code_finder::proto::SearchProfile;
 use codex_code_finder::proto::{self};
 use codex_code_finder::run_daemon;
 use codex_common::CliConfigOverrides;
@@ -203,11 +203,7 @@ fn nav_command_to_search_args(cmd: &NavCommand) -> CodeFinderSearchArgs {
         help_symbol: cmd.help_symbol.clone(),
         refine: cmd.refine.map(|id| id.to_string()),
         wait_for_index: cmd.no_wait.then_some(false),
-        profiles: cmd
-            .profiles
-            .iter()
-            .map(ProfileArg::to_profile)
-            .collect(),
+        profiles: cmd.profiles.iter().map(ProfileArg::to_profile).collect(),
     }
 }
 

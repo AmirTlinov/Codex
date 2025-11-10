@@ -8,9 +8,9 @@ use crate::proto::Language;
 use crate::proto::NavHit;
 use crate::proto::QueryId;
 use crate::proto::SearchFilters;
+use crate::proto::SearchProfile;
 use crate::proto::SearchRequest;
 use crate::proto::SearchStats;
-use crate::proto::SearchProfile;
 use crate::proto::SymbolHelp;
 use crate::proto::SymbolKind;
 use anyhow::Result;
@@ -165,13 +165,15 @@ fn profile_score(symbol: &SymbolRecord, profiles: &[SearchProfile], query: Optio
         match profile {
             SearchProfile::Balanced => {}
             SearchProfile::Focused => {
-                if let Some(q) = query {
-                    if symbol.identifier.eq_ignore_ascii_case(q)
-                        || symbol.path.to_ascii_lowercase().contains(&q.to_ascii_lowercase())
+                if let Some(q) = query
+                    && (symbol.identifier.eq_ignore_ascii_case(q)
+                        || symbol
+                            .path
+                            .to_ascii_lowercase()
+                            .contains(&q.to_ascii_lowercase()))
                     {
                         bonus += 40.0;
                     }
-                }
             }
             SearchProfile::Broad => {
                 bonus += 5.0;

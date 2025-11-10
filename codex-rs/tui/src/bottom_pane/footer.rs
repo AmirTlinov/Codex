@@ -248,7 +248,7 @@ fn append_code_finder_status(line: &mut Line<'static>, indicator: &CodeFinderFoo
     line.push_span(" · ".dim());
     match indicator.state() {
         CodeFinderIndicatorState::Building => {
-            line.push_span("●".yellow());
+            line.push_span("●".magenta());
             line.push_span(" Indexing".dim());
         }
         CodeFinderIndicatorState::Ready => {
