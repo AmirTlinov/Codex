@@ -267,51 +267,50 @@ fn parse_function_payload(arguments: &str) -> Result<CodeFinderPayload, Function
 }
 
 fn parse_freeform_payload(input: &str) -> Result<CodeFinderPayload, FunctionCallError> {
-    let mut action: Option<String> = None;
+    let mut lines = input.lines();
+    let header_line = lines.find(|line| !line.trim().is_empty()).ok_or_else(|| {
+        FunctionCallError::RespondToModel("code_finder block is empty".to_string())
+    })?;
+    let (action, mut symbol_id) = parse_header_line(header_line)?;
+
     let mut search_args = CodeFinderSearchArgs::default();
-    let mut symbol_id: Option<String> = None;
     let mut snippet_context: Option<usize> = None;
+    let mut footer_found = false;
 
-    for raw_line in input.lines() {
-        let line = raw_line.trim();
-        if line.is_empty() || line.starts_with('#') {
+    for raw_line in lines.by_ref() {
+        let trimmed = raw_line.trim();
+        if trimmed.is_empty() {
             continue;
         }
-
-        if action.is_none() && !line.contains(':') && !line.contains('=') {
-            let mut tokens = line.split_whitespace();
-            let verb = tokens
-                .next()
-                .ok_or_else(|| FunctionCallError::RespondToModel("missing action".to_string()))?
-                .to_ascii_lowercase();
-            let remainder = tokens.collect::<Vec<_>>().join(" ");
-            if !remainder.is_empty() {
-                if matches!(verb.as_str(), "open" | "snippet") {
-                    symbol_id = Some(remainder.clone());
-                } else {
-                    search_args.query = Some(remainder.clone());
-                }
+        if is_footer_line(trimmed, &action) {
+            footer_found = true;
+            if lines.any(|line| !line.trim().is_empty()) {
+                return Err(FunctionCallError::RespondToModel(
+                    "text after *** End block is not allowed".to_string(),
+                ));
             }
-            action = Some(verb);
+            break;
+        }
+        if trimmed.starts_with('#') {
             continue;
         }
-
-        let (key, value) = parse_key_value(line)?;
+        let (key, value) = parse_key_value(trimmed)?;
         apply_freeform_pair(
             key,
             value,
-            &mut action,
             &mut search_args,
             &mut symbol_id,
             &mut snippet_context,
         )?;
     }
 
-    let verb = action.ok_or_else(|| {
-        FunctionCallError::RespondToModel("code_finder freeform input missing action".to_string())
-    })?;
+    if !footer_found {
+        return Err(FunctionCallError::RespondToModel(format!(
+            "missing *** End {action} footer"
+        )));
+    }
 
-    match verb.as_str() {
+    match action.as_str() {
         "search" => Ok(CodeFinderPayload::Search(Box::new(search_args))),
         "open" => {
             let target = symbol_id.ok_or_else(|| {
@@ -332,6 +331,56 @@ fn parse_freeform_payload(input: &str) -> Result<CodeFinderPayload, FunctionCall
             "unknown code_finder action '{other}'"
         ))),
     }
+}
+
+fn parse_header_line(line: &str) -> Result<(String, Option<String>), FunctionCallError> {
+    const HEADER_PREFIX: &str = "*** Begin ";
+    let trimmed = line.trim();
+    if !trimmed.starts_with(HEADER_PREFIX) {
+        return Err(FunctionCallError::RespondToModel(
+            "code_finder block must start with *** Begin <Action>".to_string(),
+        ));
+    }
+    let rest = trimmed[HEADER_PREFIX.len()..].trim();
+    if rest.is_empty() {
+        return Err(FunctionCallError::RespondToModel(
+            "missing action after *** Begin".to_string(),
+        ));
+    }
+    let (action_token, remainder) = split_first_word(rest);
+    if action_token.is_empty() {
+        return Err(FunctionCallError::RespondToModel(
+            "missing action after *** Begin".to_string(),
+        ));
+    }
+    let action = action_token.to_ascii_lowercase();
+    let header_id = remainder
+        .filter(|value| !value.is_empty())
+        .map(std::string::ToString::to_string);
+    Ok((action, header_id))
+}
+
+fn split_first_word(input: &str) -> (&str, Option<&str>) {
+    for (idx, ch) in input.char_indices() {
+        if ch.is_whitespace() {
+            let head = &input[..idx];
+            let tail = input[idx..].trim();
+            return (head, if tail.is_empty() { None } else { Some(tail) });
+        }
+    }
+    (input, None)
+}
+
+fn is_footer_line(line: &str, action: &str) -> bool {
+    const FOOTER_PREFIX: &str = "*** End ";
+    if !line
+        .to_ascii_lowercase()
+        .starts_with(&FOOTER_PREFIX.to_ascii_lowercase())
+    {
+        return false;
+    }
+    let rest = line[FOOTER_PREFIX.len()..].trim();
+    rest.eq_ignore_ascii_case(action)
 }
 
 fn parse_key_value(line: &str) -> Result<(String, String), FunctionCallError> {
@@ -355,14 +404,15 @@ fn parse_key_value(line: &str) -> Result<(String, String), FunctionCallError> {
 fn apply_freeform_pair(
     key: String,
     raw_value: String,
-    action: &mut Option<String>,
     args: &mut CodeFinderSearchArgs,
     symbol_id: &mut Option<String>,
     snippet_context: &mut Option<usize>,
 ) -> Result<(), FunctionCallError> {
     match key.as_str() {
         "action" => {
-            *action = Some(raw_value.to_ascii_lowercase());
+            return Err(FunctionCallError::RespondToModel(
+                "action is defined by the *** Begin header".to_string(),
+            ));
         }
         "query" | "q" => args.query = Some(raw_value),
         "limit" => args.limit = Some(parse_usize("limit", &raw_value)?),

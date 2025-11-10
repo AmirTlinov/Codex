@@ -231,14 +231,29 @@ fn create_write_stdin_tool() -> ToolSpec {
     })
 }
 
-const CODE_FINDER_FREEFORM_SPEC: &str = r"code_finder accepts a short block of text.
+const CODE_FINDER_FREEFORM_SPEC: &str = r"code_finder uses envelopes like apply_patch.
 
-The first non-empty line declares the action:
-  search
-  open <symbol_id>
-  snippet <symbol_id>
+Wrap every request in matching headers:
 
-Subsequent lines are optional key/value pairs (key: value or key = value).
+*** Begin Search
+query: SessionManager
+kinds: function
+languages: rust, ts
+path_globs: core/**
+recent: true
+with_refs: true
+*** End Search
+
+*** Begin Open
+id: cf_deadbeef
+*** End Open
+
+*** Begin Snippet
+id: cf_deadbeef
+context: 12
+*** End Snippet
+
+Between the headers, provide optional key/value pairs (key: value or key = value).
 Lists are comma-separated; quote values containing spaces.
 
 Supported keys:
@@ -249,18 +264,6 @@ Supported keys:
 - with_refs, refs_limit
 - help/help_symbol, refine/query_id, wait/wait_for_index
 - id, context (snippet context lines)
-
-Example:
-search
-query: SessionManager
-kinds: function
-languages: rust, ts
-path: core/**
-recent: true
-with_refs: true
-
-snippet cf_deadbeef
-context: 12
 ";
 
 fn create_code_finder_tool() -> ToolSpec {

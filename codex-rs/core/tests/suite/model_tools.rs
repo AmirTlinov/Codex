@@ -58,7 +58,6 @@ async fn collect_tool_identifiers_for_model(model: &str) -> Vec<String> {
     config.model_family =
         find_family_for_model(model).unwrap_or_else(|| panic!("unknown model family for {model}"));
     config.features.disable(Feature::ApplyPatchFreeform);
-    config.features.disable(Feature::ViewImageTool);
     config.features.disable(Feature::WebSearchRequest);
     config.features.disable(Feature::UnifiedExec);
 
@@ -97,7 +96,8 @@ async fn model_selects_expected_tools() {
             "list_mcp_resources".to_string(),
             "list_mcp_resource_templates".to_string(),
             "read_mcp_resource".to_string(),
-            "update_plan".to_string()
+            "update_plan".to_string(),
+            "view_image".to_string()
         ],
         "codex-mini-latest should expose the local shell tool",
     );
@@ -110,7 +110,8 @@ async fn model_selects_expected_tools() {
             "list_mcp_resources".to_string(),
             "list_mcp_resource_templates".to_string(),
             "read_mcp_resource".to_string(),
-            "update_plan".to_string()
+            "update_plan".to_string(),
+            "view_image".to_string()
         ],
         "o3 should expose the generic shell tool",
     );
