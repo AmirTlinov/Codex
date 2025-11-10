@@ -1040,7 +1040,9 @@ const CODE_FINDER_SNIPPET_MAX_LINES: usize = 12;
 pub(crate) struct CodeFinderCallCell {
     call_id: String,
     action: CodeFinderActionSummary,
+    summary: Option<String>,
     raw_preview: Option<String>,
+    request_error: Option<String>,
     start_time: Instant,
     duration: Option<Duration>,
     outcome: Option<CodeFinderOutcome>,
@@ -1049,14 +1051,22 @@ pub(crate) struct CodeFinderCallCell {
 impl CodeFinderCallCell {
     fn new(call_id: String, raw_input: String) -> Self {
         let trimmed = raw_input.trim();
-        let (action, preview) = if trimmed.is_empty() {
-            (CodeFinderActionSummary::Unknown, None)
+        let (action, summary, request_error) = if trimmed.is_empty() {
+            (CodeFinderActionSummary::Unknown, None, None)
         } else {
             match parse_code_finder_payload(trimmed) {
-                Ok(payload) => (CodeFinderActionSummary::from_payload(payload), None),
+                Ok(payload) => {
+                    let action = CodeFinderActionSummary::from_payload(payload);
+                    let summary = action.summary_text();
+                    (action, summary, None)
+                }
                 Err(err) => {
                     warn!("failed to parse code_finder payload: {}", err);
-                    (CodeFinderActionSummary::Unknown, preview_from_raw(trimmed))
+                    (
+                        CodeFinderActionSummary::Unknown,
+                        preview_from_raw(trimmed),
+                        Some(err.to_string()),
+                    )
                 }
             }
         };
@@ -1064,7 +1074,9 @@ impl CodeFinderCallCell {
         Self {
             call_id,
             action,
-            raw_preview: preview.or_else(|| preview_from_raw(trimmed)),
+            summary,
+            raw_preview: preview_from_raw(trimmed),
+            request_error,
             start_time: Instant::now(),
             duration: None,
             outcome: None,
@@ -1091,19 +1103,17 @@ impl CodeFinderCallCell {
             None => spinner(Some(self.start_time)),
         };
 
-        let mut spans: Vec<Span<'static>> = vec![
-            status,
-            " ".into(),
-            padded_emoji("🔎").into(),
-            " ".into(),
-            "code_finder".bold(),
-            " ".into(),
-            self.action.label().dim(),
-        ];
+        let mut spans: Vec<Span<'static>> =
+            vec![status, " ".into(), self.action.header_label().bold()];
 
-        if let Some(suffix) = self.action.header_suffix() {
+        if let Some(hint) = self.summary.as_deref().or(self.raw_preview.as_deref()) {
             spans.push(" ".into());
-            spans.push(suffix.into());
+            spans.push(hint.to_string().dim());
+        }
+
+        if self.request_error.is_some() {
+            spans.push(" ".into());
+            spans.push("[invalid]".red());
         }
 
         if let Some(duration) = self.duration {
@@ -1115,14 +1125,18 @@ impl CodeFinderCallCell {
     }
 
     fn render_request_lines(&self, width: usize) -> Vec<Line<'static>> {
+        if let Some(err) = &self.request_error {
+            return wrap_line_owned(
+                Line::from(vec!["Failed to parse request: ".red(), err.clone().into()]),
+                width,
+            );
+        }
+
         let mut lines = self.action.request_lines(width);
         if lines.is_empty()
             && let Some(preview) = &self.raw_preview
         {
-            lines.extend(wrap_line_owned(
-                Line::from(vec!["payload: ".dim(), preview.clone().into()]),
-                width,
-            ));
+            lines.extend(wrap_line_owned(Line::from(preview.clone().dim()), width));
         }
         lines
     }
@@ -1199,17 +1213,6 @@ fn sanitize_preview(text: &str) -> String {
     truncate_text(&normalized, CODE_FINDER_MAX_PREVIEW_CHARS)
 }
 
-fn render_string_list(label: &str, values: &[String], width: usize) -> Vec<Line<'static>> {
-    if values.is_empty() {
-        return Vec::new();
-    }
-    let joined = truncate_text(&values.join(", "), CODE_FINDER_MAX_PREVIEW_CHARS);
-    wrap_line_owned(
-        Line::from(vec![format!("{label}: ").dim(), joined.into()]),
-        width,
-    )
-}
-
 fn render_error_line(error: &ErrorPayload, width: usize) -> Vec<Line<'static>> {
     let text = format!("error: {} ({})", error.message, error.code);
     wrap_line_owned(Line::from(text.red()), width)
@@ -1259,24 +1262,26 @@ impl CodeFinderActionSummary {
         }
     }
 
-    fn label(&self) -> &'static str {
+    fn header_label(&self) -> &'static str {
         match self {
-            Self::Search(_) => "search",
-            Self::Open { .. } => "open",
-            Self::Snippet { .. } => "snippet",
-            Self::Unknown => "custom",
+            Self::Search(_) => "Search",
+            Self::Open { .. } => "Open",
+            Self::Snippet { .. } => "Snippet",
+            Self::Unknown => "Custom tool",
         }
     }
 
-    fn header_suffix(&self) -> Option<String> {
+    fn summary_text(&self) -> Option<String> {
         match self {
-            Self::Search(args) => args
-                .query
-                .as_deref()
-                .map(|q| format!("query=\"{}\"", truncate_text(q, 60))),
-            Self::Open { id } | Self::Snippet { id, .. } => id
-                .as_deref()
-                .map(|value| format!("id={}", truncate_text(value, 40))),
+            Self::Search(args) => build_search_summary(args),
+            Self::Open { id } => id.clone(),
+            Self::Snippet { id, context } => {
+                let mut summary = id.clone();
+                if let (Some(text), Some(ctx)) = (summary.as_mut(), context) {
+                    text.push_str(&format!(" (context {ctx})"));
+                }
+                summary
+            }
             Self::Unknown => None,
         }
     }
@@ -1311,77 +1316,83 @@ fn render_identifier_line(label: &str, value: Option<&str>, width: usize) -> Vec
 }
 
 fn render_search_request_lines(args: &CodeFinderSearchArgs, width: usize) -> Vec<Line<'static>> {
-    let mut lines: Vec<Line<'static>> = Vec::new();
-    let query = args
-        .query
-        .as_deref()
-        .map(|q| truncate_text(q, CODE_FINDER_MAX_PREVIEW_CHARS))
-        .unwrap_or_else(|| "<empty>".to_string());
-    lines.extend(wrap_line_owned(
-        Line::from(vec!["query: ".dim(), query.into()]),
-        width,
-    ));
-
-    if let Some(help) = args.help_symbol.as_deref() {
-        lines.extend(wrap_line_owned(
-            Line::from(vec!["help_symbol: ".dim(), truncate_text(help, 80).into()]),
-            width,
-        ));
+    let mut filters: Vec<String> = Vec::new();
+    if !args.kinds.is_empty() {
+        filters.push(format!("kind={}", args.kinds.join("/")));
     }
-
-    let mut flags: Vec<String> = Vec::new();
-    if let Some(limit) = args.limit {
-        flags.push(format!("limit={limit}"));
+    if !args.languages.is_empty() {
+        filters.push(format!("lang={}", args.languages.join("/")));
     }
-    if args.with_refs.unwrap_or(false) {
-        flags.push("with_refs".to_string());
+    if !args.categories.is_empty() {
+        filters.push(format!("category={}", args.categories.join("/")));
     }
-    if let Some(limit) = args.refs_limit {
-        flags.push(format!("refs_limit={limit}"));
+    if !args.path_globs.is_empty() {
+        filters.push(format!("paths={}", args.path_globs.join(", ")));
+    } else if !args.file_substrings.is_empty() {
+        filters.push(format!("files={}", args.file_substrings.join(", ")));
     }
     if args.recent_only.unwrap_or(false) {
-        flags.push("recent".to_string());
+        filters.push("recent".to_string());
     }
     if args.only_tests.unwrap_or(false) {
-        flags.push("tests".to_string());
+        filters.push("tests".to_string());
     }
     if args.only_docs.unwrap_or(false) {
-        flags.push("docs".to_string());
+        filters.push("docs".to_string());
     }
     if args.only_deps.unwrap_or(false) {
-        flags.push("deps".to_string());
+        filters.push("deps".to_string());
     }
-    if args.wait_for_index == Some(false) {
-        flags.push("wait_for_index=false".to_string());
+    if let Some(limit) = args.limit {
+        filters.push(format!("limit={limit}"));
+    }
+    if args.with_refs.unwrap_or(false) {
+        filters.push("refs".to_string());
+    }
+    if let Some(limit) = args.refs_limit {
+        filters.push(format!("refs_limit={limit}"));
     }
     if let Some(refine) = args.refine.as_deref() {
-        flags.push(format!("refine={}", truncate_text(refine, 48)));
+        filters.push(format!("refine={}", truncate_text(refine, 48)));
     }
 
-    if !flags.is_empty() {
-        lines.extend(wrap_line_owned(
+    if filters.is_empty() {
+        Vec::new()
+    } else {
+        wrap_line_owned(
             Line::from(vec![
-                "options: ".dim(),
-                truncate_text(&flags.join(", "), CODE_FINDER_MAX_PREVIEW_CHARS).into(),
+                "filters: ".dim(),
+                truncate_text(&filters.join(", "), CODE_FINDER_MAX_PREVIEW_CHARS).into(),
             ]),
             width,
-        ));
+        )
+    }
+}
+
+fn build_search_summary(args: &CodeFinderSearchArgs) -> Option<String> {
+    let mut summary = args
+        .query
+        .clone()
+        .or_else(|| args.symbol_exact.clone())
+        .or_else(|| args.help_symbol.clone())
+        .or_else(|| args.path_globs.first().cloned())
+        .or_else(|| args.file_substrings.first().cloned());
+
+    if let (Some(text), Some(path)) = (
+        summary.as_ref(),
+        args.path_globs
+            .first()
+            .or_else(|| args.file_substrings.first()),
+    )
+        && !text.contains(path) {
+            summary = Some(format!("{text} in {path}"));
+        }
+
+    if let (Some(text), Some(lang)) = (summary.as_ref(), args.languages.first()) {
+        summary = Some(format!("{text} ({lang})"));
     }
 
-    if let Some(symbol) = args.symbol_exact.as_deref() {
-        lines.extend(wrap_line_owned(
-            Line::from(vec!["symbol: ".dim(), truncate_text(symbol, 80).into()]),
-            width,
-        ));
-    }
-
-    lines.extend(render_string_list("kinds", &args.kinds, width));
-    lines.extend(render_string_list("languages", &args.languages, width));
-    lines.extend(render_string_list("categories", &args.categories, width));
-    lines.extend(render_string_list("paths", &args.path_globs, width));
-    lines.extend(render_string_list("files", &args.file_substrings, width));
-
-    lines
+    summary
 }
 
 #[derive(Debug)]
