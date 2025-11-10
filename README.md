@@ -69,6 +69,16 @@ Codex can access MCP servers. To configure them, refer to the [config docs](./do
 
 Codex CLI supports a rich set of configuration options, with preferences stored in `~/.codex/config.toml`. For full configuration options, see [Configuration](./docs/config.md).
 
+### Code Finder navigation
+
+Codex ships with a background indexer and deterministic search surface called **Code Finder**. Once `codex nav` runs inside a project, it spawns a daemon that keeps symbol metadata, recency signals, and file fingerprints up to date. Agents (and humans) can then:
+
+- `codex nav "SymbolName" --kind function --with-refs` → fuzzy search with JSON output, refs, filters such as `--recent`, `--docs`, `--deps`, globbed paths, or cached query refinement via `--from <query_id>`.
+- `codex open <id>` → download the full file for a search hit and reuse IDs for downstream tooling.
+- `codex snippet <id> --context 12` → stream only the relevant window around a definition.
+
+See the dedicated [Code Finder guide](./docs/code-finder.md) for the protocol, schema, and watchdog details.
+
 ---
 
 ### Docs & FAQ
@@ -101,6 +111,7 @@ Codex CLI supports a rich set of configuration options, with preferences stored 
   - [Build from source](./docs/install.md#build-from-source)
 - [**FAQ**](./docs/faq.md)
 - [**Open source fund**](./docs/open-source-fund.md)
+- [**Code Finder**](./docs/code-finder.md)
 
 ---
 
