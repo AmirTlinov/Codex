@@ -488,6 +488,8 @@ mod tests {
 
     #[test]
     fn query_mentions_tests_ignores_snake_case_suffix() {
-        assert!(!super::query_mentions_tests("code_finder_history_lines_for_test"));
+        assert!(!super::query_mentions_tests(
+            "code_finder_history_lines_for_test"
+        ));
     }
 }

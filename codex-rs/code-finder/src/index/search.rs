@@ -465,3 +465,65 @@ impl FilterSet {
         true
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::index::builder::IndexBuilder;
+    use crate::index::filter::PathFilter;
+    use crate::proto::FileCategory;
+    use crate::proto::SearchFilters;
+    use crate::proto::SearchRequest;
+    use std::collections::HashSet;
+    use std::sync::Arc;
+    use tempfile::tempdir;
+
+    #[test]
+    fn integration_search_finds_snake_case_symbol() {
+        let temp = tempdir().unwrap();
+        let root = temp.path();
+        std::fs::create_dir_all(root.join("tui/src")).unwrap();
+        std::fs::create_dir_all(root.join("tui/tests")).unwrap();
+        std::fs::write(
+            root.join("tui/src/code_finder_view.rs"),
+            "pub fn code_finder_history_lines_for_test() {}",
+        )
+        .unwrap();
+        std::fs::write(
+            root.join("tui/tests/code_finder_history.rs"),
+            "pub fn helper_test_case() {}",
+        )
+        .unwrap();
+
+        let filter = Arc::new(PathFilter::new(root).unwrap());
+        let builder = IndexBuilder::new(root, HashSet::new(), filter);
+        let snapshot = builder.build().unwrap();
+        let cache = QueryCache::new(root.join("cache"));
+
+        let base_request = SearchRequest {
+            query: Some("code_finder_history_lines_for_test".to_string()),
+            limit: 5,
+            ..Default::default()
+        };
+        let result = run_search(&snapshot, &base_request, &cache, root, 0).expect("search request");
+        assert_eq!(result.hits.len(), 1);
+        assert_eq!(result.hits[0].path, "tui/src/code_finder_view.rs");
+
+        let tests_only = SearchRequest {
+            query: Some("helper_test_case".to_string()),
+            filters: SearchFilters {
+                categories: vec![FileCategory::Tests],
+                ..Default::default()
+            },
+            limit: 5,
+            ..Default::default()
+        };
+        let tests_result =
+            run_search(&snapshot, &tests_only, &cache, root, 0).expect("tests request");
+        assert_eq!(tests_result.hits.len(), 1);
+        assert_eq!(
+            tests_result.hits[0].path,
+            "tui/tests/code_finder_history.rs"
+        );
+    }
+}
