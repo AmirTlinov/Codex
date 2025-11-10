@@ -201,10 +201,10 @@ impl IndexCoordinator {
     async fn build_snapshot(&self) -> Result<IndexSnapshot> {
         let root = self.inner.profile.project_root().to_path_buf();
         let recent = recent_paths(&root);
-        Ok(
+        let snapshot =
             tokio::task::spawn_blocking(move || IndexBuilder::new(root.as_path(), recent).build())
-                .await??,
-        )
+                .await??;
+        Ok(snapshot)
     }
 
     pub async fn current_status(&self) -> IndexStatus {
