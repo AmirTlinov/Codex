@@ -9,6 +9,7 @@ use codex_code_finder::client::CodeFinderClient;
 use codex_code_finder::client::DaemonSpawn;
 use codex_code_finder::proto::IndexState;
 use codex_code_finder::proto::IndexStatus;
+use codex_code_finder::resolve_daemon_launcher;
 use codex_core::config::Config;
 use once_cell::sync::Lazy;
 use once_cell::sync::OnceCell;
@@ -41,7 +42,7 @@ impl CodeFinderContext {
             );
         }
         let codex_home = config.codex_home.clone();
-        let exe = std::env::current_exe().context("resolve current executable for code_finder")?;
+        let exe = resolve_daemon_launcher().context("resolve code_finder launcher")?;
         let spawn = DaemonSpawn {
             program: exe,
             args: vec![

@@ -1,6 +1,10 @@
 use crate::planner::CodeFinderSearchArgs;
+use crate::planner::resolve_profile_token;
+use crate::planner::suggest_from_options;
+use crate::proto::InputFormat;
 use crate::proto::SearchProfile;
 use serde::Deserialize;
+use serde_json::Value;
 use std::fmt;
 
 #[derive(Debug, Clone, Deserialize)]
@@ -22,6 +26,85 @@ pub const DEFAULT_SNIPPET_CONTEXT: usize = 8;
 fn default_snippet_context() -> usize {
     DEFAULT_SNIPPET_CONTEXT
 }
+
+const FREEFORM_KEY_SUGGESTIONS: &[&str] = &[
+    "query",
+    "q",
+    "limit",
+    "kind",
+    "kinds",
+    "language",
+    "languages",
+    "lang",
+    "category",
+    "categories",
+    "path",
+    "paths",
+    "glob",
+    "globs",
+    "path_globs",
+    "file",
+    "files",
+    "file_substrings",
+    "symbol",
+    "symbol_exact",
+    "recent",
+    "recent_only",
+    "tests",
+    "only_tests",
+    "docs",
+    "only_docs",
+    "deps",
+    "only_deps",
+    "dependencies",
+    "with_refs",
+    "refs",
+    "refs_limit",
+    "references_limit",
+    "help",
+    "help_symbol",
+    "refine",
+    "query_id",
+    "wait",
+    "wait_for_index",
+    "id",
+    "context",
+    "profile",
+    "profiles",
+    "mode",
+    "modes",
+    "preset",
+    "presets",
+    "focus",
+    "focuses",
+];
+
+const JSON_SEARCH_KEYS: &[&str] = &[
+    "action",
+    "query",
+    "q",
+    "limit",
+    "kinds",
+    "languages",
+    "categories",
+    "path_globs",
+    "file_substrings",
+    "symbol_exact",
+    "recent_only",
+    "only_tests",
+    "only_docs",
+    "only_deps",
+    "with_refs",
+    "refs_limit",
+    "help_symbol",
+    "refine",
+    "query_id",
+    "wait_for_index",
+    "wait",
+    "profiles",
+    "input_format",
+    "schema_version",
+];
 
 #[derive(Debug, Clone)]
 pub struct PayloadParseError {
@@ -54,6 +137,258 @@ impl From<serde_json::Error> for PayloadParseError {
     }
 }
 
+fn try_quick_command(input: &str) -> Option<Result<CodeFinderPayload, PayloadParseError>> {
+    let trimmed = input.trim_start();
+    if trimmed.is_empty() {
+        return None;
+    }
+    let mut action_end = trimmed.len();
+    for (idx, ch) in trimmed.char_indices() {
+        if ch.is_whitespace() {
+            action_end = idx;
+            break;
+        }
+    }
+    let (action_raw, rest_raw) = trimmed.split_at(action_end);
+    let action = action_raw.to_ascii_lowercase();
+    let rest = rest_raw.trim_start();
+    match action.as_str() {
+        "search" | "find" => Some(parse_quick_search(rest)),
+        "open" => Some(parse_quick_open(rest)),
+        "snippet" | "snip" => Some(parse_quick_snippet(rest)),
+        _ => None,
+    }
+}
+
+fn parse_quick_search(rest: &str) -> Result<CodeFinderPayload, PayloadParseError> {
+    let tokens = split_shellwords(rest)?;
+    let mut query_tokens: Vec<String> = Vec::new();
+    let mut kv_pairs: Vec<(String, String)> = Vec::new();
+    let mut args = CodeFinderSearchArgs::default();
+    let mut only_scope = OnlyScope::Inactive;
+    for token in tokens {
+        if let Some((key, value)) = token.split_once('=') {
+            only_scope.reset();
+            kv_pairs.push((key.to_string(), value.to_string()));
+            continue;
+        }
+        let normalized = token.to_ascii_lowercase();
+        if normalized == "only" {
+            only_scope = OnlyScope::Pending;
+            continue;
+        }
+        match apply_quick_shorthand(&normalized, &mut args, &mut only_scope) {
+            ShorthandResult::Category => continue,
+            ShorthandResult::Other => {
+                only_scope.reset();
+                continue;
+            }
+            ShorthandResult::NotMatched => {}
+        }
+        only_scope.reset();
+        query_tokens.push(token);
+    }
+
+    if !query_tokens.is_empty() {
+        args.query = Some(query_tokens.join(" "));
+    }
+
+    let mut symbol_id: Option<String> = None;
+    let mut snippet_context: Option<usize> = None;
+    for (key_raw, value_raw) in kv_pairs {
+        let key = key_raw.trim().to_ascii_lowercase();
+        let value = clean_value(&value_raw);
+        apply_freeform_pair(key, value, &mut args, &mut symbol_id, &mut snippet_context)?;
+    }
+
+    args.finalize_freeform_hints();
+    Ok(CodeFinderPayload::Search(Box::new(args)))
+}
+
+fn parse_quick_open(rest: &str) -> Result<CodeFinderPayload, PayloadParseError> {
+    let id = rest.trim();
+    if id.is_empty() {
+        return Err(PayloadParseError::new(
+            "quick open requires an id after 'open'",
+        ));
+    }
+    Ok(CodeFinderPayload::Open { id: id.to_string() })
+}
+
+fn parse_quick_snippet(rest: &str) -> Result<CodeFinderPayload, PayloadParseError> {
+    let mut parts = rest.split_whitespace();
+    let Some(id) = parts.next() else {
+        return Err(PayloadParseError::new(
+            "quick snippet requires an id after 'snippet'",
+        ));
+    };
+    let mut context = DEFAULT_SNIPPET_CONTEXT;
+    if let Some(token) = parts.next() {
+        context = parse_snippet_context_token(token)?;
+    }
+    if parts.next().is_some() {
+        return Err(PayloadParseError::new(
+            "quick snippet accepts only id and optional context",
+        ));
+    }
+    Ok(CodeFinderPayload::Snippet {
+        id: id.to_string(),
+        context,
+    })
+}
+
+fn parse_snippet_context_token(token: &str) -> Result<usize, PayloadParseError> {
+    let raw = token
+        .trim()
+        .strip_prefix("context=")
+        .unwrap_or(token.trim());
+    raw.parse::<usize>()
+        .map_err(|err| PayloadParseError::new(format!("invalid snippet context '{token}': {err}")))
+}
+
+fn split_shellwords(input: &str) -> Result<Vec<String>, PayloadParseError> {
+    let mut tokens: Vec<String> = Vec::new();
+    let mut current = String::new();
+    let mut in_quote: Option<char> = None;
+    let mut escape = false;
+    for ch in input.chars() {
+        if escape {
+            current.push(ch);
+            escape = false;
+            continue;
+        }
+        if ch == '\\' {
+            escape = true;
+            continue;
+        }
+        if let Some(active) = in_quote {
+            if ch == active {
+                in_quote = None;
+            } else {
+                current.push(ch);
+            }
+            continue;
+        }
+        match ch {
+            '"' | '\'' => in_quote = Some(ch),
+            c if c.is_whitespace() => {
+                if !current.is_empty() {
+                    tokens.push(current.clone());
+                    current.clear();
+                }
+            }
+            _ => current.push(ch),
+        }
+    }
+    if escape {
+        return Err(PayloadParseError::new(
+            "quick command ended with escape character",
+        ));
+    }
+    if in_quote.is_some() {
+        return Err(PayloadParseError::new(
+            "quick command contains unterminated quote",
+        ));
+    }
+    if !current.is_empty() {
+        tokens.push(current);
+    }
+    Ok(tokens)
+}
+
+#[derive(Clone, Copy, Default, PartialEq, Eq)]
+enum OnlyScope {
+    #[default]
+    Inactive,
+    Pending,
+    Latched,
+}
+
+impl OnlyScope {
+    fn reset(&mut self) {
+        *self = OnlyScope::Inactive;
+    }
+
+    fn consume_category(&mut self) -> bool {
+        match self {
+            OnlyScope::Pending => {
+                *self = OnlyScope::Latched;
+                true
+            }
+            OnlyScope::Latched => true,
+            OnlyScope::Inactive => false,
+        }
+    }
+}
+
+enum ShorthandResult {
+    Category,
+    Other,
+    NotMatched,
+}
+
+fn apply_quick_shorthand(
+    token: &str,
+    args: &mut CodeFinderSearchArgs,
+    only_scope: &mut OnlyScope,
+) -> ShorthandResult {
+    match token {
+        "tests" => {
+            if only_scope.consume_category() {
+                args.only_tests = Some(true);
+            }
+            push_profile(args, SearchProfile::Tests);
+            ShorthandResult::Category
+        }
+        "docs" => {
+            if only_scope.consume_category() {
+                args.only_docs = Some(true);
+            }
+            push_profile(args, SearchProfile::Docs);
+            ShorthandResult::Category
+        }
+        "deps" => {
+            if only_scope.consume_category() {
+                args.only_deps = Some(true);
+            }
+            push_profile(args, SearchProfile::Deps);
+            ShorthandResult::Category
+        }
+        "recent" => {
+            args.recent_only = Some(true);
+            push_profile(args, SearchProfile::Recent);
+            ShorthandResult::Other
+        }
+        "references" | "refs" => {
+            push_profile(args, SearchProfile::References);
+            ShorthandResult::Other
+        }
+        "symbols" => {
+            push_profile(args, SearchProfile::Symbols);
+            ShorthandResult::Other
+        }
+        "files" => {
+            push_profile(args, SearchProfile::Files);
+            ShorthandResult::Other
+        }
+        "ai" => {
+            push_profile(args, SearchProfile::Ai);
+            ShorthandResult::Other
+        }
+        "with_refs" | "withrefs" => {
+            args.with_refs = Some(true);
+            ShorthandResult::Other
+        }
+        _ => ShorthandResult::NotMatched,
+    }
+}
+
+fn push_profile(args: &mut CodeFinderSearchArgs, profile: SearchProfile) {
+    if !args.profiles.contains(&profile) {
+        args.profiles.push(profile);
+    }
+}
+
 pub fn parse_payload(arguments: &str) -> Result<CodeFinderPayload, PayloadParseError> {
     let trimmed = arguments.trim();
     if trimmed.is_empty() {
@@ -62,11 +397,156 @@ pub fn parse_payload(arguments: &str) -> Result<CodeFinderPayload, PayloadParseE
         ));
     }
 
-    if trimmed.starts_with('{') {
-        serde_json::from_str::<CodeFinderPayload>(trimmed).map_err(PayloadParseError::from)
-    } else {
-        parse_freeform_payload(trimmed)
+    if let Some(result) = try_quick_command(trimmed) {
+        return result;
     }
+
+    if trimmed.starts_with('{') {
+        let mut payload = parse_json_payload(trimmed)?;
+        set_input_format(&mut payload, InputFormat::Json);
+        Ok(payload)
+    } else {
+        let mut payload = parse_freeform_payload(trimmed)?;
+        set_input_format(&mut payload, InputFormat::Freeform);
+        Ok(payload)
+    }
+}
+
+fn set_input_format(payload: &mut CodeFinderPayload, format: InputFormat) {
+    if let CodeFinderPayload::Search(args) = payload {
+        args.input_format = format;
+    }
+}
+
+fn parse_json_payload(raw: &str) -> Result<CodeFinderPayload, PayloadParseError> {
+    let value: Value = serde_json::from_str(raw).map_err(|err| {
+        PayloadParseError::new(format!(
+            "Could not parse JSON payload ({err}). Try {{\"action\":\"search\", ...}} or the *** Begin Search block described in the tool spec."
+        ))
+    })?;
+
+    if let Some(block) = extract_embedded_block(&value) {
+        return parse_payload(&block);
+    }
+
+    if let Ok(mut payload) = serde_json::from_value::<CodeFinderPayload>(value.clone()) {
+        if let CodeFinderPayload::Search(args) = &mut payload {
+            if let Some(obj) = value.as_object() {
+                hydrate_json_aliases(obj, args);
+                record_unknown_json_keys(obj, args, None);
+            }
+            args.finalize_freeform_hints();
+        }
+        return Ok(payload);
+    }
+
+    if let Some(obj) = value.as_object() {
+        if let Some(search_body) = obj.get("search") {
+            let raw_map = search_body
+                .as_object()
+                .cloned()
+                .ok_or_else(|| PayloadParseError::new("search payload must be an object"))?;
+            let mut search_map = raw_map.clone();
+            let profiles_value = search_map.remove("profiles");
+            let sanitized = Value::Object(search_map);
+            let mut args: CodeFinderSearchArgs =
+                serde_json::from_value(sanitized).map_err(|err| {
+                    PayloadParseError::new(format!(
+                        "Invalid search payload: {err}. Provide fields like {{\"query\": \"foo\"}}"
+                    ))
+                })?;
+            apply_json_profiles(profiles_value, &mut args)?;
+            hydrate_json_aliases(&raw_map, &mut args);
+            record_unknown_json_keys(&raw_map, &mut args, Some("search"));
+            args.finalize_freeform_hints();
+            return Ok(CodeFinderPayload::Search(Box::new(args)));
+        }
+        if let Some(open_body) = obj.get("open") {
+            const OPEN_INLINE_EXAMPLE: &str = r#"{"open": "symbol-id"}"#;
+            const OPEN_OBJECT_EXAMPLE: &str = r#"{"open": {"id": "symbol-id"}}"#;
+            if let Some(id_value) = open_body.as_str() {
+                return Ok(CodeFinderPayload::Open {
+                    id: id_value.to_string(),
+                });
+            }
+            #[derive(Deserialize)]
+            struct OpenJson {
+                id: String,
+            }
+            let parsed: OpenJson = serde_json::from_value(open_body.clone()).map_err(|err| {
+                PayloadParseError::new(format!(
+                    "Invalid open payload: {err}. Use {OPEN_INLINE_EXAMPLE} or {OPEN_OBJECT_EXAMPLE}",
+                ))
+            })?;
+            return Ok(CodeFinderPayload::Open { id: parsed.id });
+        }
+        if let Some(snippet_body) = obj.get("snippet") {
+            if let Some(id_value) = snippet_body.as_str() {
+                return Ok(CodeFinderPayload::Snippet {
+                    id: id_value.to_string(),
+                    context: DEFAULT_SNIPPET_CONTEXT,
+                });
+            }
+            #[derive(Deserialize)]
+            struct SnippetJson {
+                id: String,
+                #[serde(default = "default_snippet_context")]
+                context: usize,
+            }
+            let parsed: SnippetJson = serde_json::from_value(snippet_body.clone()).map_err(|err| {
+                PayloadParseError::new(format!(
+                    "Invalid snippet payload: {err}. Use {{\"snippet\": {{\"id\": \"...\", \"context\": 8}}}}"
+                ))
+            })?;
+            return Ok(CodeFinderPayload::Snippet {
+                id: parsed.id,
+                context: parsed.context,
+            });
+        }
+    }
+
+    Err(PayloadParseError::new(
+        "Unrecognized JSON shape. Provide {\"action\":\"search\", ...} or shorthand like {\"search\": {\"query\":\"foo\"}}.",
+    ))
+}
+
+fn apply_json_profiles(
+    raw_value: Option<Value>,
+    args: &mut CodeFinderSearchArgs,
+) -> Result<(), PayloadParseError> {
+    let Some(raw) = raw_value else {
+        return Ok(());
+    };
+
+    let tokens: Vec<String> = match raw {
+        Value::String(token) => vec![token],
+        Value::Array(items) => items
+            .into_iter()
+            .map(|value| match value {
+                Value::String(s) => Ok(s),
+                other => Err(PayloadParseError::new(format!(
+                    "profiles array must contain strings (found {other})"
+                ))),
+            })
+            .collect::<Result<_, _>>()?,
+        other => {
+            return Err(PayloadParseError::new(format!(
+                "profiles must be a string or array of strings (found {other})"
+            )));
+        }
+    };
+
+    for token in tokens {
+        let (profile, hint) = resolve_profile_token(&token).map_err(PayloadParseError::new)?;
+        if !args.profiles.contains(&profile) {
+            args.profiles.push(profile);
+        }
+        if let Some(note) = hint {
+            args.record_autocorrection(note);
+        }
+    }
+
+    Ok(())
 }
 
 pub fn parse_freeform_payload(input: &str) -> Result<CodeFinderPayload, PayloadParseError> {
@@ -79,7 +559,6 @@ pub fn parse_freeform_payload(input: &str) -> Result<CodeFinderPayload, PayloadP
 
     let mut search_args = CodeFinderSearchArgs::default();
     let mut snippet_context: Option<usize> = None;
-    let mut footer_found = false;
 
     for raw_line in lines.by_ref() {
         let trimmed = raw_line.trim();
@@ -87,12 +566,6 @@ pub fn parse_freeform_payload(input: &str) -> Result<CodeFinderPayload, PayloadP
             continue;
         }
         if is_footer_line(trimmed, &action) {
-            footer_found = true;
-            if lines.any(|line| !line.trim().is_empty()) {
-                return Err(PayloadParseError::new(
-                    "text after *** End block is not allowed",
-                ));
-            }
             break;
         }
         if trimmed.starts_with('#') {
@@ -108,14 +581,11 @@ pub fn parse_freeform_payload(input: &str) -> Result<CodeFinderPayload, PayloadP
         )?;
     }
 
-    if !footer_found {
-        return Err(PayloadParseError::new(format!(
-            "missing *** End {action} footer"
-        )));
-    }
-
     match action.as_str() {
-        "search" => Ok(CodeFinderPayload::Search(Box::new(search_args))),
+        "search" => {
+            search_args.finalize_freeform_hints();
+            Ok(CodeFinderPayload::Search(Box::new(search_args)))
+        }
         "open" => {
             let target = symbol_id
                 .ok_or_else(|| PayloadParseError::new("code_finder open requires an id"))?;
@@ -192,15 +662,24 @@ fn split_first_word(input: &str) -> (&str, Option<&str>) {
 }
 
 fn is_footer_line(line: &str, action: &str) -> bool {
-    const FOOTER_PREFIX: &str = "*** End ";
-    if !line
-        .to_ascii_lowercase()
-        .starts_with(&FOOTER_PREFIX.to_ascii_lowercase())
-    {
+    const FOOTER_PREFIX: &str = "*** end";
+    let trimmed = line.trim();
+    if trimmed.is_empty() {
         return false;
     }
-    let rest = line[FOOTER_PREFIX.len()..].trim();
-    rest.eq_ignore_ascii_case(action)
+    let lower = trimmed.to_ascii_lowercase();
+    if lower == FOOTER_PREFIX {
+        return true;
+    }
+    if !lower.starts_with(FOOTER_PREFIX) {
+        return false;
+    }
+    let rest = lower[FOOTER_PREFIX.len()..].trim();
+    if let Some(stripped) = rest.strip_prefix(':') {
+        stripped.trim().eq_ignore_ascii_case(action)
+    } else {
+        rest.is_empty() || rest.eq_ignore_ascii_case(action)
+    }
 }
 
 fn parse_key_value(line: &str) -> Result<(String, String), PayloadParseError> {
@@ -273,16 +752,18 @@ fn apply_freeform_pair(
                 ));
             }
             for token in tokens {
-                let profile = parse_profile(&token)?;
+                let (profile, hint) =
+                    resolve_profile_token(&token).map_err(PayloadParseError::new)?;
                 if !args.profiles.contains(&profile) {
                     args.profiles.push(profile);
                 }
+                if let Some(note) = hint {
+                    args.record_autocorrection(note);
+                }
             }
         }
-        other => {
-            return Err(PayloadParseError::new(format!(
-                "unsupported code_finder field '{other}'"
-            )));
+        _ => {
+            record_unknown_key_hint(&key, args);
         }
     }
     Ok(())
@@ -303,6 +784,81 @@ fn parse_usize(field: &str, value: &str) -> Result<usize, PayloadParseError> {
         .trim()
         .parse()
         .map_err(|err| PayloadParseError::new(format!("invalid {field} value: {err}")))
+}
+
+fn record_unknown_key_hint(key: &str, args: &mut CodeFinderSearchArgs) {
+    let trimmed = key.trim();
+    if trimmed.is_empty() {
+        return;
+    }
+    let leaf = trimmed
+        .rsplit_once('.')
+        .map(|(_, leaf)| leaf)
+        .unwrap_or(trimmed);
+    let suggestion = suggest_from_options(leaf, FREEFORM_KEY_SUGGESTIONS)
+        .filter(|candidate| !candidate.eq_ignore_ascii_case(leaf))
+        .map(std::string::ToString::to_string);
+    args.record_unknown_freeform_key(trimmed, suggestion);
+}
+
+fn record_unknown_json_keys(
+    map: &serde_json::Map<String, Value>,
+    args: &mut CodeFinderSearchArgs,
+    path: Option<&str>,
+) {
+    for key in map.keys() {
+        if is_known_json_key(key) {
+            continue;
+        }
+        if let Some(prefix) = path {
+            if prefix.is_empty() {
+                record_unknown_key_hint(key, args);
+            } else {
+                let combined = format!("{prefix}.{key}");
+                record_unknown_key_hint(&combined, args);
+            }
+        } else {
+            record_unknown_key_hint(key, args);
+        }
+    }
+}
+
+fn hydrate_json_aliases(map: &serde_json::Map<String, Value>, args: &mut CodeFinderSearchArgs) {
+    if args.query.is_none()
+        && let Some(Value::String(text)) = map.get("q")
+    {
+        args.query = Some(text.clone());
+    }
+    if args.refine.is_none()
+        && let Some(Value::String(text)) = map.get("query_id")
+    {
+        args.refine = Some(text.clone());
+    }
+    if args.wait_for_index.is_none()
+        && let Some(Value::Bool(flag)) = map.get("wait")
+    {
+        args.wait_for_index = Some(*flag);
+    }
+}
+
+fn extract_embedded_block(value: &Value) -> Option<String> {
+    match value {
+        Value::String(text) => {
+            let trimmed = text.trim();
+            trimmed
+                .starts_with("*** Begin ")
+                .then(|| trimmed.to_string())
+        }
+        Value::Object(map) => map.values().find_map(extract_embedded_block),
+        Value::Array(items) => items.iter().find_map(extract_embedded_block),
+        _ => None,
+    }
+}
+
+fn is_known_json_key(key: &str) -> bool {
+    JSON_SEARCH_KEYS
+        .iter()
+        .any(|known| known.eq_ignore_ascii_case(key))
 }
 
 fn split_list(value: &str) -> Vec<String> {
@@ -330,15 +886,11 @@ fn clean_value(value: &str) -> String {
     trimmed.to_string()
 }
 
-fn parse_profile(raw: &str) -> Result<SearchProfile, PayloadParseError> {
-    SearchProfile::from_token(raw).ok_or_else(|| {
-        PayloadParseError::new(format!("unsupported code_finder profile '{}'", raw.trim()))
-    })
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::proto::InputFormat;
+    use crate::proto::SearchProfile;
 
     #[test]
     fn parse_freeform_with_leading_text() {
@@ -381,6 +933,247 @@ mod tests {
         match parse_freeform_payload(input).expect("should parse mode alias") {
             CodeFinderPayload::Search(args) => {
                 assert_eq!(args.profiles, vec![SearchProfile::References]);
+            }
+            other => panic!("unexpected payload: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_json_action_sets_input_format() {
+        let input = r#"{"action":"search","query":"foo"}"#;
+        match parse_payload(input).expect("json search") {
+            CodeFinderPayload::Search(args) => {
+                assert_eq!(args.input_format, InputFormat::Json);
+                assert_eq!(args.query, Some("foo".into()));
+            }
+            other => panic!("unexpected payload: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_json_shorthand_search() {
+        let input = r#"{"search": {"query": "bar"}}"#;
+        match parse_payload(input).expect("json shorthand") {
+            CodeFinderPayload::Search(args) => {
+                assert_eq!(args.query, Some("bar".into()));
+                assert_eq!(args.input_format, InputFormat::Json);
+            }
+            other => panic!("unexpected payload: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn quick_search_supports_query_and_options() {
+        let input = "search \"async executor\" profiles=symbols with_refs=true";
+        match parse_payload(input).expect("quick search") {
+            CodeFinderPayload::Search(args) => {
+                assert_eq!(args.query.as_deref(), Some("async executor"));
+                assert_eq!(args.profiles, vec![SearchProfile::Symbols]);
+                assert_eq!(args.with_refs, Some(true));
+            }
+            other => panic!("unexpected payload: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn quick_search_supports_shorthand_sequences() {
+        let input = "search tests only docs \"http server\"";
+        match parse_payload(input).expect("quick shorthand search") {
+            CodeFinderPayload::Search(args) => {
+                assert_eq!(args.query.as_deref(), Some("http server"));
+                assert!(args.profiles.contains(&SearchProfile::Tests));
+                assert!(args.profiles.contains(&SearchProfile::Docs));
+                assert_eq!(args.only_docs, Some(true));
+                assert_eq!(args.only_tests, None);
+            }
+            other => panic!("unexpected payload: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn quick_search_chain_only_categories() {
+        let input = "search only docs deps \"multi scope\"";
+        match parse_payload(input).expect("quick only chain search") {
+            CodeFinderPayload::Search(args) => {
+                assert_eq!(args.query.as_deref(), Some("multi scope"));
+                assert_eq!(args.only_docs, Some(true));
+                assert_eq!(args.only_deps, Some(true));
+                assert!(args.profiles.contains(&SearchProfile::Docs));
+                assert!(args.profiles.contains(&SearchProfile::Deps));
+            }
+            other => panic!("unexpected payload: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn quick_search_accepts_query_after_options() {
+        let input = "search profiles=symbols async limit=5 executor";
+        match parse_payload(input).expect("quick mixed order search") {
+            CodeFinderPayload::Search(args) => {
+                assert_eq!(args.query.as_deref(), Some("async executor"));
+                assert_eq!(args.limit, Some(5));
+                assert_eq!(args.profiles, vec![SearchProfile::Symbols]);
+            }
+            other => panic!("unexpected payload: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn quick_open_and_snippet_commands_parse() {
+        match parse_payload("open cf_123").expect("quick open") {
+            CodeFinderPayload::Open { id } => assert_eq!(id, "cf_123"),
+            other => panic!("unexpected payload: {other:?}"),
+        }
+        match parse_payload("snippet cf_321 12").expect("quick snippet") {
+            CodeFinderPayload::Snippet { id, context } => {
+                assert_eq!(id, "cf_321");
+                assert_eq!(context, 12);
+            }
+            other => panic!("unexpected payload: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn json_action_unknown_key_adds_hint() {
+        let input = r#"{"action":"search","queery":"foo"}"#;
+        match parse_payload(input).expect("json action search") {
+            CodeFinderPayload::Search(args) => {
+                let hint = args
+                    .hints
+                    .iter()
+                    .find(|hint| hint.contains("ignored unsupported keys"))
+                    .expect("aggregated hint missing");
+                assert!(hint.contains("queery -> query"));
+            }
+            other => panic!("unexpected payload: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn json_shorthand_unknown_key_reports_path() {
+        let input = r#"{"search": {"queery": "foo"}}"#;
+        match parse_payload(input).expect("json shorthand") {
+            CodeFinderPayload::Search(args) => {
+                let hint = args
+                    .hints
+                    .iter()
+                    .find(|hint| hint.contains("ignored unsupported keys"))
+                    .expect("aggregated hint missing");
+                assert!(hint.contains("search.queery -> query"));
+            }
+            other => panic!("unexpected payload: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn json_alias_q_and_wait_are_accepted() {
+        let input = r#"{"action":"search","q":"foo","wait":false}"#;
+        match parse_payload(input).expect("json alias q/wait") {
+            CodeFinderPayload::Search(args) => {
+                assert_eq!(args.query.as_deref(), Some("foo"));
+                assert_eq!(args.wait_for_index, Some(false));
+                assert!(args.hints.is_empty());
+            }
+            other => panic!("unexpected payload: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn json_alias_query_id_is_accepted() {
+        let input = r#"{"action":"search","query_id":"abc"}"#;
+        match parse_payload(input).expect("json alias query_id") {
+            CodeFinderPayload::Search(args) => {
+                assert_eq!(args.refine.as_deref(), Some("abc"));
+                assert!(args.hints.is_empty());
+            }
+            other => panic!("unexpected payload: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn json_action_string_block_is_unwrapped() {
+        let input = r#"{"action":"*** Begin Search\nquery: App\n*** End Search"}"#;
+        match parse_payload(input).expect("embedded block in JSON") {
+            CodeFinderPayload::Search(args) => {
+                assert_eq!(args.query.as_deref(), Some("App"));
+            }
+            other => panic!("unexpected payload: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn profile_suggestion_is_autocorrected() {
+        let input = "*** Begin Search\nprofile: refernces\n*** End Search";
+        match parse_freeform_payload(input).expect("suggestion applied") {
+            CodeFinderPayload::Search(args) => {
+                assert_eq!(args.profiles, vec![SearchProfile::References]);
+                assert!(
+                    args.hints
+                        .iter()
+                        .any(|hint| hint.contains("auto-corrected"))
+                );
+            }
+            other => panic!("unexpected payload: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn unsupported_key_adds_hint_instead_of_error() {
+        let input = "*** Begin Search\nqueery: foo\n*** End Search";
+        match parse_freeform_payload(input).expect("unknown key ignored") {
+            CodeFinderPayload::Search(args) => {
+                assert!(args.query.is_none());
+                let hint = args
+                    .hints
+                    .iter()
+                    .find(|hint| hint.contains("ignored unsupported keys"))
+                    .expect("aggregated hint missing");
+                assert!(hint.contains("queery -> query"));
+            }
+            other => panic!("unexpected payload: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn many_unknown_keys_are_compacted() {
+        let input = "*** Begin Search\nqueery: foo\nlimmit: 10\nlangg: rust\nunk: bar\nunknown_two: baz\nunknown_three: qux\n*** End Search";
+        match parse_freeform_payload(input).expect("multiple keys tolerated") {
+            CodeFinderPayload::Search(args) => {
+                let hint = args
+                    .hints
+                    .iter()
+                    .find(|hint| hint.contains("ignored unsupported keys"))
+                    .expect("aggregated hint missing");
+                assert!(hint.contains("queery -> query"));
+                assert!(hint.contains("limmit -> limit"));
+                assert!(hint.contains("(+"));
+            }
+            other => panic!("unexpected payload: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_freeform_without_footer_succeeds() {
+        let input = "*** Begin Search\nquery: fallback\n";
+        match parse_freeform_payload(input).expect("missing footer tolerated") {
+            CodeFinderPayload::Search(args) => {
+                assert_eq!(args.query, Some("fallback".into()));
+            }
+            other => panic!("unexpected payload: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_json_profile_autocorrects() {
+        let input = r#"{"search": {"profiles": ["refernces"], "query": "foo"}}"#;
+        match parse_payload(input).expect("json autocorrect") {
+            CodeFinderPayload::Search(args) => {
+                assert_eq!(args.profiles, vec![SearchProfile::References]);
+                assert!(
+                    args.hints
+                        .iter()
+                        .any(|hint| hint.contains("auto-corrected"))
+                );
             }
             other => panic!("unexpected payload: {other:?}"),
         }

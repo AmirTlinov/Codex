@@ -5,7 +5,7 @@ use std::fmt;
 use time::OffsetDateTime;
 use uuid::Uuid;
 
-pub const PROTOCOL_VERSION: u32 = 2;
+pub const PROTOCOL_VERSION: u32 = 3;
 
 pub type QueryId = Uuid;
 
@@ -72,6 +72,23 @@ pub enum SearchProfile {
     Deps,
     Recent,
     References,
+    Ai,
+}
+
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub enum InputFormat {
+    Json,
+    #[default]
+    Freeform,
+}
+
+impl fmt::Display for InputFormat {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            InputFormat::Json => write!(f, "json"),
+            InputFormat::Freeform => write!(f, "freeform"),
+        }
+    }
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
@@ -106,6 +123,9 @@ pub struct SearchRequest {
     pub wait_for_index: bool,
     pub profiles: Vec<SearchProfile>,
     pub schema_version: u32,
+    pub input_format: InputFormat,
+    pub hints: Vec<String>,
+    pub autocorrections: Vec<String>,
 }
 
 impl Default for SearchRequest {
@@ -121,6 +141,9 @@ impl Default for SearchRequest {
             wait_for_index: true,
             profiles: Vec::new(),
             schema_version: PROTOCOL_VERSION,
+            input_format: InputFormat::Freeform,
+            hints: Vec::new(),
+            autocorrections: Vec::new(),
         }
     }
 }
@@ -165,6 +188,18 @@ pub struct SearchStats {
     pub took_ms: u128,
     pub candidate_size: usize,
     pub cache_hit: bool,
+    #[serde(default)]
+    pub recent_fallback: bool,
+    #[serde(default)]
+    pub refine_fallback: bool,
+    #[serde(default)]
+    pub smart_refine: bool,
+    #[serde(default)]
+    pub input_format: InputFormat,
+    #[serde(default)]
+    pub applied_profiles: Vec<SearchProfile>,
+    #[serde(default)]
+    pub autocorrections: Vec<String>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
@@ -194,6 +229,8 @@ pub struct SearchResponse {
     pub hits: Vec<NavHit>,
     pub index: IndexStatus,
     pub stats: Option<SearchStats>,
+    #[serde(default)]
+    pub hints: Vec<String>,
     pub error: Option<ErrorPayload>,
 }
 
@@ -204,6 +241,7 @@ impl SearchResponse {
             hits: Vec::new(),
             index: status,
             stats: None,
+            hints: Vec::new(),
             error: None,
         }
     }
@@ -244,6 +282,33 @@ pub struct OpenResponse {
     pub truncated: bool,
     pub index: IndexStatus,
     pub error: Option<ErrorPayload>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn search_response_deserializes_without_hints() {
+        let value = json!({
+            "query_id": null,
+            "hits": [],
+            "index": {
+                "state": "ready",
+                "symbols": 0,
+                "files": 0,
+                "updated_at": null,
+                "progress": null,
+                "schema_version": PROTOCOL_VERSION,
+                "notice": null
+            },
+            "stats": null,
+            "error": null
+        });
+        let response: SearchResponse = serde_json::from_value(value).unwrap();
+        assert!(response.hints.is_empty());
+    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]

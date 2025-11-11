@@ -49,6 +49,46 @@ pub struct DaemonSpawn {
     pub env: Vec<(String, String)>,
 }
 
+pub fn resolve_daemon_launcher() -> Result<PathBuf> {
+    if let Some(value) = std::env::var_os("CODE_FINDER_LAUNCHER") {
+        let candidate = PathBuf::from(value);
+        if candidate.exists() {
+            return Ok(candidate);
+        }
+    }
+    let exe = std::env::current_exe().context("resolve current executable for code_finder")?;
+    if is_codex_binary(&exe) {
+        return Ok(exe);
+    }
+    if let Some(sibling) = codex_sibling(&exe) {
+        return Ok(sibling);
+    }
+    Ok(exe)
+}
+
+fn is_codex_binary(path: &Path) -> bool {
+    path.file_stem()
+        .and_then(|stem| stem.to_str())
+        .map(|name| name.eq_ignore_ascii_case("codex"))
+        .unwrap_or(false)
+}
+
+fn codex_sibling(exe: &Path) -> Option<PathBuf> {
+    let dir = exe.parent()?;
+    let candidates: &[_] = &[
+        #[cfg(windows)]
+        "codex.exe",
+        "codex",
+    ];
+    for name in candidates {
+        let candidate = dir.join(name);
+        if candidate.exists() {
+            return Some(candidate);
+        }
+    }
+    None
+}
+
 #[derive(Clone)]
 pub struct CodeFinderClient {
     project: ProjectProfile,

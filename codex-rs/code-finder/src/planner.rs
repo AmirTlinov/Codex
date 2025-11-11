@@ -1,4 +1,5 @@
 use crate::proto::FileCategory;
+use crate::proto::InputFormat;
 use crate::proto::Language;
 use crate::proto::PROTOCOL_VERSION;
 use crate::proto::QueryId;
@@ -10,9 +11,9 @@ use serde::Deserialize;
 use std::fmt;
 use uuid::Uuid;
 
-#[derive(Debug, Clone, Default, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 pub struct CodeFinderSearchArgs {
-    #[serde(default)]
+    #[serde(default, alias = "q")]
     pub query: Option<String>,
     #[serde(default)]
     pub limit: Option<usize>,
@@ -42,12 +43,106 @@ pub struct CodeFinderSearchArgs {
     pub refs_limit: Option<usize>,
     #[serde(default)]
     pub help_symbol: Option<String>,
-    #[serde(default)]
+    #[serde(default, alias = "query_id")]
     pub refine: Option<String>,
-    #[serde(default)]
+    #[serde(default, alias = "wait")]
     pub wait_for_index: Option<bool>,
-    #[serde(default, alias = "profile")]
+    #[serde(skip)]
     pub profiles: Vec<SearchProfile>,
+    #[serde(skip)]
+    pub input_format: InputFormat,
+    #[serde(skip)]
+    pub hints: Vec<String>,
+    #[serde(skip)]
+    pub autocorrections: Vec<String>,
+    #[serde(skip)]
+    unknown_freeform_keys: Vec<UnknownFreeformKey>,
+}
+
+impl Default for CodeFinderSearchArgs {
+    fn default() -> Self {
+        Self {
+            query: None,
+            limit: None,
+            kinds: Vec::new(),
+            languages: Vec::new(),
+            categories: Vec::new(),
+            path_globs: Vec::new(),
+            file_substrings: Vec::new(),
+            symbol_exact: None,
+            recent_only: None,
+            only_tests: None,
+            only_docs: None,
+            only_deps: None,
+            with_refs: None,
+            refs_limit: None,
+            help_symbol: None,
+            refine: None,
+            wait_for_index: None,
+            profiles: Vec::new(),
+            input_format: InputFormat::Freeform,
+            hints: Vec::new(),
+            autocorrections: Vec::new(),
+            unknown_freeform_keys: Vec::new(),
+        }
+    }
+}
+
+impl CodeFinderSearchArgs {
+    pub fn record_autocorrection(&mut self, message: impl Into<String>) {
+        let msg = message.into();
+        self.hints.push(msg.clone());
+        self.autocorrections.push(msg);
+    }
+
+    pub fn record_unknown_freeform_key(
+        &mut self,
+        key: impl Into<String>,
+        suggestion: Option<String>,
+    ) {
+        let key = key.into();
+        if self
+            .unknown_freeform_keys
+            .iter()
+            .any(|entry| entry.key == key)
+        {
+            return;
+        }
+        self.unknown_freeform_keys
+            .push(UnknownFreeformKey { key, suggestion });
+    }
+
+    pub fn finalize_freeform_hints(&mut self) {
+        if self.unknown_freeform_keys.is_empty() {
+            return;
+        }
+        const PREVIEW_LIMIT: usize = 3;
+        let mut parts = Vec::new();
+        for entry in self.unknown_freeform_keys.iter().take(PREVIEW_LIMIT) {
+            if let Some(suggestion) = &entry.suggestion {
+                parts.push(format!("{} -> {}", entry.key, suggestion));
+            } else {
+                parts.push(entry.key.clone());
+            }
+        }
+        let extra = self
+            .unknown_freeform_keys
+            .len()
+            .saturating_sub(PREVIEW_LIMIT);
+        let mut detail = parts.join(", ");
+        if extra > 0 {
+            detail.push_str(&format!(" (+{extra} more)"));
+        }
+        self.hints
+            .push(format!("ignored unsupported keys: {detail}"));
+        self.unknown_freeform_keys.clear();
+    }
+}
+
+#[derive(Debug, Clone)]
+struct UnknownFreeformKey {
+    key: String,
+    suggestion: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -94,6 +189,12 @@ pub fn plan_search_request(
     }
 
     let has_explicit_profile = !args.profiles.is_empty();
+    let has_help_symbol = args
+        .help_symbol
+        .as_deref()
+        .map(|s| !s.trim().is_empty())
+        .unwrap_or(false);
+    let has_refine = args.refine.is_some();
 
     if !args.categories.is_empty() {
         for cat in args.categories.drain(..) {
@@ -150,6 +251,9 @@ pub fn plan_search_request(
         !filters.path_globs.is_empty(),
         !filters.file_substrings.is_empty(),
         has_explicit_profile || !filters.categories.is_empty(),
+        has_refine,
+        has_help_symbol,
+        &selected_profiles,
     )?;
 
     let refine = match args.refine {
@@ -168,36 +272,58 @@ pub fn plan_search_request(
         wait_for_index: args.wait_for_index.unwrap_or(true),
         schema_version: PROTOCOL_VERSION,
         profiles: selected_profiles,
+        input_format: args.input_format,
+        hints: args.hints,
+        autocorrections: args.autocorrections,
     };
 
     Ok(request)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn validate_query_requirements(
     query: Option<&str>,
     has_symbol_exact: bool,
     has_path_globs: bool,
     has_file_substrings: bool,
     has_category_filter: bool,
+    has_refine: bool,
+    has_help_symbol: bool,
+    profiles: &[SearchProfile],
 ) -> Result<(), SearchPlannerError> {
-    let query_is_empty = query.map(|text| text.trim().is_empty()).unwrap_or(true);
+    let query_has_text = query.and_then(|text| {
+        let trimmed = text.trim();
+        if trimmed.is_empty() {
+            None
+        } else {
+            Some(trimmed)
+        }
+    });
 
-    if query_is_empty
+    if query_has_text.is_none()
         && !has_symbol_exact
         && !has_path_globs
         && !has_file_substrings
         && !has_category_filter
+        && !has_refine
     {
         return Err(SearchPlannerError::new(
-            "query text or filters (symbol_exact, path_globs, file_substrings) are required",
+            "Provide a `query`, `symbol_exact`, `path_globs`, `file_substrings`, or `refine: <query_id>`. Example: `query: Session` or `symbol_exact: Session`.",
         ));
     }
 
-    if let Some(text) = query
-        && text.trim().is_empty()
-    {
+    if query.map(|text| text.trim().is_empty()).unwrap_or(false) {
         return Err(SearchPlannerError::new(
-            "query must contain non-whitespace characters",
+            "`query` must contain visible characters. Try removing it or provide text, e.g. `query: SessionManager`.",
+        ));
+    }
+
+    let ai_requested = profiles
+        .iter()
+        .any(|profile| matches!(profile, SearchProfile::Ai));
+    if ai_requested && query_has_text.is_none() && !has_symbol_exact && !has_help_symbol {
+        return Err(SearchPlannerError::new(
+            "The `ai` profile needs a `query`, `symbol_exact`, or `help_symbol`. Example: `symbol_exact: Session`.",
         ));
     }
 
@@ -205,7 +331,8 @@ fn validate_query_requirements(
 }
 
 fn parse_symbol_kind(raw: &str) -> Result<SymbolKind, SearchPlannerError> {
-    match raw.to_ascii_lowercase().as_str() {
+    let lower = raw.to_ascii_lowercase();
+    match lower.as_str() {
         "function" => Ok(SymbolKind::Function),
         "method" => Ok(SymbolKind::Method),
         "struct" => Ok(SymbolKind::Struct),
@@ -219,9 +346,11 @@ fn parse_symbol_kind(raw: &str) -> Result<SymbolKind, SearchPlannerError> {
         "type" | "typealias" => Ok(SymbolKind::TypeAlias),
         "test" => Ok(SymbolKind::Test),
         "document" | "doc" => Ok(SymbolKind::Document),
-        other => Err(SearchPlannerError::new(format!(
-            "unsupported symbol kind '{other}'"
-        ))),
+        other => Err(unsupported_value_error(
+            "symbol kind",
+            other,
+            SYMBOL_KIND_SUGGESTIONS,
+        )),
     }
 }
 
@@ -239,9 +368,11 @@ fn parse_language(raw: &str) -> Result<Language, SearchPlannerError> {
         "yaml" | "yml" => Ok(Language::Yaml),
         "toml" => Ok(Language::Toml),
         "unknown" => Ok(Language::Unknown),
-        other => Err(SearchPlannerError::new(format!(
-            "unsupported language '{other}'"
-        ))),
+        other => Err(unsupported_value_error(
+            "language",
+            other,
+            LANGUAGE_SUGGESTIONS,
+        )),
     }
 }
 
@@ -251,9 +382,11 @@ fn parse_category(raw: &str) -> Result<FileCategory, SearchPlannerError> {
         "tests" | "test" => Ok(FileCategory::Tests),
         "docs" | "doc" => Ok(FileCategory::Docs),
         "deps" | "dependencies" => Ok(FileCategory::Deps),
-        other => Err(SearchPlannerError::new(format!(
-            "unsupported category '{other}'"
-        ))),
+        other => Err(unsupported_value_error(
+            "category",
+            other,
+            CATEGORY_SUGGESTIONS,
+        )),
     }
 }
 
@@ -310,6 +443,20 @@ fn apply_profiles(
                 filters.recent_only = true;
             }
             SearchProfile::References => {
+                *with_refs = true;
+                if refs_limit.is_none() {
+                    *refs_limit = Some(DEFAULT_REFS_LIMIT);
+                }
+            }
+            SearchProfile::Ai => {
+                if allow_kind_overrides {
+                    for kind in SYMBOL_FOCUS_KINDS.iter() {
+                        if !filters.kinds.contains(kind) {
+                            filters.kinds.push(kind.clone());
+                        }
+                    }
+                }
+                *limit = (*limit).clamp(10, 20);
                 *with_refs = true;
                 if refs_limit.is_none() {
                     *refs_limit = Some(DEFAULT_REFS_LIMIT);
@@ -412,6 +559,149 @@ fn push_profile(target: &mut Vec<SearchProfile>, profile: SearchProfile) {
     }
 }
 
+const SYMBOL_KIND_SUGGESTIONS: &[&str] = &[
+    "function",
+    "method",
+    "struct",
+    "enum",
+    "trait",
+    "impl",
+    "module",
+    "class",
+    "interface",
+    "constant",
+    "type",
+    "test",
+    "document",
+];
+
+const LANGUAGE_SUGGESTIONS: &[&str] = &[
+    "rust",
+    "typescript",
+    "tsx",
+    "javascript",
+    "python",
+    "go",
+    "bash",
+    "markdown",
+    "json",
+    "yaml",
+    "toml",
+    "unknown",
+];
+
+const CATEGORY_SUGGESTIONS: &[&str] = &["source", "tests", "docs", "deps"];
+
+pub(crate) const PROFILE_SUGGESTIONS: &[&str] = &[
+    "balanced",
+    "focused",
+    "broad",
+    "symbols",
+    "files",
+    "tests",
+    "docs",
+    "deps",
+    "recent",
+    "references",
+    "ai",
+];
+
+fn unsupported_value_error(
+    field: &str,
+    value: &str,
+    options: &'static [&'static str],
+) -> SearchPlannerError {
+    let supported = options.join(", ");
+    if let Some(suggestion) = suggest_from_options(value, options) {
+        SearchPlannerError::new(format!(
+            "unsupported {field} '{value}'. Did you mean '{suggestion}'? Supported {field}s: {supported}",
+        ))
+    } else {
+        SearchPlannerError::new(format!(
+            "unsupported {field} '{value}'. Supported {field}s: {supported}",
+        ))
+    }
+}
+
+pub(crate) fn suggest_from_options(
+    value: &str,
+    options: &'static [&'static str],
+) -> Option<&'static str> {
+    let lower = value.trim().to_ascii_lowercase();
+    options
+        .iter()
+        .find(|&option| edit_distance_leq_one(&lower, option))
+        .map(|v| v as _)
+}
+
+pub(crate) fn resolve_profile_token(raw: &str) -> Result<(SearchProfile, Option<String>), String> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return Err("profile token must not be empty".to_string());
+    }
+    if let Some(profile) = SearchProfile::from_token(trimmed) {
+        return Ok((profile, None));
+    }
+    if let Some(suggestion) = suggest_from_options(trimmed, PROFILE_SUGGESTIONS)
+        && let Some(profile) = SearchProfile::from_token(suggestion)
+    {
+        return Ok((
+            profile,
+            Some(format!(
+                "profile '{trimmed}' auto-corrected to '{suggestion}'"
+            )),
+        ));
+    }
+    Err(format!(
+        "unsupported code_finder profile '{trimmed}'. Supported profiles: {}",
+        PROFILE_SUGGESTIONS.join(", ")
+    ))
+}
+
+fn edit_distance_leq_one(lhs: &str, rhs: &str) -> bool {
+    if lhs == rhs {
+        return true;
+    }
+    let lhs = lhs.as_bytes();
+    let rhs = rhs.as_bytes();
+    if lhs.len().abs_diff(rhs.len()) > 1 {
+        return false;
+    }
+    if lhs.len() == rhs.len() {
+        let mut mismatches = 0;
+        for (a, b) in lhs.iter().zip(rhs.iter()) {
+            if a != b {
+                mismatches += 1;
+                if mismatches > 1 {
+                    return false;
+                }
+            }
+        }
+        return true;
+    }
+    let (longer, shorter) = if lhs.len() > rhs.len() {
+        (lhs, rhs)
+    } else {
+        (rhs, lhs)
+    };
+    let mut i = 0;
+    let mut j = 0;
+    let mut found_delta = false;
+    while i < longer.len() && j < shorter.len() {
+        if longer[i] == shorter[j] {
+            i += 1;
+            j += 1;
+            continue;
+        }
+        if found_delta {
+            return false;
+        }
+        found_delta = true;
+        i += 1; // skip extra byte in longer string
+    }
+    true
+}
+
 impl SearchProfile {
     pub fn from_token(raw: &str) -> Option<Self> {
         match raw.trim().to_ascii_lowercase().as_str() {
@@ -425,6 +715,7 @@ impl SearchProfile {
             "deps" | "dependencies" | "manifests" => Some(SearchProfile::Deps),
             "recent" | "modified" | "changed" => Some(SearchProfile::Recent),
             "references" | "refs" | "xrefs" => Some(SearchProfile::References),
+            "ai" | "assistant" => Some(SearchProfile::Ai),
             _ => None,
         }
     }
@@ -441,14 +732,17 @@ impl SearchProfile {
             SearchProfile::Deps => "deps",
             SearchProfile::Recent => "recent",
             SearchProfile::References => "references",
+            SearchProfile::Ai => "ai",
         }
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 #[cfg(test)]
 mod tests {
     use super::*;
     use pretty_assertions::assert_eq;
+    use uuid::Uuid;
 
     #[test]
     fn symbols_profile_applies_symbol_focus() {
@@ -491,5 +785,36 @@ mod tests {
         assert!(!super::query_mentions_tests(
             "code_finder_history_lines_for_test"
         ));
+    }
+
+    #[test]
+    fn refine_only_is_allowed() {
+        let request = plan_search_request(CodeFinderSearchArgs {
+            refine: Some(Uuid::new_v4().to_string()),
+            ..Default::default()
+        })
+        .expect("refine without query should be accepted");
+        assert!(request.refine.is_some());
+    }
+
+    #[test]
+    fn ai_profile_requires_anchor() {
+        let err = plan_search_request(CodeFinderSearchArgs {
+            profiles: vec![SearchProfile::Ai],
+            ..Default::default()
+        })
+        .expect_err("ai profile without query should error");
+        assert!(err.message().contains("The `ai` profile"));
+    }
+
+    #[test]
+    fn unsupported_language_suggests_fix() {
+        let err = plan_search_request(CodeFinderSearchArgs {
+            languages: vec!["pytho".into()],
+            query: Some("foo".into()),
+            ..Default::default()
+        })
+        .expect_err("invalid language should error");
+        assert!(err.message().contains("Did you mean"));
     }
 }

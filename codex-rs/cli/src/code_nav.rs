@@ -12,6 +12,7 @@ use codex_code_finder::plan_search_request;
 use codex_code_finder::planner::CodeFinderSearchArgs;
 use codex_code_finder::proto::SearchProfile;
 use codex_code_finder::proto::{self};
+use codex_code_finder::resolve_daemon_launcher;
 use codex_code_finder::run_daemon;
 use codex_common::CliConfigOverrides;
 use std::env;
@@ -174,40 +175,37 @@ pub async fn run_daemon_cmd(cmd: DaemonCommand) -> Result<()> {
 }
 
 fn nav_command_to_search_args(cmd: &NavCommand) -> CodeFinderSearchArgs {
-    let query = if cmd.query.is_empty() {
+    let mut args = CodeFinderSearchArgs::default();
+    args.query = if cmd.query.is_empty() {
         None
     } else {
         Some(cmd.query.join(" "))
     };
-
-    CodeFinderSearchArgs {
-        query,
-        limit: Some(cmd.limit),
-        kinds: cmd
-            .kinds
-            .iter()
-            .map(|k| format_kind(k).to_string())
-            .collect(),
-        languages: cmd
-            .languages
-            .iter()
-            .map(|lang| format_lang(lang).to_string())
-            .collect(),
-        categories: Vec::new(),
-        path_globs: cmd.path_globs.clone(),
-        file_substrings: cmd.file_substrings.clone(),
-        symbol_exact: cmd.symbol_exact.clone(),
-        recent_only: cmd.recent_only.then_some(true),
-        only_tests: cmd.only_tests.then_some(true),
-        only_docs: cmd.only_docs.then_some(true),
-        only_deps: cmd.only_deps.then_some(true),
-        with_refs: cmd.with_refs.then_some(true),
-        refs_limit: cmd.refs_limit,
-        help_symbol: cmd.help_symbol.clone(),
-        refine: cmd.refine.map(|id| id.to_string()),
-        wait_for_index: cmd.no_wait.then_some(false),
-        profiles: cmd.profiles.iter().map(ProfileArg::to_profile).collect(),
-    }
+    args.limit = Some(cmd.limit);
+    args.kinds = cmd
+        .kinds
+        .iter()
+        .map(|k| format_kind(k).to_string())
+        .collect();
+    args.languages = cmd
+        .languages
+        .iter()
+        .map(|lang| format_lang(lang).to_string())
+        .collect();
+    args.path_globs = cmd.path_globs.clone();
+    args.file_substrings = cmd.file_substrings.clone();
+    args.symbol_exact = cmd.symbol_exact.clone();
+    args.recent_only = cmd.recent_only.then_some(true);
+    args.only_tests = cmd.only_tests.then_some(true);
+    args.only_docs = cmd.only_docs.then_some(true);
+    args.only_deps = cmd.only_deps.then_some(true);
+    args.with_refs = cmd.with_refs.then_some(true);
+    args.refs_limit = cmd.refs_limit;
+    args.help_symbol = cmd.help_symbol.clone();
+    args.refine = cmd.refine.map(|id| id.to_string());
+    args.wait_for_index = cmd.no_wait.then_some(false);
+    args.profiles = cmd.profiles.iter().map(ProfileArg::to_profile).collect();
+    args
 }
 
 async fn build_client(project_root: Option<PathBuf>) -> Result<CodeFinderClient> {
@@ -225,7 +223,7 @@ async fn build_client(project_root: Option<PathBuf>) -> Result<CodeFinderClient>
 }
 
 fn build_spawn_command(project_root: &Path) -> Result<DaemonSpawn> {
-    let exe = env::current_exe().context("current executable path")?;
+    let exe = resolve_daemon_launcher().context("resolve code-finder launcher")?;
     let mut args = vec!["code-finder-daemon".to_string()];
     args.push("--project-root".to_string());
     args.push(project_root.display().to_string());

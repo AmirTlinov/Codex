@@ -33,9 +33,56 @@ pub struct SearchComputation {
     pub hits: Vec<NavHit>,
     pub stats: SearchStats,
     pub cache_entry: Option<(QueryId, CachedQuery)>,
+    pub hints: Vec<String>,
 }
 
 pub fn run_search(
+    snapshot: &IndexSnapshot,
+    request: &SearchRequest,
+    cache: &QueryCache,
+    project_root: &Path,
+    refs_limit: usize,
+) -> Result<SearchComputation> {
+    let smart_refine = request.refine.is_some()
+        && request
+            .query
+            .as_ref()
+            .is_some_and(|text| !text.trim().is_empty());
+
+    let mut working_request = request.clone();
+    let mut outcome = run_search_once(snapshot, &working_request, cache, project_root, refs_limit)?;
+    let mut hints = request.hints.clone();
+
+    if outcome.hits.is_empty() && working_request.refine.is_some() {
+        let mut fallback = working_request.clone();
+        fallback.refine = None;
+        outcome = run_search_once(snapshot, &fallback, cache, project_root, refs_limit)?;
+        outcome.stats.refine_fallback = true;
+        hints.push("refine returned no hits; reran without --from id".to_string());
+        working_request = fallback;
+    }
+
+    if outcome.hits.is_empty() && working_request.filters.recent_only {
+        let mut fallback = working_request.clone();
+        fallback.filters.recent_only = false;
+        fallback
+            .profiles
+            .retain(|profile| !matches!(profile, SearchProfile::Recent));
+        outcome = run_search_once(snapshot, &fallback, cache, project_root, refs_limit)?;
+        outcome.stats.recent_fallback = true;
+        hints.push("no recent hits; showing full index".to_string());
+        working_request = fallback;
+    }
+
+    outcome.stats.smart_refine = smart_refine;
+    outcome.stats.input_format = request.input_format;
+    outcome.stats.applied_profiles = working_request.profiles;
+    outcome.stats.autocorrections = request.autocorrections.clone();
+    outcome.hints = hints;
+    Ok(outcome)
+}
+
+fn run_search_once(
     snapshot: &IndexSnapshot,
     request: &SearchRequest,
     cache: &QueryCache,
@@ -131,6 +178,12 @@ pub fn run_search(
         took_ms,
         candidate_size: ordered_ids.len(),
         cache_hit,
+        recent_fallback: false,
+        refine_fallback: false,
+        smart_refine: false,
+        input_format: request.input_format,
+        applied_profiles: Vec::new(),
+        autocorrections: Vec::new(),
     };
 
     let cache_entry = {
@@ -149,6 +202,7 @@ pub fn run_search(
         hits,
         stats,
         cache_entry,
+        hints: Vec::new(),
     })
 }
 
@@ -306,6 +360,23 @@ fn profile_score(symbol: &SymbolRecord, profiles: &[SearchProfile], query: Optio
             }
             SearchProfile::References => {
                 if is_symbolic_kind(&symbol.kind) {
+                    bonus += 10.0;
+                }
+            }
+            SearchProfile::Ai => {
+                if is_symbolic_kind(&symbol.kind) {
+                    bonus += 60.0;
+                }
+                if let Some(q) = query
+                    && (symbol.identifier.eq_ignore_ascii_case(q)
+                        || symbol
+                            .path
+                            .to_ascii_lowercase()
+                            .contains(&q.to_ascii_lowercase()))
+                {
+                    bonus += 40.0;
+                }
+                if symbol.recent {
                     bonus += 10.0;
                 }
             }
@@ -477,6 +548,7 @@ mod tests {
     use std::collections::HashSet;
     use std::sync::Arc;
     use tempfile::tempdir;
+    use uuid::Uuid;
 
     #[test]
     fn integration_search_finds_snake_case_symbol() {
@@ -524,6 +596,103 @@ mod tests {
         assert_eq!(
             tests_result.hits[0].path,
             "tui/tests/code_finder_history.rs"
+        );
+    }
+
+    #[test]
+    fn recent_profile_triggers_fallback() {
+        let temp = tempdir().unwrap();
+        let root = temp.path();
+        std::fs::create_dir_all(root.join("src"))
+            .and_then(|_| std::fs::write(root.join("src/lib.rs"), "pub fn example() {}"))
+            .unwrap();
+        let filter = Arc::new(PathFilter::new(root).unwrap());
+        let builder = IndexBuilder::new(root, HashSet::new(), filter);
+        let snapshot = builder.build().unwrap();
+        let cache = QueryCache::new(root.join("cache"));
+
+        let request = SearchRequest {
+            query: Some("example".into()),
+            filters: SearchFilters {
+                recent_only: true,
+                ..Default::default()
+            },
+            profiles: vec![SearchProfile::Recent],
+            limit: 5,
+            ..Default::default()
+        };
+        let result = run_search(&snapshot, &request, &cache, root, 0).expect("search");
+        assert!(result.stats.recent_fallback);
+        assert_eq!(result.hits.len(), 1);
+    }
+
+    #[test]
+    fn smart_refine_flag_is_set() {
+        let temp = tempdir().unwrap();
+        let root = temp.path();
+        std::fs::create_dir_all(root.join("src"))
+            .and_then(|_| std::fs::write(root.join("src/lib.rs"), "pub fn sample() {}"))
+            .unwrap();
+        let filter = Arc::new(PathFilter::new(root).unwrap());
+        let builder = IndexBuilder::new(root, HashSet::new(), filter);
+        let snapshot = builder.build().unwrap();
+        let cache = QueryCache::new(root.join("cache"));
+
+        let request = SearchRequest {
+            query: Some("sample".into()),
+            refine: Some(Uuid::new_v4()),
+            limit: 5,
+            ..Default::default()
+        };
+        let result = run_search(&snapshot, &request, &cache, root, 0).expect("search");
+        assert!(result.stats.smart_refine);
+    }
+
+    #[test]
+    fn refine_fallback_recovers_missing_symbols() {
+        let temp = tempdir().unwrap();
+        let root = temp.path();
+        std::fs::create_dir_all(root.join("src")).unwrap();
+        std::fs::write(root.join("src/recent.rs"), "pub fn recent_symbol() {}").unwrap();
+        std::fs::write(
+            root.join("src/target.rs"),
+            "pub fn index_coordinator_new() {}",
+        )
+        .unwrap();
+
+        let mut recent = HashSet::new();
+        recent.insert("src/recent.rs".to_string());
+        let filter = Arc::new(PathFilter::new(root).unwrap());
+        let builder = IndexBuilder::new(root, recent, filter);
+        let snapshot = builder.build().unwrap();
+        let cache = QueryCache::new(root.join("cache"));
+
+        let initial = SearchRequest {
+            query: Some("recent_symbol".into()),
+            filters: SearchFilters {
+                recent_only: true,
+                ..Default::default()
+            },
+            limit: 5,
+            ..Default::default()
+        };
+        let first = run_search(&snapshot, &initial, &cache, root, 0).expect("initial search");
+        let (refine_id, payload) = first.cache_entry.expect("cache entry");
+        cache.store(refine_id, payload).expect("store cache");
+
+        let refine_request = SearchRequest {
+            query: Some("index_coordinator_new".into()),
+            refine: Some(refine_id),
+            limit: 5,
+            ..Default::default()
+        };
+        let outcome = run_search(&snapshot, &refine_request, &cache, root, 0).expect("refine");
+        assert!(outcome.stats.refine_fallback);
+        assert!(
+            outcome
+                .hits
+                .iter()
+                .any(|hit| hit.path.ends_with("src/target.rs"))
         );
     }
 }

@@ -1,6 +1,5 @@
 use std::path::PathBuf;
 
-use anyhow::Context;
 use async_trait::async_trait;
 use codex_code_finder::client::ClientOptions;
 use codex_code_finder::client::CodeFinderClient;
@@ -10,6 +9,7 @@ use codex_code_finder::planner::SearchPlannerError;
 use codex_code_finder::proto::OpenRequest;
 use codex_code_finder::proto::PROTOCOL_VERSION;
 use codex_code_finder::proto::SnippetRequest;
+use codex_code_finder::resolve_daemon_launcher;
 use once_cell::sync::OnceCell;
 
 use crate::function_tool::FunctionCallError;
@@ -21,6 +21,8 @@ use codex_code_finder::freeform::CodeFinderPayload;
 use codex_code_finder::freeform::parse_payload as parse_code_finder_payload;
 
 pub struct CodeFinderHandler;
+
+pub const CODE_FINDER_HANDLER_USAGE: &str = codex_code_finder::CODE_FINDER_TOOL_INSTRUCTIONS;
 
 #[async_trait]
 impl ToolHandler for CodeFinderHandler {
@@ -97,10 +99,10 @@ async fn build_client(
 ) -> Result<CodeFinderClient, FunctionCallError> {
     static EXE: OnceCell<PathBuf> = OnceCell::new();
     let exe = EXE
-        .get_or_try_init(|| std::env::current_exe().context("resolve current executable"))
+        .get_or_try_init(resolve_daemon_launcher)
         .map_err(|err| {
             FunctionCallError::Fatal(format!(
-                "code_finder failed to resolve current executable: {err}"
+                "code_finder failed to resolve launcher executable: {err}"
             ))
         })?;
 

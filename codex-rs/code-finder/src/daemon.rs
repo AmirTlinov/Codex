@@ -3,6 +3,7 @@ use crate::metadata::DaemonMetadata;
 use crate::project::ProjectProfile;
 use crate::proto::OpenRequest;
 use crate::proto::OpenResponse;
+use crate::proto::PROTOCOL_VERSION;
 use crate::proto::SearchRequest;
 use crate::proto::SearchResponse;
 use crate::proto::SnippetRequest;
@@ -80,6 +81,7 @@ async fn search_handler(
     Json(request): Json<SearchRequest>,
 ) -> Result<Json<SearchResponse>, AppError> {
     ensure_authorized(&state, &headers)?;
+    ensure_protocol_version(request.schema_version)?;
     let response = state
         .coordinator
         .handle_search(request)
@@ -94,6 +96,7 @@ async fn open_handler(
     Json(request): Json<OpenRequest>,
 ) -> Result<Json<OpenResponse>, AppError> {
     ensure_authorized(&state, &headers)?;
+    ensure_protocol_version(request.schema_version)?;
     let response = state
         .coordinator
         .handle_open(request)
@@ -108,6 +111,7 @@ async fn snippet_handler(
     Json(request): Json<SnippetRequest>,
 ) -> Result<Json<SnippetResponse>, AppError> {
     ensure_authorized(&state, &headers)?;
+    ensure_protocol_version(request.schema_version)?;
     let response = state
         .coordinator
         .handle_snippet(request)
@@ -140,6 +144,13 @@ fn ensure_authorized(state: &AppState, headers: &HeaderMap) -> Result<(), AppErr
     Ok(())
 }
 
+fn ensure_protocol_version(client_version: u32) -> Result<(), AppError> {
+    if client_version != PROTOCOL_VERSION {
+        return Err(AppError::version_mismatch(client_version));
+    }
+    Ok(())
+}
+
 fn random_secret() -> String {
     let mut bytes = [0u8; 32];
     rand::rng().fill_bytes(&mut bytes);
@@ -164,6 +175,15 @@ impl AppError {
         Self {
             status: StatusCode::INTERNAL_SERVER_ERROR,
             message: err.to_string(),
+        }
+    }
+
+    fn version_mismatch(client_version: u32) -> Self {
+        Self {
+            status: StatusCode::BAD_REQUEST,
+            message: format!(
+                "code-finder requires protocol v{PROTOCOL_VERSION}, but client sent v{client_version}"
+            ),
         }
     }
 }
