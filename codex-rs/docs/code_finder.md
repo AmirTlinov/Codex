@@ -1,70 +1,34 @@
-# Code Finder Profiles
+# Code Finder Overview
 
-The Code Finder tool now exposes a higher-level interface designed for agent
-usage. Instead of juggling many individual flags, provide a small set of
-`profile` tokens that capture the intent of the search. Profiles can be used in
-JSON payloads (`"profiles": ["symbols", "tests"]`) or in freeform blocks:
+The canonical usage guide lives in `code-finder/code_finder_tool_instructions.md` and is
+embedded into the tool handler via `include_str!`. Read that file for quick commands,
+JSON schemas, profiles, and parsing rules. This page captures the operational pieces
+that engineers most often need when integrating Code Finder into the CLI, TUI, or other
+agents.
 
-```
-*** Begin Search
-query: async executor
-profile: symbols, tests
-*** End Search
-```
+## Launching the Daemon
 
-## Available profiles
+- The daemon is not a standalone binary. All spawns happen through the `codex` executable
+  (or a custom path set via `CODE_FINDER_LAUNCHER`).
+- To point at a bespoke launcher, export `CODE_FINDER_LAUNCHER=/abs/path/to/codex` before
+  running any Code Finder command.
+- Index data is stored under `${CODEX_HOME:-$HOME/.codex}/code-finder/<project-hash>`.
+  Removing that directory forces a rebuild the next time a tool runs.
 
-| Profile     | Effect                                                                 |
-|-------------|-------------------------------------------------------------------------|
-| `balanced`  | Default behaviour (no additional tuning).                               |
-| `focused`   | Lower result limit (≤25) for pinpoint lookups.                          |
-| `broad`     | Raises the cap to 80 hits and skips reference resolution.               |
-| `symbols`   | Prioritises API symbols (function/struct/etc) and includes references.  |
-| `files`     | Focuses on file-level matches and widens the hit cap.                   |
-| `tests`     | Restricts matches to test sources.                                      |
-| `docs`      | Restricts matches to documentation (Markdown, guides, …).               |
-| `deps`      | Targets dependency manifests (`Cargo.toml`, `package.json`, …).         |
-| `recent`    | Limits to files that changed recently (git status).                     |
-| `references`| Always emits symbol references (defaults to 12).                        |
+## Protocol Compatibility
 
-Profiles can be combined. For example, `symbols, recent` narrows results to
-fresh code while still surfacing references.
+- All requests must set `schema_version: 3`; the daemon rejects older payloads with a
+  `VERSION_MISMATCH` error.
+- `hints` and `stats.autocorrections` may be absent in responses. Clients must treat
+  them as optional.
+- When you see `code_finder requires protocol v3`, delete the cached daemon metadata or
+  run any Code Finder command again so the CLI respawns a fresh daemon.
 
-## Automatic inference
+## Troubleshooting Checklist
 
-When no profiles are provided, the tool infers sensible defaults from the
-query:
-
-- `foo::bar`, `MyStruct::new`, `Handler()` ⇒ `symbols`
-- Queries containing `tests/` or the word `test` ⇒ `tests`
-- Queries containing `docs/`, `.md`, or `readme` ⇒ `docs`
-- Queries mentioning `Cargo.toml`, `package.json`, or "deps" ⇒ `deps`
-- Queries mentioning "recent" or "modified" ⇒ `recent`
-- Help-symbol requests also imply `symbols`.
-
-This means the minimal payload `*** Begin Search
-query: Foo::bar
-*** End Search` automatically enables symbol-centric scoring.
-
-## CLI usage
-
-Developers can pass the same profiles through the CLI:
-
-```
-codex code-nav search --profile symbols --profile recent SessionManager
-```
-
-Profiles may also be supplied via the JSON tool payload (`"profiles": ["symbols"]`).
-
-## Key takeaways for agents
-
-1. Prefer `profile` over low-level booleans; combine multiple tokens if needed.
-2. Omit `profile` entirely for quick guesses—the tool will auto-select based on
-   the query text.
-3. `references` guarantees cross-reference data without remembering `with_refs`
-   knobs.
-4. `focused` vs `broad` controls the cognitive load of responses (few precise
-   hits vs exploratory sweeps).
-
-These defaults aim to keep the mental overhead tiny while preserving the
-precision expected from flagship flows.
+1. Run `codex code-finder nav --project-root <repo> --limit 5 term`. If it hangs, the
+   index is still building; wait for the footer notice or `/index-code` in the TUI.
+2. If the CLI prints `failed to spawn code-finder daemon`, ensure `CODE_FINDER_LAUNCHER`
+   points to a real `codex` binary and that `CODEX_HOME` is writable.
+3. Delete `~/.codex/code-finder/<project-hash>` when switching branches with huge file
+   churn to avoid stale trees.
