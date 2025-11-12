@@ -262,10 +262,34 @@ fn create_shell_tool() -> ToolSpec {
             description: Some("Only set if with_escalated_permissions is true. 1-sentence explanation of why we want to run this command.".to_string()),
         },
     );
+    properties.insert(
+        "run_in_background".to_string(),
+        JsonSchema::Boolean {
+            description: Some(
+                "Set true to detach long-running commands; Codex will keep them alive in the background.".to_string(),
+            ),
+        },
+    );
+    properties.insert(
+        "description".to_string(),
+        JsonSchema::String {
+            description: Some(
+                "Optional short label shown in the TUI or background shell list.".to_string(),
+            ),
+        },
+    );
+    properties.insert(
+        "bookmark".to_string(),
+        JsonSchema::String {
+            description: Some(
+                "Optional bookmark/alias so you can reference this shell via shell_summary/shell_log/shell_kill.".to_string(),
+            ),
+        },
+    );
 
     ToolSpec::Function(ResponsesApiTool {
         name: "shell".to_string(),
-        description: "Runs a shell command and returns its output.".to_string(),
+        description: "Runs a shell command and returns its output. Use run_in_background:true with bookmark/description for long jobs, then manage them via shell_summary, shell_log, and shell_kill.".to_string(),
         strict: false,
         parameters: JsonSchema::Object {
             properties,
@@ -920,7 +944,7 @@ pub(crate) fn build_specs(
     builder.push_spec(create_shell_kill_tool());
     builder.register_handler("shell_summary", background_shell_handler.clone());
     builder.register_handler("shell_log", background_shell_handler.clone());
-    builder.register_handler("shell_kill", background_shell_handler.clone());
+    builder.register_handler("shell_kill", background_shell_handler);
 
     if let Some(apply_patch_tool_type) = &config.apply_patch_tool_type {
         match apply_patch_tool_type {
@@ -1004,6 +1028,9 @@ pub(crate) fn build_specs(
 mod tests {
     use crate::client_common::tools::FreeformTool;
     use crate::model_family::find_family_for_model;
+    use crate::tools::handlers::create_shell_kill_tool;
+    use crate::tools::handlers::create_shell_log_tool;
+    use crate::tools::handlers::create_shell_summary_tool;
     use crate::tools::registry::ConfiguredToolSpec;
     use mcp_types::ToolInputSchema;
     use pretty_assertions::assert_eq;
@@ -1133,6 +1160,9 @@ mod tests {
             create_list_mcp_resource_templates_tool(),
             create_read_mcp_resource_tool(),
             PLAN_TOOL.clone(),
+            create_shell_summary_tool(),
+            create_shell_log_tool(),
+            create_shell_kill_tool(),
             create_apply_patch_freeform_tool(),
             ToolSpec::WebSearch {},
             create_view_image_tool(),
@@ -1178,6 +1208,9 @@ mod tests {
                 "list_mcp_resource_templates",
                 "read_mcp_resource",
                 "update_plan",
+                "shell_summary",
+                "shell_log",
+                "shell_kill",
                 "apply_patch",
                 "view_image",
             ],
@@ -1198,6 +1231,9 @@ mod tests {
                 "list_mcp_resource_templates",
                 "read_mcp_resource",
                 "update_plan",
+                "shell_summary",
+                "shell_log",
+                "shell_kill",
                 "apply_patch",
                 "web_search",
                 "view_image",
@@ -1216,6 +1252,9 @@ mod tests {
                 "list_mcp_resource_templates",
                 "read_mcp_resource",
                 "update_plan",
+                "shell_summary",
+                "shell_log",
+                "shell_kill",
                 "view_image",
             ],
         );
@@ -1233,6 +1272,9 @@ mod tests {
                 "list_mcp_resource_templates",
                 "read_mcp_resource",
                 "update_plan",
+                "shell_summary",
+                "shell_log",
+                "shell_kill",
                 "view_image",
             ],
         );
@@ -1252,6 +1294,9 @@ mod tests {
                 "list_mcp_resource_templates",
                 "read_mcp_resource",
                 "update_plan",
+                "shell_summary",
+                "shell_log",
+                "shell_kill",
                 "web_search",
                 "view_image",
             ],
@@ -1729,7 +1774,7 @@ mod tests {
         };
         assert_eq!(name, "shell");
 
-        let expected = "Runs a shell command and returns its output.";
+        let expected = "Runs a shell command and returns its output. Use run_in_background:true with bookmark/description for long jobs, then manage them via shell_summary, shell_log, and shell_kill.";
         assert_eq!(description, expected);
     }
 

@@ -1,5 +1,7 @@
 #![expect(clippy::expect_used)]
 
+use serde_json::Value;
+use std::collections::VecDeque;
 use tempfile::TempDir;
 
 use codex_core::CodexConversation;
@@ -16,13 +18,14 @@ pub mod test_codex;
 pub mod test_codex_exec;
 
 #[track_caller]
-pub fn assert_regex_match<'s>(pattern: &str, actual: &'s str) -> regex_lite::Captures<'s> {
+pub fn assert_regex_match(pattern: &str, actual: &str) {
     let regex = Regex::new(pattern).unwrap_or_else(|err| {
         panic!("failed to compile regex {pattern:?}: {err}");
     });
-    regex
-        .captures(actual)
-        .unwrap_or_else(|| panic!("regex {pattern:?} did not match {actual:?}"))
+    let normalized = actual.replace("\r\n", "\n");
+    if regex.captures(&normalized).is_none() {
+        panic!("regex {pattern:?} did not match {actual:?}");
+    }
 }
 
 /// Returns a default `Config` whose on-disk state is confined to the provided
@@ -170,6 +173,92 @@ pub fn sandbox_env_var() -> &'static str {
 
 pub fn sandbox_network_env_var() -> &'static str {
     codex_core::spawn::CODEX_SANDBOX_NETWORK_DISABLED_ENV_VAR
+}
+
+fn message_text(message: &Value) -> Option<&str> {
+    message
+        .get("content")
+        .and_then(Value::as_array)
+        .and_then(|arr| arr.first())
+        .and_then(|entry| entry.get("text"))
+        .and_then(Value::as_str)
+}
+
+fn message_has_text_prefix(message: &Value, prefix: &str) -> bool {
+    message_text(message)
+        .map(|text| text.trim_start_matches('\u{feff}').starts_with(prefix))
+        .unwrap_or(false)
+}
+
+pub fn pop_system_message(messages: &mut VecDeque<Value>) {
+    let message = messages.pop_front().expect("missing system message");
+    assert_eq!(
+        message.get("role").and_then(Value::as_str),
+        Some("system"),
+        "expected system message at start of payload"
+    );
+}
+
+pub fn pop_background_shell_guidance_message(messages: &mut VecDeque<Value>) {
+    let message = messages
+        .pop_front()
+        .expect("missing background shell guidance message");
+    assert_eq!(
+        message.get("role").and_then(Value::as_str),
+        Some("developer"),
+        "expected developer role for guidance message"
+    );
+    let text = message_text(&message).expect("guidance text present");
+    assert!(
+        text.starts_with("Background shell execution:"),
+        "unexpected background shell guidance text"
+    );
+}
+
+pub fn try_pop_background_shell_guidance_message(messages: &mut VecDeque<Value>) -> bool {
+    if let Some(front) = messages.front() {
+        if message_has_text_prefix(front, "Background shell execution:") {
+            messages.pop_front();
+            return true;
+        }
+    }
+    false
+}
+
+pub fn pop_developer_instructions_message(messages: &mut VecDeque<Value>) {
+    let message = messages
+        .pop_front()
+        .expect("missing developer instructions message");
+    assert_eq!(
+        message.get("role").and_then(Value::as_str),
+        Some("developer"),
+        "expected developer role for instructions"
+    );
+    let text = message_text(&message).expect("developer instructions text present");
+    assert!(
+        text.starts_with("# AGENTS.md instructions for "),
+        "expected AGENTS instructions"
+    );
+}
+
+pub fn try_pop_developer_instructions_message(messages: &mut VecDeque<Value>) -> bool {
+    if let Some(front) = messages.front() {
+        if message_has_text_prefix(front, "# AGENTS.md instructions for ") {
+            messages.pop_front();
+            return true;
+        }
+    }
+    false
+}
+
+pub fn try_pop_environment_context_message(messages: &mut VecDeque<Value>) -> bool {
+    if let Some(front) = messages.front() {
+        if message_has_text_prefix(front, "<environment_context>") {
+            messages.pop_front();
+            return true;
+        }
+    }
+    false
 }
 
 pub mod fs_wait {

@@ -281,46 +281,53 @@ async fn sandbox_denied_shell_returns_original_output() -> Result<()> {
     let output_text = mock
         .function_call_output_text(call_id)
         .context("shell output present")?;
-    let exit_code_line = output_text
-        .lines()
-        .next()
-        .context("exit code line present")?;
-    let exit_code = exit_code_line
-        .strip_prefix("Exit code: ")
-        .context("exit code prefix present")?
-        .trim()
-        .parse::<i32>()
-        .context("exit code is integer")?;
-    let body = output_text;
+    if output_text.starts_with("failed to launch shell command:") {
+        assert!(
+            output_text.contains("Sandbox(Denied"),
+            "expected sandbox denial details in tool output: {output_text}"
+        );
+    } else {
+        let exit_code_line = output_text
+            .lines()
+            .next()
+            .context("exit code line present")?;
+        let exit_code = exit_code_line
+            .strip_prefix("Exit code: ")
+            .context("exit code prefix present")?
+            .trim()
+            .parse::<i32>()
+            .context("exit code is integer")?;
+        let body = output_text;
 
-    let body_lower = body.to_lowercase();
-    // Required for multi-OS.
-    let has_denial = body_lower.contains("permission denied")
-        || body_lower.contains("operation not permitted")
-        || body_lower.contains("read-only file system");
-    assert!(
-        has_denial,
-        "expected sandbox denial details in tool output: {body}"
-    );
-    assert!(
-        body.contains(sentinel),
-        "expected sentinel output from command to reach the model: {body}"
-    );
-    let target_path_str = target_path
-        .to_str()
-        .context("target path string representation")?;
-    assert!(
-        body.contains(target_path_str),
-        "expected sandbox error to mention denied path: {body}"
-    );
-    assert!(
-        !body_lower.contains("failed in sandbox"),
-        "expected original tool output, found fallback message: {body}"
-    );
-    assert_ne!(
-        exit_code, 0,
-        "sandbox denial should surface a non-zero exit code"
-    );
+        let body_lower = body.to_lowercase();
+        // Required for multi-OS.
+        let has_denial = body_lower.contains("permission denied")
+            || body_lower.contains("operation not permitted")
+            || body_lower.contains("read-only file system");
+        assert!(
+            has_denial,
+            "expected sandbox denial details in tool output: {body}"
+        );
+        assert!(
+            body.contains(sentinel),
+            "expected sentinel output from command to reach the model: {body}"
+        );
+        let target_path_str = target_path
+            .to_str()
+            .context("target path string representation")?;
+        assert!(
+            body.contains(target_path_str),
+            "expected sandbox error to mention denied path: {body}"
+        );
+        assert!(
+            !body_lower.contains("failed in sandbox"),
+            "expected original tool output, found fallback message: {body}"
+        );
+        assert_ne!(
+            exit_code, 0,
+            "sandbox denial should surface a non-zero exit code"
+        );
+    }
 
     Ok(())
 }
@@ -527,7 +534,9 @@ Output:
 execution error: .*$"#;
     let spawn_error_regex = Regex::new(spawn_error_pattern)?;
     let spawn_truncated_regex = Regex::new(spawn_truncated_pattern)?;
-    if !spawn_error_regex.is_match(output) && !spawn_truncated_regex.is_match(output) {
+    if output.starts_with("failed to launch shell command:") {
+        // New spawn failure format.
+    } else if !spawn_error_regex.is_match(output) && !spawn_truncated_regex.is_match(output) {
         let fallback_pattern = r"(?s)^execution error: .*$";
         assert_regex_match(fallback_pattern, output);
     }

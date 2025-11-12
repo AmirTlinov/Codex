@@ -1,0 +1,26 @@
+{
+  "status": "success",
+  "mode": "apply",
+  "duration_ms": 5,
+  "options": {
+    "encoding": "utf-8",
+    "newline": "preserve",
+    "strip_trailing_whitespace": false,
+    "ensure_final_newline": null,
+    "preserve_mode": true,
+    "preserve_times": true,
+    "new_file_mode": null
+  },
+  "operations": [
+    {
+      "action": "update",
+      "path": "codex-rs/tui/src/chatwidget/tests.rs",
+      "added": 12,
+      "removed": 13,
+      "renamed_to": null,
+      "status": "applied",
+      "message": null
+    }
+  ],
+  "errors": []
+}

@@ -1,5 +1,6 @@
 #![allow(clippy::unwrap_used)]
 
+use codex_core::BACKGROUND_SHELL_AGENT_GUIDANCE;
 use codex_core::CodexAuth;
 use codex_core::ConversationManager;
 use codex_core::ModelProviderInfo;
@@ -20,6 +21,7 @@ use core_test_support::load_default_config_for_test;
 use core_test_support::load_sse_fixture_with_id;
 use core_test_support::skip_if_no_network;
 use core_test_support::wait_for_event;
+use serde_json::Value;
 use std::collections::HashMap;
 use tempfile::TempDir;
 use wiremock::Mock;
@@ -33,6 +35,19 @@ fn text_user_input(text: String) -> serde_json::Value {
         "type": "message",
         "role": "user",
         "content": [ { "type": "input_text", "text": text } ]
+    })
+}
+
+fn developer_guidance_message() -> Value {
+    serde_json::json!({
+        "type": "message",
+        "role": "developer",
+        "content": [
+            {
+                "type": "input_text",
+                "text": BACKGROUND_SHELL_AGENT_GUIDANCE.trim()
+            }
+        ]
     })
 }
 
@@ -230,6 +245,9 @@ async fn prompt_tools_are_consistent_across_requests() {
                 "list_mcp_resource_templates",
                 "read_mcp_resource",
                 "update_plan",
+                "shell_summary",
+                "shell_log",
+                "shell_kill",
                 "view_image",
             ],
         ),
@@ -241,6 +259,9 @@ async fn prompt_tools_are_consistent_across_requests() {
                 "list_mcp_resource_templates",
                 "read_mcp_resource",
                 "update_plan",
+                "shell_summary",
+                "shell_log",
+                "shell_kill",
                 "apply_patch",
                 "view_image",
             ],
@@ -375,11 +396,15 @@ async fn prefixes_context_and_instructions_once_and_consistently_across_requests
         "role": "user",
         "content": [ { "type": "input_text", "text": "hello 1" } ]
     });
+    let developer_msg = developer_guidance_message();
+    let expected_input_1 = vec![
+        developer_msg,
+        expected_ui_msg,
+        expected_env_msg,
+        expected_user_message_1,
+    ];
     let body1 = requests[0].body_json::<serde_json::Value>().unwrap();
-    assert_eq!(
-        body1["input"],
-        serde_json::json!([expected_ui_msg, expected_env_msg, expected_user_message_1])
-    );
+    assert_eq!(body1["input"], Value::Array(expected_input_1.clone()));
 
     let expected_user_message_2 = serde_json::json!({
         "type": "message",
@@ -387,14 +412,9 @@ async fn prefixes_context_and_instructions_once_and_consistently_across_requests
         "content": [ { "type": "input_text", "text": "hello 2" } ]
     });
     let body2 = requests[1].body_json::<serde_json::Value>().unwrap();
-    let expected_body2 = serde_json::json!(
-        [
-            body1["input"].as_array().unwrap().as_slice(),
-            [expected_user_message_2].as_slice(),
-        ]
-        .concat()
-    );
-    assert_eq!(body2["input"], expected_body2);
+    let mut expected_input_2 = expected_input_1;
+    expected_input_2.push(expected_user_message_2);
+    assert_eq!(body2["input"], Value::Array(expected_input_2));
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -748,7 +768,9 @@ async fn send_user_turn_with_no_changes_does_not_send_environment_context() {
     ));
     let expected_user_message_1 = text_user_input("hello 1".to_string());
 
-    let expected_input_1 = serde_json::Value::Array(vec![
+    let developer_msg = developer_guidance_message();
+    let expected_input_1 = Value::Array(vec![
+        developer_msg.clone(),
         expected_ui_msg.clone(),
         expected_env_msg_1.clone(),
         expected_user_message_1.clone(),
@@ -756,7 +778,8 @@ async fn send_user_turn_with_no_changes_does_not_send_environment_context() {
     assert_eq!(body1["input"], expected_input_1);
 
     let expected_user_message_2 = text_user_input("hello 2".to_string());
-    let expected_input_2 = serde_json::Value::Array(vec![
+    let expected_input_2 = Value::Array(vec![
+        developer_msg,
         expected_ui_msg,
         expected_env_msg_1,
         expected_user_message_1,
@@ -864,7 +887,9 @@ async fn send_user_turn_with_changes_sends_environment_context() {
     let expected_env_text_1 = default_env_context_str(&default_cwd.to_string_lossy(), &shell);
     let expected_env_msg_1 = text_user_input(expected_env_text_1);
     let expected_user_message_1 = text_user_input("hello 1".to_string());
-    let expected_input_1 = serde_json::Value::Array(vec![
+    let developer_msg = developer_guidance_message();
+    let expected_input_1 = Value::Array(vec![
+        developer_msg.clone(),
         expected_ui_msg.clone(),
         expected_env_msg_1.clone(),
         expected_user_message_1.clone(),
@@ -880,7 +905,8 @@ async fn send_user_turn_with_changes_sends_environment_context() {
             .to_string(),
     );
     let expected_user_message_2 = text_user_input("hello 2".to_string());
-    let expected_input_2 = serde_json::Value::Array(vec![
+    let expected_input_2 = Value::Array(vec![
+        developer_msg,
         expected_ui_msg,
         expected_env_msg_1,
         expected_user_message_1,

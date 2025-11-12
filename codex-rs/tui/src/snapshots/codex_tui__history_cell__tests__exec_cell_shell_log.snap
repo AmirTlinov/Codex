@@ -1,0 +1,7 @@
+---
+source: tui/src/history_cell.rs
+assertion_line: 1588
+expression: rendered
+---
+● Shell Shell Log
+    Ctrl+R to run in background

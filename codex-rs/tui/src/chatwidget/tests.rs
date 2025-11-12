@@ -262,6 +262,7 @@ async fn helpers_are_available_and_do_not_panic() {
         enhanced_keys_supported: false,
         auth_manager,
         feedback: codex_feedback::CodexFeedback::new(),
+        history_store: Rc::new(RefCell::new(Vec::new())),
     };
     let mut w = ChatWidget::new(init, conversation_manager);
     // Basic construction sanity.
@@ -287,11 +288,15 @@ fn make_chatwidget_manual() -> (
         disable_paste_burst: false,
     });
     let auth_manager = AuthManager::from_auth_for_testing(CodexAuth::from_api_key("test"));
+    let history_store: HistoryStore = Rc::new(RefCell::new(Vec::new()));
+    let background_store = Rc::new(RefCell::new(BackgroundProcessStore::new()));
     let widget = ChatWidget {
         app_event_tx,
         codex_op_tx: op_tx,
         bottom_pane: bottom,
         active_cell: None,
+        history_store: history_store.clone(),
+        history_panel: HistoryPanel::new(history_store),
         config: cfg.clone(),
         auth_manager,
         session_header: SessionHeader::new(cfg.model),
@@ -302,6 +307,8 @@ fn make_chatwidget_manual() -> (
         rate_limit_switch_prompt: RateLimitSwitchPromptState::default(),
         stream_controller: None,
         running_commands: HashMap::new(),
+        exec_history_indices: HashMap::new(),
+        shell_history_indices: HashMap::new(),
         task_complete_pending: false,
         interrupts: InterruptManager::new(),
         reasoning_buffer: String::new(),
@@ -319,6 +326,7 @@ fn make_chatwidget_manual() -> (
         last_rendered_width: std::cell::Cell::new(None),
         feedback: codex_feedback::CodexFeedback::new(),
         current_rollout_path: None,
+        background_store,
     };
     (widget, rx, op_rx)
 }
@@ -853,7 +861,7 @@ fn exec_history_cell_shows_working_then_completed() {
     let blob = lines_to_single_string(lines);
     // New behavior: no glyph markers; ensure command is shown and no panic.
     assert!(
-        blob.contains("• Ran"),
+        blob.contains("● Shell"),
         "expected summary header present: {blob:?}"
     );
     assert!(
@@ -880,7 +888,7 @@ fn exec_history_cell_shows_working_then_failed() {
     let lines = &cells[0];
     let blob = lines_to_single_string(lines);
     assert!(
-        blob.contains("• Ran false"),
+        blob.contains("● Shell"),
         "expected command and header text present: {blob:?}"
     );
     assert!(blob.to_lowercase().contains("bloop"), "expected error text");

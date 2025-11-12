@@ -40,6 +40,22 @@ mod session_manager;
 
 pub(crate) use errors::UnifiedExecError;
 pub(crate) use session::UnifiedExecSession;
+pub(crate) use session_manager::SessionStatus;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum TerminateDisposition {
+    #[allow(dead_code)]
+    Requested,
+    TimedOut,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct UnifiedExecKillResult {
+    pub _call_id: String,
+    pub exit_code: i32,
+    pub aggregated_output: String,
+    pub timed_out: bool,
+}
 
 pub(crate) const DEFAULT_YIELD_TIME_MS: u64 = 10_000;
 pub(crate) const MIN_YIELD_TIME_MS: u64 = 250;
@@ -97,7 +113,7 @@ pub(crate) struct UnifiedExecSessionManager {
     sessions: Mutex<HashMap<i32, SessionEntry>>,
 }
 
-struct SessionEntry {
+pub(crate) struct SessionEntry {
     session: session::UnifiedExecSession,
     session_ref: Arc<Session>,
     turn_ref: Arc<TurnContext>,

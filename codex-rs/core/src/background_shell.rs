@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::collections::HashSet;
 use std::collections::VecDeque;
 use std::sync::Arc;
 use std::sync::atomic::AtomicU64;
@@ -17,9 +18,15 @@ use tokio::time::sleep;
 
 use crate::codex::Session;
 use crate::codex::TurnContext;
+use crate::command_label::friendly_command_label_from_args;
+use crate::command_label::friendly_command_label_from_str;
 use crate::function_tool::FunctionCallError;
+use crate::protocol::BackgroundEventKind;
+use crate::protocol::BackgroundEventMetadata;
 use crate::protocol::BackgroundShellStatus;
 use crate::protocol::BackgroundShellSummaryEntry;
+use crate::protocol::BackgroundStartMode;
+use crate::protocol::BackgroundTerminationKind;
 use crate::protocol::EventMsg;
 use crate::protocol::ExecCommandOutputDeltaEvent;
 use crate::protocol::ExecOutputStream;
@@ -32,8 +39,10 @@ use crate::tools::runtimes::shell::ShellBackgroundRuntime;
 use crate::tools::runtimes::shell::ShellRequest;
 use crate::tools::sandboxing::ToolCtx;
 use crate::unified_exec::MIN_YIELD_TIME_MS;
+use crate::unified_exec::SessionStatus;
 use crate::unified_exec::TerminateDisposition;
 use crate::unified_exec::UnifiedExecContext;
+use crate::unified_exec::UnifiedExecError;
 use crate::unified_exec::UnifiedExecSessionManager;
 
 const MAX_BUFFER_BYTES: usize = 10 * 1024 * 1024; // 10 MB
@@ -43,8 +52,13 @@ const CLEANUP_AFTER: Duration = Duration::from_secs(60 * 60);
 
 pub const BACKGROUND_SHELL_AGENT_GUIDANCE: &str = r#"Background shell execution:
 - Use the shell tool's `run_in_background: true` flag for long-running commands (e.g., `{"command":["npm","start"],"run_in_background":true}`). Provide `bookmark` and `description` when possible so you can reference shells by alias.
-- Commands that exceed roughly 10 seconds in the foreground are auto-promoted; use `PromoteShell` proactively when you already know a command will take a while.
-- Read background output via `shell_summary` (compact list for every shell) and `shell_log`/`poll_background_shell` (tail logs for a specific shell). Stop work with `shell_kill` (maps to `Op::KillBackgroundShell`).
+- Commands ending with `&`, `nohup`, or `setsid` are interpreted as background work automatically—Codex strips the wrapper so the job is tracked and killable. Use `run_in_background:true` (plus bookmark/description) when you already know a command will run long.
+- Commands that exceed roughly 10 seconds in the foreground are auto-promoted; use `PromoteShell` proactively when you already know a command will take a while. Auto-promote events now show the real `shell_id` (e.g., `shell-3`) so you can call `shell_kill --shell shell-3` immediately.
+- Always inspect background work via `shell_summary` (list) and `shell_log --shell <id> --max_lines 80`/`poll_background_shell` before assuming a task is idle; prefer these tools over rerunning the original command.
+- `shell_summary` (running shells only by default) includes each `shell_id` plus ready-to-copy kill/log commands. Add `--completed` / `--failed` (the JSON args are `include_completed` / `include_failed`) only when you truly need historical entries.
+- `shell_log` supports `mode=tail` (default chunked tail with cursor), `mode=summary` (lightweight recap), and `mode=diagnostic` (status + exit info + concise stderr tail that focuses on stderr first). Logs are delivered in small pages; request additional chunks with `cursor` instead of asking for the entire history at once.
+- Watch for system messages like “User killed background shell …” or “System auto-promoted …” — they explicitly tell you when the human or the runtime moved/killed a process, so you can react without polling first.
+- Stop work with `shell_kill` (maps to `Op::KillBackgroundShell`) and immediately follow up with `shell_log` so you can report what failed.
 - At most 10 shells may run concurrently. Each shell retains ~10 MB of stdout/stderr for an hour; summarize logs instead of dumping them into the chat unless explicitly requested.
 "#;
 
@@ -68,6 +82,7 @@ impl Default for BackgroundShellManager {
 struct BackgroundShellInner {
     entries: HashMap<String, SharedEntry>,
     bookmarks: HashMap<String, String>,
+    call_map: HashMap<String, String>,
 }
 
 type SharedEntry = Arc<Mutex<BackgroundCommandEntry>>;
@@ -77,6 +92,8 @@ struct BackgroundCommandEntry {
     description: Option<String>,
     bookmark: Option<String>,
     command_preview: String,
+    completion_announced: bool,
+    completion_cause: Option<CompletionDisposition>,
     status: BackgroundShellStatus,
     exit_code: Option<i32>,
     buffer: VecDeque<LineEntry>,
@@ -86,6 +103,7 @@ struct BackgroundCommandEntry {
     truncated: bool,
     created_at: SystemTime,
     cleanup_task: Option<JoinHandle<()>>,
+    call_ids: HashSet<String>,
 }
 
 #[derive(Clone)]
@@ -105,6 +123,15 @@ pub struct BackgroundStartResponse {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub bookmark: Option<String>,
+}
+
+pub struct BackgroundStartContext<'a> {
+    pub session: Arc<Session>,
+    pub turn: Arc<TurnContext>,
+    pub tracker: &'a SharedTurnDiffTracker,
+    pub call_id: String,
+    pub description: Option<String>,
     pub bookmark: Option<String>,
 }
 
@@ -128,7 +155,12 @@ pub struct BackgroundLogView {
     pub status: BackgroundShellStatus,
     pub exit_code: Option<i32>,
     pub truncated: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ended_by: Option<String>,
     pub lines: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub next_cursor: Option<String>,
+    pub has_more: bool,
 }
 
 #[allow(dead_code)]
@@ -144,19 +176,157 @@ pub struct BackgroundKillResponse {
     pub bookmark: Option<String>,
 }
 
-#[allow(dead_code)]
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum BackgroundEventKind {
-    Started,
-    Terminated { exit_code: i32 },
+#[derive(Clone, Debug)]
+pub struct BackgroundCompletionNotice {
+    pub shell_id: String,
+    pub exit_code: i32,
+    pub label: String,
+    pub ended_by: CompletionDisposition,
+    pub call_id: Option<String>,
 }
 
-#[allow(dead_code)]
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct BackgroundEventSummary {
-    pub shell_id: String,
-    pub kind: BackgroundEventKind,
-    pub description: Option<String>,
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ShellActionInitiator {
+    User,
+    Agent,
+}
+
+impl ShellActionInitiator {
+    fn actor(self) -> &'static str {
+        match self {
+            ShellActionInitiator::User => "User",
+            ShellActionInitiator::Agent => "Agent",
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum CompletionDisposition {
+    Natural,
+    Killed(ShellActionInitiator),
+    AlreadyFinished(ShellActionInitiator),
+}
+
+fn completion_short_label(cause: &CompletionDisposition) -> &'static str {
+    match cause {
+        CompletionDisposition::Natural => "completed on its own",
+        CompletionDisposition::Killed(ShellActionInitiator::User) => "killed by user",
+        CompletionDisposition::Killed(ShellActionInitiator::Agent) => "killed by agent",
+        CompletionDisposition::AlreadyFinished(ShellActionInitiator::User) => {
+            "user kill after completion"
+        }
+        CompletionDisposition::AlreadyFinished(ShellActionInitiator::Agent) => {
+            "agent kill after completion"
+        }
+    }
+}
+
+fn describe_completion(
+    cause: &CompletionDisposition,
+    label: &str,
+    shell_id: String,
+    exit_code: i32,
+) -> String {
+    match cause {
+        CompletionDisposition::Natural => format!(
+            "Background shell {shell_id} ({label}) completed on its own (exit {exit_code})."
+        ),
+        CompletionDisposition::Killed(initiator) => format!(
+            "{} killed background shell {} ({}) (exit {}).",
+            initiator.actor(),
+            shell_id,
+            label,
+            exit_code
+        ),
+        CompletionDisposition::AlreadyFinished(initiator) => format!(
+            "{} attempted to kill background shell {} ({}) but it had already exited (exit {}).",
+            initiator.actor(),
+            shell_id,
+            label,
+            exit_code
+        ),
+    }
+}
+
+fn non_empty_string(value: String) -> Option<String> {
+    if value.trim().is_empty() {
+        None
+    } else {
+        Some(value)
+    }
+}
+
+impl From<&CompletionDisposition> for BackgroundTerminationKind {
+    fn from(value: &CompletionDisposition) -> Self {
+        match value {
+            CompletionDisposition::Natural => BackgroundTerminationKind::Natural,
+            CompletionDisposition::Killed(ShellActionInitiator::User) => {
+                BackgroundTerminationKind::KilledByUser
+            }
+            CompletionDisposition::Killed(ShellActionInitiator::Agent) => {
+                BackgroundTerminationKind::KilledByAgent
+            }
+            CompletionDisposition::AlreadyFinished(ShellActionInitiator::User) => {
+                BackgroundTerminationKind::AlreadyFinishedUser
+            }
+            CompletionDisposition::AlreadyFinished(ShellActionInitiator::Agent) => {
+                BackgroundTerminationKind::AlreadyFinishedAgent
+            }
+        }
+    }
+}
+
+impl BackgroundCompletionNotice {
+    fn new(
+        shell_id: &str,
+        exit_code: Option<i32>,
+        entry: &BackgroundCommandEntry,
+        cause: CompletionDisposition,
+    ) -> Self {
+        let exit_value = exit_code.unwrap_or(-1);
+        Self {
+            shell_id: shell_id.to_string(),
+            exit_code: exit_value,
+            label: entry_label(shell_id, entry),
+            ended_by: cause,
+            call_id: entry.call_ids.iter().next().cloned(),
+        }
+    }
+
+    pub fn event_message(&self) -> String {
+        if self.label.is_empty() {
+            format!(
+                "Background shell {} terminated with exit code {}",
+                self.shell_id, self.exit_code
+            )
+        } else {
+            format!(
+                "Background shell {} terminated with exit code {} ({})",
+                self.shell_id, self.exit_code, self.label
+            )
+        }
+    }
+
+    pub fn agent_note(&self) -> String {
+        describe_completion(
+            &self.ended_by,
+            &self.label,
+            self.shell_id.clone(),
+            self.exit_code,
+        )
+    }
+
+    pub fn metadata(&self) -> BackgroundEventMetadata {
+        BackgroundEventMetadata {
+            shell_id: Some(self.shell_id.clone()),
+            call_id: self.call_id.clone(),
+            kind: Some(BackgroundEventKind::Terminated {
+                exit_code: self.exit_code,
+                termination: BackgroundTerminationKind::from(&self.ended_by),
+                description: non_empty_string(self.label.clone()),
+            }),
+        }
+    }
 }
 
 impl BackgroundShellManager {
@@ -167,23 +337,26 @@ impl BackgroundShellManager {
     pub async fn start(
         &self,
         request: ShellRequest,
-        session: Arc<Session>,
-        turn: Arc<TurnContext>,
-        tracker: &SharedTurnDiffTracker,
-        call_id: String,
-        description: Option<String>,
-        bookmark: Option<String>,
+        ctx: BackgroundStartContext<'_>,
     ) -> Result<BackgroundStartResponse, FunctionCallError> {
+        let BackgroundStartContext {
+            session,
+            turn,
+            tracker,
+            call_id,
+            description,
+            bookmark,
+        } = ctx;
         self.ensure_capacity()?;
 
         let manager: &UnifiedExecSessionManager = &session.services.unified_exec_manager;
         let context = UnifiedExecContext::new(session.clone(), turn.clone(), call_id.clone());
         let command_label = {
-            let joined = request.command.join(" ");
-            if joined.is_empty() {
-                "background-shell".to_string()
+            let label = friendly_command_label_from_args(&request.command);
+            if label.is_empty() {
+                request.command.join(" ")
             } else {
-                joined
+                label
             }
         };
 
@@ -254,6 +427,7 @@ impl BackgroundShellManager {
                 bookmark.clone(),
                 command_label.clone(),
                 &initial_output,
+                call_id.clone(),
             )
             .await;
             self.running_shells.fetch_add(1, Ordering::SeqCst);
@@ -273,16 +447,28 @@ impl BackgroundShellManager {
                 .await;
         }
 
+        let start_label = if command_label.is_empty() {
+            description
+                .as_deref()
+                .map(std::string::ToString::to_string)
+                .unwrap_or_else(|| shell_id.clone())
+        } else {
+            command_label.clone()
+        };
+
+        let metadata = BackgroundEventMetadata {
+            shell_id: Some(shell_id.clone()),
+            call_id: Some(call_id.clone()),
+            kind: Some(BackgroundEventKind::Started {
+                description: Some(start_label.clone()),
+                mode: BackgroundStartMode::RunInBackground,
+            }),
+        };
         session
             .notify_background_event(
                 &turn,
-                format!(
-                    "Background shell {shell_id} started{}",
-                    description
-                        .as_deref()
-                        .map(|d| format!(" ({d})"))
-                        .unwrap_or_default()
-                ),
+                format!("Background shell {shell_id} started ({start_label})"),
+                Some(metadata),
             )
             .await;
 
@@ -308,6 +494,8 @@ impl BackgroundShellManager {
         captured_output: String,
         description: Option<String>,
         bookmark: Option<String>,
+        call_id: String,
+        mode: BackgroundStartMode,
     ) -> BackgroundStartResponse {
         let shell_id = self.allocate_shell_id();
         let description = clean_description(description);
@@ -317,27 +505,48 @@ impl BackgroundShellManager {
             .ok()
             .flatten();
 
+        let manager: &UnifiedExecSessionManager = &session.services.unified_exec_manager;
+        let session_label = manager
+            .session_command_label(session_id)
+            .await
+            .and_then(|raw| {
+                friendly_command_label_from_str(&raw)
+                    .or(Some(raw))
+                    .and_then(|value| sanitize_label(&value))
+            });
+
+        let promo_preview = pick_command_preview(session_label, &description);
+
+        let promo_preview_label = promo_preview.clone();
+
         self.insert_entry(
             shell_id.clone(),
             session_id,
             description.clone(),
             bookmark.clone(),
-            "promoted shell".to_string(),
+            promo_preview,
             &captured_output,
+            call_id.clone(),
         )
         .await;
         self.running_shells.fetch_add(1, Ordering::SeqCst);
+
+        let metadata = BackgroundEventMetadata {
+            shell_id: Some(shell_id.clone()),
+            call_id: Some(call_id.clone()),
+            kind: Some(BackgroundEventKind::Started {
+                description: non_empty_string(promo_preview_label.clone()),
+                mode,
+            }),
+        };
 
         session
             .notify_background_event(
                 &turn,
                 format!(
-                    "Background shell {shell_id} started (promoted from foreground{})",
-                    description
-                        .as_deref()
-                        .map(|d| format!(" — {d}"))
-                        .unwrap_or_default()
+                    "Background shell {shell_id} started (promoted from foreground — {promo_preview_label})"
                 ),
+                Some(metadata),
             )
             .await;
 
@@ -393,7 +602,26 @@ impl BackgroundShellManager {
             let mut guard = entry.lock().await;
             self.append_output(&mut guard, &response.output, ExecOutputStream::Stdout);
             if response.session_id.is_none() {
-                self.mark_completed(&shell_id, &mut guard, response.exit_code);
+                let cause = CompletionDisposition::Natural;
+                let completed =
+                    self.mark_completed(&shell_id, &mut guard, response.exit_code, cause.clone());
+                if completed && !guard.completion_announced {
+                    guard.completion_announced = true;
+                    let notice = BackgroundCompletionNotice::new(
+                        &shell_id,
+                        response.exit_code,
+                        &guard,
+                        cause,
+                    );
+                    session
+                        .notify_background_event_with_note(
+                            turn.as_ref(),
+                            notice.event_message(),
+                            Some(notice.agent_note()),
+                            Some(notice.metadata()),
+                        )
+                        .await;
+                }
             }
         }
 
@@ -414,6 +642,7 @@ impl BackgroundShellManager {
         &self,
         identifier: &str,
         max_lines: usize,
+        cursor: Option<&str>,
         filter_regex: Option<&str>,
     ) -> Result<BackgroundLogView, FunctionCallError> {
         let (shell_id, entry) = self.resolve_identifier(identifier).await.ok_or_else(|| {
@@ -422,8 +651,15 @@ impl BackgroundShellManager {
 
         let regex = compile_regex(filter_regex)?;
         let limit = max_lines.clamp(1, 400);
+        let before_seq = match cursor {
+            Some(value) => Some(value.parse::<u64>().map_err(|err| {
+                FunctionCallError::RespondToModel(format!("invalid cursor '{value}': {err}"))
+            })?),
+            None => None,
+        };
         let guard = entry.lock().await;
-        let lines = self.collect_tail_lines(&guard, limit, regex.as_ref());
+        let (lines, next_cursor, has_more) =
+            self.collect_tail_chunk(&guard, limit, before_seq, regex.as_ref());
 
         Ok(BackgroundLogView {
             shell_id,
@@ -433,7 +669,13 @@ impl BackgroundShellManager {
             status: guard.status.clone(),
             exit_code: guard.exit_code,
             truncated: guard.truncated,
+            ended_by: guard
+                .completion_cause
+                .as_ref()
+                .map(|cause| completion_short_label(cause).to_string()),
             lines,
+            next_cursor,
+            has_more,
         })
     }
 
@@ -443,59 +685,202 @@ impl BackgroundShellManager {
         identifier: &str,
         session: Arc<Session>,
         turn: Arc<TurnContext>,
+        initiator: ShellActionInitiator,
     ) -> Result<BackgroundKillResponse, FunctionCallError> {
         let (shell_id, entry) = self.resolve_identifier(identifier).await.ok_or_else(|| {
             FunctionCallError::RespondToModel(format!("unknown background shell id: {identifier}"))
         })?;
 
-        let guard = entry.lock().await;
-        let session_id = guard.session_id.ok_or_else(|| {
-            FunctionCallError::RespondToModel(format!(
-                "background shell {shell_id} is already finished"
-            ))
-        })?;
-        drop(guard);
+        let session_id = {
+            let guard = entry.lock().await;
+            guard.session_id.ok_or_else(|| {
+                FunctionCallError::RespondToModel(format!(
+                    "background shell {shell_id} is already finished"
+                ))
+            })?
+        };
 
         let manager: &UnifiedExecSessionManager = &session.services.unified_exec_manager;
-        let kill = manager
+
+        match manager.refresh_session_state(session_id).await {
+            SessionStatus::Exited { exit_code, .. } => {
+                return Ok(self
+                    .finish_already_completed_kill(
+                        &shell_id, entry, exit_code, &session, &turn, initiator,
+                    )
+                    .await);
+            }
+            SessionStatus::Unknown => {
+                return Ok(self
+                    .finish_already_completed_kill(
+                        &shell_id,
+                        entry,
+                        Some(-1),
+                        &session,
+                        &turn,
+                        initiator,
+                    )
+                    .await);
+            }
+            SessionStatus::Alive { .. } => {}
+        }
+
+        let kill = match manager
             .terminate_session(session_id, TerminateDisposition::Requested)
             .await
-            .map_err(|err| {
-                FunctionCallError::RespondToModel(format!(
-                    "failed to terminate background shell: {err:?}"
-                ))
-            })?;
+        {
+            Ok(result) => Some(result),
+            Err(err) => {
+                if matches!(err, UnifiedExecError::UnknownSessionId { .. })
+                    || matches!(&err,
+                        UnifiedExecError::CreateSession { message }
+                        if message.contains("No such process")
+                    )
+                {
+                    None
+                } else {
+                    return Err(FunctionCallError::RespondToModel(format!(
+                        "failed to terminate background shell: {err:?}"
+                    )));
+                }
+            }
+        };
 
+        let kill = match kill {
+            Some(result) => result,
+            None => {
+                return Ok(self
+                    .finish_already_completed_kill(
+                        &shell_id,
+                        entry,
+                        Some(-1),
+                        &session,
+                        &turn,
+                        initiator,
+                    )
+                    .await);
+            }
+        };
         let mut guard = entry.lock().await;
         self.append_output(
             &mut guard,
             &kill.aggregated_output,
             ExecOutputStream::Stdout,
         );
-        guard.status = BackgroundShellStatus::Failed;
-        guard.exit_code = Some(kill.exit_code);
-        guard.session_id = None;
-        self.running_shells.fetch_sub(1, Ordering::SeqCst);
-        self.schedule_cleanup(shell_id.clone(), &mut guard);
+        let cause = CompletionDisposition::Killed(initiator);
+        self.mark_completed(&shell_id, &mut guard, Some(kill.exit_code), cause.clone());
+        guard.completion_announced = true;
+        let call_id = guard.call_ids.iter().next().cloned();
+
+        let (kill_target, bookmark, description) = self.kill_metadata(&guard, &shell_id);
+        let kill_description = match initiator {
+            ShellActionInitiator::User => format!("Kill shell {kill_target} (user requested)"),
+            ShellActionInitiator::Agent => format!("Kill shell {kill_target} (agent requested)"),
+        };
+        let label = entry_label(&shell_id, &guard);
+        let agent_note = describe_completion(&cause, &label, shell_id.clone(), kill.exit_code);
+        let metadata = BackgroundEventMetadata {
+            shell_id: Some(shell_id.clone()),
+            call_id,
+            kind: Some(BackgroundEventKind::Terminated {
+                exit_code: kill.exit_code,
+                termination: BackgroundTerminationKind::from(&cause),
+                description: non_empty_string(label.clone()),
+            }),
+        };
 
         session
-            .notify_background_event(
+            .notify_background_event_with_note(
                 &turn,
                 format!(
-                    "Background shell {shell_id} terminated with exit code {}",
+                    "Background shell {shell_id} terminated with exit code {} ({kill_description})",
                     kill.exit_code
                 ),
+                Some(agent_note),
+                Some(metadata),
             )
             .await;
 
         Ok(BackgroundKillResponse {
             shell_id,
-            status: BackgroundShellStatus::Failed,
+            status: guard.status.clone(),
             exit_code: kill.exit_code,
             output: kill.aggregated_output,
-            description: guard.description.clone(),
-            bookmark: guard.bookmark.clone(),
+            description,
+            bookmark,
         })
+    }
+
+    async fn finish_already_completed_kill(
+        &self,
+        shell_id: &str,
+        entry: SharedEntry,
+        exit_code: Option<i32>,
+        session: &Arc<Session>,
+        turn: &Arc<TurnContext>,
+        initiator: ShellActionInitiator,
+    ) -> BackgroundKillResponse {
+        let mut guard = entry.lock().await;
+        let cause = CompletionDisposition::AlreadyFinished(initiator);
+        self.mark_completed(shell_id, &mut guard, exit_code, cause.clone());
+        guard.completion_announced = true;
+        let call_id = guard.call_ids.iter().next().cloned();
+        let (kill_target, bookmark, description) = self.kill_metadata(&guard, shell_id);
+        let exit_value = exit_code.unwrap_or(-1);
+        let kill_description = format!("Kill shell {kill_target} (already finished)");
+        let label = entry_label(shell_id, &guard);
+        let agent_note = describe_completion(&cause, &label, shell_id.to_string(), exit_value);
+        let metadata = BackgroundEventMetadata {
+            shell_id: Some(shell_id.to_string()),
+            call_id,
+            kind: Some(BackgroundEventKind::Terminated {
+                exit_code: exit_value,
+                termination: BackgroundTerminationKind::from(&cause),
+                description: non_empty_string(label.clone()),
+            }),
+        };
+
+        session
+            .notify_background_event_with_note(
+                turn,
+                format!(
+                    "Background shell {shell_id} was already finished (exit code {exit_value}) ({kill_description})"
+                ),
+                Some(agent_note),
+                Some(metadata),
+            )
+            .await;
+
+        BackgroundKillResponse {
+            shell_id: shell_id.to_string(),
+            status: guard.status.clone(),
+            exit_code: exit_value,
+            output: String::new(),
+            description,
+            bookmark,
+        }
+    }
+
+    fn kill_metadata(
+        &self,
+        guard: &BackgroundCommandEntry,
+        fallback: &str,
+    ) -> (String, Option<String>, Option<String>) {
+        let kill_target = if !guard.command_preview.is_empty() {
+            guard.command_preview.clone()
+        } else if let Some(desc) = guard.description.clone() {
+            desc
+        } else if let Some(bookmark) = guard.bookmark.clone() {
+            format!("#{bookmark}")
+        } else {
+            fallback.to_string()
+        };
+
+        (
+            kill_target,
+            guard.bookmark.clone(),
+            guard.description.clone(),
+        )
     }
 
     pub async fn summary(&self, limit: Option<usize>) -> Vec<BackgroundShellSummaryEntry> {
@@ -520,6 +905,10 @@ impl BackgroundShellManager {
                 guard.bookmark.clone(),
                 guard.command_preview.clone(),
                 self.tail_lines(&guard),
+                guard
+                    .completion_cause
+                    .as_ref()
+                    .map(|cause| completion_short_label(cause).to_string()),
             ));
         }
         enriched.sort_by_key(|(_, created_at, ..)| *created_at);
@@ -537,6 +926,7 @@ impl BackgroundShellManager {
                     bookmark,
                     preview,
                     tail,
+                    ended_by,
                 )| BackgroundShellSummaryEntry {
                     shell_id,
                     bookmark,
@@ -546,9 +936,67 @@ impl BackgroundShellManager {
                     command_preview: preview,
                     tail_lines: tail,
                     started_at_ms: Self::system_time_to_epoch_ms(created_at),
+                    ended_by,
                 },
             )
             .collect()
+    }
+
+    pub async fn refresh_running_entries(
+        &self,
+        exec_manager: &UnifiedExecSessionManager,
+    ) -> Vec<BackgroundCompletionNotice> {
+        let entries = {
+            let inner = self.inner.lock().await;
+            inner
+                .entries
+                .iter()
+                .map(|(id, entry)| (id.clone(), Arc::clone(entry)))
+                .collect::<Vec<_>>()
+        };
+
+        let mut completions = Vec::new();
+        for (shell_id, entry) in entries {
+            let mut guard = entry.lock().await;
+            if guard.status != BackgroundShellStatus::Running {
+                continue;
+            }
+            let session_id = match guard.session_id {
+                Some(id) => id,
+                None => continue,
+            };
+            match exec_manager.refresh_session_state(session_id).await {
+                SessionStatus::Alive { exit_code, .. } => {
+                    guard.exit_code = exit_code;
+                }
+                SessionStatus::Exited { exit_code, .. } => {
+                    let cause = CompletionDisposition::Natural;
+                    let completed =
+                        self.mark_completed(&shell_id, &mut guard, exit_code, cause.clone());
+                    if completed && !guard.completion_announced {
+                        guard.completion_announced = true;
+                        completions.push(BackgroundCompletionNotice::new(
+                            &shell_id, exit_code, &guard, cause,
+                        ));
+                    }
+                }
+                SessionStatus::Unknown => {
+                    let cause = CompletionDisposition::Natural;
+                    let completed =
+                        self.mark_completed(&shell_id, &mut guard, Some(-1), cause.clone());
+                    if completed && !guard.completion_announced {
+                        guard.completion_announced = true;
+                        completions.push(BackgroundCompletionNotice::new(
+                            &shell_id,
+                            Some(-1),
+                            &guard,
+                            cause,
+                        ));
+                    }
+                }
+            }
+        }
+        completions
     }
 
     fn system_time_to_epoch_ms(time: SystemTime) -> Option<i64> {
@@ -609,12 +1057,17 @@ impl BackgroundShellManager {
         bookmark: Option<String>,
         command_preview: String,
         initial_output: &str,
+        call_id: String,
     ) {
+        let mut call_ids = HashSet::new();
+        call_ids.insert(call_id.clone());
         let mut entry = BackgroundCommandEntry {
             session_id: Some(session_id),
             description,
             bookmark,
             command_preview,
+            completion_announced: false,
+            completion_cause: None,
             status: BackgroundShellStatus::Running,
             exit_code: None,
             buffer: VecDeque::new(),
@@ -624,12 +1077,116 @@ impl BackgroundShellManager {
             truncated: false,
             created_at: SystemTime::now(),
             cleanup_task: None,
+            call_ids,
         };
         self.append_output(&mut entry, initial_output, ExecOutputStream::Stdout);
 
         let shared = Arc::new(Mutex::new(entry));
         let mut inner = self.inner.lock().await;
+        inner.call_map.insert(call_id, shell_id.clone());
         inner.entries.insert(shell_id, shared);
+    }
+
+    pub async fn running_shell_ids(&self) -> Vec<String> {
+        let entries = {
+            let inner = self.inner.lock().await;
+            inner
+                .entries
+                .iter()
+                .map(|(id, entry)| (id.clone(), Arc::clone(entry)))
+                .collect::<Vec<_>>()
+        };
+
+        let mut running = Vec::new();
+        for (shell_id, entry) in entries {
+            let guard = entry.lock().await;
+            if guard.status == BackgroundShellStatus::Running {
+                running.push(shell_id);
+            }
+        }
+        running
+    }
+
+    pub async fn label_for_shell(&self, identifier: &str) -> Option<String> {
+        let entry = {
+            let inner = self.inner.lock().await;
+            inner.entries.get(identifier).cloned()
+        }?;
+        let guard = entry.lock().await;
+        Some(entry_label(identifier, &guard))
+    }
+
+    pub async fn pump_session_output(
+        &self,
+        identifier: &str,
+        exec_manager: &UnifiedExecSessionManager,
+    ) -> Result<Option<BackgroundCompletionNotice>, FunctionCallError> {
+        let (shell_id, entry) = self.resolve_identifier(identifier).await.ok_or_else(|| {
+            FunctionCallError::RespondToModel(format!("unknown background shell id: {identifier}"))
+        })?;
+
+        let session_id = {
+            let guard = entry.lock().await;
+            guard.session_id
+        };
+
+        let Some(session_id) = session_id else {
+            return Ok(None);
+        };
+
+        let response = match exec_manager
+            .write_stdin(crate::unified_exec::WriteStdinRequest {
+                session_id,
+                input: "",
+                yield_time_ms: Some(MIN_YIELD_TIME_MS),
+                max_output_tokens: None,
+            })
+            .await
+        {
+            Ok(resp) => resp,
+            Err(UnifiedExecError::UnknownSessionId { .. }) => {
+                let mut guard = entry.lock().await;
+                guard.session_id = None;
+                let cause = CompletionDisposition::Natural;
+                let completed = self.mark_completed(&shell_id, &mut guard, Some(-1), cause.clone());
+                if completed && !guard.completion_announced {
+                    guard.completion_announced = true;
+                    return Ok(Some(BackgroundCompletionNotice::new(
+                        &shell_id,
+                        Some(-1),
+                        &guard,
+                        cause,
+                    )));
+                }
+                return Ok(None);
+            }
+            Err(err) => {
+                return Err(FunctionCallError::RespondToModel(format!(
+                    "failed to read background shell output: {err:?}"
+                )));
+            }
+        };
+
+        let mut guard = entry.lock().await;
+        if !response.output.is_empty() {
+            self.append_output(&mut guard, &response.output, ExecOutputStream::Stdout);
+        }
+        guard.exit_code = response.exit_code;
+        if response.session_id.is_none() {
+            let cause = CompletionDisposition::Natural;
+            let completed =
+                self.mark_completed(&shell_id, &mut guard, response.exit_code, cause.clone());
+            if completed && !guard.completion_announced {
+                guard.completion_announced = true;
+                return Ok(Some(BackgroundCompletionNotice::new(
+                    &shell_id,
+                    response.exit_code,
+                    &guard,
+                    cause,
+                )));
+            }
+        }
+        Ok(None)
     }
 
     fn append_output(
@@ -647,7 +1204,7 @@ impl BackgroundShellManager {
                 continue;
             }
             entry.next_seq += 1;
-            let bytes = text.as_bytes().len() + stream_prefix(&stream).len();
+            let bytes = text.len() + stream_prefix(&stream).len();
             entry.buffer.push_back(LineEntry {
                 seq: entry.next_seq,
                 stream: stream.clone(),
@@ -680,10 +1237,10 @@ impl BackgroundShellManager {
                 continue;
             }
             let formatted = format_line(line);
-            if let Some(re) = regex {
-                if !re.is_match(&formatted) {
-                    continue;
-                }
+            if let Some(re) = regex
+                && !re.is_match(&formatted)
+            {
+                continue;
             }
             entry.last_read_seq = line.seq;
             lines.push(formatted);
@@ -691,30 +1248,53 @@ impl BackgroundShellManager {
         lines
     }
 
-    fn collect_tail_lines(
+    fn collect_tail_chunk(
         &self,
         entry: &BackgroundCommandEntry,
         limit: usize,
+        before_seq: Option<u64>,
         regex: Option<&Regex>,
-    ) -> Vec<String> {
+    ) -> (Vec<String>, Option<String>, bool) {
         if limit == 0 {
-            return Vec::new();
+            return (Vec::new(), None, false);
         }
-        let mut lines = Vec::new();
+
+        let mut collected: Vec<(u64, String)> = Vec::new();
+        let mut oldest_seq: Option<u64> = None;
         for line in entry.buffer.iter().rev() {
-            let formatted = format_line(line);
-            if let Some(re) = regex {
-                if !re.is_match(&formatted) {
-                    continue;
-                }
+            if before_seq.is_some_and(|seq| line.seq >= seq) {
+                continue;
             }
-            lines.push(formatted);
-            if lines.len() == limit {
+            let formatted = format_line(line);
+            if let Some(re) = regex
+                && !re.is_match(&formatted)
+            {
+                continue;
+            }
+            collected.push((line.seq, formatted));
+            oldest_seq = Some(line.seq);
+            if collected.len() == limit {
                 break;
             }
         }
-        lines.reverse();
-        lines
+
+        let has_more = oldest_seq.is_some_and(|min_seq| {
+            entry.buffer.iter().any(|candidate| {
+                candidate.seq < min_seq
+                    && before_seq.is_none_or(|seq| candidate.seq < seq)
+                    && regex.is_none_or(|re| re.is_match(&format_line(candidate)))
+            })
+        });
+
+        let next_cursor = if has_more {
+            oldest_seq.map(|seq| seq.saturating_sub(1).to_string())
+        } else {
+            None
+        };
+
+        collected.reverse();
+        let lines = collected.into_iter().map(|(_, line)| line).collect();
+        (lines, next_cursor, has_more)
     }
 
     fn mark_completed(
@@ -722,16 +1302,56 @@ impl BackgroundShellManager {
         shell_id: &str,
         entry: &mut BackgroundCommandEntry,
         exit_code: Option<i32>,
-    ) {
-        if entry.session_id.take().is_some() {
+        cause: CompletionDisposition,
+    ) -> bool {
+        let had_session = entry.session_id.take().is_some();
+        if had_session {
             self.running_shells.fetch_sub(1, Ordering::SeqCst);
-            entry.status = if exit_code.unwrap_or(-1) == 0 {
-                BackgroundShellStatus::Completed
-            } else {
-                BackgroundShellStatus::Failed
-            };
+        }
+
+        let next_status = if exit_code.unwrap_or(-1) == 0 {
+            BackgroundShellStatus::Completed
+        } else {
+            BackgroundShellStatus::Failed
+        };
+
+        let mut changed = false;
+        if entry.status != next_status {
+            entry.status = next_status;
+            changed = true;
+        }
+        if entry.exit_code != exit_code {
             entry.exit_code = exit_code;
+            changed = true;
+        }
+        let cause_updated = Self::apply_completion_cause(entry, cause);
+        if changed || cause_updated {
+            entry.completion_announced = false;
+        }
+        if had_session {
             self.schedule_cleanup(shell_id.to_string(), entry);
+        }
+        had_session || changed || cause_updated
+    }
+
+    fn apply_completion_cause(
+        entry: &mut BackgroundCommandEntry,
+        cause: CompletionDisposition,
+    ) -> bool {
+        match entry.completion_cause.as_ref() {
+            Some(existing)
+                if matches!(
+                    existing,
+                    CompletionDisposition::Killed(_) | CompletionDisposition::AlreadyFinished(_)
+                ) && matches!(cause, CompletionDisposition::Natural) =>
+            {
+                false
+            }
+            Some(existing) if existing == &cause => false,
+            _ => {
+                entry.completion_cause = Some(cause);
+                true
+            }
         }
     }
 
@@ -744,8 +1364,15 @@ impl BackgroundShellManager {
             sleep(CLEANUP_AFTER).await;
             let mut guard = inner.lock().await;
             if let Some(entry) = guard.entries.remove(&shell_id) {
-                if let Some(bookmark) = entry.lock().await.bookmark.clone() {
+                let (bookmark, call_ids) = {
+                    let entry_guard = entry.lock().await;
+                    (entry_guard.bookmark.clone(), entry_guard.call_ids.clone())
+                };
+                if let Some(bookmark) = bookmark {
                     guard.bookmarks.remove(&bookmark);
+                }
+                for call_id in call_ids {
+                    guard.call_map.remove(&call_id);
                 }
             }
         }));
@@ -783,6 +1410,33 @@ impl BackgroundShellManager {
     }
 }
 
+fn pick_command_preview(session_label: Option<String>, description: &Option<String>) -> String {
+    if let Some(label) = session_label.and_then(|value| sanitize_label(&value)) {
+        return label;
+    }
+
+    if let Some(desc_label) = description
+        .as_deref()
+        .and_then(friendly_command_label_from_str)
+        .and_then(|value| sanitize_label(&value))
+    {
+        return desc_label;
+    }
+
+    description
+        .clone()
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or_else(|| "promoted shell".to_string())
+}
+
+fn sanitize_label(raw: &str) -> Option<String> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    Some(trimmed.to_string())
+}
+
 fn clean_description(description: Option<String>) -> Option<String> {
     description
         .map(|value| value.trim().to_string())
@@ -793,6 +1447,24 @@ fn clean_bookmark(bookmark: Option<String>) -> Option<String> {
     bookmark
         .map(|value| value.trim().to_string())
         .filter(|value| !value.is_empty())
+}
+
+fn entry_label(shell_id: &str, entry: &BackgroundCommandEntry) -> String {
+    if let Some(label) = sanitize_label(&entry.command_preview) {
+        return label;
+    }
+    if let Some(desc) = entry.description.as_deref() {
+        if let Some(label) =
+            friendly_command_label_from_str(desc).and_then(|value| sanitize_label(&value))
+        {
+            return label;
+        }
+        let trimmed = desc.trim();
+        if !trimmed.is_empty() {
+            return trimmed.to_string();
+        }
+    }
+    format!("shell {shell_id}")
 }
 
 fn stream_prefix(stream: &ExecOutputStream) -> &'static str {
@@ -816,52 +1488,25 @@ fn compile_regex(pattern: Option<&str>) -> Result<Option<Regex>, FunctionCallErr
     }
 }
 
-#[allow(dead_code)]
-pub fn parse_background_event_message(message: &str) -> Option<BackgroundEventSummary> {
-    const PREFIX: &str = "Background shell ";
-    let remainder = message.strip_prefix(PREFIX)?;
-    let (shell_id, tail) = remainder.split_once(' ')?;
-    let shell_id = shell_id.to_string();
-    let tail = tail.trim_start();
+#[cfg(test)]
+mod tests {
+    use super::*;
 
-    fn parse_description(note: &str) -> Option<String> {
-        let trimmed = note.trim();
-        if trimmed.is_empty() {
-            None
-        } else if let Some(stripped) = trimmed.strip_prefix('(').and_then(|s| s.strip_suffix(')')) {
-            let value = stripped.trim();
-            if value.is_empty() {
-                None
-            } else {
-                Some(value.to_string())
-            }
-        } else {
-            Some(trimmed.to_string())
-        }
+    #[test]
+    fn pick_preview_prefers_session_label() {
+        let result = pick_command_preview(Some("npm run dev".into()), &Some("custom".into()));
+        assert_eq!(result, "npm run dev");
     }
 
-    if let Some(rest) = tail.strip_prefix("started") {
-        let description = parse_description(rest);
-        return Some(BackgroundEventSummary {
-            shell_id,
-            kind: BackgroundEventKind::Started,
-            description,
-        });
+    #[test]
+    fn pick_preview_falls_back_to_description_label() {
+        let result = pick_command_preview(None, &Some("bash -lc 'npm run dev'".into()));
+        assert_eq!(result, "npm run dev");
     }
 
-    if let Some(rest) = tail.strip_prefix("terminated with exit code ") {
-        let (code_str, note) = match rest.split_once(' ') {
-            Some((code, remainder)) => (code, remainder),
-            None => (rest, ""),
-        };
-        let exit_code: i32 = code_str.parse().ok()?;
-        let description = parse_description(note);
-        return Some(BackgroundEventSummary {
-            shell_id,
-            kind: BackgroundEventKind::Terminated { exit_code },
-            description,
-        });
+    #[test]
+    fn pick_preview_defaults_when_missing() {
+        let result = pick_command_preview(None, &None);
+        assert_eq!(result, "promoted shell");
     }
-
-    None
 }

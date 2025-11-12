@@ -507,17 +507,27 @@ async fn review_input_isolated_from_parent_history() {
     .await;
     let _complete = wait_for_event(&codex, |ev| matches!(ev, EventMsg::TaskComplete(_))).await;
 
-    // Assert the request `input` contains the environment context followed by the user review prompt.
+    // Assert the request `input` contains the developer guidance, environment context, and review prompt.
     let request = &server.received_requests().await.unwrap()[0];
     let body = request.body_json::<serde_json::Value>().unwrap();
     let input = body["input"].as_array().expect("input array");
     assert_eq!(
         input.len(),
-        2,
-        "expected environment context and review prompt"
+        3,
+        "expected developer guidance, environment context, and review prompt"
     );
 
-    let env_msg = &input[0];
+    let guidance = BACKGROUND_SHELL_AGENT_GUIDANCE.trim();
+    let dev_msg = &input[0];
+    assert_eq!(dev_msg["type"].as_str().unwrap(), "message");
+    assert_eq!(dev_msg["role"].as_str().unwrap(), "developer");
+    assert_eq!(
+        dev_msg["content"][0]["text"].as_str().unwrap(),
+        guidance,
+        "developer guidance should match background shell instructions"
+    );
+
+    let env_msg = &input[1];
     assert_eq!(env_msg["type"].as_str().unwrap(), "message");
     assert_eq!(env_msg["role"].as_str().unwrap(), "user");
     let env_text = env_msg["content"][0]["text"].as_str().expect("env text");
@@ -530,7 +540,7 @@ async fn review_input_isolated_from_parent_history() {
         "environment context should include cwd"
     );
 
-    let review_msg = &input[1];
+    let review_msg = &input[2];
     assert_eq!(review_msg["type"].as_str().unwrap(), "message");
     assert_eq!(review_msg["role"].as_str().unwrap(), "user");
     assert_eq!(
@@ -734,3 +744,4 @@ where
         .expect("resume conversation")
         .conversation
 }
+use codex_core::BACKGROUND_SHELL_AGENT_GUIDANCE;

@@ -1,5 +1,6 @@
 use std::borrow::Cow;
 use std::collections::HashMap;
+use std::ffi::OsString;
 use std::io::ErrorKind;
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -214,7 +215,7 @@ impl ServerHandler for TestToolServer {
                     }
                 };
 
-                let env_snapshot: HashMap<String, String> = std::env::vars().collect();
+                let env_snapshot = env_snapshot_lossy();
                 let structured_content = json!({
                     "echo": format!("ECHOING: {}", args.message),
                     "env": env_snapshot.get("MCP_TEST_VALUE"),
@@ -317,4 +318,16 @@ async fn require_bearer(
     } else {
         Err(StatusCode::UNAUTHORIZED)
     }
+}
+
+fn env_snapshot_lossy() -> HashMap<String, String> {
+    std::env::vars_os()
+        .map(|(k, v)| (os_to_string_lossy(k), os_to_string_lossy(v)))
+        .collect()
+}
+
+fn os_to_string_lossy(value: OsString) -> String {
+    value
+        .into_string()
+        .unwrap_or_else(|os| os.to_string_lossy().into_owned())
 }

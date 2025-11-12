@@ -1,10 +1,11 @@
 ---
 source: tui/src/history_cell.rs
+assertion_line: 2210
 expression: rendered
 ---
-• Ran echo
-  │ this_is_a_very_long_si
-  │ ngle_token_that_will_w
+● Shell echo
+  │ this_is_a_very_long_
+  │ single_token_that_wi
   │ … +2 lines
   └ error: first line on
     stderr

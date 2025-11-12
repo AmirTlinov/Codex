@@ -36,7 +36,7 @@ const DEFAULT_TIMEOUT_MS: u64 = 10_000;
 const SIGKILL_CODE: i32 = 9;
 const TIMEOUT_CODE: i32 = 64;
 const EXIT_CODE_SIGNAL_BASE: i32 = 128; // conventional shell: 128 + signal
-const EXEC_TIMEOUT_EXIT_CODE: i32 = 124; // conventional timeout exit code
+pub(crate) const EXEC_TIMEOUT_EXIT_CODE: i32 = 124; // conventional timeout exit code
 
 // I/O buffer sizing
 const READ_CHUNK_SIZE: usize = 8192; // bytes per read
@@ -736,7 +736,9 @@ mod tests {
             "-c".to_string(),
             "sleep 60 & echo $!; sleep 60".to_string(),
         ];
-        let env: HashMap<String, String> = std::env::vars().collect();
+        let env: HashMap<String, String> = crate::exec_env::capture_env_vars_lossy()
+            .into_iter()
+            .collect();
         let params = ExecParams {
             command,
             cwd: std::env::current_dir()?,

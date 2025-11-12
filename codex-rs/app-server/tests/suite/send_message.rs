@@ -330,10 +330,9 @@ fn assert_developer_message(item: &ResponseItem, expected_text: &str) {
         ResponseItem::Message { role, content, .. } => {
             assert_eq!(role, "developer");
             let texts = content_texts(content);
-            assert_eq!(
-                texts,
-                vec![expected_text],
-                "expected developer instructions message, got {texts:?}"
+            assert!(
+                matches!(texts.as_slice(), [text] if text.starts_with(expected_text)),
+                "expected developer instructions message starting with `{expected_text}`, got {texts:?}"
             );
         }
         other => panic!("expected developer instructions message, got {other:?}"),

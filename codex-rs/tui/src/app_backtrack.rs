@@ -1,10 +1,13 @@
 use std::any::TypeId;
+use std::cell::RefCell;
 use std::path::PathBuf;
+use std::rc::Rc;
 use std::sync::Arc;
 
 use crate::app::App;
 use crate::history_cell::SessionInfoCell;
 use crate::history_cell::UserHistoryCell;
+use crate::history_store::HistoryStore;
 use crate::pager_overlay::Overlay;
 use crate::tui;
 use crate::tui::TuiEvent;
@@ -118,7 +121,8 @@ impl App {
     /// Open transcript overlay (enters alternate screen and shows full transcript).
     pub(crate) fn open_transcript_overlay(&mut self, tui: &mut tui::Tui) {
         let _ = tui.enter_alt_screen();
-        self.overlay = Some(Overlay::new_transcript(self.transcript_cells.clone()));
+        let snapshot = { self.history_store.borrow().clone() };
+        self.overlay = Some(Overlay::new_transcript(snapshot));
         tui.frame_requester().schedule_frame();
     }
 
@@ -126,10 +130,6 @@ impl App {
     pub(crate) fn close_transcript_overlay(&mut self, tui: &mut tui::Tui) {
         let _ = tui.leave_alt_screen();
         let was_backtrack = self.backtrack.overlay_preview_active;
-        if !self.deferred_history_lines.is_empty() {
-            let lines = std::mem::take(&mut self.deferred_history_lines);
-            tui.insert_history_lines(lines);
-        }
         self.overlay = None;
         self.backtrack.overlay_preview_active = false;
         if was_backtrack {
@@ -141,12 +141,8 @@ impl App {
     /// Re-render the full transcript into the terminal scrollback in one call.
     /// Useful when switching sessions to ensure prior history remains visible.
     pub(crate) fn render_transcript_once(&mut self, tui: &mut tui::Tui) {
-        if !self.transcript_cells.is_empty() {
-            let width = tui.terminal.last_known_screen_size.width;
-            for cell in &self.transcript_cells {
-                tui.insert_history_lines(cell.display_lines(width));
-            }
-        }
+        let _ = tui;
+        self.chat_widget.on_history_modified();
     }
 
     /// Initialize backtrack state and show composer hint.
@@ -171,7 +167,10 @@ impl App {
         self.backtrack.primed = true;
         self.backtrack.base_id = self.chat_widget.conversation_id();
         self.backtrack.overlay_preview_active = true;
-        let count = user_count(&self.transcript_cells);
+        let count = {
+            let history = self.history_store.borrow();
+            user_count(&history)
+        };
         if let Some(last) = count.checked_sub(1) {
             self.apply_backtrack_selection(last);
         }
@@ -180,7 +179,10 @@ impl App {
 
     /// Step selection to the next older user message and update overlay.
     fn step_backtrack_and_highlight(&mut self, tui: &mut tui::Tui) {
-        let count = user_count(&self.transcript_cells);
+        let count = {
+            let history = self.history_store.borrow();
+            user_count(&history)
+        };
         if count == 0 {
             return;
         }
@@ -203,7 +205,11 @@ impl App {
 
     /// Apply a computed backtrack selection to the overlay and internal counter.
     fn apply_backtrack_selection(&mut self, nth_user_message: usize) {
-        if let Some(cell_idx) = nth_user_position(&self.transcript_cells, nth_user_message) {
+        let cell_idx = {
+            let history = self.history_store.borrow();
+            nth_user_position(&history, nth_user_message)
+        };
+        if let Some(cell_idx) = cell_idx {
             self.backtrack.nth_user_message = nth_user_message;
             if let Some(Overlay::Transcript(t)) = &mut self.overlay {
                 t.set_highlight_cell(Some(cell_idx));
@@ -232,11 +238,14 @@ impl App {
     fn overlay_confirm_backtrack(&mut self, tui: &mut tui::Tui) {
         let nth_user_message = self.backtrack.nth_user_message;
         if let Some(base_id) = self.backtrack.base_id {
-            let prefill = nth_user_position(&self.transcript_cells, nth_user_message)
-                .and_then(|idx| self.transcript_cells.get(idx))
-                .and_then(|cell| cell.as_any().downcast_ref::<UserHistoryCell>())
-                .map(|c| c.message.clone())
-                .unwrap_or_default();
+            let prefill = {
+                let history = self.history_store.borrow();
+                nth_user_position(&history, nth_user_message)
+                    .and_then(|idx| history.get(idx))
+                    .and_then(|cell| cell.as_any().downcast_ref::<UserHistoryCell>())
+                    .map(|c| c.message.clone())
+            }
+            .unwrap_or_default();
             self.close_transcript_overlay(tui);
             self.request_backtrack(prefill, base_id, nth_user_message);
         }
@@ -257,12 +266,14 @@ impl App {
     /// Computes the prefill from the selected user message and requests history.
     pub(crate) fn confirm_backtrack_from_main(&mut self) {
         if let Some(base_id) = self.backtrack.base_id {
-            let prefill =
-                nth_user_position(&self.transcript_cells, self.backtrack.nth_user_message)
-                    .and_then(|idx| self.transcript_cells.get(idx))
+            let prefill = {
+                let history = self.history_store.borrow();
+                nth_user_position(&history, self.backtrack.nth_user_message)
+                    .and_then(|idx| history.get(idx))
                     .and_then(|cell| cell.as_any().downcast_ref::<UserHistoryCell>())
                     .map(|c| c.message.clone())
-                    .unwrap_or_default();
+            }
+            .unwrap_or_default();
             self.request_backtrack(prefill, base_id, self.backtrack.nth_user_message);
         }
         self.reset_backtrack_state();
@@ -338,6 +349,9 @@ impl App {
     ) {
         let conv = new_conv.conversation;
         let session_configured = new_conv.session_configured;
+        let mut preserved_history = self.history_store.borrow().clone();
+        trim_transcript_cells_to_nth_user(&mut preserved_history, nth_user_message);
+        let history_store: HistoryStore = Rc::new(RefCell::new(preserved_history));
         let init = crate::chatwidget::ChatWidgetInit {
             config: cfg,
             frame_requester: tui.frame_requester(),
@@ -347,21 +361,16 @@ impl App {
             enhanced_keys_supported: self.enhanced_keys_supported,
             auth_manager: self.auth_manager.clone(),
             feedback: self.feedback.clone(),
+            history_store: history_store.clone(),
         };
         self.chat_widget =
             crate::chatwidget::ChatWidget::new_from_existing(init, conv, session_configured);
-        // Trim transcript up to the selected user message and re-render it.
-        self.trim_transcript_for_backtrack(nth_user_message);
+        self.history_store = history_store;
         self.render_transcript_once(tui);
         if !prefill.is_empty() {
             self.chat_widget.set_composer_text(prefill.to_string());
         }
         tui.frame_requester().schedule_frame();
-    }
-
-    /// Trim transcript_cells to preserve only content up to the selected user message.
-    fn trim_transcript_for_backtrack(&mut self, nth_user_message: usize) {
-        trim_transcript_cells_to_nth_user(&mut self.transcript_cells, nth_user_message);
     }
 }
 

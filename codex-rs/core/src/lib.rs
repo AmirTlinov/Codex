@@ -7,6 +7,8 @@
 
 mod apply_patch;
 pub mod auth;
+mod background_shell;
+pub use background_shell::BACKGROUND_SHELL_AGENT_GUIDANCE;
 pub mod bash;
 mod chat_completions;
 mod client;
@@ -15,6 +17,7 @@ pub mod codex;
 mod codex_conversation;
 pub use codex_conversation::CodexConversation;
 mod codex_delegate;
+pub mod command_label;
 mod command_safety;
 pub mod config;
 pub mod config_loader;
@@ -26,6 +29,7 @@ pub mod exec;
 pub mod exec_env;
 pub mod features;
 mod flags;
+mod foreground_shell;
 pub mod git_info;
 pub mod landlock;
 pub mod mcp;

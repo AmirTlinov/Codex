@@ -1,0 +1,20 @@
+{
+  "status": "failed",
+  "mode": "validate",
+  "duration_ms": 0,
+  "options": {
+    "encoding": "utf-8",
+    "newline": "preserve",
+    "strip_trailing_whitespace": false,
+    "ensure_final_newline": null,
+    "preserve_mode": true,
+    "preserve_times": true,
+    "new_file_mode": null
+  },
+  "operations": [],
+  "errors": [
+    {
+      "message": "Cannot update file 'tui/src/chatwidget.rs': file not found"
+    }
+  ]
+}

@@ -116,6 +116,11 @@ impl ToolRouter {
                             timeout_ms: exec.timeout_ms,
                             with_escalated_permissions: None,
                             justification: None,
+                            run_in_background: None,
+                            description: None,
+                            manage_process: None,
+                            tail_lines: None,
+                            bookmark: None,
                         };
                         Ok(Some(ToolCall {
                             tool_name: "local_shell".to_string(),

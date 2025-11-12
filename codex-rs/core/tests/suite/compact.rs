@@ -13,6 +13,9 @@ use codex_core::protocol::WarningEvent;
 use codex_protocol::user_input::UserInput;
 use core_test_support::load_default_config_for_test;
 use core_test_support::skip_if_no_network;
+use core_test_support::try_pop_background_shell_guidance_message;
+use core_test_support::try_pop_developer_instructions_message;
+use core_test_support::try_pop_environment_context_message;
 use core_test_support::wait_for_event;
 use std::collections::VecDeque;
 use tempfile::TempDir;
@@ -1144,10 +1147,18 @@ async fn manual_compact_twice_preserves_latest_user_messages() {
         .into_iter()
         .collect::<VecDeque<_>>();
 
-    // System prompt
-    final_output.pop_front();
-    // Developer instructions
-    final_output.pop_front();
+    loop {
+        if try_pop_background_shell_guidance_message(&mut final_output) {
+            continue;
+        }
+        if try_pop_developer_instructions_message(&mut final_output) {
+            continue;
+        }
+        if try_pop_environment_context_message(&mut final_output) {
+            continue;
+        }
+        break;
+    }
 
     let _ = final_output
         .iter_mut()

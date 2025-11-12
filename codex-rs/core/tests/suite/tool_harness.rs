@@ -95,7 +95,7 @@ async fn shell_tool_executes_command_and_streams_output() -> anyhow::Result<()> 
     let exec_output: Value = serde_json::from_str(output_text)?;
     assert_eq!(exec_output["metadata"]["exit_code"], 0);
     let stdout = exec_output["output"].as_str().expect("stdout field");
-    assert_regex_match(r"(?s)^tool harness\n?$", stdout);
+    assert_regex_match(r"(?s)^tool harness\r?\n?$", stdout);
 
     Ok(())
 }

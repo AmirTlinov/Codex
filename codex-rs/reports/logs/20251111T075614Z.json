@@ -1,0 +1,51 @@
+{
+  "status": "failed",
+  "mode": "validate",
+  "duration_ms": 0,
+  "options": {
+    "encoding": "utf-8",
+    "newline": "preserve",
+    "strip_trailing_whitespace": false,
+    "ensure_final_newline": null,
+    "preserve_mode": true,
+    "preserve_times": true,
+    "new_file_mode": null
+  },
+  "operations": [],
+  "errors": [
+    {
+      "message": "Unable to locate hunk for 'tui/src/chatwidget.rs' (header: @@)",
+      "details": {
+        "path": "tui/src/chatwidget.rs",
+        "hunk_header": "@@",
+        "expected_context": [
+          "        if let Some(event) = parse_background_event(&message) {",
+          "            let (toast_message, label, preview) = {",
+          "                let mut store = self.background_store.borrow_mut();",
+          "                store.apply_event(event.clone());",
+          "                let label = store.label_for(&event.shell_id);",
+          "                let preview = store.command_preview(&event.shell_id);",
+          "                let toast = label",
+          "                    .as_ref()",
+          "                    .map(|label| format_background_toast(label, &event.kind));",
+          "                (toast, label, preview)",
+          "            };",
+          "",
+          "            if let Some(msg) = toast_message {",
+          "                self.bottom_pane.push_background_toast(msg);",
+          "                self.bottom_pane",
+          "                    .request_redraw_in(std::time::Duration::from_secs(3));",
+          "            }",
+          "",
+          "            if let Some(label) = label",
+          "                && let Some((headline, details, status)) =",
+          "                    shell_event_display_for_kind(&label, preview.as_deref(), &event.kind)",
+          "            {",
+          "                if let Some(kill_label) = kill_headline_target(&headline) {",
+          "                    self.mark_command_as_killed_by_label(&kill_label);"
+        ],
+        "kind": "hunk_not_found"
+      }
+    }
+  ]
+}

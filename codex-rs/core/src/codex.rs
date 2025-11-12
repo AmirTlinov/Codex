@@ -5,8 +5,13 @@ use std::sync::Arc;
 use std::sync::atomic::AtomicU64;
 
 use crate::AuthManager;
+use crate::background_shell::BACKGROUND_SHELL_AGENT_GUIDANCE;
+use crate::background_shell::BackgroundShellManager;
+use crate::background_shell::ShellActionInitiator;
 use crate::client_common::REVIEW_PROMPT;
 use crate::features::Feature;
+use crate::foreground_shell::ForegroundPromotionResult;
+use crate::foreground_shell::ForegroundShellRegistry;
 use crate::function_tool::FunctionCallError;
 use crate::mcp::auth::McpAuthStatusEntry;
 use crate::mcp_connection_manager::DEFAULT_STARTUP_TIMEOUT;
@@ -76,6 +81,10 @@ use crate::protocol::AgentReasoningSectionBreakEvent;
 use crate::protocol::ApplyPatchApprovalRequestEvent;
 use crate::protocol::AskForApproval;
 use crate::protocol::BackgroundEventEvent;
+use crate::protocol::BackgroundEventKind;
+use crate::protocol::BackgroundEventMetadata;
+use crate::protocol::BackgroundShellPollEvent;
+use crate::protocol::BackgroundStartMode;
 use crate::protocol::DeprecationNoticeEvent;
 use crate::protocol::ErrorEvent;
 use crate::protocol::Event;
@@ -89,6 +98,7 @@ use crate::protocol::ReviewDecision;
 use crate::protocol::SandboxCommandAssessment;
 use crate::protocol::SandboxPolicy;
 use crate::protocol::SessionConfiguredEvent;
+use crate::protocol::ShellPromotedEvent;
 use crate::protocol::StreamErrorEvent;
 use crate::protocol::Submission;
 use crate::protocol::TokenCountEvent;
@@ -167,12 +177,15 @@ impl Codex {
 
         let config = Arc::new(config);
 
+        let developer_instructions =
+            merge_developer_instructions(config.developer_instructions.clone());
+
         let session_configuration = SessionConfiguration {
             provider: config.model_provider.clone(),
             model: config.model.clone(),
             model_reasoning_effort: config.model_reasoning_effort,
             model_reasoning_summary: config.model_reasoning_summary,
-            developer_instructions: config.developer_instructions.clone(),
+            developer_instructions,
             user_instructions,
             base_instructions: config.base_instructions.clone(),
             compact_prompt: config.compact_prompt.clone(),
@@ -599,6 +612,8 @@ impl Session {
             auth_manager: Arc::clone(&auth_manager),
             otel_event_manager,
             tool_approvals: Mutex::new(ApprovalStore::default()),
+            background_shell: BackgroundShellManager::new(),
+            foreground_shell: ForegroundShellRegistry::new(),
         };
 
         let sess = Arc::new(Session {
@@ -1111,10 +1126,263 @@ impl Session {
         &self,
         turn_context: &TurnContext,
         message: impl Into<String>,
+        metadata: Option<BackgroundEventMetadata>,
     ) {
+        self.notify_background_event_with_note(turn_context, message, None, metadata)
+            .await;
+    }
+
+    pub(crate) async fn notify_background_event_with_note(
+        &self,
+        turn_context: &TurnContext,
+        message: impl Into<String>,
+        agent_note: Option<String>,
+        metadata: Option<BackgroundEventMetadata>,
+    ) {
+        let message = message.into();
         let event = EventMsg::BackgroundEvent(BackgroundEventEvent {
-            message: message.into(),
+            message: message.clone(),
+            metadata,
         });
+        self.send_event(turn_context, event).await;
+        let note_text = agent_note.unwrap_or_else(|| format!("Background shell: {message}"));
+        self.record_background_note_text(&note_text).await;
+    }
+
+    async fn record_background_note_text(&self, text: &str) {
+        let items = vec![ResponseItem::Message {
+            id: None,
+            role: "system".to_string(),
+            content: vec![ContentItem::OutputText {
+                text: text.to_string(),
+            }],
+        }];
+        self.record_into_history(items.as_slice()).await;
+        self.persist_rollout_response_items(items.as_slice()).await;
+    }
+
+    pub(crate) async fn send_shell_promoted(
+        &self,
+        sub_id: &str,
+        call_id: String,
+        shell_id: String,
+        initial_output: String,
+        description: Option<String>,
+        bookmark: Option<String>,
+    ) {
+        let event = Event {
+            id: sub_id.to_string(),
+            msg: EventMsg::ShellPromoted(ShellPromotedEvent {
+                call_id,
+                shell_id,
+                initial_output,
+                description,
+                bookmark,
+            }),
+        };
+        self.send_event_raw(event).await;
+    }
+
+    pub(crate) async fn promote_shell(
+        self: &Arc<Self>,
+        turn_context: Arc<TurnContext>,
+        sub_id: String,
+        call_id: String,
+        description: Option<String>,
+        bookmark: Option<String>,
+    ) {
+        if let Some(state) = self.services.foreground_shell.get(&call_id).await {
+            state.request_promotion();
+
+            let Some(session_id) = state.take_session_id().await else {
+                self.notify_background_event(
+                    turn_context.as_ref(),
+                    format!("Foreground shell {call_id} is no longer running; unable to promote."),
+                    None,
+                )
+                .await;
+                return;
+            };
+
+            let captured_output = state.take_output().await;
+            let response = self
+                .services
+                .background_shell
+                .adopt_existing(
+                    Arc::clone(self),
+                    Arc::clone(&turn_context),
+                    session_id,
+                    captured_output,
+                    description.clone(),
+                    bookmark.clone(),
+                    call_id.clone(),
+                    BackgroundStartMode::ManualPromotion,
+                )
+                .await;
+
+            let result = ForegroundPromotionResult {
+                shell_id: response.shell_id.clone(),
+                initial_output: response.initial_output.clone(),
+                description: response.description.clone(),
+                bookmark: response.bookmark.clone(),
+            };
+            state.deliver_promotion_result(result).await;
+
+            self.send_shell_promoted(
+                &sub_id,
+                call_id.clone(),
+                response.shell_id.clone(),
+                response.initial_output.clone(),
+                response.description.clone(),
+                response.bookmark.clone(),
+            )
+            .await;
+
+            let descriptor = match (
+                response.description.as_deref(),
+                response.bookmark.as_deref(),
+            ) {
+                (Some(desc), Some(alias)) => format!("desc: {desc}, bookmark: {alias}"),
+                (Some(desc), None) => format!("desc: {desc}"),
+                (None, Some(alias)) => format!("bookmark: {alias}"),
+                (None, None) => String::new(),
+            };
+
+            let shell_label = self
+                .services
+                .background_shell
+                .label_for_shell(&response.shell_id)
+                .await
+                .or_else(|| response.description.clone())
+                .unwrap_or_else(|| response.shell_id.clone());
+            let promotion_message = if descriptor.is_empty() {
+                format!(
+                    "Foreground shell manually promoted to background shell {} ({shell_label}; requested by user)",
+                    response.shell_id
+                )
+            } else {
+                format!(
+                    "Foreground shell manually promoted to background shell {} ({shell_label}; {descriptor}; requested by user)",
+                    response.shell_id
+                )
+            };
+            let agent_note = if descriptor.is_empty() {
+                format!(
+                    "User moved command {shell_label} into background shell {}.",
+                    response.shell_id
+                )
+            } else {
+                format!(
+                    "User moved command {shell_label} into background shell {} ({descriptor}).",
+                    response.shell_id
+                )
+            };
+
+            let metadata = BackgroundEventMetadata {
+                shell_id: Some(response.shell_id.clone()),
+                call_id: Some(call_id.clone()),
+                kind: Some(BackgroundEventKind::Started {
+                    description: Some(shell_label.clone()),
+                    mode: BackgroundStartMode::ManualPromotion,
+                }),
+            };
+            self.notify_background_event_with_note(
+                turn_context.as_ref(),
+                promotion_message,
+                Some(agent_note),
+                Some(metadata),
+            )
+            .await;
+        } else {
+            self.notify_background_event(
+                turn_context.as_ref(),
+                format!("No foreground shell with id {call_id} to promote."),
+                None,
+            )
+            .await;
+        }
+    }
+
+    pub(crate) async fn poll_background_shell(
+        self: &Arc<Self>,
+        turn_context: Arc<TurnContext>,
+        shell_id: String,
+    ) {
+        let manager = &self.services.background_shell;
+        match manager
+            .poll(&shell_id, None, Arc::clone(self), turn_context.clone())
+            .await
+        {
+            Ok(response) => {
+                let event = EventMsg::BackgroundShellPoll(BackgroundShellPollEvent {
+                    shell_id: response.shell_id,
+                    lines: response.lines,
+                    status: response.status,
+                    exit_code: response.exit_code,
+                    truncated: response.truncated,
+                    bookmark: response.bookmark,
+                });
+                self.send_event(turn_context.as_ref(), event).await;
+            }
+            Err(err) => {
+                self.notify_background_event(
+                    turn_context.as_ref(),
+                    format!("Failed to poll background shell {shell_id}: {err}"),
+                    None,
+                )
+                .await;
+            }
+        }
+    }
+
+    pub(crate) async fn kill_background_shell(
+        self: &Arc<Self>,
+        turn_context: Arc<TurnContext>,
+        shell_id: String,
+    ) {
+        let manager = &self.services.background_shell;
+        if let Err(err) = manager
+            .kill(
+                &shell_id,
+                Arc::clone(self),
+                turn_context.clone(),
+                ShellActionInitiator::User,
+            )
+            .await
+        {
+            self.notify_background_event(
+                turn_context.as_ref(),
+                format!("Failed to kill background shell {shell_id}: {err}"),
+                None,
+            )
+            .await;
+        }
+    }
+
+    pub(crate) async fn publish_background_shell_summary(
+        &self,
+        turn_context: &TurnContext,
+        limit: Option<usize>,
+    ) {
+        let completions = self
+            .services
+            .background_shell
+            .refresh_running_entries(&self.services.unified_exec_manager)
+            .await;
+        for notice in completions {
+            self.notify_background_event_with_note(
+                turn_context,
+                notice.event_message(),
+                Some(notice.agent_note()),
+                Some(notice.metadata()),
+            )
+            .await;
+        }
+        let entries = self.services.background_shell.summary(limit).await;
+        let event =
+            EventMsg::BackgroundShellSummary(crate::protocol::BackgroundShellSummaryEvent {
+                entries,
+            });
         self.send_event(turn_context, event).await;
     }
 
@@ -1253,6 +1521,22 @@ impl Session {
     }
 }
 
+fn merge_developer_instructions(existing: Option<String>) -> Option<String> {
+    let guidance = BACKGROUND_SHELL_AGENT_GUIDANCE.trim();
+    match existing {
+        Some(current) => {
+            if current.contains(guidance) {
+                Some(current)
+            } else if current.is_empty() {
+                Some(guidance.to_string())
+            } else {
+                Some(format!("{current}\n\n{guidance}"))
+            }
+        }
+        None => Some(guidance.to_string()),
+    }
+}
+
 async fn submission_loop(sess: Arc<Session>, config: Arc<Config>, rx_sub: Receiver<Submission>) {
     let mut previous_context: Option<Arc<TurnContext>> = None;
     // To break out of this loop, send Op::Shutdown.
@@ -1321,6 +1605,23 @@ async fn submission_loop(sess: Arc<Session>, config: Arc<Config>, rx_sub: Receiv
                     &mut previous_context,
                 )
                 .await;
+            }
+            Op::PromoteShell {
+                call_id,
+                description,
+                bookmark,
+            } => {
+                handlers::promote_shell(&sess, sub.id.clone(), call_id, description, bookmark)
+                    .await;
+            }
+            Op::PollBackgroundShell { shell_id } => {
+                handlers::poll_background_shell(&sess, sub.id.clone(), shell_id).await;
+            }
+            Op::BackgroundShellSummary { limit } => {
+                handlers::background_shell_summary(&sess, sub.id.clone(), limit).await;
+            }
+            Op::KillBackgroundShell { shell_id } => {
+                handlers::kill_background_shell(&sess, sub.id.clone(), shell_id).await;
             }
             Op::Shutdown => {
                 if handlers::shutdown(&sess, sub.id.clone()).await {
@@ -1575,6 +1876,46 @@ mod handlers {
             sess.spawn_task(Arc::clone(&turn_context), items, CompactTask)
                 .await;
         }
+    }
+
+    pub async fn promote_shell(
+        sess: &Arc<Session>,
+        sub_id: String,
+        call_id: String,
+        description: Option<String>,
+        bookmark: Option<String>,
+    ) {
+        let turn_context = sess
+            .new_turn_with_sub_id(sub_id.clone(), SessionSettingsUpdate::default())
+            .await;
+        sess.promote_shell(turn_context, sub_id, call_id, description, bookmark)
+            .await;
+    }
+
+    pub async fn poll_background_shell(sess: &Arc<Session>, sub_id: String, shell_id: String) {
+        let turn_context = sess
+            .new_turn_with_sub_id(sub_id.clone(), SessionSettingsUpdate::default())
+            .await;
+        sess.poll_background_shell(turn_context, shell_id).await;
+    }
+
+    pub async fn background_shell_summary(
+        sess: &Arc<Session>,
+        sub_id: String,
+        limit: Option<usize>,
+    ) {
+        let turn_context = sess
+            .new_turn_with_sub_id(sub_id.clone(), SessionSettingsUpdate::default())
+            .await;
+        sess.publish_background_shell_summary(&turn_context, limit)
+            .await;
+    }
+
+    pub async fn kill_background_shell(sess: &Arc<Session>, sub_id: String, shell_id: String) {
+        let turn_context = sess
+            .new_turn_with_sub_id(sub_id.clone(), SessionSettingsUpdate::default())
+            .await;
+        sess.kill_background_shell(turn_context, shell_id).await;
     }
 
     pub async fn shutdown(sess: &Arc<Session>, sub_id: String) -> bool {
@@ -2548,6 +2889,8 @@ mod tests {
             auth_manager: Arc::clone(&auth_manager),
             otel_event_manager: otel_event_manager.clone(),
             tool_approvals: Mutex::new(ApprovalStore::default()),
+            background_shell: BackgroundShellManager::new(),
+            foreground_shell: ForegroundShellRegistry::new(),
         };
 
         let turn_context = Session::make_turn_context(
@@ -2624,6 +2967,8 @@ mod tests {
             auth_manager: Arc::clone(&auth_manager),
             otel_event_manager: otel_event_manager.clone(),
             tool_approvals: Mutex::new(ApprovalStore::default()),
+            background_shell: BackgroundShellManager::new(),
+            foreground_shell: ForegroundShellRegistry::new(),
         };
 
         let turn_context = Arc::new(Session::make_turn_context(

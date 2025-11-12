@@ -436,6 +436,21 @@ impl TranscriptOverlay {
         }
     }
 
+    pub(crate) fn replace_cell(&mut self, index: usize, cell: Arc<dyn HistoryCell>) {
+        if index >= self.cells.len() {
+            return;
+        }
+        let follow_bottom = self.view.is_scrolled_to_bottom();
+        self.cells[index] = cell;
+        self.view.renderables = Self::render_cells(&self.cells, self.highlight_cell);
+        if follow_bottom {
+            self.view.scroll_offset = usize::MAX;
+        } else if let Some(idx) = self.highlight_cell
+            && idx == index {
+                self.view.scroll_chunk_into_view(idx);
+            }
+    }
+
     pub(crate) fn set_highlight_cell(&mut self, cell: Option<usize>) {
         self.highlight_cell = cell;
         self.view.renderables = Self::render_cells(&self.cells, self.highlight_cell);

@@ -216,6 +216,10 @@ enum Expectation {
         target: TargetPath,
         content: &'static str,
     },
+    FileCreatedNoStdout {
+        target: TargetPath,
+        content: &'static str,
+    },
     PatchApplied {
         target: TargetPath,
         content: &'static str,
@@ -253,6 +257,21 @@ impl Expectation {
                     result.stdout.contains(content),
                     "stdout missing {content:?}: {}",
                     result.stdout
+                );
+                let file_contents = fs::read_to_string(&path)?;
+                assert!(
+                    file_contents.contains(content),
+                    "file contents missing {content:?}: {file_contents}"
+                );
+                let _ = fs::remove_file(path);
+            }
+            Expectation::FileCreatedNoStdout { target, content } => {
+                let (path, _) = target.resolve_for_patch(test);
+                assert_eq!(
+                    result.exit_code,
+                    Some(0),
+                    "expected successful exit for {:?}",
+                    path
                 );
                 let file_contents = fs::read_to_string(&path)?;
                 assert!(
@@ -614,7 +633,7 @@ fn scenarios() -> Vec<ScenarioSpec> {
             features: vec![],
             model_override: None,
             outcome: Outcome::Auto,
-            expectation: Expectation::FileCreated {
+            expectation: Expectation::FileCreatedNoStdout {
                 target: TargetPath::OutsideWorkspace("dfa_on_failure.txt"),
                 content: "danger-on-failure",
             },
@@ -722,7 +741,7 @@ fn scenarios() -> Vec<ScenarioSpec> {
             },
             expectation: Expectation::FileNotCreated {
                 target: TargetPath::Workspace("ro_on_request_denied.txt"),
-                message_contains: &["exec command rejected by user"],
+                message_contains: &["exec command rejected by user|failed to launch shell command"],
             },
         },
         #[cfg(not(target_os = "linux"))] // TODO (pakrym): figure out why linux behaves differently

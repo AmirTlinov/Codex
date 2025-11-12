@@ -56,7 +56,9 @@ impl ApplyPatchRuntime {
 
     fn build_command_spec(req: &ApplyPatchRequest) -> Result<CommandSpec, ToolError> {
         use std::env;
-        let exe = if let Some(path) = &req.codex_exe {
+        let exe = if let Ok(path) = env::var("CODEX_APPLY_PATCH_EXE") {
+            PathBuf::from(path)
+        } else if let Some(path) = &req.codex_exe {
             path.clone()
         } else {
             env::current_exe()

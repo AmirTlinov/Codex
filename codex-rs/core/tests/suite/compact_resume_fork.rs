@@ -162,14 +162,10 @@ async fn compact_resume_and_fork_preserve_model_history_view() {
         .as_str()
         .unwrap_or_default()
         .to_string();
-    let user_instructions = requests[0]["input"][0]["content"][0]["text"]
-        .as_str()
-        .unwrap_or_default()
-        .to_string();
-    let environment_context = requests[0]["input"][1]["content"][0]["text"]
-        .as_str()
-        .unwrap_or_default()
-        .to_string();
+    let base_inputs = requests[0]["input"].as_array().expect("input array");
+    let developer_msg = base_inputs[0].clone();
+    let user_instructions_msg = base_inputs[1].clone();
+    let environment_msg = base_inputs[2].clone();
     let tool_calls = json!(requests[0]["tools"].as_array());
     let prompt_cache_key = requests[0]["prompt_cache_key"]
         .as_str()
@@ -188,26 +184,9 @@ async fn compact_resume_and_fork_preserve_model_history_view() {
       "model": expected_model,
       "instructions": prompt,
       "input": [
-        {
-          "type": "message",
-          "role": "user",
-          "content": [
-            {
-              "type": "input_text",
-              "text": user_instructions
-            }
-          ]
-        },
-        {
-          "type": "message",
-          "role": "user",
-          "content": [
-            {
-              "type": "input_text",
-              "text": environment_context
-            }
-          ]
-        },
+        developer_msg,
+        user_instructions_msg,
+        environment_msg,
         {
           "type": "message",
           "role": "user",
@@ -237,26 +216,9 @@ async fn compact_resume_and_fork_preserve_model_history_view() {
       "model": expected_model,
       "instructions": prompt,
       "input": [
-        {
-          "type": "message",
-          "role": "user",
-          "content": [
-            {
-              "type": "input_text",
-              "text": user_instructions
-            }
-          ]
-        },
-        {
-          "type": "message",
-          "role": "user",
-          "content": [
-            {
-              "type": "input_text",
-              "text": environment_context
-            }
-          ]
-        },
+        developer_msg,
+        user_instructions_msg,
+        environment_msg,
         {
           "type": "message",
           "role": "user",
@@ -306,26 +268,9 @@ async fn compact_resume_and_fork_preserve_model_history_view() {
       "model": expected_model,
       "instructions": prompt,
       "input": [
-        {
-          "type": "message",
-          "role": "user",
-          "content": [
-            {
-              "type": "input_text",
-              "text": user_instructions
-            }
-          ]
-        },
-        {
-          "type": "message",
-          "role": "user",
-          "content": [
-            {
-              "type": "input_text",
-              "text": environment_context
-            }
-          ]
-        },
+        developer_msg,
+        user_instructions_msg,
+        environment_msg,
         {
           "type": "message",
           "role": "user",
@@ -366,26 +311,9 @@ async fn compact_resume_and_fork_preserve_model_history_view() {
       "model": expected_model,
       "instructions": prompt,
       "input": [
-        {
-          "type": "message",
-          "role": "user",
-          "content": [
-            {
-              "type": "input_text",
-              "text": user_instructions
-            }
-          ]
-        },
-        {
-          "type": "message",
-          "role": "user",
-          "content": [
-            {
-              "type": "input_text",
-              "text": environment_context
-            }
-          ]
-        },
+        developer_msg,
+        user_instructions_msg,
+        environment_msg,
         {
           "type": "message",
           "role": "user",
@@ -446,26 +374,9 @@ async fn compact_resume_and_fork_preserve_model_history_view() {
       "model": expected_model,
       "instructions": prompt,
       "input": [
-        {
-          "type": "message",
-          "role": "user",
-          "content": [
-            {
-              "type": "input_text",
-              "text": user_instructions
-            }
-          ]
-        },
-        {
-          "type": "message",
-          "role": "user",
-          "content": [
-            {
-              "type": "input_text",
-              "text": environment_context
-            }
-          ]
-        },
+        developer_msg,
+        user_instructions_msg,
+        environment_msg,
         {
           "type": "message",
           "role": "user",
@@ -607,14 +518,10 @@ async fn compact_resume_after_second_compaction_preserves_history() {
         .as_str()
         .unwrap_or_default()
         .to_string();
-    let user_instructions = requests[0]["input"][0]["content"][0]["text"]
-        .as_str()
-        .unwrap_or_default()
-        .to_string();
-    let environment_instructions = requests[0]["input"][1]["content"][0]["text"]
-        .as_str()
-        .unwrap_or_default()
-        .to_string();
+    let base_inputs = requests[0]["input"].as_array().expect("input array");
+    let developer_msg = base_inputs[0].clone();
+    let user_instructions_msg = base_inputs[1].clone();
+    let environment_msg = base_inputs[2].clone();
 
     // Build expected final request input: initial context + forked user message +
     // compacted summary + post-compact user message + resumed user message.
@@ -625,26 +532,9 @@ async fn compact_resume_after_second_compaction_preserves_history() {
       {
         "instructions": prompt,
         "input": [
-          {
-            "type": "message",
-            "role": "user",
-            "content": [
-              {
-                "type": "input_text",
-                "text": user_instructions
-              }
-            ]
-          },
-          {
-            "type": "message",
-            "role": "user",
-            "content": [
-              {
-                "type": "input_text",
-                "text": environment_instructions
-              }
-            ]
-          },
+          developer_msg,
+          user_instructions_msg,
+          environment_msg,
           {
             "type": "message",
             "role": "user",

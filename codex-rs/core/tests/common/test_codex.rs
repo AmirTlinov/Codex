@@ -97,8 +97,14 @@ impl TestCodexBuilder {
         let mut config = load_default_config_for_test(home);
         config.cwd = cwd.path().to_path_buf();
         config.model_provider = model_provider;
-        if let Ok(cmd) = assert_cmd::Command::cargo_bin("codex") {
+        if let Ok(cmd) = assert_cmd::Command::cargo_bin("codex-linux-sandbox") {
             config.codex_linux_sandbox_exe = Some(PathBuf::from(cmd.get_program().to_os_string()));
+        }
+        if let Ok(cmd) = assert_cmd::Command::cargo_bin("codex") {
+            let path = cmd.get_program().to_string_lossy().to_string();
+            unsafe {
+                std::env::set_var("CODEX_APPLY_PATCH_EXE", path);
+            }
         }
 
         let mut mutators = vec![];

@@ -26,20 +26,31 @@ Long-running shell commands no longer have to pin the UI. Codex now exposes a
 first-class background shell manager that you can drive from both the agent and
 the TUI:
 
-- **`run_in_background` flag** – Every shell tool call (including `!` user
-  commands) accepts `run_in_background: true|false` plus optional
-  `bookmark=` / `description=` tokens. Example user command:
+- **`run_in_background` flag + smart detection** – Every shell tool call
+  (including `!` user commands) accepts `run_in_background: true|false` plus
+  optional `bookmark=` / `description=` tokens. Example user command:
   ``! npm start run_in_background: true bookmark=dev description="watch mode"``
-  Codex auto-promotes any foreground command that runs for ~10 seconds,
-  so the flag is mainly for proactively long jobs.
-- **New RPCs & helpers** – `shell_summary` gives the model a compact list of all
-  background shells, `shell_log` returns recent stdout/stderr for a single
-  shell (by id or bookmark), and `shell_kill` terminates a runaway job. Under
+  Codex auto-promotes any foreground command that runs for ~10 seconds, and it
+  also treats `nohup …`, `setsid …`, or trailing `&` as implicit background
+  hints (the wrappers are stripped so the process remains visible and killable).
+  Use the flag proactively for long jobs; Codex will handle fixation otherwise.
+- **New RPCs & helpers** – `shell_summary` (running shells by default; add
+  `--completed` / `--failed`—aliases for `include_completed:true` /
+  `include_failed:true`—only when you really need history) gives the model a
+  compact list of all background shells, `shell_log` returns recent stdout/stderr
+  for a single shell (by id or bookmark, with optional `cursor` paging), and `shell_kill`
+  terminates a runaway job. Under
   the hood, these pair with `Op::BackgroundShellSummary`,
   `Op::PollBackgroundShell`, and `Op::KillBackgroundShell`, so the agent can
   list, tail, and stop shells without
   dumping logs into the chat. Summaries include the latest 10 lines, bookmark,
-  and a compact command preview.
+  compact command preview **и точный `shell_id` с готовыми командами вроде
+  `shell_kill --shell shell-3` или `shell_log --shell shell-3 --max_lines 80`**.
+  `shell_log --mode summary` выдаёт лёгкий статус (команда, bookmark,
+  последние строки), `shell_log --mode diagnostic` — статус + exit info +
+  краткий stderr-tail, а `shell_log --mode tail` возвращает кусок хвоста (макс.
+  120 строк). Для полного лога идите порциями с `cursor`, а не просите всё
+  сразу — так Codex остаётся отзывчивым.
 - **Ring buffer + retention** – Each shell keeps ~10 MB of stdout/stderr for up
   to one hour after completion. Older lines fall off the buffer (FIFO) and the
   CLI surfaces a `truncated` flag when it happens.

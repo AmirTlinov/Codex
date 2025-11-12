@@ -3,6 +3,7 @@
 use std::collections::VecDeque;
 use std::sync::Arc;
 
+use anyhow::Result as AnyhowResult;
 use tokio::sync::Mutex;
 use tokio::sync::Notify;
 use tokio::sync::mpsc;
@@ -115,19 +116,23 @@ impl UnifiedExecSession {
         self.session.writer_sender()
     }
 
-    pub(super) fn output_handles(&self) -> OutputHandles {
+    pub(crate) fn output_handles(&self) -> OutputHandles {
         (
             Arc::clone(&self.output_buffer),
             Arc::clone(&self.output_notify),
         )
     }
 
-    pub(super) fn has_exited(&self) -> bool {
+    pub(crate) fn has_exited(&self) -> bool {
         self.session.has_exited()
     }
 
-    pub(super) fn exit_code(&self) -> Option<i32> {
+    pub(crate) fn exit_code(&self) -> Option<i32> {
         self.session.exit_code()
+    }
+
+    pub(crate) fn kill(&self) -> AnyhowResult<()> {
+        self.session.kill()
     }
 
     async fn snapshot_output(&self) -> Vec<Vec<u8>> {

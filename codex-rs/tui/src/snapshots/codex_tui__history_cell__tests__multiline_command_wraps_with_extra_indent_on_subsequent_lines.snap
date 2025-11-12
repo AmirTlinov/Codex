@@ -1,8 +1,9 @@
 ---
 source: tui/src/history_cell.rs
+assertion_line: 2045
 expression: rendered
 ---
-• Ran set -o pipefail
+● Shell set -o pipefail
   │ cargo test
   │ --all-features --quiet
   └ (no output)

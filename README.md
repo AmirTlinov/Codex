@@ -82,9 +82,9 @@ Codex CLI supports a rich set of configuration options, with preferences stored 
 - The manager keeps a 10 MB rolling buffer per shell for an hour and caps the
   number of concurrent shells at 10 so the agent remains responsive.
 - Use the helper commands `shell_summary` (list every shell plus tail lines),
-  `shell_log` (fetch recent stdout/stderr for a specific shell or bookmark),
-  and `shell_kill` (terminate a background shell by id or bookmark) whenever
-  the agent needs structured insight into background work.
+  `shell_log` (fetch recent stdout/stderr for a specific shell or bookmark, with
+  optional cursor-based paging), and `shell_kill` (terminate a background shell)
+  whenever the agent needs structured insight into background work.
 
 See the [background shell workflow guide](./docs/advanced.md#background-shell)
 for the full RPC list (`shell_summary`, poll/kill) and UX details.

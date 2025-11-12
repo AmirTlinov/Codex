@@ -1,0 +1,32 @@
+{
+  "status": "failed",
+  "mode": "validate",
+  "duration_ms": 0,
+  "options": {
+    "encoding": "utf-8",
+    "newline": "preserve",
+    "strip_trailing_whitespace": false,
+    "ensure_final_newline": null,
+    "preserve_mode": true,
+    "preserve_times": true,
+    "new_file_mode": null
+  },
+  "operations": [],
+  "errors": [
+    {
+      "message": "Unable to locate hunk for 'tui/src/chatwidget/tests.rs' (header: @@)",
+      "details": {
+        "path": "tui/src/chatwidget/tests.rs",
+        "hunk_header": "@@",
+        "expected_context": [
+          "    assert!(",
+          "        blob.contains(\"Shell echo done\"),",
+          "        \"expected command text in header: {blob:?}\"",
+          "    );",
+          "    assert!(blob.contains(\"\u2514 done\"), \"expected output line present: {blob:?}\");"
+        ],
+        "kind": "hunk_not_found"
+      }
+    }
+  ]
+}

@@ -1,5 +1,6 @@
 ---
 source: tui/src/chatwidget/tests.rs
+assertion_line: 1799
 expression: "lines[start_idx..].join(\"\\n\")"
 ---
 • I need to check the codex-rs repository to explain why the project's binaries
@@ -26,7 +27,7 @@ expression: "lines[start_idx..].join(\"\\n\")"
   through crates for heavy dependencies in Cargo.toml, including cli, core,
   exec, linux-sandbox, tui, login, ollama, and mcp.
 
-• Ran for d in ansi-escape apply-patch arg0 cli common core exec execpolicy
+● Shell for d in ansi-escape apply-patch arg0 cli common core exec execpolicy
   │ file-search linux-sandbox login mcp-client mcp-server mcp-types ollama
   │ tui; do echo "--- $d/Cargo.toml"; sed -n '1,200p' $d/Cargo.toml; echo;
   │ … +1 lines

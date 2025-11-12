@@ -449,11 +449,6 @@ impl Tui {
         Ok(())
     }
 
-    pub fn insert_history_lines(&mut self, lines: Vec<Line<'static>>) {
-        self.pending_history_lines.extend(lines);
-        self.frame_requester().schedule_frame();
-    }
-
     pub fn draw(
         &mut self,
         height: u16,

@@ -1,0 +1,7 @@
+---
+source: tui/src/history_cell.rs
+assertion_line: 1609
+expression: rendered
+---
+● Shell Shell Kill
+  └ shell terminated

@@ -308,7 +308,8 @@ async fn shell_output_preserves_fixture_json_without_serialization() -> Result<(
         .unwrap_or_default()
         .to_string();
     assert_eq!(
-        stdout, FIXTURE_JSON,
+        stdout.replace("\r\n", "\n"),
+        FIXTURE_JSON,
         "expected shell output to match the fixture contents"
     );
 
@@ -378,7 +379,8 @@ async fn shell_output_structures_fixture_with_serialization() -> Result<()> {
         header.trim_end(),
     );
     assert_eq!(
-        body, FIXTURE_JSON,
+        body.replace("\r\n", "\n"),
+        FIXTURE_JSON,
         "expected Output section to include the fixture contents"
     );
 

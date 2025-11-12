@@ -5,9 +5,10 @@ Executes shell requests under the orchestrator: asks for approval when needed,
 builds a CommandSpec, and runs it under the current SandboxAttempt.
 */
 use crate::command_safety::is_dangerous_command::requires_initial_appoval;
-use crate::exec::ExecToolCallOutput;
+use crate::error::CodexErr;
+use crate::error::SandboxErr;
+use crate::protocol::SandboxCommandAssessment;
 use crate::protocol::SandboxPolicy;
-use crate::sandboxing::execute_env;
 use crate::tools::runtimes::build_command_spec;
 use crate::tools::sandboxing::Approvable;
 use crate::tools::sandboxing::ApprovalCtx;
@@ -20,6 +21,9 @@ use crate::tools::sandboxing::ToolCtx;
 use crate::tools::sandboxing::ToolError;
 use crate::tools::sandboxing::ToolRuntime;
 use crate::tools::sandboxing::with_cached_approval;
+use crate::unified_exec::UnifiedExecError;
+use crate::unified_exec::UnifiedExecSession;
+use crate::unified_exec::UnifiedExecSessionManager;
 use codex_protocol::protocol::AskForApproval;
 use codex_protocol::protocol::ReviewDecision;
 use futures::future::BoxFuture;
@@ -33,6 +37,7 @@ pub struct ShellRequest {
     pub env: std::collections::HashMap<String, String>,
     pub with_escalated_permissions: Option<bool>,
     pub justification: Option<String>,
+    pub risk: Option<SandboxCommandAssessment>,
 }
 
 impl ProvidesSandboxRetryData for ShellRequest {
@@ -44,9 +49,6 @@ impl ProvidesSandboxRetryData for ShellRequest {
     }
 }
 
-#[derive(Default)]
-pub struct ShellRuntime;
-
 #[derive(serde::Serialize, Clone, Debug, Eq, PartialEq, Hash)]
 pub(crate) struct ApprovalKey {
     command: Vec<String>,
@@ -54,30 +56,27 @@ pub(crate) struct ApprovalKey {
     escalated: bool,
 }
 
-impl ShellRuntime {
-    pub fn new() -> Self {
-        Self
-    }
+pub struct ShellBackgroundRuntime<'a> {
+    manager: &'a UnifiedExecSessionManager,
+}
 
-    fn stdout_stream(ctx: &ToolCtx<'_>) -> Option<crate::exec::StdoutStream> {
-        Some(crate::exec::StdoutStream {
-            sub_id: ctx.turn.sub_id.clone(),
-            call_id: ctx.call_id.clone(),
-            tx_event: ctx.session.get_tx_event(),
-        })
+impl<'a> ShellBackgroundRuntime<'a> {
+    pub fn new(manager: &'a UnifiedExecSessionManager) -> Self {
+        Self { manager }
     }
 }
 
-impl Sandboxable for ShellRuntime {
+impl Sandboxable for ShellBackgroundRuntime<'_> {
     fn sandbox_preference(&self) -> SandboxablePreference {
         SandboxablePreference::Auto
     }
+
     fn escalate_on_failure(&self) -> bool {
         true
     }
 }
 
-impl Approvable<ShellRequest> for ShellRuntime {
+impl Approvable<ShellRequest> for ShellBackgroundRuntime<'_> {
     type ApprovalKey = ApprovalKey;
 
     fn approval_key(&self, req: &ShellRequest) -> Self::ApprovalKey {
@@ -100,7 +99,7 @@ impl Approvable<ShellRequest> for ShellRuntime {
             .retry_reason
             .clone()
             .or_else(|| req.justification.clone());
-        let risk = ctx.risk.clone();
+        let risk = req.risk.clone().or_else(|| ctx.risk.clone());
         let session = ctx.session;
         let turn = ctx.turn;
         let call_id = ctx.call_id.to_string();
@@ -133,13 +132,13 @@ impl Approvable<ShellRequest> for ShellRuntime {
     }
 }
 
-impl ToolRuntime<ShellRequest, ExecToolCallOutput> for ShellRuntime {
+impl<'a> ToolRuntime<ShellRequest, UnifiedExecSession> for ShellBackgroundRuntime<'a> {
     async fn run(
         &mut self,
         req: &ShellRequest,
         attempt: &SandboxAttempt<'_>,
-        ctx: &ToolCtx<'_>,
-    ) -> Result<ExecToolCallOutput, ToolError> {
+        _ctx: &ToolCtx<'_>,
+    ) -> Result<UnifiedExecSession, ToolError> {
         let spec = build_command_spec(
             &req.command,
             &req.cwd,
@@ -148,12 +147,20 @@ impl ToolRuntime<ShellRequest, ExecToolCallOutput> for ShellRuntime {
             req.with_escalated_permissions,
             req.justification.clone(),
         )?;
-        let env = attempt
+        let exec_env = attempt
             .env_for(&spec)
             .map_err(|err| ToolError::Codex(err.into()))?;
-        let out = execute_env(&env, attempt.policy, Self::stdout_stream(ctx))
+
+        self.manager
+            .open_session_with_exec_env(&exec_env)
             .await
-            .map_err(ToolError::Codex)?;
-        Ok(out)
+            .map_err(|err| match err {
+                UnifiedExecError::SandboxDenied { output, .. } => {
+                    ToolError::Codex(CodexErr::Sandbox(SandboxErr::Denied {
+                        output: Box::new(output),
+                    }))
+                }
+                other => ToolError::Rejected(other.to_string()),
+            })
     }
 }

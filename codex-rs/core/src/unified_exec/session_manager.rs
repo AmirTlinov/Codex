@@ -5,6 +5,7 @@ use tokio::sync::mpsc;
 use tokio::time::Duration;
 use tokio::time::Instant;
 
+use crate::exec::EXEC_TIMEOUT_EXIT_CODE;
 use crate::exec::ExecToolCallOutput;
 use crate::exec::StreamOutput;
 use crate::exec_env::create_env;
@@ -20,8 +21,10 @@ use crate::tools::sandboxing::ToolCtx;
 use super::ExecCommandRequest;
 use super::MIN_YIELD_TIME_MS;
 use super::SessionEntry;
+use super::TerminateDisposition;
 use super::UnifiedExecContext;
 use super::UnifiedExecError;
+use super::UnifiedExecKillResult;
 use super::UnifiedExecResponse;
 use super::UnifiedExecSessionManager;
 use super::WriteStdinRequest;
@@ -90,6 +93,7 @@ impl UnifiedExecSessionManager {
                 response.output.clone(),
                 exit,
                 response.wall_time,
+                false,
             )
             .await;
         }
@@ -149,14 +153,67 @@ impl UnifiedExecSessionManager {
 
         if let (Some(exit), Some(entry)) = (response.exit_code, completion_entry) {
             let total_duration = Instant::now().saturating_duration_since(entry.started_at);
-            Self::emit_exec_end_from_entry(entry, response.output.clone(), exit, total_duration)
-                .await;
+            Self::emit_exec_end_from_entry(
+                entry,
+                response.output.clone(),
+                exit,
+                total_duration,
+                false,
+            )
+            .await;
         }
 
         Ok(response)
     }
 
-    async fn refresh_session_state(&self, session_id: i32) -> SessionStatus {
+    pub(crate) async fn terminate_session(
+        &self,
+        session_id: i32,
+        disposition: TerminateDisposition,
+    ) -> Result<UnifiedExecKillResult, UnifiedExecError> {
+        let entry = {
+            let mut sessions = self.sessions.lock().await;
+            sessions.remove(&session_id)
+        }
+        .ok_or(UnifiedExecError::UnknownSessionId { session_id })?;
+
+        entry
+            .session
+            .kill()
+            .map_err(|err| UnifiedExecError::create_session(err.to_string()))?;
+
+        let (output_buffer, output_notify) = entry.session.output_handles();
+        let deadline = Instant::now() + Duration::from_millis(MIN_YIELD_TIME_MS);
+        let collected =
+            Self::collect_output_until_deadline(&output_buffer, &output_notify, deadline).await;
+        let aggregated_output = String::from_utf8_lossy(&collected).to_string();
+        let timed_out = matches!(disposition, TerminateDisposition::TimedOut);
+        let exit_code = if timed_out {
+            EXEC_TIMEOUT_EXIT_CODE
+        } else {
+            entry.session.exit_code().unwrap_or(-1)
+        };
+        let call_id = entry.call_id.clone();
+        let duration = entry.started_at.elapsed();
+
+        Self::emit_exec_end_from_entry(
+            entry,
+            aggregated_output.clone(),
+            exit_code,
+            duration,
+            timed_out,
+        )
+        .await;
+
+        Ok(UnifiedExecKillResult {
+            _call_id: call_id,
+            exit_code,
+            aggregated_output,
+            timed_out,
+        })
+    }
+
+    pub(crate) async fn refresh_session_state(&self, session_id: i32) -> SessionStatus {
         let mut sessions = self.sessions.lock().await;
         let Some(entry) = sessions.get(&session_id) else {
             return SessionStatus::Unknown;
@@ -178,6 +235,11 @@ impl UnifiedExecSessionManager {
                 call_id: entry.call_id.clone(),
             }
         }
+    }
+
+    pub(crate) async fn session_command_label(&self, session_id: i32) -> Option<String> {
+        let sessions = self.sessions.lock().await;
+        sessions.get(&session_id).map(|entry| entry.command.clone())
     }
 
     async fn prepare_session_handles(
@@ -206,7 +268,7 @@ impl UnifiedExecSessionManager {
             .map_err(|_| UnifiedExecError::WriteToStdin)
     }
 
-    async fn store_session(
+    pub(crate) async fn store_session(
         &self,
         session: UnifiedExecSession,
         context: &UnifiedExecContext,
@@ -234,6 +296,7 @@ impl UnifiedExecSessionManager {
         aggregated_output: String,
         exit_code: i32,
         duration: Duration,
+        timed_out: bool,
     ) {
         let output = ExecToolCallOutput {
             exit_code,
@@ -241,7 +304,7 @@ impl UnifiedExecSessionManager {
             stderr: StreamOutput::new(String::new()),
             aggregated_output: StreamOutput::new(aggregated_output),
             duration,
-            timed_out: false,
+            timed_out,
         };
         let event_ctx = ToolEventCtx::new(
             entry.session_ref.as_ref(),
@@ -261,6 +324,7 @@ impl UnifiedExecSessionManager {
         aggregated_output: String,
         exit_code: i32,
         duration: Duration,
+        timed_out: bool,
     ) {
         let output = ExecToolCallOutput {
             exit_code,
@@ -268,7 +332,7 @@ impl UnifiedExecSessionManager {
             stderr: StreamOutput::new(String::new()),
             aggregated_output: StreamOutput::new(aggregated_output),
             duration,
-            timed_out: false,
+            timed_out,
         };
         let event_ctx = ToolEventCtx::new(
             context.session.as_ref(),
@@ -327,7 +391,7 @@ impl UnifiedExecSessionManager {
             .map_err(|e| UnifiedExecError::create_session(format!("{e:?}")))
     }
 
-    pub(super) async fn collect_output_until_deadline(
+    pub(crate) async fn collect_output_until_deadline(
         output_buffer: &OutputBuffer,
         output_notify: &Arc<Notify>,
         deadline: Instant,
@@ -372,7 +436,7 @@ impl UnifiedExecSessionManager {
     }
 }
 
-enum SessionStatus {
+pub(crate) enum SessionStatus {
     Alive {
         exit_code: Option<i32>,
         call_id: String,

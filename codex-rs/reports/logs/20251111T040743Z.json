@@ -1,0 +1,33 @@
+{
+  "status": "failed",
+  "mode": "validate",
+  "duration_ms": 0,
+  "options": {
+    "encoding": "utf-8",
+    "newline": "preserve",
+    "strip_trailing_whitespace": false,
+    "ensure_final_newline": null,
+    "preserve_mode": true,
+    "preserve_times": true,
+    "new_file_mode": null
+  },
+  "operations": [],
+  "errors": [
+    {
+      "message": "Unable to locate hunk for 'core/src/background_shell.rs' (header: @@)",
+      "details": {
+        "path": "core/src/background_shell.rs",
+        "hunk_header": "@@",
+        "expected_context": [
+          "pub const BACKGROUND_SHELL_AGENT_GUIDANCE: &str = r#\"Background shell execution:",
+          "- Use the shell tool's `run_in_background: true` flag for long-running commands (e.g., `{\\\"command\\\":[\\\"npm\\\",\\\"start\\\"],\\\"run_in_background\\\":true}`). Provide `bookmark` and `description` when possible so you can reference shells by alias.",
+          "- Commands that exceed roughly 10 seconds in the foreground are auto-promoted; use `PromoteShell` proactively when you already know a command will take a while.",
+          "- Read background output via `shell_summary` (compact list for every shell) and `shell_log`/`poll_background_shell` (tail logs for a specific shell). Stop work with `shell_kill` (maps to `Op::KillBackgroundShell`).",
+          "- At most 10 shells may run concurrently. Each shell retains ~10 MB of stdout/stderr for an hour; summarize logs instead of dumping them into the chat unless explicitly requested.",
+          "\"#;"
+        ],
+        "kind": "hunk_not_found"
+      }
+    }
+  ]
+}

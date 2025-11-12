@@ -182,7 +182,7 @@ impl EventProcessor for EventProcessorWithHumanOutput {
                     ts_msg!(self, "  {}", details.style(self.dimmed));
                 }
             }
-            EventMsg::BackgroundEvent(BackgroundEventEvent { message }) => {
+            EventMsg::BackgroundEvent(BackgroundEventEvent { message, .. }) => {
                 ts_msg!(self, "{}", message.style(self.dimmed));
             }
             EventMsg::StreamError(StreamErrorEvent { message }) => {
@@ -534,7 +534,10 @@ impl EventProcessor for EventProcessorWithHumanOutput {
             | EventMsg::ReasoningContentDelta(_)
             | EventMsg::ReasoningRawContentDelta(_)
             | EventMsg::UndoCompleted(_)
-            | EventMsg::UndoStarted(_) => {}
+            | EventMsg::UndoStarted(_)
+            | EventMsg::ShellPromoted(_)
+            | EventMsg::BackgroundShellSummary(_)
+            | EventMsg::BackgroundShellPoll(_) => {}
         }
         CodexStatus::Running
     }

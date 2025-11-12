@@ -91,6 +91,7 @@ async fn run_compact_task_inner(
                         format!(
                             "Trimmed {truncated_count} older conversation item(s) before compacting so the prompt fits the model context window."
                         ),
+                        None,
                     )
                     .await;
                 }

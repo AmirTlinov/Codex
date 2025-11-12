@@ -71,6 +71,19 @@ impl ExecCommandSession {
     pub fn exit_code(&self) -> Option<i32> {
         self.exit_code.lock().ok().and_then(|guard| *guard)
     }
+
+    pub fn kill(&self) -> Result<()> {
+        let mut killer_opt = self
+            .killer
+            .lock()
+            .map_err(|_| anyhow::anyhow!("failed to acquire killer lock"))?;
+        if let Some(mut killer) = killer_opt.take() {
+            killer
+                .kill()
+                .map_err(|err| anyhow::anyhow!("failed to kill process: {err}"))?;
+        }
+        Ok(())
+    }
 }
 
 impl Drop for ExecCommandSession {

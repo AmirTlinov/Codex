@@ -70,7 +70,7 @@ impl SessionTask for GhostSnapshotTask {
                             };
                             session
                                 .session
-                                .notify_background_event(&ctx_for_task, message)
+                                .notify_background_event(&ctx_for_task, message, None)
                                 .await;
                         }
                         Err(err) => {
@@ -82,7 +82,7 @@ impl SessionTask for GhostSnapshotTask {
                                 format!("Snapshots disabled after ghost snapshot panic: {err}.");
                             session
                                 .session
-                                .notify_background_event(&ctx_for_task, message)
+                                .notify_background_event(&ctx_for_task, message, None)
                                 .await;
                         }
                     }

@@ -3,6 +3,8 @@ use crate::config::types::ShellEnvironmentPolicy;
 use crate::config::types::ShellEnvironmentPolicyInherit;
 use std::collections::HashMap;
 use std::collections::HashSet;
+use std::ffi::OsString;
+use std::sync::OnceLock;
 
 /// Construct an environment map based on the rules in the specified policy. The
 /// resulting map can be passed directly to `Command::envs()` after calling
@@ -12,7 +14,44 @@ use std::collections::HashSet;
 /// The derivation follows the algorithm documented in the struct-level comment
 /// for [`ShellEnvironmentPolicy`].
 pub fn create_env(policy: &ShellEnvironmentPolicy) -> HashMap<String, String> {
-    populate_env(std::env::vars(), policy)
+    populate_env(capture_env_vars_lossy(), policy)
+}
+
+/// Collect the current process environment as UTF-8 strings, lossily converting
+/// any non-UTF entries so shell tools do not panic on systems with legacy
+/// locales (e.g., paths encoded as KOI8-R/Windows-1251). Logs a single warning
+/// the first time lossy conversion occurs.
+pub fn capture_env_vars_lossy() -> Vec<(String, String)> {
+    static WARNED: OnceLock<()> = OnceLock::new();
+
+    let mut lossy_pairs = 0usize;
+    let vars: Vec<(String, String)> = std::env::vars_os()
+        .map(|(key, value)| {
+            (
+                os_string_to_string(key, &mut lossy_pairs),
+                os_string_to_string(value, &mut lossy_pairs),
+            )
+        })
+        .collect();
+
+    if lossy_pairs > 0 && WARNED.set(()).is_ok() {
+        tracing::warn!(
+            lossy_pairs,
+            "Encountered non-UTF-8 environment variables; converting lossily so shell commands keep running"
+        );
+    }
+
+    vars
+}
+
+fn os_string_to_string(input: OsString, lossy_pairs: &mut usize) -> String {
+    match input.into_string() {
+        Ok(value) => value,
+        Err(os) => {
+            *lossy_pairs += 1;
+            os.to_string_lossy().into_owned()
+        }
+    }
 }
 
 fn populate_env<I>(vars: I, policy: &ShellEnvironmentPolicy) -> HashMap<String, String>

@@ -100,6 +100,8 @@ use crate::history_cell::AgentMessageCell;
 use crate::history_cell::HistoryCell;
 use crate::history_cell::McpToolCallCell;
 use crate::history_cell::ShellEventStatus;
+use crate::history_store::HistoryPanel;
+use crate::history_store::HistoryStore;
 use crate::markdown::append_markdown;
 #[cfg(target_os = "windows")]
 use crate::onboarding::WSL_INSTRUCTIONS;
@@ -139,7 +141,6 @@ use strum::IntoEnumIterator;
 
 const USER_SHELL_COMMAND_HELP_TITLE: &str = "Prefix a command with ! to run it locally";
 const USER_SHELL_COMMAND_HELP_HINT: &str = "Example: !ls";
-const BACKGROUND_CTRL_HINT: &str = "Ctrl+B to manage background tasks";
 // Track information about an in-flight exec command.
 struct RunningCommand {
     command: Vec<String>,
@@ -255,6 +256,7 @@ pub(crate) struct ChatWidgetInit {
     pub(crate) enhanced_keys_supported: bool,
     pub(crate) auth_manager: Arc<AuthManager>,
     pub(crate) feedback: codex_feedback::CodexFeedback,
+    pub(crate) history_store: HistoryStore,
 }
 
 #[derive(Default)]
@@ -270,6 +272,8 @@ pub(crate) struct ChatWidget {
     codex_op_tx: UnboundedSender<Op>,
     bottom_pane: BottomPane,
     active_cell: Option<Box<dyn HistoryCell>>,
+    history_store: HistoryStore,
+    history_panel: HistoryPanel,
     config: Config,
     auth_manager: Arc<AuthManager>,
     session_header: SessionHeader,
@@ -281,6 +285,8 @@ pub(crate) struct ChatWidget {
     // Stream lifecycle controller
     stream_controller: Option<StreamController>,
     running_commands: HashMap<String, RunningCommand>,
+    exec_history_indices: HashMap<String, usize>,
+    shell_history_indices: HashMap<String, usize>,
     task_complete_pending: bool,
     // Queue of interruptive UI events deferred during an active write cycle
     interrupts: InterruptManager,
@@ -314,12 +320,16 @@ pub(crate) struct ChatWidget {
     // Current session rollout path (if known)
     current_rollout_path: Option<PathBuf>,
     background_store: Rc<RefCell<BackgroundProcessStore>>,
-    background_hint_shown: bool,
 }
 
 struct UserMessage {
     text: String,
     image_paths: Vec<PathBuf>,
+}
+
+enum HistoryAction {
+    Insert,
+    Replace(usize),
 }
 
 impl From<String> for UserMessage {
@@ -362,10 +372,7 @@ impl ChatWidget {
         self.bottom_pane.update_status_header(header);
     }
 
-    fn refresh_background_indicator(&mut self) {
-        let indicator = self.background_store.borrow().indicator();
-        self.bottom_pane.set_background_indicator(indicator);
-    }
+    fn refresh_background_indicator(&mut self) {}
 
     fn request_background_summary(&self) {
         self.submit_op(Op::BackgroundShellSummary {
@@ -398,36 +405,6 @@ impl ChatWidget {
 
     fn command_preview(args: &[String]) -> String {
         shlex::try_join(args.iter().map(String::as_str)).unwrap_or_else(|_| args.join(" "))
-    }
-
-    fn handle_background_indicator_key(&mut self, key_event: KeyEvent) -> bool {
-        if !self.bottom_pane.has_background_indicator() {
-            return false;
-        }
-        match key_event.code {
-            KeyCode::Down if key_event.kind == KeyEventKind::Press => {
-                if !self.bottom_pane.background_indicator_focus()
-                    && (self.bottom_pane.composer_is_empty()
-                        || key_event.modifiers.contains(KeyModifiers::ALT))
-                {
-                    return self.bottom_pane.set_background_indicator_focus(true);
-                }
-            }
-            KeyCode::Up if key_event.kind == KeyEventKind::Press => {
-                if self.bottom_pane.background_indicator_focus() {
-                    self.bottom_pane.set_background_indicator_focus(false);
-                    return true;
-                }
-            }
-            KeyCode::Enter if key_event.kind == KeyEventKind::Press => {
-                if self.bottom_pane.background_indicator_focus() {
-                    self.app_event_tx.send(AppEvent::OpenBackgroundShellManager);
-                    return true;
-                }
-            }
-            _ => {}
-        }
-        false
     }
 
     // --- Small event handlers ---
@@ -816,32 +793,35 @@ impl ChatWidget {
         self.request_redraw();
     }
 
-    fn on_background_event(&mut self, message: String) {
-        debug!("BackgroundEvent: {message}");
-        if let Some(event) = parse_background_event(&message) {
-            let (toast_message, label) = {
-                let mut store = self.background_store.borrow_mut();
-                store.apply_event(event.clone());
-                let label = store.label_for(&event.shell_id);
-                let toast = label
-                    .as_ref()
-                    .map(|label| format_background_toast(label, &event.kind));
-                (toast, label)
-            };
-
-            if let Some(msg) = toast_message {
-                self.bottom_pane.push_background_toast(msg);
-                self.bottom_pane
-                    .request_redraw_in(std::time::Duration::from_secs(3));
-            }
-
-            if let Some(label) = label {
-                if let Some((headline, details, status)) =
-                    shell_event_display_for_kind(&label, &event.kind)
-                {
-                    self.add_shell_event_message(headline, details, status);
+    fn on_background_event(&mut self, raw: BackgroundEventEvent) {
+        debug!("BackgroundEvent: {}", raw.message);
+        if let Some(event) = parse_background_event(&raw) {
+            let mut preferred_index = None;
+            if let Some(call_id) = event.call_id.as_deref() {
+                self.ensure_exec_history_recorded(call_id);
+                if let Some(index) = self.exec_history_indices.remove(call_id) {
+                    preferred_index = Some(index);
                 }
             }
+
+            let label = {
+                let mut store = self.background_store.borrow_mut();
+                store.apply_event(event.clone());
+                store.label_for(&event.shell_id)
+            };
+
+            if let Some(label) = label
+                && let Some((headline, details, status)) =
+                    shell_event_display_for_kind(&label, &event.kind)
+                {
+                    self.add_shell_event_message(
+                        &event.shell_id,
+                        preferred_index,
+                        headline,
+                        details,
+                        status,
+                    );
+                }
 
             self.refresh_background_indicator();
             self.request_background_summary();
@@ -850,21 +830,20 @@ impl ChatWidget {
     }
 
     fn on_shell_promoted_event(&mut self, event: ShellPromotedEvent) {
+        self.ensure_exec_history_recorded(&event.call_id);
+        let preferred_index = self.exec_history_indices.remove(&event.call_id);
         self.background_store.borrow_mut().on_shell_promoted(&event);
         let label = self.background_store.borrow().label_for(&event.shell_id);
-        if let Some(label_str) = &label {
-            self.bottom_pane
-                .push_background_toast(format!("Moved to background: {label_str}"));
-        }
-        if !self.background_hint_shown {
-            self.background_hint_shown = true;
-            self.bottom_pane
-                .push_background_toast(BACKGROUND_CTRL_HINT.to_string());
-        }
         if let Some(label) = label {
             let (headline, details, status) =
                 shell_event_display_for_promotion(&label, event.description.clone());
-            self.add_shell_event_message(headline, details, status);
+            self.add_shell_event_message(
+                &event.shell_id,
+                preferred_index,
+                headline,
+                details,
+                status,
+            );
         }
         self.refresh_background_indicator();
         self.request_background_summary();
@@ -1170,6 +1149,7 @@ impl ChatWidget {
             enhanced_keys_supported,
             auth_manager,
             feedback,
+            history_store,
         } = common;
         let mut rng = rand::rng();
         let placeholder = EXAMPLE_PROMPTS[rng.random_range(0..EXAMPLE_PROMPTS.len())].to_string();
@@ -1189,6 +1169,8 @@ impl ChatWidget {
                 disable_paste_burst: config.disable_paste_burst,
             }),
             active_cell: None,
+            history_store: history_store.clone(),
+            history_panel: HistoryPanel::new(history_store),
             config: config.clone(),
             auth_manager,
             session_header: SessionHeader::new(config.model),
@@ -1202,6 +1184,8 @@ impl ChatWidget {
             rate_limit_switch_prompt: RateLimitSwitchPromptState::default(),
             stream_controller: None,
             running_commands: HashMap::new(),
+            exec_history_indices: HashMap::new(),
+            shell_history_indices: HashMap::new(),
             task_complete_pending: false,
             interrupts: InterruptManager::new(),
             reasoning_buffer: String::new(),
@@ -1219,7 +1203,6 @@ impl ChatWidget {
             feedback,
             current_rollout_path: None,
             background_store,
-            background_hint_shown: false,
         }
     }
 
@@ -1238,6 +1221,7 @@ impl ChatWidget {
             enhanced_keys_supported,
             auth_manager,
             feedback,
+            history_store,
         } = common;
         let mut rng = rand::rng();
         let placeholder = EXAMPLE_PROMPTS[rng.random_range(0..EXAMPLE_PROMPTS.len())].to_string();
@@ -1259,6 +1243,8 @@ impl ChatWidget {
                 disable_paste_burst: config.disable_paste_burst,
             }),
             active_cell: None,
+            history_store: history_store.clone(),
+            history_panel: HistoryPanel::new(history_store),
             config: config.clone(),
             auth_manager,
             session_header: SessionHeader::new(config.model),
@@ -1272,6 +1258,8 @@ impl ChatWidget {
             rate_limit_switch_prompt: RateLimitSwitchPromptState::default(),
             stream_controller: None,
             running_commands: HashMap::new(),
+            exec_history_indices: HashMap::new(),
+            shell_history_indices: HashMap::new(),
             task_complete_pending: false,
             interrupts: InterruptManager::new(),
             reasoning_buffer: String::new(),
@@ -1289,7 +1277,6 @@ impl ChatWidget {
             feedback,
             current_rollout_path: None,
             background_store,
-            background_hint_shown: false,
         }
     }
 
@@ -1321,7 +1308,10 @@ impl ChatWidget {
                 kind: KeyEventKind::Press,
                 ..
             } if modifiers.contains(KeyModifiers::CONTROL) && c.eq_ignore_ascii_case(&'b') => {
-                self.app_event_tx.send(AppEvent::OpenBackgroundShellManager);
+                self.add_info_message(
+                    "Background shell manager is unavailable in this build.".to_string(),
+                    None,
+                );
                 return;
             }
             KeyEvent {
@@ -1337,10 +1327,6 @@ impl ChatWidget {
                 self.bottom_pane.clear_ctrl_c_quit_hint();
             }
             _ => {}
-        }
-
-        if self.handle_background_indicator_key(key_event) {
-            return;
         }
 
         match key_event {
@@ -1552,6 +1538,8 @@ impl ChatWidget {
 
     fn flush_active_cell(&mut self) {
         if let Some(active) = self.active_cell.take() {
+            let next_index = self.next_history_index();
+            self.record_history_metadata(active.as_ref(), next_index);
             self.needs_final_message_separator = true;
             self.app_event_tx.send(AppEvent::InsertHistoryCell(active));
         }
@@ -1562,12 +1550,80 @@ impl ChatWidget {
     }
 
     fn add_boxed_history(&mut self, cell: Box<dyn HistoryCell>) {
+        self.prepare_history_insertion(cell.as_ref());
+        self.insert_history_cell(cell);
+    }
+
+    fn next_history_index(&self) -> usize {
+        self.history_store.borrow().len()
+    }
+
+    fn prepare_history_insertion(&mut self, cell: &dyn HistoryCell) {
         if !cell.display_lines(u16::MAX).is_empty() {
             // Only break exec grouping if the cell renders visible lines.
             self.flush_active_cell();
             self.needs_final_message_separator = true;
         }
+    }
+
+    fn insert_history_cell(&mut self, cell: Box<dyn HistoryCell>) -> usize {
+        let index = self.next_history_index();
+        self.record_history_metadata(cell.as_ref(), index);
         self.app_event_tx.send(AppEvent::InsertHistoryCell(cell));
+        index
+    }
+
+    fn replace_history_cell(&mut self, index: usize, cell: Box<dyn HistoryCell>) {
+        self.record_history_metadata(cell.as_ref(), index);
+        self.app_event_tx
+            .send(AppEvent::ReplaceHistoryCell { index, cell });
+    }
+
+    fn record_history_metadata(&mut self, cell: &dyn HistoryCell, index: usize) {
+        if let Some(exec) = cell.as_any().downcast_ref::<ExecCell>() {
+            for call in exec.iter_calls() {
+                self.exec_history_indices
+                    .insert(call.call_id.clone(), index);
+            }
+        }
+    }
+
+    fn ensure_exec_history_recorded(&mut self, call_id: &str) {
+        let active_contains_call = self
+            .active_cell
+            .as_ref()
+            .and_then(|cell| cell.as_any().downcast_ref::<ExecCell>())
+            .is_some_and(|exec| {
+                exec.iter_calls().any(|c| c.call_id == call_id)
+            });
+        if active_contains_call {
+            self.flush_active_cell();
+        }
+    }
+
+    pub(crate) fn on_history_appended(&mut self) {
+        self.refresh_history_panel();
+    }
+
+    pub(crate) fn on_history_replaced(&mut self, _index: usize) {
+        self.refresh_history_panel();
+    }
+
+    pub(crate) fn on_history_reset(&mut self) {
+        self.history_store.borrow_mut().clear();
+        self.history_panel.reset();
+        self.exec_history_indices.clear();
+        self.shell_history_indices.clear();
+        self.request_redraw();
+    }
+
+    pub(crate) fn on_history_modified(&mut self) {
+        self.refresh_history_panel();
+    }
+
+    fn refresh_history_panel(&mut self) {
+        self.history_panel.mark_dirty();
+        self.request_redraw();
     }
 
     fn queue_user_message(&mut self, user_message: UserMessage) {
@@ -1731,9 +1787,7 @@ impl ChatWidget {
             EventMsg::ShutdownComplete => self.on_shutdown_complete(),
             EventMsg::TurnDiff(TurnDiffEvent { unified_diff }) => self.on_turn_diff(unified_diff),
             EventMsg::DeprecationNotice(ev) => self.on_deprecation_notice(ev),
-            EventMsg::BackgroundEvent(BackgroundEventEvent { message }) => {
-                self.on_background_event(message)
-            }
+            EventMsg::BackgroundEvent(event) => self.on_background_event(event),
             EventMsg::ShellPromoted(ev) => self.on_shell_promoted_event(ev),
             EventMsg::BackgroundShellSummary(ev) => self.on_background_summary(ev),
             EventMsg::BackgroundShellPoll(ev) => self.on_background_poll_event(ev),
@@ -2601,13 +2655,38 @@ impl ChatWidget {
 
     pub(crate) fn add_shell_event_message(
         &mut self,
+        shell_id: &str,
+        preferred_index: Option<usize>,
         headline: String,
         details: Vec<Line<'static>>,
         status: ShellEventStatus,
     ) {
-        self.add_to_history(history_cell::new_shell_event_cell(
+        let action = if let Some(index) = preferred_index {
+            HistoryAction::Replace(index)
+        } else if let Some(index) = self.shell_history_indices.get(shell_id).copied() {
+            HistoryAction::Replace(index)
+        } else {
+            HistoryAction::Insert
+        };
+
+        let cell = Box::new(history_cell::new_shell_event_cell(
             headline, details, status,
         ));
+
+        match action {
+            HistoryAction::Insert => {
+                self.prepare_history_insertion(cell.as_ref());
+                let index = self.insert_history_cell(cell);
+                self.shell_history_indices
+                    .insert(shell_id.to_string(), index);
+            }
+            HistoryAction::Replace(index) => {
+                self.shell_history_indices
+                    .insert(shell_id.to_string(), index);
+                self.replace_history_cell(index, cell);
+            }
+        }
+
         self.request_redraw();
     }
 
@@ -2865,8 +2944,9 @@ impl ChatWidget {
             .unwrap_or_default()
     }
 
-    pub(crate) fn background_store(&self) -> Rc<RefCell<BackgroundProcessStore>> {
-        self.background_store.clone()
+    #[cfg(test)]
+    pub(crate) fn history_store(&self) -> HistoryStore {
+        self.history_store.clone()
     }
 
     pub(crate) fn conversation_id(&self) -> Option<ConversationId> {
@@ -2888,12 +2968,14 @@ impl ChatWidget {
     }
 
     fn as_renderable(&self) -> RenderableItem<'_> {
+        let history_renderable = RenderableItem::Borrowed(&self.history_panel);
         let active_cell_renderable = match &self.active_cell {
             Some(cell) => RenderableItem::Borrowed(cell).inset(Insets::tlbr(1, 0, 0, 0)),
             None => RenderableItem::Owned(Box::new(())),
         };
         let mut flex = FlexRenderable::new();
-        flex.push(1, active_cell_renderable);
+        flex.push(1, history_renderable);
+        flex.push(0, active_cell_renderable);
         flex.push(
             0,
             RenderableItem::Borrowed(&self.bottom_pane).inset(Insets::tlbr(1, 0, 0, 0)),
@@ -2917,30 +2999,18 @@ impl Renderable for ChatWidget {
     }
 }
 
-fn format_background_toast(label: &str, kind: &ParsedBackgroundEventKind) -> String {
-    match kind {
-        ParsedBackgroundEventKind::Started { .. } => format!("▶ Started: {label}"),
-        ParsedBackgroundEventKind::Terminated { exit_code, .. } => {
-            if *exit_code == 0 {
-                format!("✔ Completed: {label}")
-            } else {
-                format!("✖ Failed ({exit_code}): {label}")
-            }
-        }
-    }
-}
-
 fn shell_event_display_for_kind(
     label: &str,
     kind: &ParsedBackgroundEventKind,
 ) -> Option<(String, Vec<Line<'static>>, ShellEventStatus)> {
     match kind {
-        ParsedBackgroundEventKind::Started { description } => {
+        ParsedBackgroundEventKind::Started { description, .. } => {
             Some(shell_event_for_start(label, description.clone()))
         }
         ParsedBackgroundEventKind::Terminated {
             exit_code,
             description,
+            ..
         } => Some(shell_event_for_terminated(
             label,
             *exit_code,
@@ -2957,7 +3027,6 @@ fn shell_event_display_for_promotion(
     if let Some(desc) = description.and_then(non_empty_string) {
         details.push(detail_line(format!("Command: {desc}")));
     }
-    details.push(dim_detail_line(BACKGROUND_CTRL_HINT.to_string()));
     (
         format!("Shell Promoted({label})"),
         details,
@@ -2973,7 +3042,6 @@ fn shell_event_for_start(
     if let Some(desc) = description.and_then(non_empty_string) {
         details.push(detail_line(format!("Command: {desc}")));
     }
-    details.push(dim_detail_line(BACKGROUND_CTRL_HINT.to_string()));
     (
         format!("Shell Started({label})"),
         details,
@@ -2989,8 +3057,7 @@ fn shell_event_for_terminated(
     if let Some(desc) = description
         .as_ref()
         .and_then(|d| non_empty_string(d.clone()))
-    {
-        if is_kill_description(&desc) {
+        && is_kill_description(&desc) {
             let mut details = vec![detail_line(format!("{label} killed"))];
             if exit_code != 0 {
                 details.push(detail_line(format!("Exit code {exit_code}")));
@@ -3001,7 +3068,6 @@ fn shell_event_for_terminated(
                 ShellEventStatus::Success,
             );
         }
-    }
 
     let success = exit_code == 0;
     let mut details = vec![detail_line(format!(

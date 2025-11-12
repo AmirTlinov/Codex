@@ -45,6 +45,10 @@ pub(crate) enum AppEvent {
     DiffResult(String),
 
     InsertHistoryCell(Box<dyn HistoryCell>),
+    ReplaceHistoryCell {
+        index: usize,
+        cell: Box<dyn HistoryCell>,
+    },
 
     StartCommitAnimation,
     StopCommitAnimation,

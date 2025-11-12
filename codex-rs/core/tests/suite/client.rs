@@ -1,4 +1,5 @@
 use codex_app_server_protocol::AuthMode;
+use codex_core::BACKGROUND_SHELL_AGENT_GUIDANCE;
 use codex_core::CodexAuth;
 use codex_core::ContentItem;
 use codex_core::ConversationManager;
@@ -611,17 +612,20 @@ async fn includes_user_instructions_message_in_request() {
             .unwrap()
             .contains("be nice")
     );
-    assert_message_role(&request_body["input"][0], "user");
-    assert_message_starts_with(&request_body["input"][0], "# AGENTS.md instructions for ");
-    assert_message_ends_with(&request_body["input"][0], "</INSTRUCTIONS>");
-    let ui_text = request_body["input"][0]["content"][0]["text"]
+    let developer_guidance = BACKGROUND_SHELL_AGENT_GUIDANCE.trim();
+    assert_message_role(&request_body["input"][0], "developer");
+    assert_message_equals(&request_body["input"][0], developer_guidance);
+    assert_message_role(&request_body["input"][1], "user");
+    assert_message_starts_with(&request_body["input"][1], "# AGENTS.md instructions for ");
+    assert_message_ends_with(&request_body["input"][1], "</INSTRUCTIONS>");
+    let ui_text = request_body["input"][1]["content"][0]["text"]
         .as_str()
         .expect("invalid message content");
     assert!(ui_text.contains("<INSTRUCTIONS>"));
     assert!(ui_text.contains("be nice"));
-    assert_message_role(&request_body["input"][1], "user");
-    assert_message_starts_with(&request_body["input"][1], "<environment_context>");
-    assert_message_ends_with(&request_body["input"][1], "</environment_context>");
+    assert_message_role(&request_body["input"][2], "user");
+    assert_message_starts_with(&request_body["input"][2], "<environment_context>");
+    assert_message_ends_with(&request_body["input"][2], "</environment_context>");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -672,8 +676,10 @@ async fn includes_developer_instructions_message_in_request() {
             .unwrap()
             .contains("be nice")
     );
+    let guidance = BACKGROUND_SHELL_AGENT_GUIDANCE.trim();
+    let expected_developer = format!("be useful\n\n{guidance}");
     assert_message_role(&request_body["input"][0], "developer");
-    assert_message_equals(&request_body["input"][0], "be useful");
+    assert_message_equals(&request_body["input"][0], &expected_developer);
     assert_message_role(&request_body["input"][1], "user");
     assert_message_starts_with(&request_body["input"][1], "# AGENTS.md instructions for ");
     assert_message_ends_with(&request_body["input"][1], "</INSTRUCTIONS>");

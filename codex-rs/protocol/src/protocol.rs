@@ -172,6 +172,37 @@ pub enum Op {
     /// Request the list of available custom prompts.
     ListCustomPrompts,
 
+    /// Promote a running foreground shell to a managed background session.
+    PromoteShell {
+        /// Identifier of the foreground shell call to promote.
+        call_id: String,
+        /// Optional user-facing description.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        description: Option<String>,
+        /// Optional bookmark alias for quick references (e.g., "build").
+        #[serde(skip_serializing_if = "Option::is_none")]
+        bookmark: Option<String>,
+    },
+
+    /// Poll a background shell for new output/state transitions.
+    PollBackgroundShell {
+        /// Identifier of the background shell to poll.
+        shell_id: String,
+    },
+
+    /// Request a compact snapshot of all background shells (status + tail).
+    BackgroundShellSummary {
+        /// Optional limit on number of entries returned.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        limit: Option<usize>,
+    },
+
+    /// Terminate a background shell by id.
+    KillBackgroundShell {
+        /// Identifier (shell id or bookmark) of the background shell to stop.
+        shell_id: String,
+    },
+
     /// Request the agent to summarize the current conversation context.
     /// The agent will use its existing context (either conversation history or previous response id)
     /// to generate a summary which will be returned as an AgentMessage event.
@@ -505,6 +536,9 @@ pub enum EventMsg {
     DeprecationNotice(DeprecationNoticeEvent),
 
     BackgroundEvent(BackgroundEventEvent),
+    ShellPromoted(ShellPromotedEvent),
+    BackgroundShellSummary(BackgroundShellSummaryEvent),
+    BackgroundShellPoll(BackgroundShellPollEvent),
 
     UndoStarted(UndoStartedEvent),
 
@@ -1270,6 +1304,110 @@ pub struct ExecCommandOutputDeltaEvent {
 #[derive(Debug, Clone, Deserialize, Serialize, JsonSchema, TS)]
 pub struct BackgroundEventEvent {
     pub message: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub metadata: Option<BackgroundEventMetadata>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema, TS)]
+pub struct BackgroundEventMetadata {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub shell_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub call_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub kind: Option<BackgroundEventKind>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq, JsonSchema, TS)]
+#[serde(rename_all = "snake_case", tag = "lifecycle")]
+pub enum BackgroundEventKind {
+    Started {
+        #[serde(skip_serializing_if = "Option::is_none")]
+        description: Option<String>,
+        mode: BackgroundStartMode,
+    },
+    Terminated {
+        exit_code: i32,
+        termination: BackgroundTerminationKind,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        description: Option<String>,
+    },
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq, JsonSchema, TS)]
+#[serde(rename_all = "snake_case")]
+pub enum BackgroundStartMode {
+    RunInBackground,
+    ManualPromotion,
+    AutoPromotion,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq, JsonSchema, TS)]
+#[serde(rename_all = "snake_case")]
+pub enum BackgroundTerminationKind {
+    Natural,
+    KilledByUser,
+    KilledByAgent,
+    AlreadyFinishedUser,
+    AlreadyFinishedAgent,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema, TS)]
+pub struct ShellPromotedEvent {
+    pub call_id: String,
+    pub shell_id: String,
+    pub initial_output: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub bookmark: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq, JsonSchema, TS)]
+#[serde(rename_all = "snake_case")]
+pub enum BackgroundShellStatus {
+    Running,
+    Completed,
+    Failed,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema, TS)]
+pub struct BackgroundShellSummaryEntry {
+    pub shell_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub bookmark: Option<String>,
+    pub status: BackgroundShellStatus,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub exit_code: Option<i32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    /// Compact preview of the launching command (joined string or alias).
+    pub command_preview: String,
+    /// Recent output lines (already trimmed & sanitized).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tail_lines: Vec<String>,
+    /// Epoch milliseconds representing when the command started.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub started_at_ms: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ended_by: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema, TS)]
+pub struct BackgroundShellSummaryEvent {
+    pub entries: Vec<BackgroundShellSummaryEntry>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema, TS)]
+pub struct BackgroundShellPollEvent {
+    pub shell_id: String,
+    pub lines: Vec<String>,
+    pub status: BackgroundShellStatus,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub exit_code: Option<i32>,
+    pub truncated: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub bookmark: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, JsonSchema, TS)]

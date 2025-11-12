@@ -1,0 +1,72 @@
+{
+  "status": "failed",
+  "mode": "validate",
+  "duration_ms": 0,
+  "options": {
+    "encoding": "utf-8",
+    "newline": "preserve",
+    "strip_trailing_whitespace": false,
+    "ensure_final_newline": null,
+    "preserve_mode": true,
+    "preserve_times": true,
+    "new_file_mode": null
+  },
+  "operations": [],
+  "errors": [
+    {
+      "message": "Unable to locate hunk for 'tui/src/chatwidget.rs' (header: @@)",
+      "details": {
+        "path": "tui/src/chatwidget.rs",
+        "hunk_header": "@@",
+        "expected_context": [
+          "    fn detach_running_command_by_label(&mut self, label: &str, mark_promoted: bool) -> bool {",
+          "        let normalized = label.trim();",
+          "        if normalized.is_empty() {",
+          "            return false;",
+          "        }",
+          "        if let Some(call_id) = self",
+          "            .running_commands",
+          "            .iter()",
+          "            .find_map(|(call_id, running)| {",
+          "                let preview = Self::command_preview(&running.command);",
+          "                let stripped = strip_bash_lc_and_escape(&running.command);",
+          "                if Self::kill_label_matches(normalized, &preview)",
+          "                    || Self::kill_label_matches(normalized, &stripped)",
+          "                {",
+          "                    Some(call_id.clone())",
+          "                } else {",
+          "                    None",
+          "                }",
+          "            })",
+          "        {",
+          "            if mark_promoted {",
+          "                self.promoted_call_ids.insert(call_id.clone());",
+          "            }",
+          "            self.detached_background_commands",
+          "                .insert(call_id.clone(), normalized.to_string());",
+          "            self.running_commands.remove(&call_id);",
+          "            self.discard_active_exec_call(&call_id);",
+          "            return true;",
+          "        }",
+          "",
+          "        if let Some(call_id) = self",
+          "            .detached_background_commands",
+          "            .iter()",
+          "            .find_map(|(call_id, stored)| {",
+          "                Self::kill_label_matches(normalized, stored).then(|| call_id.clone())",
+          "            })",
+          "        {",
+          "            if mark_promoted {",
+          "                self.promoted_call_ids.insert(call_id.clone());",
+          "            }",
+          "            return true;",
+          "        }",
+          "",
+          "        false",
+          "    }"
+        ],
+        "kind": "hunk_not_found"
+      }
+    }
+  ]
+}

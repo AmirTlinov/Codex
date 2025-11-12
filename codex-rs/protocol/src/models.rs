@@ -305,6 +305,16 @@ pub struct ShellToolCallParams {
     pub with_escalated_permissions: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub justification: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub run_in_background: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub manage_process: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tail_lines: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub bookmark: Option<String>,
 }
 
 /// Responses API compatible content items that can be returned by a tool call.
@@ -616,6 +626,11 @@ mod tests {
                 timeout_ms: Some(1000),
                 with_escalated_permissions: None,
                 justification: None,
+                run_in_background: None,
+                description: None,
+                manage_process: None,
+                tail_lines: None,
+                bookmark: None,
             },
             params
         );

@@ -7,6 +7,7 @@ use std::collections::HashMap;
 use std::path::Path;
 use std::path::PathBuf;
 
+use codex_core::exec_env::capture_env_vars_lossy;
 use codex_core::protocol::SandboxPolicy;
 use codex_core::seatbelt::spawn_command_under_seatbelt;
 use codex_core::spawn::CODEX_SANDBOX_ENV_VAR;
@@ -233,7 +234,7 @@ async fn java_home_finds_runtime_under_seatbelt() {
     let command_cwd = std::env::current_dir().expect("getcwd");
     let sandbox_cwd = command_cwd.clone();
 
-    let mut env: HashMap<String, String> = std::env::vars().collect();
+    let mut env: HashMap<String, String> = capture_env_vars_lossy().into_iter().collect();
     env.remove("JAVA_HOME");
     env.remove(CODEX_SANDBOX_ENV_VAR);
 

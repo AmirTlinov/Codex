@@ -97,7 +97,10 @@ async fn model_selects_expected_tools() {
             "list_mcp_resources".to_string(),
             "list_mcp_resource_templates".to_string(),
             "read_mcp_resource".to_string(),
-            "update_plan".to_string()
+            "update_plan".to_string(),
+            "shell_summary".to_string(),
+            "shell_log".to_string(),
+            "shell_kill".to_string()
         ],
         "codex-mini-latest should expose the local shell tool",
     );
@@ -110,7 +113,10 @@ async fn model_selects_expected_tools() {
             "list_mcp_resources".to_string(),
             "list_mcp_resource_templates".to_string(),
             "read_mcp_resource".to_string(),
-            "update_plan".to_string()
+            "update_plan".to_string(),
+            "shell_summary".to_string(),
+            "shell_log".to_string(),
+            "shell_kill".to_string()
         ],
         "o3 should expose the generic shell tool",
     );
@@ -124,6 +130,9 @@ async fn model_selects_expected_tools() {
             "list_mcp_resource_templates".to_string(),
             "read_mcp_resource".to_string(),
             "update_plan".to_string(),
+            "shell_summary".to_string(),
+            "shell_log".to_string(),
+            "shell_kill".to_string(),
             "apply_patch".to_string()
         ],
         "gpt-5-codex should expose the apply_patch tool",
