@@ -27,6 +27,7 @@ use codex_navigator::proto::ContextBucket;
 use codex_navigator::proto::CoverageReason;
 use codex_navigator::proto::DoctorReport;
 use codex_navigator::proto::DoctorWorkspace;
+use codex_navigator::proto::FileCategory;
 use codex_navigator::proto::HealthPanel;
 use codex_navigator::proto::HealthRisk;
 use codex_navigator::proto::IngestKind;
@@ -141,6 +142,10 @@ pub struct NavCommand {
     #[arg(long = "diagnostics-only")]
     pub diagnostics_only: bool,
 
+    /// Control how navigator output is focused.
+    #[arg(long = "focus", value_enum, default_value_t = FocusMode::Auto)]
+    pub focus: FocusMode,
+
     /// Select the final output format.
     #[arg(long = "format", value_enum, default_value_t = OutputFormat::Json)]
     pub output_format: OutputFormat,
@@ -175,6 +180,10 @@ pub struct RepeatCommand {
     /// Index inside the selected history list (0 = most recent).
     #[arg(long = "index", default_value_t = 0)]
     pub index: usize,
+
+    /// Override the stored focus mode (default: reuse recorded focus).
+    #[arg(long = "focus", value_enum, default_value_t = FocusMode::Auto)]
+    pub focus: FocusMode,
 }
 
 #[derive(Debug, Parser)]
@@ -211,6 +220,30 @@ pub enum RefsMode {
     All,
     Definitions,
     Usages,
+}
+
+#[derive(Copy, Clone, Debug, ValueEnum, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Default)]
+pub enum FocusMode {
+    #[default]
+    Auto,
+    All,
+    Code,
+    Docs,
+    Tests,
+    Deps,
+}
+
+
+pub(crate) fn focus_label(mode: FocusMode) -> &'static str {
+    match mode {
+        FocusMode::Auto => "auto",
+        FocusMode::All => "all",
+        FocusMode::Code => "code",
+        FocusMode::Docs => "docs",
+        FocusMode::Tests => "tests",
+        FocusMode::Deps => "deps",
+    }
 }
 
 #[derive(Debug, Parser)]
@@ -383,6 +416,10 @@ pub struct FacetCommand {
     #[arg(long = "diagnostics-only")]
     pub diagnostics_only: bool,
 
+    /// Control how navigator output is focused.
+    #[arg(long = "focus", value_enum, default_value_t = FocusMode::Auto)]
+    pub focus: FocusMode,
+
     /// Select the final output format.
     #[arg(long = "format", value_enum, default_value_t = OutputFormat::Json)]
     pub output_format: OutputFormat,
@@ -417,6 +454,7 @@ pub async fn run_nav(cmd: NavCommand) -> Result<()> {
         cmd.refs_mode,
         cmd.with_refs || cmd.refs_mode != RefsMode::All,
         cmd.diagnostics_only,
+        cmd.focus,
     );
     let request = plan_search_request(args)?;
     if std::env::var("NAVIGATOR_DEBUG_REQUEST").is_ok() {
@@ -430,6 +468,7 @@ pub async fn run_nav(cmd: NavCommand) -> Result<()> {
         cmd.with_refs || cmd.refs_mode != RefsMode::All,
         cmd.diagnostics_only,
         Some(recording),
+        cmd.focus,
     )
     .await
 }
@@ -466,6 +505,7 @@ pub async fn run_facet(cmd: FacetCommand) -> Result<()> {
         cmd.refs_mode,
         cmd.with_refs || cmd.refs_mode != RefsMode::All,
         cmd.diagnostics_only,
+        cmd.focus,
     );
     let request = plan_search_request(args)?;
     execute_search(
@@ -476,6 +516,7 @@ pub async fn run_facet(cmd: FacetCommand) -> Result<()> {
         cmd.with_refs || cmd.refs_mode != RefsMode::All,
         cmd.diagnostics_only,
         Some(recording),
+        cmd.focus,
     )
     .await
 }
@@ -502,7 +543,7 @@ pub async fn run_history(mut cmd: HistoryCommand) -> Result<()> {
 pub async fn run_repeat(mut cmd: RepeatCommand) -> Result<()> {
     let client = build_client(cmd.project_root.take()).await?;
     let history = QueryHistoryStore::new(client.queries_dir());
-    let replay = if cmd.pinned {
+    let replay_opt = if cmd.pinned {
         history
             .replay_pinned(cmd.index)
             .context("load pinned navigator entry")?
@@ -510,8 +551,8 @@ pub async fn run_repeat(mut cmd: RepeatCommand) -> Result<()> {
         history
             .replay_recent(cmd.index)
             .context("load navigator history entry")?
-    }
-    .ok_or_else(|| {
+    };
+    let mut replay = replay_opt.ok_or_else(|| {
         if cmd.pinned {
             anyhow!("pinned index {} not available", cmd.index)
         } else {
@@ -521,6 +562,9 @@ pub async fn run_repeat(mut cmd: RepeatCommand) -> Result<()> {
             )
         }
     })?;
+    if cmd.focus != FocusMode::Auto {
+        replay.focus_mode = cmd.focus;
+    }
     let request = plan_search_request(replay.args.clone())?;
     execute_search(
         client,
@@ -529,7 +573,8 @@ pub async fn run_repeat(mut cmd: RepeatCommand) -> Result<()> {
         replay.refs_mode,
         replay.show_refs,
         replay.diagnostics_only,
-        Some(replay),
+        Some(replay.clone()),
+        replay.focus_mode,
     )
     .await
 }
@@ -577,33 +622,37 @@ pub async fn run_pin(mut cmd: PinCommand) -> Result<()> {
 }
 
 fn format_history_filters(item: &HistoryItem) -> String {
-    let Some(filters) = item.filters.as_ref() else {
-        return String::new();
-    };
     let mut chips = Vec::new();
-    if !filters.languages.is_empty() {
-        let langs = filters
-            .languages
-            .iter()
-            .map(language_label)
-            .collect::<Vec<_>>()
-            .join("|");
-        chips.push(format!("[lang={langs}]"));
+    if let Some(filters) = item.filters.as_ref() {
+        if !filters.languages.is_empty() {
+            let langs = filters
+                .languages
+                .iter()
+                .map(language_label)
+                .collect::<Vec<_>>()
+                .join("|");
+            chips.push(format!("[lang={langs}]"));
+        }
+        if !filters.categories.is_empty() {
+            let cats = filters
+                .categories
+                .iter()
+                .map(category_label)
+                .collect::<Vec<_>>()
+                .join("|");
+            chips.push(format!("[cat={cats}]"));
+        }
+        if !filters.owners.is_empty() {
+            chips.push(format!("[owner={}]", filters.owners.join("|")));
+        }
+        if filters.recent_only {
+            chips.push("[recent]".to_string());
+        }
     }
-    if !filters.categories.is_empty() {
-        let cats = filters
-            .categories
-            .iter()
-            .map(category_label)
-            .collect::<Vec<_>>()
-            .join("|");
-        chips.push(format!("[cat={cats}]"));
-    }
-    if !filters.owners.is_empty() {
-        chips.push(format!("[owner={}]", filters.owners.join("|")));
-    }
-    if filters.recent_only {
-        chips.push("[recent]".to_string());
+    if let Some(replay) = item.replay.as_ref()
+        && !matches!(replay.focus_mode, FocusMode::All | FocusMode::Auto)
+    {
+        chips.push(format!("[focus={}]", focus_label(replay.focus_mode)));
     }
     if chips.is_empty() {
         String::new()
@@ -1009,6 +1058,7 @@ pub async fn run_atlas(mut cmd: AtlasCommand) -> Result<()> {
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn execute_search(
     client: NavigatorClient,
     request: proto::SearchRequest,
@@ -1016,7 +1066,8 @@ async fn execute_search(
     refs_mode: RefsMode,
     show_refs: bool,
     diagnostics_only: bool,
-    recording: Option<HistoryReplay>,
+    mut recording: Option<HistoryReplay>,
+    focus_mode: FocusMode,
 ) -> Result<()> {
     if matches!(output_format, OutputFormat::Ndjson) {
         client
@@ -1036,6 +1087,10 @@ async fn execute_search(
     let mut streamed_diag = false;
     let mut streamed_hits = false;
     let stream_sideband = matches!(output_format, OutputFormat::Json);
+    let stream_focus = match focus_mode {
+        FocusMode::Auto => FocusMode::All,
+        other => other,
+    };
     let outcome = client
         .search_with_event_handler(request, |event| match event {
             SearchStreamEvent::Diagnostics { diagnostics } => {
@@ -1049,12 +1104,16 @@ async fn execute_search(
                 last_top_hits = hits.clone();
                 if stream_sideband && !streamed_hits && !diagnostics_only {
                     streamed_hits = true;
-                    print_top_hits(hits, refs_mode, show_refs);
+                    print_top_hits(hits, refs_mode, show_refs, stream_focus);
                 }
             }
             _ => {}
         })
         .await?;
+    let resolved_focus = resolve_focus_mode(focus_mode, &outcome.response);
+    if let Some(rec) = recording.as_mut() {
+        rec.focus_mode = resolved_focus;
+    }
     let history = QueryHistoryStore::new(client.queries_dir());
     let hits_for_history = if !outcome.response.hits.is_empty() {
         capture_history_hits(&outcome.response.hits)
@@ -1078,9 +1137,9 @@ async fn execute_search(
             }
             if !streamed_hits && !diagnostics_only {
                 if !outcome.top_hits.is_empty() {
-                    print_top_hits(&outcome.top_hits, refs_mode, show_refs);
+                    print_top_hits(&outcome.top_hits, refs_mode, show_refs, resolved_focus);
                 } else if !last_top_hits.is_empty() {
-                    print_top_hits(&last_top_hits, refs_mode, show_refs);
+                    print_top_hits(&last_top_hits, refs_mode, show_refs, resolved_focus);
                 }
             }
             if diagnostics_only {
@@ -1109,6 +1168,7 @@ async fn execute_search(
                 refs_mode,
                 show_refs,
                 diagnostics_only,
+                resolved_focus,
             )
         }
         OutputFormat::Ndjson => unreachable!(),
@@ -1338,12 +1398,21 @@ fn print_literal_stats(stats: &SearchStats) {
 const MAX_CLI_REFS: usize = 6;
 const TEXT_MAX_HITS: usize = 10;
 
-fn print_top_hits(hits: &[NavHit], refs_mode: RefsMode, show_refs: bool) {
+fn print_top_hits(hits: &[NavHit], refs_mode: RefsMode, show_refs: bool, focus_mode: FocusMode) {
     if hits.is_empty() {
         return;
     }
-    eprintln!("[navigator] top hits ({}):", hits.len());
-    for (idx, hit) in hits.iter().enumerate() {
+    let (filtered, suppressed) = filter_hits_for_focus(hits, focus_mode);
+    if filtered.is_empty() {
+        eprintln!(
+            "[navigator] focus[{}] filtered out streamed hits; pass --focus all to view",
+            focus_label(focus_mode)
+        );
+        return;
+    }
+    eprintln!("[navigator] top hits ({}):", filtered.len());
+    for (idx, hit) in filtered.iter().enumerate() {
+        let hit = *hit;
         let refs = hit
             .references
             .as_ref()
@@ -1368,6 +1437,7 @@ fn print_top_hits(hits: &[NavHit], refs_mode: RefsMode, show_refs: bool) {
             render_references(refs_bucket, refs_mode);
         }
     }
+    emit_focus_notice(focus_mode, suppressed, |msg| eprintln!("[navigator] {msg}"));
 }
 
 fn render_references(references: &proto::NavReferences, mode: RefsMode) {
@@ -1410,6 +1480,7 @@ fn print_text_response(
     refs_mode: RefsMode,
     show_refs: bool,
     diagnostics_only: bool,
+    focus_mode: FocusMode,
 ) -> Result<()> {
     if let Some(diag) = diagnostics {
         print_text_diagnostics(&diag);
@@ -1451,10 +1522,13 @@ fn print_text_response(
             println!("{line}");
         }
     }
+    if !matches!(focus_mode, FocusMode::All) {
+        println!("focus: {}", focus_label(focus_mode));
+    }
 
-    print_text_hits(&response.hits, refs_mode, show_refs);
+    print_text_hits(&response.hits, refs_mode, show_refs, focus_mode);
     if !response.fallback_hits.is_empty() {
-        print_text_fallback_hits(&response.fallback_hits);
+        print_text_fallback_hits(&response.fallback_hits, focus_mode);
     }
     Ok(())
 }
@@ -1691,14 +1765,23 @@ fn category_label(category: &proto::FileCategory) -> &'static str {
     }
 }
 
-fn print_text_hits(hits: &[NavHit], refs_mode: RefsMode, show_refs: bool) {
+fn print_text_hits(hits: &[NavHit], refs_mode: RefsMode, show_refs: bool, focus_mode: FocusMode) {
     if hits.is_empty() {
         println!("hits: none");
         return;
     }
-    let shown = hits.len().min(TEXT_MAX_HITS);
-    println!("hits (showing {shown} of {}):", hits.len());
-    for (idx, hit) in hits.iter().take(TEXT_MAX_HITS).enumerate() {
+    let (filtered, suppressed) = filter_hits_for_focus(hits, focus_mode);
+    if filtered.is_empty() {
+        println!(
+            "hits: none match focus[{}]; pass --focus all to show every hit",
+            focus_label(focus_mode)
+        );
+        return;
+    }
+    let shown = filtered.len().min(TEXT_MAX_HITS);
+    println!("hits (showing {shown} of {}):", filtered.len());
+    for (idx, hit) in filtered.iter().take(TEXT_MAX_HITS).enumerate() {
+        let hit = *hit;
         let mut tags: Vec<String> = vec![format!("{:?}", hit.kind), format!("{:?}", hit.language)];
         if hit.recent {
             tags.push("recent".to_string());
@@ -1731,9 +1814,10 @@ fn print_text_hits(hits: &[NavHit], refs_mode: RefsMode, show_refs: bool) {
             render_text_references(refs, refs_mode);
         }
     }
-    if hits.len() > TEXT_MAX_HITS {
-        println!("  … +{} more hits", hits.len() - TEXT_MAX_HITS);
+    if filtered.len() > TEXT_MAX_HITS {
+        println!("  … +{} more hits", filtered.len() - TEXT_MAX_HITS);
     }
+    emit_focus_notice(focus_mode, suppressed, |msg| println!("{msg}"));
 }
 
 fn render_text_references(references: &proto::NavReferences, mode: RefsMode) {
@@ -1770,6 +1854,194 @@ fn format_snippet_lines(snippet: &proto::TextSnippet) -> Vec<String> {
         rendered.push("... (truncated)".to_string());
     }
     rendered
+}
+
+fn resolve_focus_mode(requested: FocusMode, response: &proto::SearchResponse) -> FocusMode {
+    match requested {
+        FocusMode::Auto => infer_focus_mode(response),
+        other => other,
+    }
+}
+
+fn infer_focus_mode(response: &proto::SearchResponse) -> FocusMode {
+    if let Some(filters) = response.active_filters.as_ref() {
+        if filters.categories.contains(&FileCategory::Docs) {
+            return FocusMode::Docs;
+        }
+        if filters.categories.contains(&FileCategory::Tests) {
+            return FocusMode::Tests;
+        }
+        if filters.categories.contains(&FileCategory::Deps) {
+            return FocusMode::Deps;
+        }
+    }
+    if let Some(banner) = response.context_banner.as_ref()
+        && let Some(mode) = banner
+            .categories
+            .iter()
+            .max_by_key(|bucket| bucket.count)
+            .and_then(bucket_to_focus)
+        {
+            return mode;
+        }
+    infer_focus_from_hits(&response.hits)
+}
+
+fn bucket_to_focus(bucket: &ContextBucket) -> Option<FocusMode> {
+    if bucket.count < 3 {
+        return None;
+    }
+    match bucket.name.as_str() {
+        "docs" => Some(FocusMode::Docs),
+        "tests" => Some(FocusMode::Tests),
+        "deps" => Some(FocusMode::Deps),
+        _ => None,
+    }
+}
+
+fn infer_focus_from_hits(hits: &[NavHit]) -> FocusMode {
+    if hits.is_empty() {
+        return FocusMode::All;
+    }
+    let docs = count_hits_with_category(hits, FileCategory::Docs);
+    let tests = count_hits_with_category(hits, FileCategory::Tests);
+    let deps = count_hits_with_category(hits, FileCategory::Deps);
+    if docs >= 2 && docs >= tests && docs >= deps {
+        return FocusMode::Docs;
+    }
+    if tests >= 2 && tests > docs && tests >= deps {
+        return FocusMode::Tests;
+    }
+    if deps >= 2 && deps > docs && deps >= tests {
+        return FocusMode::Deps;
+    }
+    FocusMode::All
+}
+
+fn count_hits_with_category(hits: &[NavHit], category: FileCategory) -> usize {
+    hits.iter()
+        .filter(|hit| hit.categories.contains(&category))
+        .count()
+}
+
+fn filter_hits_for_focus(hits: &[NavHit], mode: FocusMode) -> (Vec<&NavHit>, usize) {
+    if matches!(mode, FocusMode::All | FocusMode::Auto) {
+        return (hits.iter().collect(), 0);
+    }
+    let mut filtered = Vec::with_capacity(hits.len());
+    let mut suppressed = 0;
+    for hit in hits {
+        if hit_matches_focus(hit, mode) {
+            filtered.push(hit);
+        } else {
+            suppressed += 1;
+        }
+    }
+    (filtered, suppressed)
+}
+
+fn filter_fallback_hits_for_focus(
+    hits: &[proto::FallbackHit],
+    mode: FocusMode,
+) -> (Vec<&proto::FallbackHit>, usize) {
+    if matches!(mode, FocusMode::All | FocusMode::Auto) {
+        return (hits.iter().collect(), 0);
+    }
+    let mut filtered = Vec::with_capacity(hits.len());
+    let mut suppressed = 0;
+    for hit in hits {
+        if fallback_hit_matches_focus(hit, mode) {
+            filtered.push(hit);
+        } else {
+            suppressed += 1;
+        }
+    }
+    (filtered, suppressed)
+}
+
+fn hit_matches_focus(hit: &NavHit, mode: FocusMode) -> bool {
+    match mode {
+        FocusMode::Code => !hit.categories.iter().any(|cat| {
+            matches!(
+                cat,
+                FileCategory::Docs | FileCategory::Tests | FileCategory::Deps
+            )
+        }),
+        FocusMode::Docs => {
+            hit.categories.contains(&FileCategory::Docs) || looks_like_docs_path(&hit.path)
+        }
+        FocusMode::Tests => {
+            hit.categories.contains(&FileCategory::Tests) || looks_like_tests_path(&hit.path)
+        }
+        FocusMode::Deps => {
+            hit.categories.contains(&FileCategory::Deps) || looks_like_deps_path(&hit.path)
+        }
+        FocusMode::All | FocusMode::Auto => true,
+    }
+}
+
+fn fallback_hit_matches_focus(hit: &proto::FallbackHit, mode: FocusMode) -> bool {
+    match mode {
+        FocusMode::Code => {
+            !(looks_like_docs_path(&hit.path)
+                || looks_like_tests_path(&hit.path)
+                || looks_like_deps_path(&hit.path))
+        }
+        FocusMode::Docs => looks_like_docs_path(&hit.path),
+        FocusMode::Tests => looks_like_tests_path(&hit.path),
+        FocusMode::Deps => looks_like_deps_path(&hit.path),
+        FocusMode::All | FocusMode::Auto => true,
+    }
+}
+
+fn looks_like_docs_path(path: &str) -> bool {
+    let lower = path.to_ascii_lowercase();
+    lower.contains("/docs/")
+        || lower.ends_with(".md")
+        || lower.ends_with(".rst")
+        || lower.ends_with(".adoc")
+}
+
+fn looks_like_tests_path(path: &str) -> bool {
+    let lower = path.to_ascii_lowercase();
+    lower.contains("/tests/")
+        || lower.contains("/test/")
+        || lower.ends_with("_test.rs")
+        || lower.ends_with("_tests.rs")
+        || lower.ends_with("_spec.rs")
+        || lower.contains("tests.")
+}
+
+fn looks_like_deps_path(path: &str) -> bool {
+    let lower = path.to_ascii_lowercase();
+    let lower_ref = lower.as_str();
+    let file = lower_ref.rsplit('/').next().unwrap_or(lower_ref);
+    matches!(
+        file,
+        "cargo.toml"
+            | "cargo.lock"
+            | "package.json"
+            | "pnpm-lock.yaml"
+            | "yarn.lock"
+            | "go.mod"
+            | "go.sum"
+            | "requirements.txt"
+            | "pyproject.toml"
+            | "gemfile"
+            | "gemfile.lock"
+            | "build.gradle"
+            | "build.gradle.kts"
+    )
+}
+
+fn emit_focus_notice<F: Fn(&str)>(mode: FocusMode, suppressed: usize, emit: F) {
+    if suppressed == 0 || matches!(mode, FocusMode::All | FocusMode::Auto) {
+        return;
+    }
+    emit(&format!(
+        "focus[{label}] hiding {suppressed} hits (use --focus all to show everything)",
+        label = focus_label(mode)
+    ));
 }
 
 fn print_atlas_node(node: &AtlasNode, depth: usize) {
@@ -1889,9 +2161,20 @@ fn format_atlas_hint_lines(hint: &proto::AtlasHint) -> Vec<String> {
     lines
 }
 
-fn print_text_fallback_hits(hits: &[proto::FallbackHit]) {
-    println!("fallback_hits ({} pending files):", hits.len());
-    for hit in hits {
+fn print_text_fallback_hits(hits: &[proto::FallbackHit], focus_mode: FocusMode) {
+    if hits.is_empty() {
+        return;
+    }
+    let (filtered, suppressed) = filter_fallback_hits_for_focus(hits, focus_mode);
+    if filtered.is_empty() {
+        println!(
+            "fallback_hits: none match focus[{}]; pass --focus all to inspect pending files",
+            focus_label(focus_mode)
+        );
+        return;
+    }
+    println!("fallback_hits ({} pending files):", filtered.len());
+    for hit in filtered {
         println!("  - {}:{} reason={}", hit.path, hit.line, hit.reason);
         if let Some(snippet) = &hit.context_snippet {
             for rendered in format_snippet_lines(snippet) {
@@ -1901,6 +2184,7 @@ fn print_text_fallback_hits(hits: &[proto::FallbackHit]) {
             println!("        {}", hit.preview.trim());
         }
     }
+    emit_focus_notice(focus_mode, suppressed, |msg| println!("{msg}"));
 }
 
 fn format_reason_summary(gaps: &[proto::CoverageGap], label: &str) -> Option<String> {
@@ -1972,6 +2256,7 @@ mod tests {
             project_root: None,
             no_wait: false,
             diagnostics_only: false,
+            focus: FocusMode::Auto,
             output_format: OutputFormat::Json,
         }
     }
@@ -1995,6 +2280,86 @@ mod tests {
         assert_eq!(args.refs_role.as_deref(), Some("definitions"));
         assert_eq!(args.help_symbol.as_deref(), Some("SessionManager"));
         assert_eq!(args.profiles, vec![SearchProfile::Symbols]);
+    }
+
+    #[test]
+    fn filter_hits_respects_focus_docs() {
+        let hits = vec![
+            sample_hit("docs/guide.md", vec![FileCategory::Docs]),
+            sample_hit("src/lib.rs", vec![FileCategory::Source]),
+        ];
+        let (filtered, suppressed) = filter_hits_for_focus(&hits, FocusMode::Docs);
+        assert_eq!(filtered.len(), 1);
+        assert_eq!(suppressed, 1);
+        assert!(filtered[0].path.contains("docs"));
+    }
+
+    #[test]
+    fn resolve_focus_prefers_active_filters() {
+        let mut response = empty_response();
+        response
+            .hits
+            .push(sample_hit("docs/guide.md", vec![FileCategory::Docs]));
+        response.active_filters = Some(proto::ActiveFilters {
+            categories: vec![FileCategory::Docs],
+            ..Default::default()
+        });
+        let mode = resolve_focus_mode(FocusMode::Auto, &response);
+        assert_eq!(mode, FocusMode::Docs);
+    }
+
+    fn sample_hit(path: &str, categories: Vec<FileCategory>) -> NavHit {
+        NavHit {
+            id: path.to_string(),
+            path: path.to_string(),
+            line: 1,
+            kind: proto::SymbolKind::Function,
+            language: proto::Language::Rust,
+            module: None,
+            layer: None,
+            categories,
+            recent: false,
+            preview: String::new(),
+            score: 1.0,
+            references: None,
+            help: None,
+            context_snippet: None,
+            owners: Vec::new(),
+            lint_suppressions: 0,
+            freshness_days: 0,
+            attention_density: 0,
+            lint_density: 0,
+        }
+    }
+
+    fn empty_response() -> proto::SearchResponse {
+        proto::SearchResponse {
+            query_id: None,
+            hits: Vec::new(),
+            index: empty_index_status(),
+            stats: None,
+            hints: Vec::new(),
+            error: None,
+            diagnostics: None,
+            fallback_hits: Vec::new(),
+            atlas_hint: None,
+            active_filters: None,
+            context_banner: None,
+        }
+    }
+
+    fn empty_index_status() -> proto::IndexStatus {
+        proto::IndexStatus {
+            state: proto::IndexState::Ready,
+            symbols: 0,
+            files: 0,
+            updated_at: None,
+            progress: None,
+            schema_version: proto::PROTOCOL_VERSION,
+            notice: None,
+            auto_indexing: true,
+            coverage: None,
+        }
     }
 }
 

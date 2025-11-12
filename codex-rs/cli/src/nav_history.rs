@@ -1,3 +1,4 @@
+use crate::code_nav::FocusMode;
 use crate::code_nav::OutputFormat;
 use crate::code_nav::RefsMode;
 use anyhow::Context;
@@ -225,6 +226,7 @@ pub struct HistoryReplay {
     pub refs_mode: RefsMode,
     pub show_refs: bool,
     pub diagnostics_only: bool,
+    pub focus_mode: FocusMode,
 }
 
 impl HistoryReplay {
@@ -234,6 +236,7 @@ impl HistoryReplay {
         refs_mode: RefsMode,
         show_refs: bool,
         diagnostics_only: bool,
+        focus_mode: FocusMode,
     ) -> Self {
         Self {
             args,
@@ -241,6 +244,7 @@ impl HistoryReplay {
             refs_mode,
             show_refs,
             diagnostics_only,
+            focus_mode,
         }
     }
 }
@@ -252,6 +256,7 @@ struct RecordedQuery {
     refs_mode: RefsMode,
     show_refs: bool,
     diagnostics_only: bool,
+    focus_mode: FocusMode,
 }
 
 impl RecordedQuery {
@@ -262,6 +267,7 @@ impl RecordedQuery {
             refs_mode: replay.refs_mode,
             show_refs: replay.show_refs,
             diagnostics_only: replay.diagnostics_only,
+            focus_mode: replay.focus_mode,
         }
     }
 
@@ -272,6 +278,7 @@ impl RecordedQuery {
             refs_mode: self.refs_mode,
             show_refs: self.show_refs,
             diagnostics_only: self.diagnostics_only,
+            focus_mode: self.focus_mode,
         }
     }
 }
@@ -429,7 +436,14 @@ mod tests {
         args.languages = vec!["rust".to_string()];
         args.only_tests = Some(true);
         args.profiles = vec![SearchProfile::Focused];
-        HistoryReplay::new(args, OutputFormat::Text, RefsMode::All, true, false)
+        HistoryReplay::new(
+            args,
+            OutputFormat::Text,
+            RefsMode::All,
+            true,
+            false,
+            FocusMode::Docs,
+        )
     }
 
     #[test]
@@ -462,6 +476,10 @@ mod tests {
         assert!(rows[1].filters.is_some());
         assert!(rows[0].replay.is_none());
         assert_eq!(rows[1].hits.len(), 1);
+        assert_eq!(
+            rows[1].replay.as_ref().expect("replay metadata").focus_mode,
+            FocusMode::Docs
+        );
     }
 
     #[test]
@@ -480,6 +498,7 @@ mod tests {
         let replayed = store.replay_pinned(0).unwrap().expect("replay");
         assert_eq!(replayed.output_format, OutputFormat::Text);
         assert_eq!(replayed.args.query.as_deref(), Some("fn sample"));
+        assert_eq!(replayed.focus_mode, FocusMode::Docs);
         store.unpin(0).unwrap();
         assert!(store.pinned().unwrap().is_empty());
     }
