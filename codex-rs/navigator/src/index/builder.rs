@@ -67,14 +67,21 @@ pub(crate) struct BuildArtifacts {
 pub struct IndexBuilder<'a> {
     root: &'a Path,
     recent: HashSet<String>,
+    churn: HashMap<String, u32>,
     filter: Arc<PathFilter>,
 }
 
 impl<'a> IndexBuilder<'a> {
-    pub fn new(root: &'a Path, recent: HashSet<String>, filter: Arc<PathFilter>) -> Self {
+    pub fn new(
+        root: &'a Path,
+        recent: HashSet<String>,
+        churn: HashMap<String, u32>,
+        filter: Arc<PathFilter>,
+    ) -> Self {
         Self {
             root,
             recent,
+            churn,
             filter,
         }
     }
@@ -205,6 +212,7 @@ impl<'a> IndexBuilder<'a> {
         let tokens = collect_tokens(content);
         let trigrams = collect_trigrams(content);
         let attention = count_attention_markers(content);
+        let churn = self.churn.get(rel_path).copied().unwrap_or(0);
         let recent = self.recent.contains(rel_path);
         let fingerprint = build_fingerprint(&metadata, &bytes);
 
@@ -234,6 +242,7 @@ impl<'a> IndexBuilder<'a> {
                 doc_summary: candidate.doc_summary,
                 dependencies: dependencies.clone(),
                 attention,
+                churn,
             });
         }
 
@@ -248,6 +257,7 @@ impl<'a> IndexBuilder<'a> {
                 trigrams,
                 line_count,
                 attention,
+                churn,
                 fingerprint,
             };
             return Ok(FileOutcome::IndexedTextOnly {
@@ -270,6 +280,7 @@ impl<'a> IndexBuilder<'a> {
             trigrams,
             line_count,
             attention,
+            churn,
             fingerprint,
         };
 
@@ -449,7 +460,7 @@ mod tests {
         fs::write(root.join("ignored_dir/lib.rs"), "pub fn hidden() {}\n").unwrap();
 
         let filter = Arc::new(PathFilter::new(root).unwrap());
-        let builder = IndexBuilder::new(root, HashSet::new(), filter);
+        let builder = IndexBuilder::new(root, HashSet::new(), HashMap::new(), filter);
         let snapshot = builder.build().unwrap().snapshot;
 
         assert!(snapshot.files.contains_key("src/lib.rs"));

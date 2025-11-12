@@ -33,6 +33,8 @@ pub struct SymbolRecord {
     pub dependencies: Vec<String>,
     #[serde(default)]
     pub attention: u32,
+    #[serde(default)]
+    pub churn: u32,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -71,6 +73,8 @@ pub struct FileEntry {
     pub line_count: u32,
     #[serde(default)]
     pub attention: u32,
+    #[serde(default)]
+    pub churn: u32,
     pub fingerprint: FileFingerprint,
 }
 

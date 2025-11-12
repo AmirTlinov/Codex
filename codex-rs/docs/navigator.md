@@ -94,6 +94,10 @@ agents.
   `--remove-lang <lang>`, `--no-tests|--no-docs|--no-deps` или `--no-recent`, и Navigator
   сам вернётся к ближайшему предку цепочки refine, пересчитает фильтры и обновит hits —
   без shelling‑out в `rg` и без знания исходного запроса.
+- Контекстное ранжирование уже учитывает git churn: мы сжимаем `git log --since=30.days` в
+  per-file score, нормализуем (clamp) и прибавляем к эвристике, поэтому горячие файлы
+  поднимаются выше даже при слабых fuzzy-совпадениях; attention (TODO/FIXME) остаётся
+  вторым усилителем «проблемных» мест.
 - The atlas is rebuilt every time the index snapshot changes, so both the tree view and the
   summary metrics stay in sync with coverage/recency signals surfaced in search results.
 

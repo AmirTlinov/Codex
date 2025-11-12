@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::collections::HashSet;
 use std::path::Path;
 use std::process::Command;
@@ -9,6 +10,14 @@ pub fn recent_paths(root: &Path) -> HashSet<String> {
         warn!("git status failed: {err:?}");
     }
     paths
+}
+
+pub fn churn_scores(root: &Path) -> HashMap<String, u32> {
+    let mut scores = HashMap::new();
+    if let Err(err) = collect_churn(root, &mut scores) {
+        warn!("git churn scan failed: {err:?}");
+    }
+    scores
 }
 
 fn collect_status(root: &Path, paths: &mut HashSet<String>) -> anyhow::Result<()> {
@@ -34,6 +43,29 @@ fn collect_status(root: &Path, paths: &mut HashSet<String>) -> anyhow::Result<()
             continue;
         }
         paths.insert(path.replace('\\', "/"));
+    }
+    Ok(())
+}
+
+fn collect_churn(root: &Path, scores: &mut HashMap<String, u32>) -> anyhow::Result<()> {
+    let output = Command::new("git")
+        .arg("log")
+        .arg("--since=30.days")
+        .arg("--name-only")
+        .arg("--pretty=format:")
+        .current_dir(root)
+        .output()?;
+    if !output.status.success() {
+        return Ok(());
+    }
+    for line in String::from_utf8_lossy(&output.stdout).lines() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        let normalized = trimmed.replace('\\', "/");
+        let counter = scores.entry(normalized).or_insert(0);
+        *counter = counter.saturating_add(1);
     }
     Ok(())
 }

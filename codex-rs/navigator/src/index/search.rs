@@ -41,6 +41,8 @@ const SUBSTRING_FALLBACK_BONUS: f32 = 60.0;
 const MAX_LITERAL_CANDIDATES: usize = 64;
 const MAX_LITERAL_PREVIEW: usize = 160;
 const MAX_LITERAL_MISSING_TRIGRAMS: usize = 8;
+const CHURN_WEIGHT: f32 = 2.5;
+const CHURN_MAX_BUCKET: u32 = 20;
 
 pub struct SearchComputation {
     pub hits: Vec<NavHit>,
@@ -446,6 +448,10 @@ fn heuristic_score(symbol: &SymbolRecord, query: Option<&str>) -> f32 {
         } else if symbol.preview.to_lowercase().contains(&q.to_lowercase()) {
             score += 5.0;
         }
+    }
+    if symbol.churn > 0 {
+        let churn = symbol.churn.min(CHURN_MAX_BUCKET) as f32;
+        score += churn * CHURN_WEIGHT;
     }
     score
 }
@@ -1124,6 +1130,7 @@ mod tests {
     use crate::proto::SearchFilters;
     use crate::proto::SearchRequest;
     use crate::proto::SymbolKind;
+    use std::collections::HashMap;
     use std::collections::HashSet;
     use std::sync::Arc;
     use tempfile::tempdir;
@@ -1147,7 +1154,7 @@ mod tests {
         .unwrap();
 
         let filter = Arc::new(PathFilter::new(root).unwrap());
-        let builder = IndexBuilder::new(root, HashSet::new(), filter);
+        let builder = IndexBuilder::new(root, HashSet::new(), HashMap::new(), filter);
         let snapshot = builder.build().unwrap().snapshot;
         assert_eq!(snapshot.files.len(), 2);
         let cache = QueryCache::new(root.join("cache"));
@@ -1184,7 +1191,7 @@ mod tests {
             .and_then(|_| std::fs::write(root.join("src/lib.rs"), "pub fn example() {}"))
             .unwrap();
         let filter = Arc::new(PathFilter::new(root).unwrap());
-        let builder = IndexBuilder::new(root, HashSet::new(), filter);
+        let builder = IndexBuilder::new(root, HashSet::new(), HashMap::new(), filter);
         let snapshot = builder.build().unwrap().snapshot;
         let cache = QueryCache::new(root.join("cache"));
 
@@ -1217,7 +1224,7 @@ mod tests {
         )
         .unwrap();
         let filter = Arc::new(PathFilter::new(root).unwrap());
-        let builder = IndexBuilder::new(root, HashSet::new(), filter);
+        let builder = IndexBuilder::new(root, HashSet::new(), HashMap::new(), filter);
         let snapshot = builder.build().unwrap().snapshot;
         assert_eq!(snapshot.symbols.len(), 0);
         let cache = QueryCache::new(root.join("cache"));
@@ -1255,7 +1262,7 @@ mod tests {
         std::fs::write(root.join("a/match.txt"), "literal scope needle").unwrap();
         std::fs::write(root.join("b/match.txt"), "literal scope needle").unwrap();
         let filter = Arc::new(PathFilter::new(root).unwrap());
-        let builder = IndexBuilder::new(root, HashSet::new(), filter);
+        let builder = IndexBuilder::new(root, HashSet::new(), HashMap::new(), filter);
         let snapshot = builder.build().unwrap().snapshot;
         let filters = SearchFilters {
             path_globs: vec!["a/**".to_string()],
@@ -1281,7 +1288,7 @@ mod tests {
         std::fs::create_dir_all(root.join("src")).unwrap();
         std::fs::write(root.join("src/short.txt"), "AI").unwrap();
         let filter = Arc::new(PathFilter::new(root).unwrap());
-        let builder = IndexBuilder::new(root, HashSet::new(), filter);
+        let builder = IndexBuilder::new(root, HashSet::new(), HashMap::new(), filter);
         let snapshot = builder.build().unwrap().snapshot;
         let cache = QueryCache::new(root.join("cache"));
         let request = SearchRequest {
@@ -1310,7 +1317,7 @@ mod tests {
         std::fs::write(root.join("src/needle.txt"), "scoped literal").unwrap();
         std::fs::write(root.join("docs/needle.txt"), "scoped literal").unwrap();
         let filter = Arc::new(PathFilter::new(root).unwrap());
-        let builder = IndexBuilder::new(root, HashSet::new(), filter);
+        let builder = IndexBuilder::new(root, HashSet::new(), HashMap::new(), filter);
         let snapshot = builder.build().unwrap().snapshot;
         let cache = QueryCache::new(root.join("cache"));
         let request = SearchRequest {
@@ -1346,7 +1353,7 @@ mod tests {
         )
         .unwrap();
         let filter = Arc::new(PathFilter::new(root).unwrap());
-        let builder = IndexBuilder::new(root, HashSet::new(), filter);
+        let builder = IndexBuilder::new(root, HashSet::new(), HashMap::new(), filter);
         let snapshot = builder.build().unwrap().snapshot;
         let cache = QueryCache::new(root.join("cache"));
 
@@ -1373,7 +1380,7 @@ mod tests {
         std::fs::create_dir_all(root.join("src")).unwrap();
         std::fs::write(root.join("src/plain.txt"), "custom literal needle").unwrap();
         let filter = Arc::new(PathFilter::new(root).unwrap());
-        let builder = IndexBuilder::new(root, HashSet::new(), filter);
+        let builder = IndexBuilder::new(root, HashSet::new(), HashMap::new(), filter);
         let snapshot = builder.build().unwrap().snapshot;
         let cache = QueryCache::new(root.join("cache"));
 
@@ -1402,7 +1409,7 @@ mod tests {
         std::fs::create_dir_all(root.join("env")).unwrap();
         std::fs::write(root.join("env/payload.txt"), "SANDBOX=1").unwrap();
         let filter = Arc::new(PathFilter::new(root).unwrap());
-        let builder = IndexBuilder::new(root, HashSet::new(), filter);
+        let builder = IndexBuilder::new(root, HashSet::new(), HashMap::new(), filter);
         let snapshot = builder.build().unwrap().snapshot;
         let trigrams = literal_query_trigrams("SANDBOX=1");
         let (candidates, missing) = literal_candidate_paths(&snapshot, &trigrams);
@@ -1420,7 +1427,7 @@ mod tests {
         std::fs::create_dir_all(root.join("config")).unwrap();
         std::fs::write(root.join("config/env.toml"), "CODEX_SANDBOX=1\nOTHER_VAR=0").unwrap();
         let filter = Arc::new(PathFilter::new(root).unwrap());
-        let builder = IndexBuilder::new(root, HashSet::new(), filter);
+        let builder = IndexBuilder::new(root, HashSet::new(), HashMap::new(), filter);
         let snapshot = builder.build().unwrap().snapshot;
         let candidates =
             literal_token_candidates(&snapshot, "CODEX_SANDBOX").expect("token candidates missing");
@@ -1438,7 +1445,7 @@ mod tests {
             .and_then(|_| std::fs::write(root.join("src/lib.rs"), "pub fn sample() {}"))
             .unwrap();
         let filter = Arc::new(PathFilter::new(root).unwrap());
-        let builder = IndexBuilder::new(root, HashSet::new(), filter);
+        let builder = IndexBuilder::new(root, HashSet::new(), HashMap::new(), filter);
         let snapshot = builder.build().unwrap().snapshot;
         let cache = QueryCache::new(root.join("cache"));
 
@@ -1467,7 +1474,7 @@ mod tests {
         let mut recent = HashSet::new();
         recent.insert("src/recent.rs".to_string());
         let filter = Arc::new(PathFilter::new(root).unwrap());
-        let builder = IndexBuilder::new(root, recent, filter);
+        let builder = IndexBuilder::new(root, recent, HashMap::new(), filter);
         let snapshot = builder.build().unwrap().snapshot;
         let cache = QueryCache::new(root.join("cache"));
 
@@ -1501,6 +1508,35 @@ mod tests {
     }
 
     #[test]
+    fn churn_signal_increases_score() {
+        let mut symbol = sample_symbol();
+        let base = heuristic_score(&symbol, None);
+        symbol.churn = 12;
+        let boosted = heuristic_score(&symbol, None);
+        assert!(boosted > base);
+    }
+
+    fn sample_symbol() -> SymbolRecord {
+        SymbolRecord {
+            id: "symbol::sample#1".into(),
+            identifier: "sample".into(),
+            kind: SymbolKind::Function,
+            language: Language::Rust,
+            path: "src/lib.rs".into(),
+            range: crate::proto::Range { start: 1, end: 1 },
+            module: None,
+            layer: None,
+            categories: vec![FileCategory::Source],
+            recent: false,
+            preview: String::new(),
+            doc_summary: None,
+            dependencies: Vec::new(),
+            attention: 0,
+            churn: 0,
+        }
+    }
+
+    #[test]
     fn file_text_round_trip_preserves_content() {
         let input = "first line\nsecond line\nthird";
         let file_text = FileText::from_content(input).expect("build text snapshot");
@@ -1518,7 +1554,7 @@ mod tests {
         let file_path = root.join("src/value.rs");
         std::fs::write(&file_path, "const NEEDLE: &str = \"token\";").unwrap();
         let filter = Arc::new(PathFilter::new(root).unwrap());
-        let builder = IndexBuilder::new(root, HashSet::new(), filter);
+        let builder = IndexBuilder::new(root, HashSet::new(), HashMap::new(), filter);
         let snapshot = builder.build().unwrap().snapshot;
         std::fs::remove_file(&file_path).unwrap();
 
@@ -1551,7 +1587,7 @@ mod tests {
         )
         .unwrap();
         let filter = Arc::new(PathFilter::new(root).unwrap());
-        let builder = IndexBuilder::new(root, HashSet::new(), filter);
+        let builder = IndexBuilder::new(root, HashSet::new(), HashMap::new(), filter);
         let snapshot = builder.build().unwrap().snapshot;
 
         let literal = literal_search(&snapshot, root, "needle", 5, None, false);

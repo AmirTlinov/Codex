@@ -22,6 +22,11 @@ use crate::index::builder::SkippedFile;
 use crate::index::builder::relative_path;
 use crate::index::coverage::CoverageTracker;
 use crate::index::filter::PathFilter;
+use crate::index::git::churn_scores;
+use crate::index::git::recent_paths;
+use crate::index::model::FileEntry;
+use crate::index::model::IndexSnapshot;
+use crate::index::model::SymbolRecord;
 use crate::project::ProjectProfile;
 use crate::proto::ActiveFilters;
 use crate::proto::AtlasSnapshot;
@@ -46,10 +51,6 @@ use crate::proto::SymbolKind;
 use anyhow::Result;
 use anyhow::anyhow;
 use cache::QueryCache;
-use git::recent_paths;
-use model::FileEntry;
-use model::IndexSnapshot;
-use model::SymbolRecord;
 use notify::Config as NotifyConfig;
 use notify::Event;
 use notify::RecommendedWatcher;
@@ -470,8 +471,9 @@ impl IndexCoordinator {
 
         let root = self.inner.profile.project_root().to_path_buf();
         let recent = recent_paths(&root);
+        let churn = churn_scores(&root);
         let filter = self.inner.filter.clone();
-        let builder = IndexBuilder::new(root.as_path(), recent, filter.clone());
+        let builder = IndexBuilder::new(root.as_path(), recent, churn, filter.clone());
         let _guard = self.inner.build_lock.lock().await;
         let mut snapshot = self.inner.snapshot.write().await;
         let mut changed = false;
@@ -539,9 +541,10 @@ impl IndexCoordinator {
     async fn build_snapshot(&self) -> Result<BuildArtifacts> {
         let root = self.inner.profile.project_root().to_path_buf();
         let recent = recent_paths(&root);
+        let churn = churn_scores(&root);
         let filter = self.inner.filter.clone();
         let snapshot = tokio::task::spawn_blocking(move || {
-            IndexBuilder::new(root.as_path(), recent, filter).build()
+            IndexBuilder::new(root.as_path(), recent, churn, filter).build()
         })
         .await??;
         Ok(snapshot)
@@ -784,6 +787,7 @@ fn build_literal_symbol(literal: &LiteralSymbolId, file_entry: &FileEntry) -> Sy
         doc_summary: None,
         dependencies: Vec::new(),
         attention: file_entry.attention,
+        churn: file_entry.churn,
     }
 }
 
@@ -1162,6 +1166,7 @@ mod tests {
             trigrams: Vec::new(),
             line_count: 0,
             attention: 0,
+            churn: 0,
             fingerprint: FileFingerprint {
                 mtime: Some(0),
                 size: 0,
