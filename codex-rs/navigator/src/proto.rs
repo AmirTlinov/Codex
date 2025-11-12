@@ -729,6 +729,8 @@ pub struct SearchResponse {
     pub atlas_hint: Option<AtlasHint>,
     #[serde(default)]
     pub active_filters: Option<ActiveFilters>,
+    #[serde(default)]
+    pub context_banner: Option<ContextBanner>,
 }
 
 impl SearchResponse {
@@ -744,8 +746,24 @@ impl SearchResponse {
             fallback_hits: Vec::new(),
             atlas_hint: None,
             active_filters: None,
+            context_banner: None,
         }
     }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Default)]
+#[skip_serializing_none]
+pub struct ContextBanner {
+    #[serde(default)]
+    pub layers: Vec<ContextBucket>,
+    #[serde(default)]
+    pub categories: Vec<ContextBucket>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+pub struct ContextBucket {
+    pub name: String,
+    pub count: usize,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]

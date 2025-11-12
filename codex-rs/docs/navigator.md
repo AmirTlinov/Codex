@@ -56,6 +56,9 @@ agents.
    временными метриками (candidate load, matcher, hit assembly, references, facets,
    literal scan/fallback). Это тот же payload, что отдаёт `/v1/nav/profile`, поэтому можно
    либо читать JSON, либо просматривать компактную таблицу прямо в CLI.
+9. Каждый ответ выводит "context" блок: слои (core/tui/infra…) и категории (docs/tests/deps)
+   с количеством совпадений. Это помогает мгновенно понять распределение результатов и выбрать
+   следующий шаг (`codex navigator facet --path ...`, `--tests` и т.п.) без ручного подсчёта.
 
 ## Operational Notes
 

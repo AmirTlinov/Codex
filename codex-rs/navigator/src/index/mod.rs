@@ -38,17 +38,21 @@ use crate::index::model::SymbolRecord;
 use crate::project::ProjectProfile;
 use crate::proto::ActiveFilters;
 use crate::proto::AtlasSnapshot;
+use crate::proto::ContextBanner;
+use crate::proto::ContextBucket;
 use crate::proto::CoverageDiagnostics;
 use crate::proto::CoverageGap;
 use crate::proto::CoverageReason;
 use crate::proto::ErrorPayload;
 use crate::proto::FallbackHit;
+use crate::proto::FileCategory;
 use crate::proto::FilterOp;
 use crate::proto::HealthPanel;
 use crate::proto::HealthSummary;
 use crate::proto::IndexState;
 use crate::proto::IndexStatus;
 use crate::proto::IngestKind;
+use crate::proto::NavHit;
 use crate::proto::OpenRequest;
 use crate::proto::OpenResponse;
 use crate::proto::QueryId;
@@ -73,6 +77,7 @@ use notify::Watcher;
 use search::literal_fallback_allowed;
 use search::literal_match_from_contents;
 use search::run_search;
+use std::collections::HashMap;
 use std::collections::HashSet;
 use std::collections::VecDeque;
 use std::path::Path;
@@ -398,6 +403,7 @@ impl IndexCoordinator {
             guardrails.observe_search_stats(&stats_clone).await;
         });
         self.record_profile_sample(&request, &stats, query_id).await;
+        let context_banner = build_context_banner(&outcome.hits);
         Ok(SearchResponse {
             query_id,
             hits: outcome.hits,
@@ -409,6 +415,7 @@ impl IndexCoordinator {
             fallback_hits,
             atlas_hint,
             active_filters,
+            context_banner,
         })
     }
 
@@ -1240,6 +1247,61 @@ fn summarize_active_filters(filters: &SearchFilters) -> Option<ActiveFilters> {
     })
 }
 
+fn build_context_banner(hits: &[NavHit]) -> Option<ContextBanner> {
+    if hits.is_empty() {
+        return None;
+    }
+    let mut layer_counts: HashMap<String, usize> = HashMap::new();
+    let mut category_counts: HashMap<String, usize> = HashMap::new();
+    for hit in hits {
+        if let Some(layer) = &hit.layer
+            && !layer.is_empty()
+        {
+            *layer_counts.entry(layer.clone()).or_insert(0) += 1;
+        }
+        for category in &hit.categories {
+            if let Some(label) = context_category_label(category) {
+                *category_counts.entry(label.to_string()).or_insert(0) += 1;
+            }
+        }
+    }
+    let layers = buckets_from_map(layer_counts, 4);
+    let categories = buckets_from_map(category_counts, 3);
+    if layers.is_empty() && categories.is_empty() {
+        None
+    } else {
+        Some(ContextBanner { layers, categories })
+    }
+}
+
+fn context_category_label(category: &FileCategory) -> Option<&'static str> {
+    match category {
+        FileCategory::Docs => Some("docs"),
+        FileCategory::Tests => Some("tests"),
+        FileCategory::Deps => Some("deps"),
+        FileCategory::Source => None,
+    }
+}
+
+fn buckets_from_map(map: HashMap<String, usize>, limit: usize) -> Vec<ContextBucket> {
+    if map.is_empty() || limit == 0 {
+        return Vec::new();
+    }
+    let mut entries: Vec<_> = map.into_iter().collect();
+    entries.sort_by(|(name_a, count_a), (name_b, count_b)| {
+        count_b.cmp(count_a).then_with(|| {
+            name_a
+                .to_ascii_lowercase()
+                .cmp(&name_b.to_ascii_lowercase())
+        })
+    });
+    entries.truncate(limit);
+    entries
+        .into_iter()
+        .map(|(name, count)| ContextBucket { name, count })
+        .collect()
+}
+
 fn rewrite_inherited_filters(cache: &QueryCache, request: &mut SearchRequest) -> Result<()> {
     let Some(refine_id) = request.refine else {
         return Err(anyhow!("inherit_filters requires --from query id"));
@@ -1388,6 +1450,9 @@ mod tests {
     use crate::proto::CoverageReason;
     use crate::proto::FileCategory;
     use crate::proto::Language;
+    use crate::proto::NavHit;
+    use crate::proto::SymbolKind;
+    use std::collections::HashMap;
     use tempfile::tempdir;
 
     #[test]
@@ -1458,6 +1523,68 @@ mod tests {
         assert!(hit.preview.contains("needle"));
         assert!(hit.context_snippet.is_some(), "snippet missing");
         assert_eq!(hit.reason, reason);
+    }
+
+    #[test]
+    fn context_banner_summarizes_layers_and_categories() {
+        let hits = vec![
+            fake_hit("core", vec![FileCategory::Docs]),
+            fake_hit("core", vec![FileCategory::Docs]),
+            fake_hit("tui", vec![FileCategory::Tests]),
+            fake_hit("tui", vec![FileCategory::Tests]),
+            fake_hit("tui", vec![FileCategory::Tests]),
+            fake_hit("docs", vec![FileCategory::Docs]),
+            fake_hit("infra", vec![FileCategory::Docs]),
+        ];
+        assert_eq!(hits.len(), 7);
+        let banner = build_context_banner(&hits).expect("banner");
+        let layer_map: HashMap<_, _> = banner
+            .layers
+            .iter()
+            .map(|bucket| (bucket.name.as_str(), bucket.count))
+            .collect();
+        assert_eq!(layer_map.get("tui"), Some(&3));
+        assert_eq!(layer_map.get("core"), Some(&2));
+        assert_eq!(layer_map.get("docs"), Some(&1));
+        let expected_docs = hits
+            .iter()
+            .filter(|hit| hit.categories.contains(&FileCategory::Docs))
+            .count();
+        let expected_tests = hits
+            .iter()
+            .filter(|hit| hit.categories.contains(&FileCategory::Tests))
+            .count();
+        let category_map: HashMap<_, _> = banner
+            .categories
+            .iter()
+            .map(|bucket| (bucket.name.as_str(), bucket.count))
+            .collect();
+        assert_eq!(category_map.get("docs"), Some(&expected_docs));
+        assert_eq!(category_map.get("tests"), Some(&expected_tests));
+    }
+
+    fn fake_hit(layer: &str, categories: Vec<FileCategory>) -> NavHit {
+        NavHit {
+            id: format!("id-{layer}-{}", categories.len()),
+            path: format!("{layer}/file.rs"),
+            line: 1,
+            kind: SymbolKind::Function,
+            language: Language::Rust,
+            module: None,
+            layer: Some(layer.to_string()),
+            categories,
+            recent: false,
+            preview: "fn sample()".to_string(),
+            score: 1.0,
+            references: None,
+            help: None,
+            context_snippet: None,
+            owners: Vec::new(),
+            lint_suppressions: 0,
+            freshness_days: 1,
+            attention_density: 0,
+            lint_density: 0,
+        }
     }
 
     #[test]

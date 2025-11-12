@@ -20,6 +20,8 @@ use codex_navigator::plan_search_request;
 use codex_navigator::planner::NavigatorSearchArgs;
 use codex_navigator::proto::AtlasNode;
 use codex_navigator::proto::AtlasRequest;
+use codex_navigator::proto::ContextBanner;
+use codex_navigator::proto::ContextBucket;
 use codex_navigator::proto::CoverageReason;
 use codex_navigator::proto::DoctorReport;
 use codex_navigator::proto::DoctorWorkspace;
@@ -1237,6 +1239,9 @@ fn print_text_response(
     if let Some(stats) = &response.stats {
         print_text_stats(stats);
     }
+    if let Some(banner) = response.context_banner.as_ref() {
+        print_context_banner(banner);
+    }
     if !response.hints.is_empty() {
         println!("hints:");
         for hint in &response.hints {
@@ -1368,6 +1373,27 @@ fn print_facet_summary(stats: &SearchStats) {
     if !facets.attention.is_empty() {
         eprintln!("  attention: {}", format_facet_line(&facets.attention));
     }
+}
+
+fn print_context_banner(banner: &ContextBanner) {
+    if banner.layers.is_empty() && banner.categories.is_empty() {
+        return;
+    }
+    println!("context:");
+    if !banner.layers.is_empty() {
+        println!("  layers {}", format_bucket_summary(&banner.layers));
+    }
+    if !banner.categories.is_empty() {
+        println!("  categories {}", format_bucket_summary(&banner.categories));
+    }
+}
+
+fn format_bucket_summary(buckets: &[ContextBucket]) -> String {
+    buckets
+        .iter()
+        .map(|bucket| format!("{}({})", bucket.name, bucket.count))
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
 fn print_active_filters(filters: &proto::ActiveFilters) {
