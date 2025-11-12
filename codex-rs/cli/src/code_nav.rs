@@ -48,6 +48,7 @@ use serde::Deserialize;
 use serde::Serialize;
 use std::collections::HashMap;
 use std::env;
+use std::fs;
 use std::path::Path;
 use std::path::PathBuf;
 use time::OffsetDateTime;
@@ -773,7 +774,7 @@ pub async fn run_eval(mut cmd: EvalCommand) -> Result<()> {
             println!("  ✅ pass ({} hits)", hits.len());
         } else {
             for failure in &case_failures {
-                println!("  ❌ {}", failure);
+                println!("  ❌ {failure}");
                 failures.push(format!("{}: {failure}", case.name));
             }
             if cmd.fail_fast {
@@ -2392,9 +2393,7 @@ fn evaluate_case(case: &EvalCase, hits: &[NavHit]) -> Vec<String> {
                 if rank > expect.max_rank {
                     failures.push(format!(
                         "pattern '{}' found at rank {} (> {})",
-                        expect.pattern,
-                        rank,
-                        expect.max_rank
+                        expect.pattern, rank, expect.max_rank
                     ));
                 } else {
                     println!(
@@ -2412,10 +2411,7 @@ fn evaluate_case(case: &EvalCase, hits: &[NavHit]) -> Vec<String> {
 fn find_match_rank(hits: &[NavHit], pattern: &str) -> Option<usize> {
     let mut rank = None;
     for (idx, hit) in hits.iter().enumerate() {
-        if hit.id.contains(pattern)
-            || hit.path.contains(pattern)
-            || hit.preview.contains(pattern)
-        {
+        if hit.id.contains(pattern) || hit.path.contains(pattern) || hit.preview.contains(pattern) {
             rank = Some(idx + 1);
             break;
         }
@@ -2435,9 +2431,8 @@ fn write_eval_snapshot(dir: &Path, case: &EvalCase, hits: &[NavHit]) -> Result<(
         })
         .collect();
     let file = dir.join(format!("{}.json", sanitize_case_name(&case.name)));
-    fs::write(&file, serde_json::to_vec_pretty(&snapshot)?).with_context(|| {
-        format!("write snapshot {}", file.display())
-    })?;
+    fs::write(&file, serde_json::to_vec_pretty(&snapshot)?)
+        .with_context(|| format!("write snapshot {}", file.display()))?;
     Ok(())
 }
 
@@ -2445,13 +2440,12 @@ fn write_eval_snapshot(dir: &Path, case: &EvalCase, hits: &[NavHit]) -> Result<(
 struct EvalHitSnapshot {
     path: String,
     line: u32,
-    score: f64,
+    score: f32,
     preview: String,
 }
 
 fn sanitize_case_name(name: &str) -> String {
-    name
-        .chars()
+    name.chars()
         .map(|ch| if ch.is_alphanumeric() { ch } else { '_' })
         .collect()
 }
@@ -2482,6 +2476,18 @@ fn print_atlas_node(node: &AtlasNode, depth: usize) {
             extras.join(", ")
         );
     }
+    if node.churn_score > 0 {
+        println!("{indent}    churn: {}", node.churn_score);
+    }
+    if !node.top_owners.is_empty() {
+        let owners = node
+            .top_owners
+            .iter()
+            .map(|summary| format!("{}({})", summary.owner, summary.file_count))
+            .collect::<Vec<_>>()
+            .join(", ");
+        println!("{indent}    owners: {owners}");
+    }
     for child in &node.children {
         print_atlas_node(child, depth + 1);
     }
@@ -2507,6 +2513,18 @@ fn print_atlas_summary(focus: &AtlasFocus) {
         node.test_files,
         node.dep_files
     );
+    if node.churn_score > 0 {
+        println!("churn score: {}", node.churn_score);
+    }
+    if !node.top_owners.is_empty() {
+        let owners = node
+            .top_owners
+            .iter()
+            .map(|summary| format!("{}({})", summary.owner, summary.file_count))
+            .collect::<Vec<_>>()
+            .join(", ");
+        println!("owners: {owners}");
+    }
     if node.children.is_empty() {
         println!("children: none");
         return;

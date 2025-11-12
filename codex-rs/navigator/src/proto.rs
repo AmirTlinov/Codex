@@ -425,7 +425,17 @@ pub struct AtlasNode {
     #[serde(default)]
     pub recent_files: usize,
     #[serde(default)]
+    pub churn_score: u64,
+    #[serde(default)]
+    pub top_owners: Vec<AtlasOwnerSummary>,
+    #[serde(default)]
     pub children: Vec<AtlasNode>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+pub struct AtlasOwnerSummary {
+    pub owner: String,
+    pub file_count: usize,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Default)]

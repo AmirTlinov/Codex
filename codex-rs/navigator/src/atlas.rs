@@ -4,11 +4,13 @@ use crate::proto::AtlasHint;
 use crate::proto::AtlasHintSummary;
 use crate::proto::AtlasNode;
 use crate::proto::AtlasNodeKind;
+use crate::proto::AtlasOwnerSummary;
 use crate::proto::AtlasSnapshot;
 use crate::proto::FileCategory;
 use crate::proto::NavHit;
 use serde::Deserialize;
 use std::collections::BTreeMap;
+use std::collections::HashMap;
 use std::collections::HashSet;
 use std::fs;
 use std::path::Path;
@@ -32,7 +34,7 @@ struct WorkspaceMember {
     path: String,
 }
 
-#[derive(Default)]
+#[derive(Clone, Default)]
 struct AtlasMetrics {
     files: usize,
     symbols: usize,
@@ -41,12 +43,19 @@ struct AtlasMetrics {
     tests: usize,
     deps: usize,
     recent: usize,
+    churn_total: u64,
+    owner_counts: HashMap<String, usize>,
 }
 
 #[derive(Default)]
 struct NodeAccumulator {
     metrics: AtlasMetrics,
     children: BTreeMap<String, NodeAccumulator>,
+}
+
+struct BuiltNode {
+    node: AtlasNode,
+    metrics: AtlasMetrics,
 }
 
 mod focus {
@@ -184,24 +193,15 @@ fn build_snapshot(snapshot: &IndexSnapshot, project_root: &Path) -> AtlasSnapsho
         .to_string();
     let mut children = Vec::new();
     let mut seen_paths: HashSet<String> = HashSet::new();
+    let mut root_metrics = AtlasMetrics::default();
     for member in members {
-        if let Some(node) = build_crate_node(&member, snapshot) {
+        if let Some(built) = build_crate_node(&member, snapshot) {
             seen_paths.insert(member.path.clone());
-            children.push(node);
+            root_metrics.absorb(&built.metrics);
+            children.push(built.node);
         }
     }
     children.sort_by(|a, b| a.name.cmp(&b.name));
-
-    let mut root_acc = NodeAccumulator::default();
-    for child in &children {
-        root_acc.metrics.files += child.file_count;
-        root_acc.metrics.symbols += child.symbol_count;
-        root_acc.metrics.loc += child.loc;
-        root_acc.metrics.docs += child.doc_files;
-        root_acc.metrics.tests += child.test_files;
-        root_acc.metrics.deps += child.dep_files;
-        root_acc.metrics.recent += child.recent_files;
-    }
 
     if children.is_empty() {
         // fall back to a single synthetic node that summarizes every indexed file.
@@ -212,9 +212,10 @@ fn build_snapshot(snapshot: &IndexSnapshot, project_root: &Path) -> AtlasSnapsho
         if accumulator.metrics.files == 0 {
             return AtlasSnapshot::default();
         }
+        let built = accumulator.into_node(root_name, AtlasNodeKind::Workspace, None);
         return AtlasSnapshot {
             generated_at: Some(OffsetDateTime::now_utc()),
-            root: Some(accumulator.into_node(root_name, AtlasNodeKind::Workspace, None)),
+            root: Some(built.node),
         };
     }
 
@@ -222,13 +223,15 @@ fn build_snapshot(snapshot: &IndexSnapshot, project_root: &Path) -> AtlasSnapsho
         name: root_name,
         kind: AtlasNodeKind::Workspace,
         path: Some(String::from(".")),
-        file_count: root_acc.metrics.files,
-        symbol_count: root_acc.metrics.symbols,
-        loc: root_acc.metrics.loc,
-        doc_files: root_acc.metrics.docs,
-        test_files: root_acc.metrics.tests,
-        dep_files: root_acc.metrics.deps,
-        recent_files: root_acc.metrics.recent,
+        file_count: root_metrics.files,
+        symbol_count: root_metrics.symbols,
+        loc: root_metrics.loc,
+        doc_files: root_metrics.docs,
+        test_files: root_metrics.tests,
+        dep_files: root_metrics.deps,
+        recent_files: root_metrics.recent,
+        churn_score: root_metrics.churn_total,
+        top_owners: root_metrics.top_owners(3),
         children,
     };
 
@@ -238,7 +241,7 @@ fn build_snapshot(snapshot: &IndexSnapshot, project_root: &Path) -> AtlasSnapsho
     }
 }
 
-fn build_crate_node(member: &WorkspaceMember, snapshot: &IndexSnapshot) -> Option<AtlasNode> {
+fn build_crate_node(member: &WorkspaceMember, snapshot: &IndexSnapshot) -> Option<BuiltNode> {
     let prefix = format!("{}/", member.path.trim_end_matches('/'));
     let mut accumulator = NodeAccumulator::default();
     for (path, entry) in snapshot.files.iter() {
@@ -275,29 +278,34 @@ impl NodeAccumulator {
         }
     }
 
-    fn into_node(self, name: String, kind: AtlasNodeKind, path: Option<String>) -> AtlasNode {
-        let mut children = Vec::new();
-        for (segment, child) in self.children {
+    fn into_node(self, name: String, kind: AtlasNodeKind, path: Option<String>) -> BuiltNode {
+        let NodeAccumulator { metrics, children } = self;
+        let mut child_nodes = Vec::new();
+        for (segment, child) in children {
             let child_path = match &path {
                 Some(parent) if !parent.is_empty() => Some(format!("{parent}/{segment}")),
                 _ => Some(segment.clone()),
             };
-            children.push(child.into_node(segment, AtlasNodeKind::Module, child_path));
+            let built = child.into_node(segment, AtlasNodeKind::Module, child_path);
+            child_nodes.push(built.node);
         }
-        children.sort_by(|a, b| a.name.cmp(&b.name));
-        AtlasNode {
+        child_nodes.sort_by(|a, b| a.name.cmp(&b.name));
+        let node = AtlasNode {
             name,
             kind,
             path,
-            file_count: self.metrics.files,
-            symbol_count: self.metrics.symbols,
-            loc: self.metrics.loc,
-            doc_files: self.metrics.docs,
-            test_files: self.metrics.tests,
-            dep_files: self.metrics.deps,
-            recent_files: self.metrics.recent,
-            children,
-        }
+            file_count: metrics.files,
+            symbol_count: metrics.symbols,
+            loc: metrics.loc,
+            doc_files: metrics.docs,
+            test_files: metrics.tests,
+            dep_files: metrics.deps,
+            recent_files: metrics.recent,
+            churn_score: metrics.churn_total,
+            top_owners: metrics.top_owners(3),
+            children: child_nodes,
+        };
+        BuiltNode { node, metrics }
     }
 }
 
@@ -309,6 +317,15 @@ impl AtlasMetrics {
         if entry.recent {
             self.recent += 1;
         }
+        self.churn_total += entry.churn as u64;
+        let mut seen = HashSet::new();
+        for owner in &entry.owners {
+            let normalized = owner.trim();
+            if normalized.is_empty() || !seen.insert(normalized) {
+                continue;
+            }
+            *self.owner_counts.entry(normalized.to_string()).or_insert(0) += 1;
+        }
         for category in &entry.categories {
             match category {
                 FileCategory::Docs => self.docs += 1,
@@ -317,6 +334,42 @@ impl AtlasMetrics {
                 FileCategory::Source => {}
             }
         }
+    }
+
+    fn absorb(&mut self, other: &AtlasMetrics) {
+        self.files += other.files;
+        self.symbols += other.symbols;
+        self.loc += other.loc;
+        self.docs += other.docs;
+        self.tests += other.tests;
+        self.deps += other.deps;
+        self.recent += other.recent;
+        self.churn_total += other.churn_total;
+        for (owner, count) in &other.owner_counts {
+            *self.owner_counts.entry(owner.clone()).or_insert(0) += count;
+        }
+    }
+
+    fn top_owners(&self, limit: usize) -> Vec<AtlasOwnerSummary> {
+        if self.owner_counts.is_empty() || limit == 0 {
+            return Vec::new();
+        }
+        let mut entries: Vec<_> = self.owner_counts.iter().collect();
+        entries.sort_by(|(owner_a, count_a), (owner_b, count_b)| {
+            count_b.cmp(count_a).then_with(|| {
+                owner_a
+                    .to_ascii_lowercase()
+                    .cmp(&owner_b.to_ascii_lowercase())
+            })
+        });
+        entries
+            .into_iter()
+            .take(limit)
+            .map(|(owner, count)| AtlasOwnerSummary {
+                owner: owner.clone(),
+                file_count: *count,
+            })
+            .collect()
     }
 }
 
