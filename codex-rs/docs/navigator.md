@@ -130,9 +130,10 @@ agents.
   агентов/интеграций.
 - CLI запоминает последний успешный `navigator search` в
   `<CODEX_HOME>/navigator/<hash>/queries/history.json`. Команда `codex navigator facet` теперь по
-  умолчанию использует этот query_id, поэтому можно писать просто `codex navigator facet --lang
-  rust --tests`; явный `--from <id>` остался для редких случаев при переключении между сессиями.
-  Просмотреть последние (до 10) идентификаторов можно через `codex navigator history`.
+  умолчанию использует этот query_id (берёт запись `[0]`), поэтому достаточно `codex navigator facet
+  --lang rust`; явный `--from <id>` остался для редких случаев. Для повторного использования более
+  старых запросов используйте `--history-index N`. Просмотреть последние идентификаторы и активные
+  фильтры можно через `codex navigator history`.
 
 ## Streaming Diagnostics
 

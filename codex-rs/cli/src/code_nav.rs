@@ -1,3 +1,4 @@
+use crate::nav_history::HistoryItem;
 use crate::nav_history::QueryHistoryStore;
 use anyhow::Context;
 use anyhow::Result;
@@ -227,6 +228,10 @@ pub struct FacetCommand {
     #[arg(long = "from")]
     pub from: Option<Uuid>,
 
+    /// Select an entry from navigator history when --from is omitted (0 = most recent).
+    #[arg(long = "history-index", default_value_t = 0)]
+    pub history_index: usize,
+
     /// Optional project root override.
     #[arg(long = "project-root")]
     pub project_root: Option<PathBuf>,
@@ -343,19 +348,27 @@ pub async fn run_facet(cmd: FacetCommand) -> Result<()> {
     let client = build_client(cmd.project_root.clone()).await?;
     let history = QueryHistoryStore::new(client.queries_dir());
     let used_explicit = cmd.from.is_some();
-    let base_query = if let Some(id) = cmd.from {
-        id
+    let history_item = if let Some(id) = cmd.from {
+        (id, None)
     } else {
-        history
-            .last_query_id()
+        let item = history
+            .entry_at(cmd.history_index)
             .context("load navigator history")?
             .ok_or_else(|| {
-                anyhow!("no previous navigator search found; run `codex navigator` first")
-            })?
+                anyhow!(
+                    "history index {} not available; run `codex navigator` first",
+                    cmd.history_index
+                )
+            })?;
+        (item.query_id, item.filters)
     };
+    let (base_query, _prior_filters) = history_item;
     let mut args = facet_command_to_search_args(&cmd, base_query);
     if !used_explicit {
-        args.hints.push(format!("using last query id {base_query}"));
+        args.hints.push(format!(
+            "using history[{index}] query id {base_query}",
+            index = cmd.history_index
+        ));
     }
     let request = plan_search_request(args)?;
     execute_search(
@@ -377,11 +390,51 @@ pub async fn run_history(mut cmd: HistoryCommand) -> Result<()> {
         println!("no navigator history recorded yet");
         return Ok(());
     }
-    println!("recent navigator query ids:");
-    for item in rows {
-        println!("  {} ({}s)", item.query_id, item.recorded_at);
+    println!("recent navigator query ids (index → query_id):");
+    for (idx, item) in rows.into_iter().enumerate() {
+        let chips = format_history_filters(&item);
+        println!(
+            "  [{idx}] {} ({}s){}",
+            item.query_id, item.recorded_at, chips
+        );
     }
     Ok(())
+}
+
+fn format_history_filters(item: &HistoryItem) -> String {
+    let Some(filters) = item.filters.as_ref() else {
+        return String::new();
+    };
+    let mut chips = Vec::new();
+    if !filters.languages.is_empty() {
+        let langs = filters
+            .languages
+            .iter()
+            .map(language_label)
+            .collect::<Vec<_>>()
+            .join("|");
+        chips.push(format!("[lang={langs}]"));
+    }
+    if !filters.categories.is_empty() {
+        let cats = filters
+            .categories
+            .iter()
+            .map(category_label)
+            .collect::<Vec<_>>()
+            .join("|");
+        chips.push(format!("[cat={cats}]"));
+    }
+    if !filters.owners.is_empty() {
+        chips.push(format!("[owner={}]", filters.owners.join("|")));
+    }
+    if filters.recent_only {
+        chips.push("[recent]".to_string());
+    }
+    if chips.is_empty() {
+        String::new()
+    } else {
+        format!(" {}", chips.join(""))
+    }
 }
 
 pub async fn run_open(cmd: OpenCommand) -> Result<()> {

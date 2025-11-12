@@ -1,5 +1,6 @@
 use anyhow::Context;
 use anyhow::Result;
+use codex_navigator::proto::ActiveFilters;
 use codex_navigator::proto::QueryId;
 use codex_navigator::proto::SearchResponse;
 use serde::Deserialize;
@@ -36,6 +37,7 @@ impl QueryHistoryStore {
             QueryHistoryEntry {
                 query_id,
                 recorded_at: now_secs(),
+                filters: response.active_filters.clone(),
             },
         );
         history.recent.truncate(MAX_RECENT);
@@ -53,9 +55,19 @@ impl QueryHistoryStore {
             rows.push(HistoryItem {
                 query_id: entry.query_id,
                 recorded_at: entry.recorded_at,
+                filters: entry.filters.clone(),
             });
         }
         Ok(rows)
+    }
+
+    pub fn entry_at(&self, index: usize) -> Result<Option<HistoryItem>> {
+        let history = self.read()?;
+        Ok(history.recent.get(index).map(|entry| HistoryItem {
+            query_id: entry.query_id,
+            recorded_at: entry.recorded_at,
+            filters: entry.filters.clone(),
+        }))
     }
 
     fn read(&self) -> Result<QueryHistory> {
@@ -87,12 +99,15 @@ struct QueryHistory {
 struct QueryHistoryEntry {
     query_id: QueryId,
     recorded_at: u64,
+    #[serde(default)]
+    filters: Option<ActiveFilters>,
 }
 
 #[derive(Debug, Clone)]
 pub struct HistoryItem {
     pub query_id: QueryId,
     pub recorded_at: u64,
+    pub filters: Option<ActiveFilters>,
 }
 
 fn now_secs() -> u64 {
@@ -139,7 +154,15 @@ mod tests {
     fn history_round_trip() {
         let dir = tempdir().unwrap();
         let store = QueryHistoryStore::new(dir.path().to_path_buf());
-        let first = sample_response(QueryId::new_v4());
+        let mut first = sample_response(QueryId::new_v4());
+        first.active_filters = Some(ActiveFilters {
+            languages: Vec::new(),
+            categories: Vec::new(),
+            path_globs: Vec::new(),
+            file_substrings: Vec::new(),
+            owners: Vec::new(),
+            recent_only: false,
+        });
         store.record_response(&first).unwrap();
         let second = sample_response(QueryId::new_v4());
         store.record_response(&second).unwrap();
@@ -147,6 +170,7 @@ mod tests {
         assert_eq!(loaded, second.query_id.expect("second id"));
         let rows = store.recent(10).unwrap();
         assert_eq!(rows.len(), 2);
+        assert!(rows[1].filters.is_some());
     }
 
     #[test]
