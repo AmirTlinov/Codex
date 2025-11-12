@@ -19,7 +19,7 @@ This roadmap enumerates the concrete work required to turn Navigator into the pr
   1. **Domain extraction:** parse `Cargo.toml`, `package.json`, `docs/` structure to build a hierarchical taxonomy (crate → module → file).
      - ✅ Snapshot now stores per-file LOC counts and aggregates them through every node so summaries expose size + recency, not just counts.
   2. **Atlas API:** expose `/v1/nav/atlas` returning tree nodes with metadata (LOC, owners, churn, docs). Cache in snapshot.
-     - ✅ `/v1/nav/atlas` already includes LOC + doc/test/dep metrics; owners/churn remain TBD.
+     - ✅ `/v1/nav/atlas` теперь содержит LOC/recency + owners/churn/док/тест/dep и CLI выводит эти метрики.
   3. **Jump commands:** extend freeform parser with `atlas` verbs: `atlas summary core`, `atlas jump tui/history`.
      - ✅ `atlas summary` now available via CLI + freeform payloads; jump verb rewrites into a scoped search. Still need richer `jump` UX (breadcrumbs in planner, interactive chips).
   4. **UI surfacing:** show breadcrumbs + sibling modules in CLI outputs so users see where they are in the map.
