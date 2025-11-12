@@ -132,6 +132,7 @@ agents.
   `<CODEX_HOME>/navigator/<hash>/queries/history.json`. Команда `codex navigator facet` теперь по
   умолчанию использует этот query_id, поэтому можно писать просто `codex navigator facet --lang
   rust --tests`; явный `--from <id>` остался для редких случаев при переключении между сессиями.
+  Просмотреть последние (до 10) идентификаторов можно через `codex navigator history`.
 
 ## Streaming Diagnostics
 

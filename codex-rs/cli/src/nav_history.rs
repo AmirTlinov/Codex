@@ -46,6 +46,18 @@ impl QueryHistoryStore {
         Ok(self.read()?.last_query_id)
     }
 
+    pub fn recent(&self, limit: usize) -> Result<Vec<HistoryItem>> {
+        let history = self.read()?;
+        let mut rows = Vec::new();
+        for entry in history.recent.iter().take(limit) {
+            rows.push(HistoryItem {
+                query_id: entry.query_id,
+                recorded_at: entry.recorded_at,
+            });
+        }
+        Ok(rows)
+    }
+
     fn read(&self) -> Result<QueryHistory> {
         match fs::read(&self.path) {
             Ok(data) => serde_json::from_slice(&data).context("parse navigator query history"),
@@ -75,6 +87,12 @@ struct QueryHistory {
 struct QueryHistoryEntry {
     query_id: QueryId,
     recorded_at: u64,
+}
+
+#[derive(Debug, Clone)]
+pub struct HistoryItem {
+    pub query_id: QueryId,
+    pub recorded_at: u64,
 }
 
 fn now_secs() -> u64 {
@@ -127,6 +145,8 @@ mod tests {
         store.record_response(&second).unwrap();
         let loaded = store.last_query_id().unwrap().expect("history id");
         assert_eq!(loaded, second.query_id.expect("second id"));
+        let rows = store.recent(10).unwrap();
+        assert_eq!(rows.len(), 2);
     }
 
     #[test]

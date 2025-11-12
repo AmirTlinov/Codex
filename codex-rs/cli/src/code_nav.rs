@@ -128,6 +128,20 @@ pub struct NavCommand {
     pub output_format: OutputFormat,
 }
 
+#[derive(Debug, Parser)]
+pub struct HistoryCommand {
+    #[clap(skip)]
+    pub config_overrides: CliConfigOverrides,
+
+    /// Optional project root override.
+    #[arg(long = "project-root")]
+    pub project_root: Option<PathBuf>,
+
+    /// Limit the number of entries to display.
+    #[arg(long = "limit", default_value_t = 10)]
+    pub limit: u32,
+}
+
 #[derive(Copy, Clone, Debug, Default, ValueEnum)]
 pub enum OutputFormat {
     #[default]
@@ -304,6 +318,7 @@ pub enum NavigatorSubcommand {
     Doctor(DoctorCommand),
     Atlas(AtlasCommand),
     Facet(FacetCommand),
+    History(HistoryCommand),
 }
 
 pub async fn run_nav(cmd: NavCommand) -> Result<()> {
@@ -352,6 +367,21 @@ pub async fn run_facet(cmd: FacetCommand) -> Result<()> {
         cmd.diagnostics_only,
     )
     .await
+}
+
+pub async fn run_history(mut cmd: HistoryCommand) -> Result<()> {
+    let client = build_client(cmd.project_root.take()).await?;
+    let history = QueryHistoryStore::new(client.queries_dir());
+    let rows = history.recent(cmd.limit as usize)?;
+    if rows.is_empty() {
+        println!("no navigator history recorded yet");
+        return Ok(());
+    }
+    println!("recent navigator query ids:");
+    for item in rows {
+        println!("  {} ({}s)", item.query_id, item.recorded_at);
+    }
+    Ok(())
 }
 
 pub async fn run_open(cmd: OpenCommand) -> Result<()> {
