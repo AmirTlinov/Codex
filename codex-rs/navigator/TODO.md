@@ -77,7 +77,7 @@ This roadmap enumerates the concrete work required to turn Navigator into the pr
 
 - **Goal:** remove friction by surfacing next actions and automating common navigation playbooks.
 - **Milestones:**
-  1. **Command palette flows:** prebuilt macros like “audit toolchain”, “trace feature flag” that chain multiple searches.
+  1. ✅ **Command palette flows:** `codex navigator flow audit-toolchain|trace-feature-flag` запускает готовые цепочки, поддерживает `--input`, dry-run и наследует фокус/refs.
   2. ✅ **Context banners:** каждый ответ печатает блок `context:` (слои core/tui/... + категории docs/tests/deps) и показывает счётчики; CLI подсвечивает их рядом со stats.
   3. ✅ **Session memory:** history теперь хранит параметры поиска + превью хитов, `codex navigator repeat` повторяет любой запрос (включая закреплённые), а `codex navigator pin` позволяет закреплять/снимать и перечислять избранные цепочки.
   4. ✅ **Focus mode:** CLI `--focus` (auto/code/docs/tests/deps/all) фильтрует вывод, показывает suppressed-счётчики и сохраняется в history/repeat, так что шум от нецелевых категорий исчез.

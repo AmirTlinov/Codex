@@ -207,6 +207,40 @@ pub struct PinCommand {
     pub list: bool,
 }
 
+#[derive(Debug, Parser)]
+pub struct FlowCommand {
+    #[clap(skip)]
+    pub config_overrides: CliConfigOverrides,
+
+    /// Optional project root override.
+    #[arg(long = "project-root")]
+    pub project_root: Option<PathBuf>,
+
+    /// Which predefined flow to execute.
+    #[arg(value_enum)]
+    pub name: FlowName,
+
+    /// Optional flow-specific input (e.g., feature flag key).
+    #[arg(long = "input")]
+    pub input: Option<String>,
+
+    /// Only print the planned steps without running them.
+    #[arg(long = "dry-run")]
+    pub dry_run: bool,
+
+    #[arg(long = "format", value_enum, default_value_t = OutputFormat::Text)]
+    pub output_format: OutputFormat,
+
+    #[arg(long = "refs-mode", value_enum, default_value_t = RefsMode::All)]
+    pub refs_mode: RefsMode,
+
+    #[arg(long = "with-refs")]
+    pub with_refs: bool,
+
+    #[arg(long = "focus", value_enum, default_value_t = FocusMode::Auto)]
+    pub focus: FocusMode,
+}
+
 #[derive(Copy, Clone, Debug, Default, ValueEnum, Serialize, Deserialize, PartialEq, Eq)]
 pub enum OutputFormat {
     #[default]
@@ -222,8 +256,7 @@ pub enum RefsMode {
     Usages,
 }
 
-#[derive(Copy, Clone, Debug, ValueEnum, Serialize, Deserialize, PartialEq, Eq)]
-#[derive(Default)]
+#[derive(Copy, Clone, Debug, ValueEnum, Serialize, Deserialize, PartialEq, Eq, Default)]
 pub enum FocusMode {
     #[default]
     Auto,
@@ -234,6 +267,11 @@ pub enum FocusMode {
     Deps,
 }
 
+#[derive(Copy, Clone, Debug, ValueEnum, PartialEq, Eq)]
+pub enum FlowName {
+    AuditToolchain,
+    TraceFeatureFlag,
+}
 
 pub(crate) fn focus_label(mode: FocusMode) -> &'static str {
     match mode {
@@ -442,6 +480,7 @@ pub enum NavigatorSubcommand {
     History(HistoryCommand),
     Repeat(RepeatCommand),
     Pin(PinCommand),
+    Flow(FlowCommand),
     Profile(ProfileCommand),
 }
 
@@ -461,7 +500,7 @@ pub async fn run_nav(cmd: NavCommand) -> Result<()> {
         eprintln!("navigator.nav request: {request:#?}");
     }
     execute_search(
-        client,
+        &client,
         request,
         cmd.output_format,
         cmd.refs_mode,
@@ -509,7 +548,7 @@ pub async fn run_facet(cmd: FacetCommand) -> Result<()> {
     );
     let request = plan_search_request(args)?;
     execute_search(
-        client,
+        &client,
         request,
         cmd.output_format,
         cmd.refs_mode,
@@ -567,7 +606,7 @@ pub async fn run_repeat(mut cmd: RepeatCommand) -> Result<()> {
     }
     let request = plan_search_request(replay.args.clone())?;
     execute_search(
-        client,
+        &client,
         request,
         replay.output_format,
         replay.refs_mode,
@@ -617,6 +656,68 @@ pub async fn run_pin(mut cmd: PinCommand) -> Result<()> {
     println!("pinned history[{index}] → {}", item.query_id);
     if let Some(summary) = summarize_history_query(&item) {
         println!("  query: {summary}");
+    }
+    Ok(())
+}
+
+pub async fn run_flow(mut cmd: FlowCommand) -> Result<()> {
+    let client = build_client(cmd.project_root.take()).await?;
+    cmd.input = cmd.input.and_then(|raw| {
+        let trimmed = raw.trim();
+        if trimmed.is_empty() {
+            None
+        } else {
+            Some(trimmed.to_string())
+        }
+    });
+    let definition = flow_definition(cmd.name);
+    if definition.requires_input && cmd.input.is_none() {
+        return Err(anyhow!(
+            "flow '{}' requires --input <value>",
+            definition.display_name
+        ));
+    }
+    println!(
+        "flow: {} — {}",
+        definition.display_name, definition.description
+    );
+    if cmd.dry_run {
+        for (idx, step) in definition.steps.iter().enumerate() {
+            println!("  [{:>2}] {}", idx + 1, step.title);
+        }
+        return Ok(());
+    }
+    let invocation = FlowInvocation {
+        input: cmd.input.as_deref(),
+    };
+    for (idx, step) in definition.steps.iter().enumerate() {
+        println!(
+            "\n[step {}/{}] {}",
+            idx + 1,
+            definition.steps.len(),
+            step.title
+        );
+        let args = (step.build)(&invocation);
+        let request = plan_search_request(args)?;
+        let resolved_focus = if matches!(cmd.focus, FocusMode::Auto) {
+            step.focus
+        } else {
+            cmd.focus
+        };
+        let resolved_refs_mode = step.refs_mode.unwrap_or(cmd.refs_mode);
+        let show_refs = cmd.with_refs || step.with_refs || resolved_refs_mode != RefsMode::All;
+        let output_format = step.output_format.unwrap_or(cmd.output_format);
+        execute_search(
+            &client,
+            request,
+            output_format,
+            resolved_refs_mode,
+            show_refs,
+            false,
+            None,
+            resolved_focus,
+        )
+        .await?;
     }
     Ok(())
 }
@@ -1060,7 +1161,7 @@ pub async fn run_atlas(mut cmd: AtlasCommand) -> Result<()> {
 
 #[allow(clippy::too_many_arguments)]
 async fn execute_search(
-    client: NavigatorClient,
+    client: &NavigatorClient,
     request: proto::SearchRequest,
     output_format: OutputFormat,
     refs_mode: RefsMode,
@@ -1881,9 +1982,9 @@ fn infer_focus_mode(response: &proto::SearchResponse) -> FocusMode {
             .iter()
             .max_by_key(|bucket| bucket.count)
             .and_then(bucket_to_focus)
-        {
-            return mode;
-        }
+    {
+        return mode;
+    }
     infer_focus_from_hits(&response.hits)
 }
 
@@ -2042,6 +2143,126 @@ fn emit_focus_notice<F: Fn(&str)>(mode: FocusMode, suppressed: usize, emit: F) {
         "focus[{label}] hiding {suppressed} hits (use --focus all to show everything)",
         label = focus_label(mode)
     ));
+}
+
+struct FlowDefinition {
+    display_name: &'static str,
+    description: &'static str,
+    requires_input: bool,
+    steps: &'static [FlowStep],
+}
+
+struct FlowStep {
+    title: &'static str,
+    build: fn(&FlowInvocation) -> NavigatorSearchArgs,
+    focus: FocusMode,
+    refs_mode: Option<RefsMode>,
+    with_refs: bool,
+    output_format: Option<OutputFormat>,
+}
+
+struct FlowInvocation<'a> {
+    input: Option<&'a str>,
+}
+
+impl<'a> FlowInvocation<'a> {
+    fn required_input(&self, flow: FlowName) -> &'a str {
+        self.input
+            .unwrap_or_else(|| panic!("flow {flow:?} requires --input but none provided"))
+    }
+}
+
+const AUDIT_TOOLCHAIN_STEPS: &[FlowStep] = &[
+    FlowStep {
+        title: "Scan rust-toolchain manifests",
+        build: build_toolchain_manifest_step,
+        focus: FocusMode::Deps,
+        refs_mode: None,
+        with_refs: false,
+        output_format: Some(OutputFormat::Text),
+    },
+    FlowStep {
+        title: "Review toolchain documentation",
+        build: build_toolchain_docs_step,
+        focus: FocusMode::Docs,
+        refs_mode: None,
+        with_refs: false,
+        output_format: Some(OutputFormat::Text),
+    },
+];
+
+const TRACE_FEATURE_FLAG_STEPS: &[FlowStep] = &[
+    FlowStep {
+        title: "Locate flag definition",
+        build: build_flag_definition_step,
+        focus: FocusMode::Docs,
+        refs_mode: Some(RefsMode::Definitions),
+        with_refs: false,
+        output_format: Some(OutputFormat::Text),
+    },
+    FlowStep {
+        title: "Trace flag usage in code",
+        build: build_flag_usage_step,
+        focus: FocusMode::Code,
+        refs_mode: Some(RefsMode::All),
+        with_refs: true,
+        output_format: Some(OutputFormat::Text),
+    },
+];
+
+const AUDIT_TOOLCHAIN_DEF: FlowDefinition = FlowDefinition {
+    display_name: "Audit Toolchain",
+    description: "Walk through rust-toolchain manifests and documentation to verify pinned toolchains",
+    requires_input: false,
+    steps: AUDIT_TOOLCHAIN_STEPS,
+};
+
+const TRACE_FEATURE_FLAG_DEF: FlowDefinition = FlowDefinition {
+    display_name: "Trace Feature Flag",
+    description: "Follow a feature flag from definition through code references",
+    requires_input: true,
+    steps: TRACE_FEATURE_FLAG_STEPS,
+};
+
+fn flow_definition(name: FlowName) -> &'static FlowDefinition {
+    match name {
+        FlowName::AuditToolchain => &AUDIT_TOOLCHAIN_DEF,
+        FlowName::TraceFeatureFlag => &TRACE_FEATURE_FLAG_DEF,
+    }
+}
+
+fn build_toolchain_manifest_step(_: &FlowInvocation) -> NavigatorSearchArgs {
+    let mut args = NavigatorSearchArgs::default();
+    args.query = Some("rust-toolchain OR toolchain override".to_string());
+    args.file_substrings = vec!["rust-toolchain".to_string()];
+    args.limit = Some(40);
+    args
+}
+
+fn build_toolchain_docs_step(_: &FlowInvocation) -> NavigatorSearchArgs {
+    let mut args = NavigatorSearchArgs::default();
+    args.query = Some("toolchain profile OR channel".to_string());
+    args.only_docs = Some(true);
+    args.limit = Some(40);
+    args
+}
+
+fn build_flag_definition_step(inv: &FlowInvocation) -> NavigatorSearchArgs {
+    let token = inv.required_input(FlowName::TraceFeatureFlag);
+    let mut args = NavigatorSearchArgs::default();
+    args.query = Some(format!("{token} feature flag"));
+    args.only_docs = Some(true);
+    args.limit = Some(40);
+    args
+}
+
+fn build_flag_usage_step(inv: &FlowInvocation) -> NavigatorSearchArgs {
+    let token = inv.required_input(FlowName::TraceFeatureFlag);
+    let mut args = NavigatorSearchArgs::default();
+    args.query = Some(token.to_string());
+    args.limit = Some(60);
+    args.with_refs = Some(true);
+    args
 }
 
 fn print_atlas_node(node: &AtlasNode, depth: usize) {

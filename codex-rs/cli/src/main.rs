@@ -18,6 +18,7 @@ use codex_cli::code_nav::run_atlas;
 use codex_cli::code_nav::run_daemon_cmd;
 use codex_cli::code_nav::run_doctor;
 use codex_cli::code_nav::run_facet;
+use codex_cli::code_nav::run_flow;
 use codex_cli::code_nav::run_history;
 use codex_cli::code_nav::run_nav;
 use codex_cli::code_nav::run_open;
@@ -465,6 +466,13 @@ async fn cli_main(codex_linux_sandbox_exe: Option<PathBuf>) -> anyhow::Result<()
                         navigator_cli.config_overrides.clone(),
                     );
                     run_pin(pin_cli).await?;
+                }
+                NavigatorSubcommand::Flow(mut flow_cli) => {
+                    prepend_config_flags(
+                        &mut flow_cli.config_overrides,
+                        navigator_cli.config_overrides.clone(),
+                    );
+                    run_flow(flow_cli).await?;
                 }
                 NavigatorSubcommand::Profile(mut profile_cli) => {
                     prepend_config_flags(
