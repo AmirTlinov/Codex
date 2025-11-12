@@ -137,6 +137,10 @@ agents.
   Во избежание шума события дросселируются таймером `NAVIGATOR_GUARDRAIL_COOLDOWN_SECS` (300 с по
   умолчанию) и отдельным 60‑секундным cooldown для slow-query. Это закрывает пункт 5.3 roadmap и
   позволяет получать внешние оповещения без опроса Doctor.
+- Self-heal: если индекс упал в состояние Failed, либо в coverage накапливается >`NAVIGATOR_SELF_HEAL_ERROR_LIMIT`
+  ошибок или >`NAVIGATOR_SELF_HEAL_PENDING_LIMIT` ожидающих файлов, координатор автоматически запускает
+  `rebuild_all` (не чаще, чем раз в `NAVIGATOR_SELF_HEAL_COOLDOWN_SECS`, 15 мин по умолчанию). Это
+  значит, что большинство “залипших” индексов восстанавливаются без ручного `codex navigator daemon`.
 - `stats.facets` теперь содержит новые бакеты `freshness` ("0-1d", "2-3d", "4-7d", "8-30d",
   "31-90d", "old") и `attention` ("calm", "low", "medium", "hot"). CLI выводит их в блоке
   `facets:` сразу после languages/categories, так что можно моментально понять, насколько свежи и

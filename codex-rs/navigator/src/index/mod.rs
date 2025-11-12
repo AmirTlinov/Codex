@@ -38,6 +38,7 @@ use crate::index::model::SymbolRecord;
 use crate::project::ProjectProfile;
 use crate::proto::ActiveFilters;
 use crate::proto::AtlasSnapshot;
+use crate::proto::CoverageDiagnostics;
 use crate::proto::CoverageGap;
 use crate::proto::CoverageReason;
 use crate::proto::ErrorPayload;
@@ -93,6 +94,7 @@ use tokio::time::Sleep;
 use tokio::time::sleep;
 use tokio_util::sync::CancellationToken;
 use tracing::error;
+use tracing::info;
 use tracing::warn;
 
 #[derive(Clone)]
@@ -111,6 +113,8 @@ struct Inner {
     coverage: Arc<CoverageTracker>,
     health: Arc<HealthStore>,
     guardrails: Arc<GuardrailEmitter>,
+    self_heal: SelfHealPolicy,
+    self_heal_state: Mutex<Option<Instant>>,
     shutdown: CancellationToken,
 }
 
@@ -131,6 +135,17 @@ const SNIPPET_MAX_BYTES: usize = 8 * 1024;
 const COVERAGE_LIMIT: usize = 32;
 const FALLBACK_MAX_FILE_BYTES: usize = 512 * 1024;
 const LITERAL_PENDING_SAMPLE: usize = 8;
+const SELF_HEAL_PENDING_LIMIT: usize = 96;
+const SELF_HEAL_ERROR_LIMIT: usize = 4;
+const SELF_HEAL_COOLDOWN_SECS: u64 = 900;
+
+#[derive(Clone)]
+struct SelfHealPolicy {
+    enabled: bool,
+    pending_limit: usize,
+    error_limit: usize,
+    cooldown: Duration,
+}
 
 impl IndexCoordinator {
     pub fn cancel_background(&self) {
@@ -232,6 +247,35 @@ impl IndexCoordinator {
             guardrail_latency,
             guardrail_cooldown,
         ));
+        let self_heal_enabled = std::env::var("NAVIGATOR_SELF_HEAL_ENABLED")
+            .ok()
+            .map(|value| value.trim().to_ascii_lowercase())
+            .and_then(|value| match value.as_str() {
+                "0" | "false" | "off" => Some(false),
+                "1" | "true" | "on" => Some(true),
+                _ => None,
+            })
+            .unwrap_or(true);
+        let self_heal_pending_limit = std::env::var("NAVIGATOR_SELF_HEAL_PENDING_LIMIT")
+            .ok()
+            .and_then(|value| value.parse::<usize>().ok())
+            .filter(|value| *value > 0)
+            .unwrap_or(SELF_HEAL_PENDING_LIMIT);
+        let self_heal_error_limit = std::env::var("NAVIGATOR_SELF_HEAL_ERROR_LIMIT")
+            .ok()
+            .and_then(|value| value.parse::<usize>().ok())
+            .unwrap_or(SELF_HEAL_ERROR_LIMIT);
+        let self_heal_cooldown = std::env::var("NAVIGATOR_SELF_HEAL_COOLDOWN_SECS")
+            .ok()
+            .and_then(|value| value.parse::<u64>().ok())
+            .map(Duration::from_secs)
+            .unwrap_or(Duration::from_secs(SELF_HEAL_COOLDOWN_SECS));
+        let self_heal = SelfHealPolicy {
+            enabled: self_heal_enabled,
+            pending_limit: self_heal_pending_limit,
+            error_limit: self_heal_error_limit,
+            cooldown: self_heal_cooldown,
+        };
         let auto_indexing_flag = Arc::new(AtomicBool::new(auto_indexing));
         let shutdown = CancellationToken::new();
         let inner = Arc::new(Inner {
@@ -245,6 +289,8 @@ impl IndexCoordinator {
             coverage: Arc::new(CoverageTracker::new(Some(COVERAGE_LIMIT))),
             health,
             guardrails,
+            self_heal,
+            self_heal_state: Mutex::new(None),
             shutdown,
         });
         let coordinator = Self { inner };
@@ -422,6 +468,7 @@ impl IndexCoordinator {
             .take(8)
             .collect();
         let health = self.inner.health.summary(&coverage).await;
+        self.maybe_trigger_self_heal(&status, &coverage).await;
         let guardrails = self.inner.guardrails.clone();
         let health_clone = health.clone();
         let coverage_clone = coverage.clone();
@@ -437,6 +484,36 @@ impl IndexCoordinator {
             pending_literals,
             health: Some(health),
         }
+    }
+
+    async fn maybe_trigger_self_heal(&self, status: &IndexStatus, coverage: &CoverageDiagnostics) {
+        if !self.inner.self_heal.enabled {
+            return;
+        }
+        let unhealthy = matches!(status.state, IndexState::Failed)
+            || coverage.errors.len() > self.inner.self_heal.error_limit
+            || coverage.pending.len() > self.inner.self_heal.pending_limit;
+        if !unhealthy {
+            return;
+        }
+        let mut guard = self.inner.self_heal_state.lock().await;
+        if guard
+            .map(|instant| instant.elapsed() < self.inner.self_heal.cooldown)
+            .unwrap_or(false)
+        {
+            return;
+        }
+        *guard = Some(Instant::now());
+        drop(guard);
+        let this = self.clone();
+        tokio::spawn(async move {
+            info!("navigator self-heal triggered");
+            if let Err(err) = this.rebuild_all().await {
+                warn!("navigator self-heal rebuild failed: {err:?}");
+            } else {
+                info!("navigator self-heal rebuild completed");
+            }
+        });
     }
 
     pub async fn health_panel(&self) -> HealthPanel {
