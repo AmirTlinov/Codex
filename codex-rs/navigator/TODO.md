@@ -67,9 +67,9 @@ This roadmap enumerates the concrete work required to turn Navigator into the pr
 
 - **Goal:** give immediate insight into where time is spent (cache hit, matcher, literal scan, HTTP).
 - **Milestones:**
-  1. **Profiling hooks:** record per-stage timings inside `run_search` and embed in `SearchStats`.
-  2. **`/profiler` endpoint:** stream aggregated timings for last _N_ queries; support flamegraph export.
-  3. **CLI view:** add `navigator profile last` command showing stage breakdown + bottleneck hints.
+  1. ✅ **Profiling hooks:** `run_search` / `run_text_search` теперь собирают тайминги (candidate load, matcher, hit assembly, references, facets, literal scan/fallback) и кладут их в `stats.stages`.
+  2. ✅ **`/profiler` endpoint:** `/v1/nav/profile` возвращает последние _N_ сэмплов (query_id, урезанный запрос, тайминги, cache hit/literal flags) для любого workspace.
+  3. ✅ **CLI view:** `codex navigator profile --limit N [--json]` печатает эти же сэмплы и подсвечивает “виноватые” стадии, так что bottlenecks видны без ручных логов.
   4. **Optimization backlog:** use profiler data to prioritize hotspots (matching, glob filters, IO) and track regressions.
 - **Success criteria:** performance regressions get detected within one commit; engineers can self-serve bottleneck analysis.
 

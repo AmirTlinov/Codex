@@ -346,6 +346,8 @@ pub struct SearchStats {
     pub facets: Option<FacetSummary>,
     #[serde(default)]
     pub text_mode: bool,
+    #[serde(default)]
+    pub stages: Vec<SearchStageTiming>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Default)]
@@ -472,6 +474,24 @@ pub struct CoverageDiagnostics {
     pub errors: Vec<CoverageGap>,
 }
 
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum SearchStage {
+    CandidateLoad,
+    Matcher,
+    HitAssembly,
+    References,
+    Facets,
+    LiteralScan,
+    LiteralFallback,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+pub struct SearchStageTiming {
+    pub stage: SearchStage,
+    pub duration_ms: u64,
+}
+
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum IngestKind {
@@ -558,6 +578,38 @@ pub struct HealthSummary {
     pub risk: HealthRisk,
     #[serde(default)]
     pub issues: Vec<HealthIssue>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+pub struct ProfileRequest {
+    pub schema_version: u32,
+    #[serde(default)]
+    pub project_root: Option<String>,
+    #[serde(default)]
+    pub limit: Option<usize>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Default)]
+pub struct ProfileResponse {
+    #[serde(default)]
+    pub samples: Vec<SearchProfileSample>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+#[skip_serializing_none]
+pub struct SearchProfileSample {
+    #[serde(default)]
+    pub query_id: Option<QueryId>,
+    #[serde(default)]
+    pub query: Option<String>,
+    pub took_ms: u64,
+    pub candidate_size: usize,
+    pub cache_hit: bool,
+    pub literal_fallback: bool,
+    pub text_mode: bool,
+    pub timestamp: OffsetDateTime,
+    #[serde(default)]
+    pub stages: Vec<SearchStageTiming>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, Hash)]
@@ -829,6 +881,7 @@ mod tests {
             literal_pending_paths: None,
             facets: None,
             text_mode: false,
+            stages: Vec::new(),
         };
         let value = serde_json::to_value(&stats).unwrap();
         assert_eq!(value["took_ms"], json!(42));

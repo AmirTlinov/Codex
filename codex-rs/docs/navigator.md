@@ -52,6 +52,10 @@ agents.
    необходимости можно добавить `--json`, чтобы получить оригинальный отчёт / подобрать
    конкретные пути из coverage. Функциональный хендлер по‑прежнему вызывает Doctor после
    каждой RPC-ошибки и пересказывает резюме модели.
+8. `codex navigator profile [--limit N] [--json]` выводит последние поисковые запросы с
+   временными метриками (candidate load, matcher, hit assembly, references, facets,
+   literal scan/fallback). Это тот же payload, что отдаёт `/v1/nav/profile`, поэтому можно
+   либо читать JSON, либо просматривать компактную таблицу прямо в CLI.
 
 ## Operational Notes
 
@@ -141,6 +145,18 @@ agents.
   ошибок или >`NAVIGATOR_SELF_HEAL_PENDING_LIMIT` ожидающих файлов, координатор автоматически запускает
   `rebuild_all` (не чаще, чем раз в `NAVIGATOR_SELF_HEAL_COOLDOWN_SECS`, 15 мин по умолчанию). Это
   значит, что большинство “залипших” индексов восстанавливаются без ручного `codex navigator daemon`.
+  Переменная `NAVIGATOR_SELF_HEAL_ENABLED=0/1` позволяет полностью отключить механику, а лимиты можно
+  подкрутить теми же env переменными.
+
+### Query Profiler
+
+- Каждый поиск теперь записывает покомпонентные тайминги (`stats.stages`): candidate load,
+  matcher, hit assembly, references, facets, literal scan/fallback. Эти данные доступны как в
+  потоковом `stats`, так и задним числом через профайлер.
+- `POST /v1/nav/profile` возвращает последние _N_ сэмплов с query_id, урезанным текстом запроса,
+  таймингами и признаками (cache hit, literal fallback, text_mode). Простая CLI-обёртка —
+  `codex navigator profile --limit 8` — печатает список и позволяет быстро понять, где тратится
+  время. Добавьте `--json`, чтобы сохранить payload как артефакт.
 - `stats.facets` теперь содержит новые бакеты `freshness` ("0-1d", "2-3d", "4-7d", "8-30d",
   "31-90d", "old") и `attention` ("calm", "low", "medium", "hot"). CLI выводит их в блоке
   `facets:` сразу после languages/categories, так что можно моментально понять, насколько свежи и

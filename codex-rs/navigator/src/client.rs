@@ -7,6 +7,8 @@ use crate::proto::IndexStatus;
 use crate::proto::NavHit;
 use crate::proto::OpenRequest;
 use crate::proto::OpenResponse;
+use crate::proto::ProfileRequest;
+use crate::proto::ProfileResponse;
 use crate::proto::ReindexRequest;
 use crate::proto::SearchDiagnostics;
 use crate::proto::SearchRequest;
@@ -209,6 +211,27 @@ impl NavigatorClient {
             let status = resp.status();
             let body = resp.text().await.unwrap_or_default();
             return Err(anyhow!("snippet request failed: {status} - {body}"));
+        }
+        Ok(resp.json().await?)
+    }
+
+    pub async fn profile(&self, mut request: ProfileRequest) -> Result<ProfileResponse> {
+        self.fill_project_root(&mut request.project_root);
+        if request.limit.is_none() {
+            request.limit = Some(10);
+        }
+        let url = format!("{}/v1/nav/profile", self.base_url);
+        let resp = self
+            .http
+            .post(url)
+            .headers(self.auth_headers()?)
+            .json(&request)
+            .send()
+            .await?;
+        if !resp.status().is_success() {
+            let status = resp.status();
+            let body = resp.text().await.unwrap_or_default();
+            return Err(anyhow!("profile request failed: {status} - {body}"));
         }
         Ok(resp.json().await?)
     }

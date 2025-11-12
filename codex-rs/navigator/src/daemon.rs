@@ -8,6 +8,8 @@ use crate::proto::IndexStatus;
 use crate::proto::OpenRequest;
 use crate::proto::OpenResponse;
 use crate::proto::PROTOCOL_VERSION;
+use crate::proto::ProfileRequest;
+use crate::proto::ProfileResponse;
 use crate::proto::ReindexRequest;
 use crate::proto::SearchRequest;
 use crate::proto::SearchStreamEvent;
@@ -131,6 +133,7 @@ pub async fn run_daemon(opts: DaemonOptions) -> Result<()> {
         .route("/v1/nav/open", post(open_handler))
         .route("/v1/nav/snippet", post(snippet_handler))
         .route("/v1/nav/atlas", post(atlas_handler))
+        .route("/v1/nav/profile", post(profile_handler))
         .route("/v1/nav/reindex", post(reindex_handler))
         .route("/v1/nav/settings", post(settings_handler))
         .route("/v1/nav/doctor", get(doctor_handler))
@@ -208,6 +211,21 @@ async fn snippet_handler(
         .await
         .map_err(AppError::internal)?;
     Ok(Json(response))
+}
+
+async fn profile_handler(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(request): Json<ProfileRequest>,
+) -> Result<Json<ProfileResponse>, AppError> {
+    ensure_authorized(&state, &headers)?;
+    ensure_protocol_version(request.schema_version)?;
+    let workspace = state.workspace(request.project_root.clone()).await?;
+    let samples = workspace
+        .coordinator()
+        .profile_snapshot(request.limit)
+        .await;
+    Ok(Json(ProfileResponse { samples }))
 }
 
 async fn atlas_handler(

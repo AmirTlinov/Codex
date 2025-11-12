@@ -28,8 +28,12 @@ use codex_navigator::proto::HealthRisk;
 use codex_navigator::proto::IngestKind;
 use codex_navigator::proto::IngestRunSummary;
 use codex_navigator::proto::NavHit;
+use codex_navigator::proto::ProfileRequest;
+use codex_navigator::proto::ProfileResponse;
 use codex_navigator::proto::SearchDiagnostics;
 use codex_navigator::proto::SearchProfile;
+use codex_navigator::proto::SearchStage;
+use codex_navigator::proto::SearchStageTiming;
 use codex_navigator::proto::SearchStats;
 use codex_navigator::proto::SearchStreamEvent;
 use codex_navigator::proto::{self};
@@ -215,6 +219,22 @@ pub struct DoctorCommand {
 }
 
 #[derive(Debug, Parser)]
+pub struct ProfileCommand {
+    #[clap(skip)]
+    pub config_overrides: CliConfigOverrides,
+
+    #[arg(long = "project-root")]
+    pub project_root: Option<PathBuf>,
+
+    #[arg(long = "limit", default_value = "10")]
+    pub limit: usize,
+
+    /// Print raw JSON response.
+    #[arg(long = "json")]
+    pub json: bool,
+}
+
+#[derive(Debug, Parser)]
 pub struct AtlasCommand {
     #[clap(skip)]
     pub config_overrides: CliConfigOverrides,
@@ -339,6 +359,7 @@ pub enum NavigatorSubcommand {
     Atlas(AtlasCommand),
     Facet(FacetCommand),
     History(HistoryCommand),
+    Profile(ProfileCommand),
 }
 
 pub async fn run_nav(cmd: NavCommand) -> Result<()> {
@@ -513,6 +534,22 @@ pub async fn run_doctor(mut cmd: DoctorCommand) -> Result<()> {
     }
 }
 
+pub async fn run_profile(mut cmd: ProfileCommand) -> Result<()> {
+    let client = build_client(cmd.project_root.take()).await?;
+    let request = ProfileRequest {
+        schema_version: proto::PROTOCOL_VERSION,
+        project_root: None,
+        limit: Some(cmd.limit),
+    };
+    let response = client.profile(request).await?;
+    if cmd.json {
+        print_json(&response)
+    } else {
+        print_profile_summary(&response);
+        Ok(())
+    }
+}
+
 fn print_doctor_summary(report: &DoctorReport) {
     println!("navigator daemon pid {}", report.daemon_pid);
     if report.workspaces.is_empty() {
@@ -527,6 +564,39 @@ fn print_doctor_summary(report: &DoctorReport) {
         println!("actions:");
         for action in &report.actions {
             println!("  - {action}");
+        }
+    }
+}
+
+fn print_profile_summary(response: &ProfileResponse) {
+    if response.samples.is_empty() {
+        println!("no profiler samples yet");
+        return;
+    }
+    println!("latest {} search samples:", response.samples.len());
+    let now = OffsetDateTime::now_utc();
+    for sample in &response.samples {
+        let age_secs = (now - sample.timestamp).whole_seconds().max(0) as u64;
+        let cache = if sample.cache_hit { "hit" } else { "miss" };
+        let literal = if sample.literal_fallback {
+            "literal"
+        } else {
+            "symbolic"
+        };
+        let mode = if sample.text_mode { "text" } else { "symbol" };
+        println!(
+            "- {took}ms | candidates {} | cache={cache} | {literal} | {mode} | {} ago",
+            sample.candidate_size,
+            format_age(age_secs),
+            took = sample.took_ms,
+        );
+        if let Some(query) = &sample.query {
+            println!("    query: {query}");
+        }
+        if sample.stages.is_empty() {
+            println!("    stages: (not recorded)");
+        } else {
+            println!("    stages: {}", format_stage_timings(&sample.stages));
         }
     }
 }
@@ -686,6 +756,26 @@ fn human_bytes(bytes: u64) -> String {
         format!("{bytes}{}", UNITS[unit])
     } else {
         format!("{value:.1}{}", UNITS[unit])
+    }
+}
+
+fn format_stage_timings(stages: &[SearchStageTiming]) -> String {
+    stages
+        .iter()
+        .map(|entry| format!("{}={}ms", stage_label(&entry.stage), entry.duration_ms))
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+fn stage_label(stage: &SearchStage) -> &'static str {
+    match stage {
+        SearchStage::CandidateLoad => "candidates",
+        SearchStage::Matcher => "matcher",
+        SearchStage::HitAssembly => "hits",
+        SearchStage::References => "refs",
+        SearchStage::Facets => "facets",
+        SearchStage::LiteralScan => "literal",
+        SearchStage::LiteralFallback => "fallback",
     }
 }
 

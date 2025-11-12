@@ -16,6 +16,8 @@ use crate::proto::ReferenceRole;
 use crate::proto::SearchFilters;
 use crate::proto::SearchProfile;
 use crate::proto::SearchRequest;
+use crate::proto::SearchStage;
+use crate::proto::SearchStageTiming;
 use crate::proto::SearchStats;
 use crate::proto::SymbolHelp;
 use crate::proto::SymbolKind;
@@ -57,6 +59,36 @@ const LINT_MEDIUM_THRESHOLD: u32 = 4;
 const LINT_HIGH_THRESHOLD: u32 = 10;
 const LINT_MEDIUM_PENALTY: f32 = 14.0;
 const LINT_HIGH_PENALTY: f32 = 30.0;
+
+#[derive(Default)]
+struct StageRecorder {
+    timings: Vec<SearchStageTiming>,
+}
+
+impl StageRecorder {
+    fn record(&mut self, stage: SearchStage, duration: std::time::Duration) {
+        if duration.is_zero() {
+            return;
+        }
+        let millis = duration.as_millis().min(u64::MAX as u128) as u64;
+        if let Some(existing) = self.timings.iter_mut().find(|t| t.stage == stage) {
+            existing.duration_ms = existing.duration_ms.saturating_add(millis);
+        } else {
+            self.timings.push(SearchStageTiming {
+                stage,
+                duration_ms: millis,
+            });
+        }
+    }
+
+    fn record_from(&mut self, stage: SearchStage, start: Instant) {
+        self.record(stage, start.elapsed());
+    }
+
+    fn into_vec(self) -> Vec<SearchStageTiming> {
+        self.timings
+    }
+}
 
 pub struct SearchComputation {
     pub hits: Vec<NavHit>,
@@ -110,6 +142,7 @@ pub fn run_search(
     }
 
     let mut literal_fallback = false;
+    let mut literal_fallback_duration = None;
     let mut literal_metrics: Option<LiteralMetrics> = None;
     if literal_fallback_allowed(&working_request)
         && outcome.hits.is_empty()
@@ -152,6 +185,7 @@ pub fn run_search(
             outcome.hits = hits;
             outcome.cache_entry = None;
             literal_fallback = true;
+            literal_fallback_duration = Some(literal_elapsed);
             hints.push(format!("returning literal matches for \"{query}\""));
             if literal_kind_filter {
                 hints.push(
@@ -180,7 +214,21 @@ pub fn run_search(
             outcome.stats.literal_missing_trigrams = Some(metrics.missing_trigrams);
         }
     }
+    if let Some(micros) = literal_fallback_duration {
+        outcome.stats.stages.push(SearchStageTiming {
+            stage: SearchStage::LiteralFallback,
+            duration_ms: (micros as f64 / 1000.0).ceil() as u64,
+        });
+    }
+    let facets_start = Instant::now();
     outcome.stats.facets = summarize_facets(&outcome.hits);
+    let facets_duration = facets_start.elapsed();
+    if facets_duration.as_nanos() > 0 {
+        outcome.stats.stages.push(SearchStageTiming {
+            stage: SearchStage::Facets,
+            duration_ms: facets_duration.as_millis().min(u64::MAX as u128) as u64,
+        });
+    }
     if let Some(sample) = lint_override_hint(&outcome.hits) {
         hints.push(sample);
     }
@@ -194,6 +242,7 @@ fn run_text_search(
     project_root: &Path,
     personal: &PersonalSignals,
 ) -> Result<SearchComputation> {
+    let mut stages = StageRecorder::default();
     let start = Instant::now();
     let query = request
         .query
@@ -202,6 +251,7 @@ fn run_text_search(
         .filter(|q| !q.is_empty())
         .ok_or_else(|| anyhow!("text search requires a query"))?;
     let filter_set = FilterSet::new(&request.filters)?;
+    let literal_start = Instant::now();
     let literal = literal_search(
         snapshot,
         project_root,
@@ -211,6 +261,8 @@ fn run_text_search(
         request.filters.recent_only,
     );
     let took_ms = start.elapsed().as_millis().min(u64::MAX as u128) as u64;
+    stages.record_from(SearchStage::LiteralScan, literal_start);
+    let facets_start = Instant::now();
     let LiteralSearchResult {
         mut hits,
         candidates,
@@ -223,6 +275,8 @@ fn run_text_search(
     }
     let mut hints = Vec::new();
     hints.push(format!("text search for \"{query}\""));
+    let facets = summarize_facets(&hits);
+    stages.record_from(SearchStage::Facets, facets_start);
     let mut stats = SearchStats {
         took_ms,
         candidate_size: candidates,
@@ -240,8 +294,9 @@ fn run_text_search(
         literal_scanned_bytes: Some(scanned_bytes),
         literal_missing_trigrams: Some(missing_trigrams),
         literal_pending_paths: None,
-        facets: summarize_facets(&hits),
+        facets,
         text_mode: true,
+        stages: Vec::new(),
     };
     if stats
         .literal_missing_trigrams
@@ -250,6 +305,7 @@ fn run_text_search(
     {
         stats.literal_missing_trigrams = None;
     }
+    stats.stages = stages.into_vec();
     Ok(SearchComputation {
         hits,
         stats,
@@ -267,8 +323,11 @@ fn run_search_once(
     personal: &PersonalSignals,
 ) -> Result<SearchComputation> {
     let start = Instant::now();
+    let mut stages = StageRecorder::default();
+    let candidate_start = Instant::now();
     let (candidates, cache_hit) = load_candidates(snapshot, request, cache)?;
     let filters = FilterSet::new(&request.filters)?;
+    stages.record_from(SearchStage::CandidateLoad, candidate_start);
     let owner_targets = request.filters.owners.clone();
     let pattern = request.query.as_ref().map(|query| create_pattern(query));
     let query_variants = request
@@ -280,6 +339,7 @@ fn run_search_once(
         .as_ref()
         .map(|q| q.trim().len() > 48)
         .unwrap_or(false);
+    let match_start = Instant::now();
     let mut matcher = pattern
         .as_ref()
         .map(|_| Matcher::new(nucleo_matcher::Config::DEFAULT));
@@ -331,6 +391,7 @@ fn run_search_once(
         total += 1.0;
         scored.push((total, symbol.id.clone()));
     }
+    stages.record_from(SearchStage::Matcher, match_start);
 
     scored.sort_by(|a, b| {
         b.0.partial_cmp(&a.0)
@@ -340,6 +401,7 @@ fn run_search_once(
     let ordered_ids: Vec<String> = scored.iter().map(|(_, id)| id.clone()).collect();
     let limit = request.limit.max(1);
     let mut hits = Vec::new();
+    let assemble_start = Instant::now();
     for (score, id) in scored.into_iter().take(limit) {
         if let Some(symbol) = snapshot.symbol(&id) {
             hits.push(build_hit(
@@ -349,12 +411,14 @@ fn run_search_once(
                 snapshot,
                 request,
                 refs_limit,
+                Some(&mut stages),
             ));
         }
     }
+    stages.record_from(SearchStage::HitAssembly, assemble_start);
 
     let took_ms = start.elapsed().as_millis().min(u64::MAX as u128) as u64;
-    let stats = SearchStats {
+    let mut stats = SearchStats {
         took_ms,
         candidate_size: ordered_ids.len(),
         cache_hit,
@@ -373,6 +437,7 @@ fn run_search_once(
         literal_pending_paths: None,
         facets: None,
         text_mode: false,
+        stages: Vec::new(),
     };
 
     let cache_entry = {
@@ -388,6 +453,7 @@ fn run_search_once(
         ))
     };
 
+    stats.stages = stages.into_vec();
     Ok(SearchComputation {
         hits,
         stats,
@@ -666,14 +732,20 @@ fn build_hit(
     snapshot: &IndexSnapshot,
     request: &SearchRequest,
     refs_limit: usize,
+    stage_recorder: Option<&mut StageRecorder>,
 ) -> NavHit {
     let references = if request.with_refs {
+        let refs_start = Instant::now();
         let mut refs = references::find_references(snapshot, project_root, symbol, refs_limit);
         if let Some(role) = request.refs_role {
             match role {
                 ReferenceRole::Definition => refs.usages.clear(),
                 ReferenceRole::Usage => refs.definitions.clear(),
             }
+        }
+        let duration = refs_start.elapsed();
+        if let Some(recorder) = stage_recorder {
+            recorder.record(SearchStage::References, duration);
         }
         if refs.is_empty() { None } else { Some(refs) }
     } else {
@@ -1331,6 +1403,7 @@ mod tests {
     use std::collections::HashMap;
     use std::collections::HashSet;
     use std::sync::Arc;
+    use std::time::Duration;
     use tempfile::tempdir;
     use uuid::Uuid;
 
@@ -1926,6 +1999,17 @@ mod tests {
             snippet.lines.iter().any(|line| line.emphasis),
             "matching line flagged"
         );
+    }
+
+    #[test]
+    fn stage_recorder_accumulates_timings() {
+        let mut recorder = StageRecorder::default();
+        recorder.record(SearchStage::Matcher, Duration::from_millis(5));
+        recorder.record(SearchStage::Matcher, Duration::from_millis(7));
+        let entries = recorder.into_vec();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].stage, SearchStage::Matcher);
+        assert_eq!(entries[0].duration_ms, 12);
     }
 
     #[test]

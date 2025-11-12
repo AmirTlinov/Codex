@@ -55,8 +55,10 @@ use crate::proto::QueryId;
 use crate::proto::Range;
 use crate::proto::SearchDiagnostics;
 use crate::proto::SearchFilters;
+use crate::proto::SearchProfileSample;
 use crate::proto::SearchRequest;
 use crate::proto::SearchResponse;
+use crate::proto::SearchStats;
 use crate::proto::SnippetRequest;
 use crate::proto::SnippetResponse;
 use crate::proto::SymbolKind;
@@ -72,6 +74,7 @@ use search::literal_fallback_allowed;
 use search::literal_match_from_contents;
 use search::run_search;
 use std::collections::HashSet;
+use std::collections::VecDeque;
 use std::path::Path;
 use std::path::PathBuf;
 use std::pin::Pin;
@@ -115,6 +118,7 @@ struct Inner {
     guardrails: Arc<GuardrailEmitter>,
     self_heal: SelfHealPolicy,
     self_heal_state: Mutex<Option<Instant>>,
+    profile_history: Mutex<VecDeque<SearchProfileSample>>,
     shutdown: CancellationToken,
 }
 
@@ -138,6 +142,7 @@ const LITERAL_PENDING_SAMPLE: usize = 8;
 const SELF_HEAL_PENDING_LIMIT: usize = 96;
 const SELF_HEAL_ERROR_LIMIT: usize = 4;
 const SELF_HEAL_COOLDOWN_SECS: u64 = 900;
+const PROFILE_HISTORY_LIMIT: usize = 64;
 
 #[derive(Clone)]
 struct SelfHealPolicy {
@@ -291,6 +296,7 @@ impl IndexCoordinator {
             guardrails,
             self_heal,
             self_heal_state: Mutex::new(None),
+            profile_history: Mutex::new(VecDeque::with_capacity(PROFILE_HISTORY_LIMIT)),
             shutdown,
         });
         let coordinator = Self { inner };
@@ -391,6 +397,7 @@ impl IndexCoordinator {
         tokio::spawn(async move {
             guardrails.observe_search_stats(&stats_clone).await;
         });
+        self.record_profile_sample(&request, &stats, query_id).await;
         Ok(SearchResponse {
             query_id,
             hits: outcome.hits,
@@ -524,6 +531,12 @@ impl IndexCoordinator {
     pub async fn health_summary(&self) -> HealthSummary {
         let coverage = self.inner.coverage.diagnostics().await;
         self.inner.health.summary(&coverage).await
+    }
+
+    pub async fn profile_snapshot(&self, limit: Option<usize>) -> Vec<SearchProfileSample> {
+        let cap = limit.unwrap_or(10).clamp(1, PROFILE_HISTORY_LIMIT);
+        let guard = self.inner.profile_history.lock().await;
+        guard.iter().rev().take(cap).cloned().collect()
     }
 
     pub async fn rebuild_index(&self) -> Result<IndexStatus> {
@@ -887,6 +900,43 @@ impl IndexCoordinator {
             }
         });
     }
+
+    async fn record_profile_sample(
+        &self,
+        request: &SearchRequest,
+        stats: &SearchStats,
+        query_id: Option<QueryId>,
+    ) {
+        let mut guard = self.inner.profile_history.lock().await;
+        if guard.len() >= PROFILE_HISTORY_LIMIT {
+            guard.pop_front();
+        }
+        guard.push_back(SearchProfileSample {
+            query_id,
+            query: normalize_query(request.query.as_deref()),
+            took_ms: stats.took_ms,
+            candidate_size: stats.candidate_size,
+            cache_hit: stats.cache_hit,
+            literal_fallback: stats.literal_fallback,
+            text_mode: stats.text_mode,
+            timestamp: OffsetDateTime::now_utc(),
+            stages: stats.stages.clone(),
+        });
+    }
+}
+
+fn normalize_query(query: Option<&str>) -> Option<String> {
+    let text = query?.trim();
+    if text.is_empty() {
+        return None;
+    }
+    let mut owned = text.to_string();
+    const MAX_LEN: usize = 160;
+    if owned.len() > MAX_LEN {
+        owned.truncate(MAX_LEN.saturating_sub(1));
+        owned.push('…');
+    }
+    Some(owned)
 }
 
 enum WatchEvent {
