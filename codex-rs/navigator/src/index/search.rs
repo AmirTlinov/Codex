@@ -150,6 +150,9 @@ pub fn run_search(
         }
     }
     outcome.stats.facets = summarize_facets(&outcome.hits);
+    if let Some(sample) = lint_override_hint(&outcome.hits) {
+        hints.push(sample);
+    }
     outcome.hints = hints;
     Ok(outcome)
 }
@@ -460,9 +463,22 @@ fn heuristic_score(symbol: &SymbolRecord, query: Option<&str>, owners: &[String]
     {
         score += OWNER_MATCH_BONUS;
     }
+    if !owners.is_empty()
+        && !symbol.owners.is_empty()
+        && symbol
+            .owners
+            .iter()
+            .any(|owner| owners.iter().any(|target| target == owner))
+    {
+        score += OWNER_MATCH_BONUS;
+    }
     if symbol.churn > 0 {
         let churn = symbol.churn.min(CHURN_MAX_BUCKET) as f32;
         score += churn * CHURN_WEIGHT;
+    }
+    if symbol.lint_suppressions > 0 {
+        let penalty = symbol.lint_suppressions.min(5) as f32 * 5.0;
+        score -= penalty;
     }
     score
 }
@@ -627,6 +643,7 @@ fn build_hit(
         help,
         context_snippet: None,
         owners: symbol.owners.clone(),
+        lint_suppressions: symbol.lint_suppressions,
     }
 }
 
@@ -930,6 +947,7 @@ fn build_literal_hit(
         help: None,
         context_snippet: Some(matched.snippet),
         owners: file.owners.clone(),
+        lint_suppressions: file.lint_suppressions,
     })
 }
 
@@ -951,6 +969,7 @@ fn summarize_facets(hits: &[NavHit]) -> Option<FacetSummary> {
     let mut language_counts: HashMap<String, usize> = HashMap::new();
     let mut category_counts: HashMap<String, usize> = HashMap::new();
     let mut owner_counts: HashMap<String, usize> = HashMap::new();
+    let mut lint_counts: HashMap<String, usize> = HashMap::new();
     for hit in hits {
         let lang = language_label(&hit.language).to_string();
         *language_counts.entry(lang).or_default() += 1;
@@ -964,18 +983,43 @@ fn summarize_facets(hits: &[NavHit]) -> Option<FacetSummary> {
             }
             *owner_counts.entry(owner.to_ascii_lowercase()).or_default() += 1;
         }
+        let lint_bucket = if hit.lint_suppressions > 0 {
+            "suppressed"
+        } else {
+            "clean"
+        };
+        *lint_counts.entry(lint_bucket.to_string()).or_default() += 1;
     }
     let languages = sort_buckets(language_counts);
     let categories = sort_buckets(category_counts);
     let owners = sort_buckets(owner_counts);
-    if languages.is_empty() && categories.is_empty() && owners.is_empty() {
+    let lint = sort_buckets(lint_counts);
+    if languages.is_empty() && categories.is_empty() && owners.is_empty() && lint.is_empty() {
         return None;
     }
     Some(FacetSummary {
         languages,
         categories,
         owners,
+        lint,
     })
+}
+
+fn lint_override_hint(hits: &[NavHit]) -> Option<String> {
+    let mut matches: Vec<String> = hits
+        .iter()
+        .filter(|hit| hit.lint_suppressions > 0)
+        .take(3)
+        .map(|hit| format!("{} ({} #[allow])", hit.path, hit.lint_suppressions))
+        .collect();
+    if matches.is_empty() {
+        return None;
+    }
+    let total = hits.iter().filter(|hit| hit.lint_suppressions > 0).count();
+    if total > matches.len() {
+        matches.push("…".to_string());
+    }
+    Some(format!("lint overrides present: {}", matches.join(", ")))
 }
 
 fn sort_buckets(counts: HashMap<String, usize>) -> Vec<FacetBucket> {
@@ -1660,6 +1704,7 @@ mod tests {
             doc_summary: None,
             dependencies: Vec::new(),
             attention: 0,
+            lint_suppressions: 0,
             churn: 0,
             owners: Vec::new(),
         }

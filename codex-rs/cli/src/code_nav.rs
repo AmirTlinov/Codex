@@ -920,6 +920,9 @@ fn print_facet_summary(stats: &SearchStats) {
     if !facets.owners.is_empty() {
         eprintln!("  owners: {}", format_facet_line(&facets.owners));
     }
+    if !facets.lint.is_empty() {
+        eprintln!("  lint: {}", format_facet_line(&facets.lint));
+    }
 }
 
 fn print_active_filters(filters: &proto::ActiveFilters) {
@@ -1033,6 +1036,9 @@ fn print_text_hits(hits: &[NavHit], refs_mode: RefsMode, show_refs: bool) {
         }
         if let Some(module) = &hit.module {
             tags.push(format!("module={module}"));
+        }
+        if hit.lint_suppressions > 0 {
+            tags.push(format!("lint={}#[allow]", hit.lint_suppressions));
         }
         println!(
             "  {:>2}. {}:{} [{}] id={}",

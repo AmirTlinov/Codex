@@ -281,6 +281,8 @@ pub struct NavHit {
     pub context_snippet: Option<TextSnippet>,
     #[serde(default)]
     pub owners: Vec<String>,
+    #[serde(default)]
+    pub lint_suppressions: u32,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
@@ -345,6 +347,8 @@ pub struct FacetSummary {
     pub categories: Vec<FacetBucket>,
     #[serde(default)]
     pub owners: Vec<FacetBucket>,
+    #[serde(default)]
+    pub lint: Vec<FacetBucket>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]

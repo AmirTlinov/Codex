@@ -34,6 +34,8 @@ pub struct SymbolRecord {
     #[serde(default)]
     pub attention: u32,
     #[serde(default)]
+    pub lint_suppressions: u32,
+    #[serde(default)]
     pub churn: u32,
     #[serde(default)]
     pub owners: Vec<String>,
@@ -75,6 +77,8 @@ pub struct FileEntry {
     pub line_count: u32,
     #[serde(default)]
     pub attention: u32,
+    #[serde(default)]
+    pub lint_suppressions: u32,
     #[serde(default)]
     pub churn: u32,
     #[serde(default)]

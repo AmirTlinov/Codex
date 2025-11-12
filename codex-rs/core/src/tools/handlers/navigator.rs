@@ -417,6 +417,7 @@ mod tests {
             help: None,
             context_snippet: None,
             owners: Vec::new(),
+            lint_suppressions: 0,
         };
         let response = SearchResponse {
             query_id: None,

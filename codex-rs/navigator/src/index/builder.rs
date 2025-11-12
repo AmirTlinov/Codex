@@ -216,6 +216,7 @@ impl<'a> IndexBuilder<'a> {
         let tokens = collect_tokens(content);
         let trigrams = collect_trigrams(content);
         let attention = count_attention_markers(content);
+        let lint_suppressions = count_lint_suppressions(content);
         let owners = self.owners.owners_for(rel_path);
         let churn = self.churn.get(rel_path).copied().unwrap_or(0);
         let recent = self.recent.contains(rel_path);
@@ -247,6 +248,7 @@ impl<'a> IndexBuilder<'a> {
                 doc_summary: candidate.doc_summary,
                 dependencies: dependencies.clone(),
                 attention,
+                lint_suppressions,
                 owners: owners.clone(),
                 churn,
             });
@@ -263,6 +265,7 @@ impl<'a> IndexBuilder<'a> {
                 trigrams,
                 line_count,
                 attention,
+                lint_suppressions,
                 owners,
                 churn,
                 fingerprint,
@@ -287,6 +290,7 @@ impl<'a> IndexBuilder<'a> {
             trigrams,
             line_count,
             attention,
+            lint_suppressions,
             owners,
             churn,
             fingerprint,
@@ -357,6 +361,13 @@ fn count_attention_markers(content: &str) -> u32 {
     count = count.saturating_add(upper.matches("TODO").count() as u32);
     count = count.saturating_add(upper.matches("FIXME").count() as u32);
     count.min(MAX_ATTENTION_MARKERS)
+}
+
+fn count_lint_suppressions(content: &str) -> u32 {
+    if content.is_empty() {
+        return 0;
+    }
+    content.matches("#[allow(").count() as u32
 }
 
 fn push_token(buf: &mut String, set: &mut HashSet<String>) {

@@ -104,6 +104,9 @@ agents.
   per-file score, нормализуем (clamp) и прибавляем к эвристике, поэтому горячие файлы
   поднимаются выше даже при слабых fuzzy-совпадениях; attention (TODO/FIXME) остаётся
   вторым усилителем «проблемных» мест.
+- Дополнительно Navigator штрафует файлы, где много `#[allow(...)]`: хиты с большим
+  числом подавлений получают меньший вес и всплывают отдельной фасетой `lint`, так что
+  можно быстро увидеть “чистые” vs “замьюченные” области без чтения линтовых логов.
 - The atlas is rebuilt every time the index snapshot changes, so both the tree view and the
   summary metrics stay in sync with coverage/recency signals surfaced in search results.
 

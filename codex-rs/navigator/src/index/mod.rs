@@ -791,6 +791,7 @@ fn build_literal_symbol(literal: &LiteralSymbolId, file_entry: &FileEntry) -> Sy
         doc_summary: None,
         dependencies: Vec::new(),
         attention: file_entry.attention,
+        lint_suppressions: file_entry.lint_suppressions,
         churn: file_entry.churn,
         owners: file_entry.owners.clone(),
     }
@@ -1182,6 +1183,7 @@ mod tests {
             trigrams: Vec::new(),
             line_count: 0,
             attention: 0,
+            lint_suppressions: 0,
             churn: 0,
             owners: Vec::new(),
             fingerprint: FileFingerprint {

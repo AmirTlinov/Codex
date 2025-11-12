@@ -504,6 +504,7 @@ members = ["core", "tui"]
                 trigrams: Vec::new(),
                 line_count: 20,
                 attention: 0,
+                lint_suppressions: 0,
                 churn: 0,
                 owners: Vec::new(),
                 fingerprint: FileFingerprint {
@@ -525,6 +526,7 @@ members = ["core", "tui"]
                 trigrams: Vec::new(),
                 line_count: 12,
                 attention: 0,
+                lint_suppressions: 0,
                 churn: 0,
                 owners: Vec::new(),
                 fingerprint: FileFingerprint {
@@ -554,6 +556,7 @@ members = ["core", "tui"]
             help: None,
             context_snippet: None,
             owners: Vec::new(),
+            lint_suppressions: 0,
         }
     }
 }
