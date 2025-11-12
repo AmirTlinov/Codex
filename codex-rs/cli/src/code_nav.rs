@@ -241,6 +241,28 @@ pub struct FlowCommand {
     pub focus: FocusMode,
 }
 
+#[derive(Debug, Parser)]
+pub struct EvalCommand {
+    #[clap(skip)]
+    pub config_overrides: CliConfigOverrides,
+
+    /// Optional project root override.
+    #[arg(long = "project-root")]
+    pub project_root: Option<PathBuf>,
+
+    /// Path to the JSON suite file describing evaluation cases.
+    #[arg(value_name = "SUITE")]
+    pub suite: PathBuf,
+
+    /// Directory to write hit snapshots for debugging (optional).
+    #[arg(long = "snapshot-dir")]
+    pub snapshot_dir: Option<PathBuf>,
+
+    /// Stop execution after the first failure instead of running the entire suite.
+    #[arg(long = "fail-fast")]
+    pub fail_fast: bool,
+}
+
 #[derive(Copy, Clone, Debug, Default, ValueEnum, Serialize, Deserialize, PartialEq, Eq)]
 pub enum OutputFormat {
     #[default]
@@ -481,6 +503,7 @@ pub enum NavigatorSubcommand {
     Repeat(RepeatCommand),
     Pin(PinCommand),
     Flow(FlowCommand),
+    Eval(EvalCommand),
     Profile(ProfileCommand),
 }
 
@@ -720,6 +743,54 @@ pub async fn run_flow(mut cmd: FlowCommand) -> Result<()> {
         .await?;
     }
     Ok(())
+}
+
+pub async fn run_eval(mut cmd: EvalCommand) -> Result<()> {
+    let client = build_client(cmd.project_root.take()).await?;
+    let suite_data = fs::read_to_string(&cmd.suite)
+        .with_context(|| format!("read eval suite {}", cmd.suite.display()))?;
+    let suite: EvalSuite = serde_json::from_str(&suite_data)
+        .with_context(|| format!("parse eval suite {}", cmd.suite.display()))?;
+    if suite.cases.is_empty() {
+        println!("suite '{}' has no cases", cmd.suite.display());
+        return Ok(());
+    }
+    if let Some(dir) = cmd.snapshot_dir.as_ref() {
+        fs::create_dir_all(dir).context("create eval snapshot dir")?;
+    }
+    let mut failures = Vec::new();
+    for case in &suite.cases {
+        println!("\n[eval] case {}", case.name);
+        let args = build_eval_args(case)?;
+        let request = plan_search_request(args)?;
+        let outcome = client.search_with_events(request).await?;
+        let hits = &outcome.response.hits;
+        if let Some(dir) = cmd.snapshot_dir.as_ref() {
+            write_eval_snapshot(dir, case, hits)?;
+        }
+        let case_failures = evaluate_case(case, hits);
+        if case_failures.is_empty() {
+            println!("  ✅ pass ({} hits)", hits.len());
+        } else {
+            for failure in &case_failures {
+                println!("  ❌ {}", failure);
+                failures.push(format!("{}: {failure}", case.name));
+            }
+            if cmd.fail_fast {
+                break;
+            }
+        }
+    }
+    if failures.is_empty() {
+        println!("\nEvaluation suite passed ({} cases).", suite.cases.len());
+        Ok(())
+    } else {
+        Err(anyhow!(
+            "evaluation failed: {} issues\n{}",
+            failures.len(),
+            failures.join("\n")
+        ))
+    }
 }
 
 fn format_history_filters(item: &HistoryItem) -> String {
@@ -2263,6 +2334,126 @@ fn build_flag_usage_step(inv: &FlowInvocation) -> NavigatorSearchArgs {
     args.limit = Some(60);
     args.with_refs = Some(true);
     args
+}
+
+#[derive(Debug, Deserialize)]
+struct EvalSuite {
+    cases: Vec<EvalCase>,
+}
+
+#[derive(Debug, Deserialize)]
+struct EvalCase {
+    name: String,
+    query: String,
+    #[serde(default)]
+    languages: Vec<String>,
+    #[serde(default)]
+    owners: Vec<String>,
+    #[serde(default)]
+    categories: Vec<String>,
+    #[serde(default)]
+    recent_only: Option<bool>,
+    #[serde(default)]
+    limit: Option<usize>,
+    #[serde(default)]
+    expect: Vec<EvalExpectation>,
+}
+
+#[derive(Debug, Deserialize)]
+struct EvalExpectation {
+    pattern: String,
+    max_rank: usize,
+}
+
+fn build_eval_args(case: &EvalCase) -> Result<NavigatorSearchArgs> {
+    if case.query.trim().is_empty() {
+        return Err(anyhow!("case '{}' missing query", case.name));
+    }
+    let mut args = NavigatorSearchArgs::default();
+    args.query = Some(case.query.clone());
+    args.limit = case.limit.or(Some(50));
+    args.languages = case.languages.clone();
+    args.owners = case.owners.clone();
+    if !case.categories.is_empty() {
+        args.categories = case.categories.clone();
+    }
+    args.recent_only = case.recent_only;
+    Ok(args)
+}
+
+fn evaluate_case(case: &EvalCase, hits: &[NavHit]) -> Vec<String> {
+    let mut failures = Vec::new();
+    if case.expect.is_empty() {
+        return failures;
+    }
+    for expect in &case.expect {
+        match find_match_rank(hits, &expect.pattern) {
+            Some(rank) => {
+                if rank > expect.max_rank {
+                    failures.push(format!(
+                        "pattern '{}' found at rank {} (> {})",
+                        expect.pattern,
+                        rank,
+                        expect.max_rank
+                    ));
+                } else {
+                    println!(
+                        "  • '{}' satisfied at rank {} (<= {})",
+                        expect.pattern, rank, expect.max_rank
+                    );
+                }
+            }
+            None => failures.push(format!("pattern '{}' not found", expect.pattern)),
+        }
+    }
+    failures
+}
+
+fn find_match_rank(hits: &[NavHit], pattern: &str) -> Option<usize> {
+    let mut rank = None;
+    for (idx, hit) in hits.iter().enumerate() {
+        if hit.id.contains(pattern)
+            || hit.path.contains(pattern)
+            || hit.preview.contains(pattern)
+        {
+            rank = Some(idx + 1);
+            break;
+        }
+    }
+    rank
+}
+
+fn write_eval_snapshot(dir: &Path, case: &EvalCase, hits: &[NavHit]) -> Result<()> {
+    let snapshot: Vec<_> = hits
+        .iter()
+        .take(50)
+        .map(|hit| EvalHitSnapshot {
+            path: hit.path.clone(),
+            line: hit.line,
+            score: hit.score,
+            preview: hit.preview.clone(),
+        })
+        .collect();
+    let file = dir.join(format!("{}.json", sanitize_case_name(&case.name)));
+    fs::write(&file, serde_json::to_vec_pretty(&snapshot)?).with_context(|| {
+        format!("write snapshot {}", file.display())
+    })?;
+    Ok(())
+}
+
+#[derive(Serialize)]
+struct EvalHitSnapshot {
+    path: String,
+    line: u32,
+    score: f64,
+    preview: String,
+}
+
+fn sanitize_case_name(name: &str) -> String {
+    name
+        .chars()
+        .map(|ch| if ch.is_alphanumeric() { ch } else { '_' })
+        .collect()
 }
 
 fn print_atlas_node(node: &AtlasNode, depth: usize) {
