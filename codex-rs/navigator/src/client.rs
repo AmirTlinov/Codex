@@ -144,6 +144,10 @@ impl NavigatorClient {
         Ok(self.search_with_events(request).await?.response)
     }
 
+    pub fn queries_dir(&self) -> PathBuf {
+        self.project.queries_dir()
+    }
+
     pub async fn search_with_events(&self, request: SearchRequest) -> Result<SearchStreamOutcome> {
         self.search_with_event_handler(request, |_| {}).await
     }

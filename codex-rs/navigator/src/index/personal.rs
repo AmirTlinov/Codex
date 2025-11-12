@@ -143,9 +143,10 @@ fn tokenize_branch(branch: &str) -> Vec<String> {
 
 fn detect_plan_tokens(project_root: &Path) -> Vec<String> {
     if let Some(env_path) = env::var_os("NAVIGATOR_PLAN_PATH")
-        && let Some(text) = read_plan_text(project_root, PathBuf::from(env_path)) {
-            return tokenize_plan(&text);
-        }
+        && let Some(text) = read_plan_text(project_root, PathBuf::from(env_path))
+    {
+        return tokenize_plan(&text);
+    }
     for candidate in PLAN_FILE_CANDIDATES {
         let candidate_path = project_root.join(candidate);
         if let Some(text) = read_plan_text(project_root, candidate_path) {

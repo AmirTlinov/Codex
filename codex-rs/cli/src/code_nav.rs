@@ -1,5 +1,7 @@
+use crate::nav_history::QueryHistoryStore;
 use anyhow::Context;
 use anyhow::Result;
+use anyhow::anyhow;
 use clap::ArgAction;
 use clap::Parser;
 use clap::ValueEnum;
@@ -207,9 +209,9 @@ pub struct FacetCommand {
     #[clap(skip)]
     pub config_overrides: CliConfigOverrides,
 
-    /// Reuse candidates from a previous query id.
+    /// Reuse candidates from a previous query id (defaults to last navigator search).
     #[arg(long = "from")]
-    pub from: Uuid,
+    pub from: Option<Uuid>,
 
     /// Optional project root override.
     #[arg(long = "project-root")]
@@ -324,7 +326,22 @@ pub async fn run_nav(cmd: NavCommand) -> Result<()> {
 
 pub async fn run_facet(cmd: FacetCommand) -> Result<()> {
     let client = build_client(cmd.project_root.clone()).await?;
-    let args = facet_command_to_search_args(&cmd);
+    let history = QueryHistoryStore::new(client.queries_dir());
+    let used_explicit = cmd.from.is_some();
+    let base_query = if let Some(id) = cmd.from {
+        id
+    } else {
+        history
+            .last_query_id()
+            .context("load navigator history")?
+            .ok_or_else(|| {
+                anyhow!("no previous navigator search found; run `codex navigator` first")
+            })?
+    };
+    let mut args = facet_command_to_search_args(&cmd, base_query);
+    if !used_explicit {
+        args.hints.push(format!("using last query id {base_query}"));
+    }
     let request = plan_search_request(args)?;
     execute_search(
         client,
@@ -472,6 +489,10 @@ async fn execute_search(
             _ => {}
         })
         .await?;
+    let history = QueryHistoryStore::new(client.queries_dir());
+    history
+        .record_response(&outcome.response)
+        .context("record navigator history")?;
 
     match output_format {
         OutputFormat::Json => {
@@ -562,9 +583,9 @@ fn nav_command_to_search_args(cmd: &NavCommand) -> NavigatorSearchArgs {
     args
 }
 
-fn facet_command_to_search_args(cmd: &FacetCommand) -> NavigatorSearchArgs {
+fn facet_command_to_search_args(cmd: &FacetCommand, base_query: Uuid) -> NavigatorSearchArgs {
     let mut args = NavigatorSearchArgs::default();
-    args.refine = Some(cmd.from.to_string());
+    args.refine = Some(base_query.to_string());
     args.inherit_filters = true;
     if cmd.clear {
         args.clear_filters = true;
@@ -1001,7 +1022,15 @@ fn format_active_filters_lines(filters: &proto::ActiveFilters) -> Vec<String> {
     if tokens.is_empty() {
         Vec::new()
     } else {
-        vec![format!("active filters: {}", tokens.join(", "))]
+        let chips = tokens
+            .iter()
+            .map(|token| format!("[{token}]"))
+            .collect::<Vec<_>>()
+            .join(" ");
+        vec![
+            format!("active filters: {}", tokens.join(", ")),
+            format!("  {chips}"),
+        ]
     }
 }
 

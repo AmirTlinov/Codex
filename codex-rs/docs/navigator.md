@@ -128,6 +128,10 @@ agents.
   `facets:` сразу после languages/categories, так что можно моментально понять, насколько свежи и
   “шумны” найденные места без дополнительного запроса. JSON ответы содержат те же поля для любых
   агентов/интеграций.
+- CLI запоминает последний успешный `navigator search` в
+  `<CODEX_HOME>/navigator/<hash>/queries/history.json`. Команда `codex navigator facet` теперь по
+  умолчанию использует этот query_id, поэтому можно писать просто `codex navigator facet --lang
+  rust --tests`; явный `--from <id>` остался для редких случаев при переключении между сессиями.
 
 ## Streaming Diagnostics
 
