@@ -83,3 +83,4 @@ This roadmap enumerates the concrete work required to turn Navigator into the pr
 - **Iteration cadence:** treat each epic as a 1–2 week slice with demoable value; keep this TODO updated after each milestone.
 - **Quality bar:** every feature ships with planner/CLI documentation, unit + integration tests, and benchmarking notes.
 - **Adoption:** once a milestone lands, dogfood it immediately inside Codex CLI and capture feedback under `.agents/context/`.
+- **UX contract:** TUI остаётся пользовательским слоем: минимум когнитивного шума, только итоговые подсказки (hits, активные фильтры, atlas breadcrumbs). Все продвинутые возможности (`navigator` CLI, facet команды, atlas карты) предназначены для ИИ-оператора, чтобы ускорять его ориентирование.

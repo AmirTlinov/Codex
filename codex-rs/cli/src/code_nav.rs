@@ -231,6 +231,10 @@ pub struct FacetCommand {
     #[arg(long = "recent")]
     pub recent_only: bool,
 
+    /// Clear all previously applied filters before adding new ones.
+    #[arg(long = "clear")]
+    pub clear: bool,
+
     /// Include references in the output.
     #[arg(long = "with-refs")]
     pub with_refs: bool,
@@ -366,9 +370,10 @@ pub async fn run_atlas(mut cmd: AtlasCommand) -> Result<()> {
             .map(str::to_string);
         let focus = atlas_focus(&root, trimmed_target.as_deref());
         if !focus.matched
-            && let Some(target) = trimmed_target.as_deref() {
-                println!("target '{target}' not found; showing workspace summary");
-            }
+            && let Some(target) = trimmed_target.as_deref()
+        {
+            println!("target '{target}' not found; showing workspace summary");
+        }
         print_atlas_summary(&focus);
         return Ok(());
     }
@@ -460,6 +465,9 @@ async fn execute_search(
                 print_literal_stats(stats);
                 print_facet_summary(stats);
             }
+            if let Some(filters) = outcome.response.active_filters.as_ref() {
+                print_active_filters(filters);
+            }
             if let Some(hint) = outcome.response.atlas_hint.as_ref() {
                 print_atlas_hint_sideband(hint);
             }
@@ -524,6 +532,10 @@ fn nav_command_to_search_args(cmd: &NavCommand) -> NavigatorSearchArgs {
 fn facet_command_to_search_args(cmd: &FacetCommand) -> NavigatorSearchArgs {
     let mut args = NavigatorSearchArgs::default();
     args.refine = Some(cmd.from.to_string());
+    if cmd.clear {
+        args.hints
+            .push("cleared previously applied filters".to_string());
+    }
     args.languages = cmd
         .languages
         .iter()
@@ -545,6 +557,11 @@ fn facet_command_to_search_args(cmd: &FacetCommand) -> NavigatorSearchArgs {
         args.with_refs = Some(true);
     }
     args.refs_limit = cmd.refs_limit;
+    args.refs_role = match cmd.refs_mode {
+        RefsMode::All => None,
+        RefsMode::Definitions => Some("definitions".to_string()),
+        RefsMode::Usages => Some("usages".to_string()),
+    };
     args
 }
 
@@ -739,6 +756,11 @@ fn print_text_response(
             println!("  - {hint}");
         }
     }
+    if let Some(filters) = response.active_filters.as_ref() {
+        for line in format_active_filters_lines(filters) {
+            println!("{line}");
+        }
+    }
     if let Some(hint) = response.atlas_hint.as_ref() {
         for line in format_atlas_hint_lines(hint) {
             println!("{line}");
@@ -843,6 +865,12 @@ fn print_facet_summary(stats: &SearchStats) {
     }
 }
 
+fn print_active_filters(filters: &proto::ActiveFilters) {
+    for line in format_active_filters_lines(filters) {
+        eprintln!("[navigator] {line}");
+    }
+}
+
 fn print_atlas_hint_sideband(hint: &proto::AtlasHint) {
     for line in format_atlas_hint_lines(hint) {
         eprintln!("[navigator] {line}");
@@ -863,6 +891,68 @@ fn format_facet_line(buckets: &[proto::FacetBucket]) -> String {
         format!("{preview} …")
     } else {
         preview
+    }
+}
+
+fn format_active_filters_lines(filters: &proto::ActiveFilters) -> Vec<String> {
+    let mut tokens = Vec::new();
+    if !filters.languages.is_empty() {
+        let values = filters
+            .languages
+            .iter()
+            .map(language_label)
+            .collect::<Vec<_>>()
+            .join("|");
+        tokens.push(format!("lang={values}"));
+    }
+    if !filters.categories.is_empty() {
+        let values = filters
+            .categories
+            .iter()
+            .map(category_label)
+            .collect::<Vec<_>>()
+            .join("|");
+        tokens.push(format!("cat={values}"));
+    }
+    if !filters.path_globs.is_empty() {
+        tokens.push(format!("path={}", filters.path_globs.join("|")));
+    }
+    if !filters.file_substrings.is_empty() {
+        tokens.push(format!("file={}", filters.file_substrings.join("|")));
+    }
+    if filters.recent_only {
+        tokens.push("recent".to_string());
+    }
+    if tokens.is_empty() {
+        Vec::new()
+    } else {
+        vec![format!("active filters: {}", tokens.join(", "))]
+    }
+}
+
+fn language_label(language: &proto::Language) -> &'static str {
+    match language {
+        proto::Language::Rust => "rust",
+        proto::Language::Typescript => "ts",
+        proto::Language::Tsx => "tsx",
+        proto::Language::Javascript => "js",
+        proto::Language::Python => "python",
+        proto::Language::Go => "go",
+        proto::Language::Bash => "bash",
+        proto::Language::Markdown => "md",
+        proto::Language::Json => "json",
+        proto::Language::Yaml => "yaml",
+        proto::Language::Toml => "toml",
+        proto::Language::Unknown => "unknown",
+    }
+}
+
+fn category_label(category: &proto::FileCategory) -> &'static str {
+    match category {
+        proto::FileCategory::Source => "source",
+        proto::FileCategory::Tests => "tests",
+        proto::FileCategory::Docs => "docs",
+        proto::FileCategory::Deps => "deps",
     }
 }
 

@@ -301,6 +301,7 @@ fn parse_quick_facet(rest: &str) -> Result<NavigatorPayload, PayloadParseError> 
         ));
     }
     let mut args = NavigatorSearchArgs::default();
+    let mut cleared = false;
     for token in tokens {
         let trimmed = token.trim();
         let lower = trimmed.to_ascii_lowercase();
@@ -317,13 +318,20 @@ fn parse_quick_facet(rest: &str) -> Result<NavigatorPayload, PayloadParseError> 
             "tests" => args.only_tests = Some(true),
             "deps" => args.only_deps = Some(true),
             "recent" => args.recent_only = Some(true),
-            other => args.record_unknown_freeform_key(other, None),
+            "clear" | "clear=true" => {
+                cleared = true;
+            }
+            _ => args.record_unknown_freeform_key(trimmed, None),
         }
     }
     if args.refine.is_none() {
         return Err(PayloadParseError::new(
             "facet command requires from=<query_id>",
         ));
+    }
+    if cleared {
+        args.hints
+            .push("cleared previously applied filters".to_string());
     }
     args.finalize_freeform_hints();
     Ok(NavigatorPayload::Search(Box::new(args)))
@@ -1314,11 +1322,12 @@ mod tests {
 
     #[test]
     fn parse_quick_facet_builds_args() {
-        match parse_payload("facet from=abc123 lang=rust docs").expect("facet parsed") {
+        match parse_payload("facet from=abc123 clear lang=rust docs").expect("facet parsed") {
             NavigatorPayload::Search(args) => {
                 assert_eq!(args.refine.as_deref(), Some("abc123"));
                 assert!(args.languages.contains(&"rust".to_string()));
                 assert_eq!(args.only_docs, Some(true));
+                assert!(args.hints.iter().any(|hint| hint.contains("cleared")));
             }
             other => panic!("unexpected payload: {other:?}"),
         }

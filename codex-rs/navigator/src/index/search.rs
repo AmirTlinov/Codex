@@ -435,6 +435,10 @@ fn heuristic_score(symbol: &SymbolRecord, query: Option<&str>) -> f32 {
     if symbol.recent {
         score += 10.0;
     }
+    if symbol.attention > 0 {
+        let capped = symbol.attention.min(5) as f32;
+        score += capped * 4.0;
+    }
     if let Some(q) = query {
         if symbol.identifier.eq_ignore_ascii_case(q) {
             score += 200.0;

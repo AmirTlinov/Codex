@@ -28,6 +28,7 @@ use regex::Regex;
 pub(crate) const MAX_FILE_BYTES: usize = 2 * 1024 * 1024;
 const MAX_TOKENS_PER_FILE: usize = 256;
 const MAX_TRIGRAMS_PER_FILE: usize = 4096;
+const MAX_ATTENTION_MARKERS: u32 = 32;
 
 #[derive(Clone, Debug)]
 pub(crate) enum SkipReason {
@@ -203,6 +204,7 @@ impl<'a> IndexBuilder<'a> {
         let dependencies = collect_dependencies(language.clone(), content);
         let tokens = collect_tokens(content);
         let trigrams = collect_trigrams(content);
+        let attention = count_attention_markers(content);
         let recent = self.recent.contains(rel_path);
         let fingerprint = build_fingerprint(&metadata, &bytes);
 
@@ -231,6 +233,7 @@ impl<'a> IndexBuilder<'a> {
                 preview: candidate.preview,
                 doc_summary: candidate.doc_summary,
                 dependencies: dependencies.clone(),
+                attention,
             });
         }
 
@@ -244,6 +247,7 @@ impl<'a> IndexBuilder<'a> {
                 tokens,
                 trigrams,
                 line_count,
+                attention,
                 fingerprint,
             };
             return Ok(FileOutcome::IndexedTextOnly {
@@ -265,6 +269,7 @@ impl<'a> IndexBuilder<'a> {
             tokens,
             trigrams,
             line_count,
+            attention,
             fingerprint,
         };
 
@@ -322,6 +327,17 @@ fn collect_trigrams(content: &str) -> Vec<u32> {
         set.insert(value);
     }
     set.into_iter().collect()
+}
+
+fn count_attention_markers(content: &str) -> u32 {
+    if content.is_empty() {
+        return 0;
+    }
+    let upper = content.to_ascii_uppercase();
+    let mut count = 0u32;
+    count = count.saturating_add(upper.matches("TODO").count() as u32);
+    count = count.saturating_add(upper.matches("FIXME").count() as u32);
+    count.min(MAX_ATTENTION_MARKERS)
 }
 
 fn push_token(buf: &mut String, set: &mut HashSet<String>) {

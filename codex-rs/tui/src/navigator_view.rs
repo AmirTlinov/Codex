@@ -5,6 +5,7 @@ use codex_navigator::freeform::parse_payload as parse_navigator_payload;
 use codex_navigator::navigator_flags;
 use codex_navigator::planner::NavigatorSearchArgs;
 use codex_navigator::profile_badges;
+use codex_navigator::proto::ActiveFilters;
 use codex_navigator::proto::AtlasHint;
 use codex_navigator::proto::AtlasNode;
 use codex_navigator::proto::ErrorPayload;
@@ -223,6 +224,9 @@ fn render_search_outcome(resp: &SearchResponse) -> Vec<String> {
             lines.push(format!("  - {hint}"));
         }
     }
+    if let Some(filters) = resp.active_filters.as_ref() {
+        lines.extend(render_active_filters(filters));
+    }
     if let Some(hint) = resp.atlas_hint.as_ref() {
         lines.extend(render_search_atlas_hint(hint));
     }
@@ -413,6 +417,73 @@ fn render_search_atlas_hint(hint: &AtlasHint) -> Vec<String> {
         lines.push(format!("  nearby: {}", preview.join(", ")));
     }
     lines
+}
+
+fn render_active_filters(filters: &ActiveFilters) -> Vec<String> {
+    let tokens = active_filter_tokens(filters);
+    if tokens.is_empty() {
+        Vec::new()
+    } else {
+        vec![format!("active filters: {}", tokens.join(", "))]
+    }
+}
+
+fn active_filter_tokens(filters: &ActiveFilters) -> Vec<String> {
+    let mut tokens = Vec::new();
+    if !filters.languages.is_empty() {
+        let langs = filters
+            .languages
+            .iter()
+            .map(language_label)
+            .collect::<Vec<_>>()
+            .join("|");
+        tokens.push(format!("lang={langs}"));
+    }
+    if !filters.categories.is_empty() {
+        let cats = filters
+            .categories
+            .iter()
+            .map(category_label)
+            .collect::<Vec<_>>()
+            .join("|");
+        tokens.push(format!("cat={cats}"));
+    }
+    if !filters.path_globs.is_empty() {
+        tokens.push(format!("path={}", filters.path_globs.join("|")));
+    }
+    if !filters.file_substrings.is_empty() {
+        tokens.push(format!("file={}", filters.file_substrings.join("|")));
+    }
+    if filters.recent_only {
+        tokens.push("recent".to_string());
+    }
+    tokens
+}
+
+fn language_label(language: &codex_navigator::proto::Language) -> &'static str {
+    match language {
+        codex_navigator::proto::Language::Rust => "rust",
+        codex_navigator::proto::Language::Typescript => "ts",
+        codex_navigator::proto::Language::Tsx => "tsx",
+        codex_navigator::proto::Language::Javascript => "js",
+        codex_navigator::proto::Language::Python => "python",
+        codex_navigator::proto::Language::Go => "go",
+        codex_navigator::proto::Language::Bash => "bash",
+        codex_navigator::proto::Language::Markdown => "md",
+        codex_navigator::proto::Language::Json => "json",
+        codex_navigator::proto::Language::Yaml => "yaml",
+        codex_navigator::proto::Language::Toml => "toml",
+        codex_navigator::proto::Language::Unknown => "unknown",
+    }
+}
+
+fn category_label(category: &codex_navigator::proto::FileCategory) -> &'static str {
+    match category {
+        codex_navigator::proto::FileCategory::Source => "source",
+        codex_navigator::proto::FileCategory::Tests => "tests",
+        codex_navigator::proto::FileCategory::Docs => "docs",
+        codex_navigator::proto::FileCategory::Deps => "deps",
+    }
 }
 
 fn render_nav_hit(hit: &NavHit) -> Vec<String> {

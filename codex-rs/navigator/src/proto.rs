@@ -111,6 +111,21 @@ pub struct SearchFilters {
     pub recent_only: bool,
 }
 
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Default)]
+#[skip_serializing_none]
+pub struct ActiveFilters {
+    #[serde(default)]
+    pub languages: Vec<Language>,
+    #[serde(default)]
+    pub categories: Vec<FileCategory>,
+    #[serde(default)]
+    pub path_globs: Vec<String>,
+    #[serde(default)]
+    pub file_substrings: Vec<String>,
+    #[serde(default)]
+    pub recent_only: bool,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 #[serde(default)]
 pub struct SearchRequest {
@@ -525,6 +540,8 @@ pub struct SearchResponse {
     pub fallback_hits: Vec<FallbackHit>,
     #[serde(default)]
     pub atlas_hint: Option<AtlasHint>,
+    #[serde(default)]
+    pub active_filters: Option<ActiveFilters>,
 }
 
 impl SearchResponse {
@@ -539,6 +556,7 @@ impl SearchResponse {
             diagnostics: None,
             fallback_hits: Vec::new(),
             atlas_hint: None,
+            active_filters: None,
         }
     }
 }

@@ -31,6 +31,8 @@ pub struct SymbolRecord {
     pub preview: String,
     pub doc_summary: Option<String>,
     pub dependencies: Vec<String>,
+    #[serde(default)]
+    pub attention: u32,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -67,6 +69,8 @@ pub struct FileEntry {
     pub trigrams: Vec<u32>,
     #[serde(default)]
     pub line_count: u32,
+    #[serde(default)]
+    pub attention: u32,
     pub fingerprint: FileFingerprint,
 }
 

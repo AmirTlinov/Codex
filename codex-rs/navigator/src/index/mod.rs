@@ -23,6 +23,7 @@ use crate::index::builder::relative_path;
 use crate::index::coverage::CoverageTracker;
 use crate::index::filter::PathFilter;
 use crate::project::ProjectProfile;
+use crate::proto::ActiveFilters;
 use crate::proto::AtlasSnapshot;
 use crate::proto::CoverageGap;
 use crate::proto::CoverageReason;
@@ -34,6 +35,7 @@ use crate::proto::OpenRequest;
 use crate::proto::OpenResponse;
 use crate::proto::Range;
 use crate::proto::SearchDiagnostics;
+use crate::proto::SearchFilters;
 use crate::proto::SearchRequest;
 use crate::proto::SearchResponse;
 use crate::proto::SnippetRequest;
@@ -230,6 +232,7 @@ impl IndexCoordinator {
             refs_limit,
         )?;
         let atlas_hint = build_search_hint(&snapshot, &outcome.hits);
+        let active_filters = summarize_active_filters(&request.filters);
         drop(snapshot);
 
         let query_id = outcome.cache_entry.as_ref().map(|(id, _)| *id);
@@ -300,6 +303,7 @@ impl IndexCoordinator {
             diagnostics: Some(diagnostics),
             fallback_hits,
             atlas_hint,
+            active_filters,
         })
     }
 
@@ -774,6 +778,7 @@ fn build_literal_symbol(literal: &LiteralSymbolId, file_entry: &FileEntry) -> Sy
         preview: String::new(),
         doc_summary: None,
         dependencies: Vec::new(),
+        attention: file_entry.attention,
     }
 }
 
@@ -962,6 +967,24 @@ fn coverage_reason_from_skip(reason: SkipReason) -> CoverageReason {
     }
 }
 
+fn summarize_active_filters(filters: &SearchFilters) -> Option<ActiveFilters> {
+    let has_filters = !filters.languages.is_empty()
+        || !filters.categories.is_empty()
+        || !filters.path_globs.is_empty()
+        || !filters.file_substrings.is_empty()
+        || filters.recent_only;
+    if !has_filters {
+        return None;
+    }
+    Some(ActiveFilters {
+        languages: filters.languages.clone(),
+        categories: filters.categories.clone(),
+        path_globs: filters.path_globs.clone(),
+        file_substrings: filters.file_substrings.clone(),
+        recent_only: filters.recent_only,
+    })
+}
+
 fn skipped_to_gaps(skipped: Vec<SkippedFile>) -> Vec<CoverageGap> {
     skipped
         .into_iter()
@@ -1010,6 +1033,7 @@ mod tests {
             tokens: Vec::new(),
             trigrams: Vec::new(),
             line_count: 0,
+            attention: 0,
             fingerprint: FileFingerprint {
                 mtime: Some(0),
                 size: 0,
