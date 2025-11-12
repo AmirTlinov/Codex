@@ -418,6 +418,9 @@ mod tests {
             context_snippet: None,
             owners: Vec::new(),
             lint_suppressions: 0,
+            freshness_days: 0,
+            attention_density: 0,
+            lint_density: 0,
         };
         let response = SearchResponse {
             query_id: None,
@@ -438,6 +441,8 @@ mod tests {
             error: None,
             diagnostics: Some(diagnostics.clone()),
             fallback_hits: Vec::new(),
+            atlas_hint: None,
+            active_filters: None,
         };
         let payload = SearchToolOutput {
             diagnostics: Some(diagnostics),

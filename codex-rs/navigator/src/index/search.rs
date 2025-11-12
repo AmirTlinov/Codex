@@ -44,6 +44,18 @@ const MAX_LITERAL_MISSING_TRIGRAMS: usize = 8;
 const CHURN_WEIGHT: f32 = 2.5;
 const CHURN_MAX_BUCKET: u32 = 20;
 const OWNER_MATCH_BONUS: f32 = 80.0;
+const FRESHNESS_BONUS_TABLE: [(u32, f32); 5] =
+    [(1, 80.0), (3, 55.0), (7, 35.0), (30, 18.0), (90, 10.0)];
+const ATTENTION_LOW_THRESHOLD: u32 = 2;
+const ATTENTION_MEDIUM_THRESHOLD: u32 = 6;
+const ATTENTION_HIGH_THRESHOLD: u32 = 15;
+const ATTENTION_LOW_BONUS: f32 = 8.0;
+const ATTENTION_MEDIUM_BONUS: f32 = 18.0;
+const ATTENTION_HIGH_BONUS: f32 = 28.0;
+const LINT_MEDIUM_THRESHOLD: u32 = 4;
+const LINT_HIGH_THRESHOLD: u32 = 10;
+const LINT_MEDIUM_PENALTY: f32 = 14.0;
+const LINT_HIGH_PENALTY: f32 = 30.0;
 
 pub struct SearchComputation {
     pub hits: Vec<NavHit>,
@@ -439,14 +451,8 @@ fn ensure_haystack<'a>(cache: &'a mut Option<String>, symbol: &SymbolRecord) -> 
 }
 
 fn heuristic_score(symbol: &SymbolRecord, query: Option<&str>, owners: &[String]) -> f32 {
-    let mut score = 0.0;
-    if symbol.recent {
-        score += 10.0;
-    }
-    if symbol.attention > 0 {
-        let capped = symbol.attention.min(5) as f32;
-        score += capped * 4.0;
-    }
+    let mut score = recency_bonus(symbol.freshness_days, symbol.recent);
+    score += attention_bonus(symbol.attention_density);
     if let Some(q) = query {
         if symbol.identifier.eq_ignore_ascii_case(q) {
             score += 200.0;
@@ -463,24 +469,51 @@ fn heuristic_score(symbol: &SymbolRecord, query: Option<&str>, owners: &[String]
     {
         score += OWNER_MATCH_BONUS;
     }
-    if !owners.is_empty()
-        && !symbol.owners.is_empty()
-        && symbol
-            .owners
-            .iter()
-            .any(|owner| owners.iter().any(|target| target == owner))
-    {
-        score += OWNER_MATCH_BONUS;
-    }
     if symbol.churn > 0 {
         let churn = symbol.churn.min(CHURN_MAX_BUCKET) as f32;
         score += churn * CHURN_WEIGHT;
     }
-    if symbol.lint_suppressions > 0 {
-        let penalty = symbol.lint_suppressions.min(5) as f32 * 5.0;
-        score -= penalty;
+    score - lint_penalty(symbol.lint_density, symbol.lint_suppressions)
+}
+
+fn recency_bonus(days: u32, recent_flag: bool) -> f32 {
+    let mut bonus = 0.0;
+    for (threshold, value) in FRESHNESS_BONUS_TABLE {
+        if days <= threshold {
+            bonus = value;
+            break;
+        }
     }
-    score
+    if recent_flag {
+        bonus += 10.0;
+    }
+    bonus
+}
+
+fn attention_bonus(density: u32) -> f32 {
+    if density == 0 {
+        return 0.0;
+    }
+    if density >= ATTENTION_HIGH_THRESHOLD {
+        return ATTENTION_HIGH_BONUS;
+    }
+    if density >= ATTENTION_MEDIUM_THRESHOLD {
+        return ATTENTION_MEDIUM_BONUS;
+    }
+    if density >= ATTENTION_LOW_THRESHOLD {
+        return ATTENTION_LOW_BONUS;
+    }
+    4.0
+}
+
+fn lint_penalty(density: u32, suppressions: u32) -> f32 {
+    let mut penalty = suppressions.min(5) as f32 * 5.0;
+    if density >= LINT_HIGH_THRESHOLD {
+        penalty += LINT_HIGH_PENALTY;
+    } else if density >= LINT_MEDIUM_THRESHOLD {
+        penalty += LINT_MEDIUM_PENALTY;
+    }
+    penalty
 }
 
 fn profile_score(symbol: &SymbolRecord, profiles: &[SearchProfile], query: Option<&str>) -> f32 {
@@ -644,6 +677,9 @@ fn build_hit(
         context_snippet: None,
         owners: symbol.owners.clone(),
         lint_suppressions: symbol.lint_suppressions,
+        freshness_days: symbol.freshness_days,
+        attention_density: symbol.attention_density,
+        lint_density: symbol.lint_density,
     }
 }
 
@@ -948,6 +984,9 @@ fn build_literal_hit(
         context_snippet: Some(matched.snippet),
         owners: file.owners.clone(),
         lint_suppressions: file.lint_suppressions,
+        freshness_days: file.freshness_days,
+        attention_density: file.attention_density,
+        lint_density: file.lint_density,
     })
 }
 
@@ -970,6 +1009,8 @@ fn summarize_facets(hits: &[NavHit]) -> Option<FacetSummary> {
     let mut category_counts: HashMap<String, usize> = HashMap::new();
     let mut owner_counts: HashMap<String, usize> = HashMap::new();
     let mut lint_counts: HashMap<String, usize> = HashMap::new();
+    let mut freshness_counts: HashMap<String, usize> = HashMap::new();
+    let mut attention_counts: HashMap<String, usize> = HashMap::new();
     for hit in hits {
         let lang = language_label(&hit.language).to_string();
         *language_counts.entry(lang).or_default() += 1;
@@ -989,12 +1030,24 @@ fn summarize_facets(hits: &[NavHit]) -> Option<FacetSummary> {
             "clean"
         };
         *lint_counts.entry(lint_bucket.to_string()).or_default() += 1;
+        let freshness = freshness_bucket(hit.freshness_days);
+        *freshness_counts.entry(freshness.to_string()).or_default() += 1;
+        let attention = attention_bucket(hit.attention_density);
+        *attention_counts.entry(attention.to_string()).or_default() += 1;
     }
     let languages = sort_buckets(language_counts);
     let categories = sort_buckets(category_counts);
     let owners = sort_buckets(owner_counts);
     let lint = sort_buckets(lint_counts);
-    if languages.is_empty() && categories.is_empty() && owners.is_empty() && lint.is_empty() {
+    let freshness = sort_buckets(freshness_counts);
+    let attention = sort_buckets(attention_counts);
+    if languages.is_empty()
+        && categories.is_empty()
+        && owners.is_empty()
+        && lint.is_empty()
+        && freshness.is_empty()
+        && attention.is_empty()
+    {
         return None;
     }
     Some(FacetSummary {
@@ -1002,6 +1055,8 @@ fn summarize_facets(hits: &[NavHit]) -> Option<FacetSummary> {
         categories,
         owners,
         lint,
+        freshness,
+        attention,
     })
 }
 
@@ -1054,6 +1109,26 @@ fn category_label(category: &FileCategory) -> &'static str {
         FileCategory::Tests => "tests",
         FileCategory::Docs => "docs",
         FileCategory::Deps => "deps",
+    }
+}
+
+fn freshness_bucket(days: u32) -> &'static str {
+    match days {
+        0..=1 => "0-1d",
+        2..=3 => "2-3d",
+        4..=7 => "4-7d",
+        8..=30 => "8-30d",
+        31..=90 => "31-90d",
+        _ => "old",
+    }
+}
+
+fn attention_bucket(density: u32) -> &'static str {
+    match density {
+        0 => "calm",
+        1..=4 => "low",
+        5..=15 => "medium",
+        _ => "hot",
     }
 }
 
@@ -1511,6 +1586,18 @@ mod tests {
                 .any(|bucket| bucket.value == "rust" && bucket.count == 2)
         );
         assert!(!facets.categories.is_empty());
+        assert!(
+            facets
+                .freshness
+                .iter()
+                .any(|bucket| bucket.value == "old" && bucket.count == 2)
+        );
+        assert!(
+            facets
+                .attention
+                .iter()
+                .any(|bucket| bucket.value == "calm" && bucket.count == 2)
+        );
     }
 
     #[test]
@@ -1698,6 +1785,39 @@ mod tests {
         let base = heuristic_score(&symbol, None, &[]);
         let boosted = heuristic_score(&symbol, None, &["core".to_string()]);
         assert!(boosted > base);
+    }
+
+    #[test]
+    fn recency_signal_prioritizes_fresh_hits() {
+        let mut fresh = sample_symbol();
+        fresh.freshness_days = 1;
+        fresh.recent = true;
+        let mut stale = sample_symbol();
+        stale.freshness_days = 200;
+        let fresh_score = heuristic_score(&fresh, None, &[]);
+        let stale_score = heuristic_score(&stale, None, &[]);
+        assert!(fresh_score > stale_score + 20.0);
+    }
+
+    #[test]
+    fn attention_density_increases_score() {
+        let regular = sample_symbol();
+        let mut noisy = sample_symbol();
+        noisy.attention_density = 20;
+        let base = heuristic_score(&regular, None, &[]);
+        let boosted = heuristic_score(&noisy, None, &[]);
+        assert!(boosted > base);
+    }
+
+    #[test]
+    fn lint_density_penalizes_matches() {
+        let clean = sample_symbol();
+        let mut suppressed = sample_symbol();
+        suppressed.lint_density = 12;
+        suppressed.lint_suppressions = 4;
+        let clean_score = heuristic_score(&clean, None, &[]);
+        let suppressed_score = heuristic_score(&suppressed, None, &[]);
+        assert!(clean_score > suppressed_score);
     }
 
     fn sample_symbol() -> SymbolRecord {

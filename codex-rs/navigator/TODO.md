@@ -31,7 +31,9 @@ This roadmap enumerates the concrete work required to turn Navigator into the pr
 - **Goal:** rank results by relevance to current work (recency, TODO density, failing tests, ownership).
 - **Milestones:**
   1. **Signal ingestion:** collect git recency, reviewer comments, TODO/FIXME counts, lint warnings; store per-file scores.
+     - ✅ Снапшот теперь содержит `freshness_days`, `attention_density`, `lint_density`; builder заполняет их на каждом ingest через git log + TODO/#[allow] сканирование.
   2. **Ranking model:** add scoring pipeline combining fuzzy score + context bonuses; make weights configurable via config file.
+     - ✅ `heuristic_score` использует новые сигналы: свежие/недавно правленные файлы получают boost, TODO-насыщенные блоки всплывают выше, а lint-heavy результаты штрафуются.
   3. **Personal context:** integrate plan/task files so active epics boost relevant files.
   4. **Evaluation harness:** snapshot search sessions and assert ordering improvements (A/B tests offline).
 - **Success criteria:** ≥80 % of manual reorder actions disappear in daily use; top hit matches intent in qualitative reviews.
@@ -43,6 +45,7 @@ This roadmap enumerates the concrete work required to turn Navigator into the pr
   1. **Facet metadata:** augment `IndexSnapshot` with per-file attributes (layer, service, complexity score, owner).
   2. **Facet API:** extend `SearchStats` with a `facets` section (each facet → buckets + counts). Provide CLI commands to apply/remove facets interactively.
      - ✅ `navigator search` уже отдаёт фасеты, и CLI/TUI их печатают; осталось добавить приоритизацию по сложности/слою.
+     - ✅ Добавлены свежие `freshness`/`attention` бакеты (0–1d, 2–3d,… / calm, hot), и CLI сразу печатает их в блоке facets.
   3. **Interactive loop:** add incremental `facet add lang=rust` commands that reuse previous `query_id`.
      - ✅ `codex navigator facet --from <query-id> --lang rust --tests` реализовано и подхватывается freeform `facet from=... lang=...`.
   4. **UX polish:** display active filters + suggestion chips to avoid cognitive overload.

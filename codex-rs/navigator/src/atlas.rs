@@ -563,6 +563,9 @@ members = ["core", "tui"]
             context_snippet: None,
             owners: Vec::new(),
             lint_suppressions: 0,
+            freshness_days: crate::index::model::DEFAULT_FRESHNESS_DAYS,
+            attention_density: 0,
+            lint_density: 0,
         }
     }
 }

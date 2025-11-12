@@ -283,6 +283,16 @@ pub struct NavHit {
     pub owners: Vec<String>,
     #[serde(default)]
     pub lint_suppressions: u32,
+    #[serde(default = "default_navhit_freshness")]
+    pub freshness_days: u32,
+    #[serde(default)]
+    pub attention_density: u32,
+    #[serde(default)]
+    pub lint_density: u32,
+}
+
+const fn default_navhit_freshness() -> u32 {
+    365
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
@@ -349,6 +359,10 @@ pub struct FacetSummary {
     pub owners: Vec<FacetBucket>,
     #[serde(default)]
     pub lint: Vec<FacetBucket>,
+    #[serde(default)]
+    pub freshness: Vec<FacetBucket>,
+    #[serde(default)]
+    pub attention: Vec<FacetBucket>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]

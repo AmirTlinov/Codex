@@ -110,6 +110,19 @@ agents.
 - The atlas is rebuilt every time the index snapshot changes, so both the tree view and the
   summary metrics stay in sync with coverage/recency signals surfaced in search results.
 
+### Contextual Signals & Facets
+
+- Каждая индексация теперь вытягивает `git log --since=120.days`, вычисляет `freshness_days`
+  и сохраняет его в снапшоте. Свежие/недавно отредактированные символы получают заметный boost
+  в эвристике ранжирования, поэтому топ-хиты сразу отражают текущий контекст задачи.
+- TODO/FIXME маркеры нормализуются в `attention_density` (по KLOC) и дают дополнительный boost
+  “горячим” файлам, тогда как обилие `#[allow(...)]` попадает в `lint_density` и штрафует результаты.
+- `stats.facets` теперь содержит новые бакеты `freshness` ("0-1d", "2-3d", "4-7d", "8-30d",
+  "31-90d", "old") и `attention` ("calm", "low", "medium", "hot"). CLI выводит их в блоке
+  `facets:` сразу после languages/categories, так что можно моментально понять, насколько свежи и
+  “шумны” найденные места без дополнительного запроса. JSON ответы содержат те же поля для любых
+  агентов/интеграций.
+
 ## Streaming Diagnostics
 
 - `/v1/nav/search` now streams NDJSON events. Clients should expect this sequence:

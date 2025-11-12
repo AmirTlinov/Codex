@@ -907,7 +907,13 @@ fn print_facet_summary(stats: &SearchStats) {
     let Some(facets) = &stats.facets else {
         return;
     };
-    if facets.languages.is_empty() && facets.categories.is_empty() {
+    if facets.languages.is_empty()
+        && facets.categories.is_empty()
+        && facets.owners.is_empty()
+        && facets.lint.is_empty()
+        && facets.freshness.is_empty()
+        && facets.attention.is_empty()
+    {
         return;
     }
     eprintln!("facets:");
@@ -922,6 +928,12 @@ fn print_facet_summary(stats: &SearchStats) {
     }
     if !facets.lint.is_empty() {
         eprintln!("  lint: {}", format_facet_line(&facets.lint));
+    }
+    if !facets.freshness.is_empty() {
+        eprintln!("  freshness: {}", format_facet_line(&facets.freshness));
+    }
+    if !facets.attention.is_empty() {
+        eprintln!("  attention: {}", format_facet_line(&facets.attention));
     }
 }
 
