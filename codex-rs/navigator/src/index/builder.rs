@@ -263,7 +263,7 @@ impl<'a> IndexBuilder<'a> {
                 trigrams,
                 line_count,
                 attention,
-            owners,
+                owners,
                 churn,
                 fingerprint,
             };

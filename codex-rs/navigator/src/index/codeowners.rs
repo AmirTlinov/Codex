@@ -16,9 +16,10 @@ impl OwnerResolver {
         for rel in CODEOWNERS_CANDIDATES {
             let path = root.join(rel);
             if path.exists()
-                && let Some(resolver) = Self::from_file(&path) {
-                    return resolver;
-                }
+                && let Some(resolver) = Self::from_file(&path)
+            {
+                return resolver;
+            }
         }
         Self::default()
     }

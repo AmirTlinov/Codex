@@ -43,6 +43,7 @@ const MAX_LITERAL_PREVIEW: usize = 160;
 const MAX_LITERAL_MISSING_TRIGRAMS: usize = 8;
 const CHURN_WEIGHT: f32 = 2.5;
 const CHURN_MAX_BUCKET: u32 = 20;
+const OWNER_MATCH_BONUS: f32 = 80.0;
 
 pub struct SearchComputation {
     pub hits: Vec<NavHit>,
@@ -229,6 +230,7 @@ fn run_search_once(
     let start = Instant::now();
     let (candidates, cache_hit) = load_candidates(snapshot, request, cache)?;
     let filters = FilterSet::new(&request.filters)?;
+    let owner_targets = request.filters.owners.clone();
     let pattern = request.query.as_ref().map(|query| create_pattern(query));
     let query_variants = request
         .query
@@ -259,7 +261,7 @@ fn run_search_once(
             let haystack: Utf32Str<'_> = Utf32Str::new(haystack_str, &mut utf32buf);
             if let Some(score) = pat.score(haystack, matcher_ref) {
                 let mut total = score as f32;
-                total += heuristic_score(symbol, request.query.as_deref());
+                total += heuristic_score(symbol, request.query.as_deref(), &owner_targets);
                 total += profile_score(symbol, &request.profiles, request.query.as_deref());
                 scored.push((total, symbol.id.clone()));
                 continue;
@@ -273,7 +275,7 @@ fn run_search_once(
                 .iter()
                 .any(|variant| haystack_lower.contains(variant))
             {
-                let mut total = heuristic_score(symbol, request.query.as_deref());
+                let mut total = heuristic_score(symbol, request.query.as_deref(), &owner_targets);
                 total += profile_score(symbol, &request.profiles, request.query.as_deref());
                 total += SUBSTRING_FALLBACK_BONUS;
                 scored.push((total, symbol.id.clone()));
@@ -283,7 +285,7 @@ fn run_search_once(
         if pattern.is_some() {
             continue;
         }
-        let mut total = heuristic_score(symbol, request.query.as_deref());
+        let mut total = heuristic_score(symbol, request.query.as_deref(), &owner_targets);
         total += profile_score(symbol, &request.profiles, request.query.as_deref());
         total += 1.0;
         scored.push((total, symbol.id.clone()));
@@ -433,7 +435,7 @@ fn ensure_haystack<'a>(cache: &'a mut Option<String>, symbol: &SymbolRecord) -> 
     cache.as_deref().unwrap_or("")
 }
 
-fn heuristic_score(symbol: &SymbolRecord, query: Option<&str>) -> f32 {
+fn heuristic_score(symbol: &SymbolRecord, query: Option<&str>, owners: &[String]) -> f32 {
     let mut score = 0.0;
     if symbol.recent {
         score += 10.0;
@@ -448,6 +450,15 @@ fn heuristic_score(symbol: &SymbolRecord, query: Option<&str>) -> f32 {
         } else if symbol.preview.to_lowercase().contains(&q.to_lowercase()) {
             score += 5.0;
         }
+    }
+    if !owners.is_empty()
+        && !symbol.owners.is_empty()
+        && symbol
+            .owners
+            .iter()
+            .any(|owner| owners.iter().any(|target| target == owner))
+    {
+        score += OWNER_MATCH_BONUS;
     }
     if symbol.churn > 0 {
         let churn = symbol.churn.min(CHURN_MAX_BUCKET) as f32;
@@ -1618,9 +1629,18 @@ mod tests {
     #[test]
     fn churn_signal_increases_score() {
         let mut symbol = sample_symbol();
-        let base = heuristic_score(&symbol, None);
+        let base = heuristic_score(&symbol, None, &[]);
         symbol.churn = 12;
-        let boosted = heuristic_score(&symbol, None);
+        let boosted = heuristic_score(&symbol, None, &[]);
+        assert!(boosted > base);
+    }
+
+    #[test]
+    fn owner_filter_boosts_score() {
+        let mut symbol = sample_symbol();
+        symbol.owners = vec!["core".to_string()];
+        let base = heuristic_score(&symbol, None, &[]);
+        let boosted = heuristic_score(&symbol, None, &["core".to_string()]);
         assert!(boosted > base);
     }
 
