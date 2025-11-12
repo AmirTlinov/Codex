@@ -363,10 +363,7 @@ pub async fn run_facet(cmd: FacetCommand) -> Result<()> {
             .entry_at(history_index)
             .context("load navigator history")?
             .ok_or_else(|| {
-                anyhow!(
-                    "history index {} not available; run `codex navigator` first",
-                    history_index
-                )
+                anyhow!("history index {history_index} not available; run `codex navigator` first")
             })?;
         (item.query_id, item.filters)
     };
@@ -374,8 +371,7 @@ pub async fn run_facet(cmd: FacetCommand) -> Result<()> {
     let mut args = facet_command_to_search_args(&cmd, base_query, prior_filters.as_ref());
     if !used_explicit {
         args.hints.push(format!(
-            "using history[{index}] query id {base_query}",
-            index = history_index
+            "using history[{history_index}] query id {base_query}"
         ));
     }
     let request = plan_search_request(args)?;
@@ -446,7 +442,7 @@ fn format_history_filters(item: &HistoryItem) -> String {
 
 fn format_age(seconds: u64) -> String {
     if seconds < 60 {
-        format!("{}s ago", seconds)
+        format!("{seconds}s ago")
     } else if seconds < 3600 {
         format!("{}m ago", seconds / 60)
     } else if seconds < 86_400 {
