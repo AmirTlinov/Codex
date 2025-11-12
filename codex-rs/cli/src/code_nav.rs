@@ -562,10 +562,10 @@ fn describe_index_status(status: &proto::IndexStatus) -> String {
         let age_secs = (OffsetDateTime::now_utc() - updated).whole_seconds().max(0) as u64;
         parts.push(format!("updated {}", format_age(age_secs)));
     }
-    if let Some(notice) = &status.notice {
-        if !notice.is_empty() {
-            parts.push(notice.clone());
-        }
+    if let Some(notice) = &status.notice
+        && !notice.is_empty()
+    {
+        parts.push(notice.clone());
     }
     parts.join(" • ")
 }

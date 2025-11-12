@@ -131,6 +131,12 @@ agents.
   файлов по причинам, долю literal fallback, объём просканированных файлов и медианный текстовый
   скан. Эти данные попадают в streamed diagnostics и `navigator doctor`, поэтому риск/рекомендации
   переживают перезапуски демона.
+- Guardrail-алерты: если риск ≥ yellow или запрос занял дольше `NAVIGATOR_GUARDRAIL_LATENCY_MS`
+  (по умолчанию 1500 мс), Navigator логирует предупреждение (`navigator::guardrail`) и, при наличии
+  `NAVIGATOR_GUARDRAIL_WEBHOOK`, шлёт JSON-пэйлоад с деталями (risk/issues или статистика запроса).
+  Во избежание шума события дросселируются таймером `NAVIGATOR_GUARDRAIL_COOLDOWN_SECS` (300 с по
+  умолчанию) и отдельным 60‑секундным cooldown для slow-query. Это закрывает пункт 5.3 roadmap и
+  позволяет получать внешние оповещения без опроса Doctor.
 - `stats.facets` теперь содержит новые бакеты `freshness` ("0-1d", "2-3d", "4-7d", "8-30d",
   "31-90d", "old") и `attention` ("calm", "low", "medium", "hot"). CLI выводит их в блоке
   `facets:` сразу после languages/categories, так что можно моментально понять, насколько свежи и

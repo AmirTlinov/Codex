@@ -5,6 +5,7 @@ mod codeowners;
 mod coverage;
 mod filter;
 mod git;
+mod guardrail;
 mod health;
 mod language;
 pub(crate) mod model;
@@ -29,6 +30,7 @@ use crate::index::filter::PathFilter;
 use crate::index::git::churn_scores;
 use crate::index::git::recency_days;
 use crate::index::git::recent_paths;
+use crate::index::guardrail::GuardrailEmitter;
 use crate::index::health::HealthStore;
 use crate::index::model::FileEntry;
 use crate::index::model::IndexSnapshot;
@@ -108,6 +110,7 @@ struct Inner {
     auto_indexing: Arc<AtomicBool>,
     coverage: Arc<CoverageTracker>,
     health: Arc<HealthStore>,
+    guardrails: Arc<GuardrailEmitter>,
     shutdown: CancellationToken,
 }
 
@@ -208,6 +211,27 @@ impl IndexCoordinator {
             ),
         };
         let filter = Arc::new(PathFilter::new(profile.project_root())?);
+        let guardrail_webhook = std::env::var("NAVIGATOR_GUARDRAIL_WEBHOOK")
+            .ok()
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty());
+        let guardrail_latency = std::env::var("NAVIGATOR_GUARDRAIL_LATENCY_MS")
+            .ok()
+            .and_then(|value| value.parse::<u64>().ok())
+            .filter(|value| *value > 0)
+            .unwrap_or(1_500);
+        let guardrail_cooldown = std::env::var("NAVIGATOR_GUARDRAIL_COOLDOWN_SECS")
+            .ok()
+            .and_then(|value| value.parse::<u64>().ok())
+            .filter(|value| *value > 0)
+            .map(Duration::from_secs)
+            .unwrap_or(Duration::from_secs(300));
+        let guardrails = Arc::new(GuardrailEmitter::new(
+            profile.project_root(),
+            guardrail_webhook,
+            guardrail_latency,
+            guardrail_cooldown,
+        ));
         let auto_indexing_flag = Arc::new(AtomicBool::new(auto_indexing));
         let shutdown = CancellationToken::new();
         let inner = Arc::new(Inner {
@@ -220,6 +244,7 @@ impl IndexCoordinator {
             auto_indexing: auto_indexing_flag,
             coverage: Arc::new(CoverageTracker::new(Some(COVERAGE_LIMIT))),
             health,
+            guardrails,
             shutdown,
         });
         let coordinator = Self { inner };
@@ -315,6 +340,11 @@ impl IndexCoordinator {
         if let Err(err) = self.inner.health.record_search(&stats).await {
             warn!("navigator health search metrics failed: {err:?}");
         }
+        let guardrails = self.inner.guardrails.clone();
+        let stats_clone = stats.clone();
+        tokio::spawn(async move {
+            guardrails.observe_search_stats(&stats_clone).await;
+        });
         Ok(SearchResponse {
             query_id,
             hits: outcome.hits,
@@ -392,6 +422,14 @@ impl IndexCoordinator {
             .take(8)
             .collect();
         let health = self.inner.health.summary(&coverage).await;
+        let guardrails = self.inner.guardrails.clone();
+        let health_clone = health.clone();
+        let coverage_clone = coverage.clone();
+        tokio::spawn(async move {
+            guardrails
+                .observe_health(&health_clone, &coverage_clone)
+                .await;
+        });
         SearchDiagnostics {
             index_state: status.state.clone(),
             freshness_secs,
