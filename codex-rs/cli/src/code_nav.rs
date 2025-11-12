@@ -386,6 +386,10 @@ pub struct AtlasCommand {
     /// Show a detailed summary for the chosen node instead of the full tree.
     #[arg(long = "summary")]
     pub summary: bool,
+
+    /// Jump into a node by running a scoped search (equivalent to `atlas jump foo`).
+    #[arg(long = "jump")]
+    pub jump: Option<String>,
 }
 
 #[derive(Debug, Parser)]
@@ -1213,6 +1217,14 @@ pub async fn run_atlas(mut cmd: AtlasCommand) -> Result<()> {
         print_atlas_summary(&focus);
         return Ok(());
     }
+    if let Some(jump_target) = cmd
+        .jump
+        .as_deref()
+        .map(str::trim)
+        .filter(|token| !token.is_empty())
+    {
+        return run_atlas_jump(&client, &root, jump_target).await;
+    }
     if let Some(target) = cmd
         .target
         .as_deref()
@@ -1229,6 +1241,40 @@ pub async fn run_atlas(mut cmd: AtlasCommand) -> Result<()> {
         print_atlas_node(&root, 0);
     }
     Ok(())
+}
+
+async fn run_atlas_jump(client: &NavigatorClient, root: &AtlasNode, target: &str) -> Result<()> {
+    let focus = atlas_focus(root, Some(target));
+    if !focus.matched {
+        println!("atlas jump target '{target}' not found");
+        return Ok(());
+    }
+    let mut args = NavigatorSearchArgs::default();
+    args.hints
+        .push(format!("atlas jump constrained to '{}'", focus.node.name));
+    if let Some(path) = focus.node.path.as_deref()
+        && !path.trim().is_empty()
+        && path != "."
+    {
+        let normalized = path.trim_end_matches('/');
+        args.path_globs.push(format!("{normalized}/**/*"));
+    } else {
+        args.file_substrings.push(focus.node.name.clone());
+    }
+    args.limit = Some(60);
+    args.profiles = vec![SearchProfile::Files];
+    let request = plan_search_request(args)?;
+    execute_search(
+        client,
+        request,
+        OutputFormat::Text,
+        RefsMode::All,
+        false,
+        false,
+        None,
+        FocusMode::Auto,
+    )
+    .await
 }
 
 #[allow(clippy::too_many_arguments)]

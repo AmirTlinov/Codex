@@ -114,8 +114,9 @@ agents.
   in a freeform block (or JSON with `{"action":"atlas_summary","target":"core"}`) and
   the function call returns the structured summary payload.
 - Quick command `atlas jump path/to/domain` converts into a scoped search that applies the
-  path filter and the `files` profile, so you can pivot from the atlas map directly into
-  focused symbol/text results without rewriting filters.
+  path filter and the `files` profile, so вы сразу попадаете в нужный слой; то же самое
+  можно сделать из CLI через `codex navigator atlas --jump path/to/domain`, не прибегая к
+  freeform-командам.
 - Every `navigator search` response now prints the Atlas focus inline (breadcrumbs + top
   siblings), so you always know где находитесь в дереве без отдельного вызова
   `navigator atlas`.
