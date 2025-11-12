@@ -25,6 +25,7 @@ use crate::index::codeowners::OwnerResolver;
 use crate::index::coverage::CoverageTracker;
 use crate::index::filter::PathFilter;
 use crate::index::git::churn_scores;
+use crate::index::git::recency_days;
 use crate::index::git::recent_paths;
 use crate::index::model::FileEntry;
 use crate::index::model::IndexSnapshot;
@@ -474,9 +475,17 @@ impl IndexCoordinator {
         let root = self.inner.profile.project_root().to_path_buf();
         let recent = recent_paths(&root);
         let churn = churn_scores(&root);
+        let freshness = recency_days(&root);
         let owners = OwnerResolver::load(&root);
         let filter = self.inner.filter.clone();
-        let builder = IndexBuilder::new(root.as_path(), recent, churn, owners, filter.clone());
+        let builder = IndexBuilder::new(
+            root.as_path(),
+            recent,
+            churn,
+            freshness,
+            owners,
+            filter.clone(),
+        );
         let _guard = self.inner.build_lock.lock().await;
         let mut snapshot = self.inner.snapshot.write().await;
         let mut changed = false;
@@ -545,10 +554,11 @@ impl IndexCoordinator {
         let root = self.inner.profile.project_root().to_path_buf();
         let recent = recent_paths(&root);
         let churn = churn_scores(&root);
+        let freshness = recency_days(&root);
         let owners = OwnerResolver::load(&root);
         let filter = self.inner.filter.clone();
         let snapshot = tokio::task::spawn_blocking(move || {
-            IndexBuilder::new(root.as_path(), recent, churn, owners, filter).build()
+            IndexBuilder::new(root.as_path(), recent, churn, freshness, owners, filter).build()
         })
         .await??;
         Ok(snapshot)
@@ -791,8 +801,11 @@ fn build_literal_symbol(literal: &LiteralSymbolId, file_entry: &FileEntry) -> Sy
         doc_summary: None,
         dependencies: Vec::new(),
         attention: file_entry.attention,
+        attention_density: file_entry.attention_density,
         lint_suppressions: file_entry.lint_suppressions,
+        lint_density: file_entry.lint_density,
         churn: file_entry.churn,
+        freshness_days: file_entry.freshness_days,
         owners: file_entry.owners.clone(),
     }
 }
@@ -1183,8 +1196,11 @@ mod tests {
             trigrams: Vec::new(),
             line_count: 0,
             attention: 0,
+            attention_density: 0,
             lint_suppressions: 0,
+            lint_density: 0,
             churn: 0,
+            freshness_days: crate::index::model::DEFAULT_FRESHNESS_DAYS,
             owners: Vec::new(),
             fingerprint: FileFingerprint {
                 mtime: Some(0),

@@ -14,6 +14,7 @@ use std::collections::HashMap;
 use std::collections::HashSet;
 use std::time::SystemTime;
 
+pub const DEFAULT_FRESHNESS_DAYS: u32 = 365;
 const TEXT_BLOCK_TARGET_BYTES: usize = 32 * 1024;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -34,9 +35,15 @@ pub struct SymbolRecord {
     #[serde(default)]
     pub attention: u32,
     #[serde(default)]
+    pub attention_density: u32,
+    #[serde(default)]
     pub lint_suppressions: u32,
     #[serde(default)]
+    pub lint_density: u32,
+    #[serde(default)]
     pub churn: u32,
+    #[serde(default = "default_freshness_days")]
+    pub freshness_days: u32,
     #[serde(default)]
     pub owners: Vec<String>,
 }
@@ -78,9 +85,15 @@ pub struct FileEntry {
     #[serde(default)]
     pub attention: u32,
     #[serde(default)]
+    pub attention_density: u32,
+    #[serde(default)]
     pub lint_suppressions: u32,
     #[serde(default)]
+    pub lint_density: u32,
+    #[serde(default)]
     pub churn: u32,
+    #[serde(default = "default_freshness_days")]
+    pub freshness_days: u32,
     #[serde(default)]
     pub owners: Vec<String>,
     pub fingerprint: FileFingerprint,
@@ -121,6 +134,10 @@ impl IndexSnapshot {
     pub fn symbol(&self, id: &str) -> Option<&SymbolRecord> {
         self.symbols.get(id)
     }
+}
+
+const fn default_freshness_days() -> u32 {
+    DEFAULT_FRESHNESS_DAYS
 }
 
 impl TextBlock {

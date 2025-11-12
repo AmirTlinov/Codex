@@ -504,8 +504,11 @@ members = ["core", "tui"]
                 trigrams: Vec::new(),
                 line_count: 20,
                 attention: 0,
+                attention_density: 0,
                 lint_suppressions: 0,
+                lint_density: 0,
                 churn: 0,
+                freshness_days: crate::index::model::DEFAULT_FRESHNESS_DAYS,
                 owners: Vec::new(),
                 fingerprint: FileFingerprint {
                     mtime: None,
@@ -526,8 +529,11 @@ members = ["core", "tui"]
                 trigrams: Vec::new(),
                 line_count: 12,
                 attention: 0,
+                attention_density: 0,
                 lint_suppressions: 0,
+                lint_density: 0,
                 churn: 0,
+                freshness_days: crate::index::model::DEFAULT_FRESHNESS_DAYS,
                 owners: Vec::new(),
                 fingerprint: FileFingerprint {
                     mtime: None,

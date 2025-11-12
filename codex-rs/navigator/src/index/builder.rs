@@ -6,6 +6,7 @@ use crate::index::codeowners::OwnerResolver;
 use crate::index::filter::PathFilter;
 use crate::index::language::detect_language;
 use crate::index::language::extract_symbols;
+use crate::index::model::DEFAULT_FRESHNESS_DAYS;
 use crate::index::model::FileEntry;
 use crate::index::model::FileFingerprint;
 use crate::index::model::FileText;
@@ -69,6 +70,7 @@ pub struct IndexBuilder<'a> {
     root: &'a Path,
     recent: HashSet<String>,
     churn: HashMap<String, u32>,
+    freshness_days: HashMap<String, u32>,
     owners: OwnerResolver,
     filter: Arc<PathFilter>,
 }
@@ -78,6 +80,7 @@ impl<'a> IndexBuilder<'a> {
         root: &'a Path,
         recent: HashSet<String>,
         churn: HashMap<String, u32>,
+        freshness_days: HashMap<String, u32>,
         owners: OwnerResolver,
         filter: Arc<PathFilter>,
     ) -> Self {
@@ -85,6 +88,7 @@ impl<'a> IndexBuilder<'a> {
             root,
             recent,
             churn,
+            freshness_days,
             owners,
             filter,
         }
@@ -220,6 +224,13 @@ impl<'a> IndexBuilder<'a> {
         let owners = self.owners.owners_for(rel_path);
         let churn = self.churn.get(rel_path).copied().unwrap_or(0);
         let recent = self.recent.contains(rel_path);
+        let freshness_days = self
+            .freshness_days
+            .get(rel_path)
+            .copied()
+            .unwrap_or(DEFAULT_FRESHNESS_DAYS);
+        let attention_density = density_per_kloc(attention, line_count);
+        let lint_density = density_per_kloc(lint_suppressions, line_count);
         let fingerprint = build_fingerprint(&metadata, &bytes);
 
         let text = FileText::from_content(content)?;
@@ -248,9 +259,12 @@ impl<'a> IndexBuilder<'a> {
                 doc_summary: candidate.doc_summary,
                 dependencies: dependencies.clone(),
                 attention,
+                attention_density,
                 lint_suppressions,
+                lint_density,
                 owners: owners.clone(),
                 churn,
+                freshness_days,
             });
         }
 
@@ -265,9 +279,12 @@ impl<'a> IndexBuilder<'a> {
                 trigrams,
                 line_count,
                 attention,
+                attention_density,
                 lint_suppressions,
+                lint_density,
                 owners,
                 churn,
+                freshness_days,
                 fingerprint,
             };
             return Ok(FileOutcome::IndexedTextOnly {
@@ -290,9 +307,12 @@ impl<'a> IndexBuilder<'a> {
             trigrams,
             line_count,
             attention,
+            attention_density,
             lint_suppressions,
+            lint_density,
             owners,
             churn,
+            freshness_days,
             fingerprint,
         };
 
@@ -350,6 +370,14 @@ fn collect_trigrams(content: &str) -> Vec<u32> {
         set.insert(value);
     }
     set.into_iter().collect()
+}
+
+fn density_per_kloc(count: u32, line_count: u32) -> u32 {
+    if count == 0 || line_count == 0 {
+        return 0;
+    }
+    let scaled = count.saturating_mul(1000) / line_count.max(1);
+    scaled.min(1000)
 }
 
 fn count_attention_markers(content: &str) -> u32 {
@@ -482,6 +510,7 @@ mod tests {
         let builder = IndexBuilder::new(
             root,
             HashSet::new(),
+            HashMap::new(),
             HashMap::new(),
             OwnerResolver::default(),
             filter,

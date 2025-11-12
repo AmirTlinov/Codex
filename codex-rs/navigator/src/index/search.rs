@@ -1249,6 +1249,7 @@ mod tests {
             root,
             HashSet::new(),
             HashMap::new(),
+            HashMap::new(),
             OwnerResolver::default(),
             filter,
         );
@@ -1292,6 +1293,7 @@ mod tests {
             root,
             HashSet::new(),
             HashMap::new(),
+            HashMap::new(),
             OwnerResolver::default(),
             filter,
         );
@@ -1330,6 +1332,7 @@ mod tests {
         let builder = IndexBuilder::new(
             root,
             HashSet::new(),
+            HashMap::new(),
             HashMap::new(),
             OwnerResolver::default(),
             filter,
@@ -1375,6 +1378,7 @@ mod tests {
             root,
             HashSet::new(),
             HashMap::new(),
+            HashMap::new(),
             OwnerResolver::default(),
             filter,
         );
@@ -1406,6 +1410,7 @@ mod tests {
         let builder = IndexBuilder::new(
             root,
             HashSet::new(),
+            HashMap::new(),
             HashMap::new(),
             OwnerResolver::default(),
             filter,
@@ -1441,6 +1446,7 @@ mod tests {
         let builder = IndexBuilder::new(
             root,
             HashSet::new(),
+            HashMap::new(),
             HashMap::new(),
             OwnerResolver::default(),
             filter,
@@ -1484,6 +1490,7 @@ mod tests {
             root,
             HashSet::new(),
             HashMap::new(),
+            HashMap::new(),
             OwnerResolver::default(),
             filter,
         );
@@ -1516,6 +1523,7 @@ mod tests {
         let builder = IndexBuilder::new(
             root,
             HashSet::new(),
+            HashMap::new(),
             HashMap::new(),
             OwnerResolver::default(),
             filter,
@@ -1552,6 +1560,7 @@ mod tests {
             root,
             HashSet::new(),
             HashMap::new(),
+            HashMap::new(),
             OwnerResolver::default(),
             filter,
         );
@@ -1576,6 +1585,7 @@ mod tests {
             root,
             HashSet::new(),
             HashMap::new(),
+            HashMap::new(),
             OwnerResolver::default(),
             filter,
         );
@@ -1599,6 +1609,7 @@ mod tests {
         let builder = IndexBuilder::new(
             root,
             HashSet::new(),
+            HashMap::new(),
             HashMap::new(),
             OwnerResolver::default(),
             filter,
@@ -1634,6 +1645,7 @@ mod tests {
         let builder = IndexBuilder::new(
             root,
             recent,
+            HashMap::new(),
             HashMap::new(),
             OwnerResolver::default(),
             filter,
@@ -1704,8 +1716,11 @@ mod tests {
             doc_summary: None,
             dependencies: Vec::new(),
             attention: 0,
+            attention_density: 0,
             lint_suppressions: 0,
+            lint_density: 0,
             churn: 0,
+            freshness_days: crate::index::model::DEFAULT_FRESHNESS_DAYS,
             owners: Vec::new(),
         }
     }
@@ -1731,6 +1746,7 @@ mod tests {
         let builder = IndexBuilder::new(
             root,
             HashSet::new(),
+            HashMap::new(),
             HashMap::new(),
             OwnerResolver::default(),
             filter,
@@ -1770,6 +1786,7 @@ mod tests {
         let builder = IndexBuilder::new(
             root,
             HashSet::new(),
+            HashMap::new(),
             HashMap::new(),
             OwnerResolver::default(),
             filter,
