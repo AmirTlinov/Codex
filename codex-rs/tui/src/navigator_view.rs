@@ -143,7 +143,7 @@ fn summarize_atlas_summary_request(target: Option<&str>) -> NavigatorExecRequest
         parsed: vec![ParsedCommand::Navigator {
             summary: Some(summary.clone()),
             query: Some(summary),
-            path: target.map(|value| value.to_string()),
+            path: target.map(std::string::ToString::to_string),
             profiles: Vec::new(),
             flags: vec!["summary".into()],
         }],

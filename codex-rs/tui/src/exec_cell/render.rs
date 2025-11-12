@@ -297,7 +297,7 @@ impl ExecCell {
                                 spans.push(" ".into());
                                 spans.push(format!("({})", flags.join(", ")).dim());
                             }
-                            lines.push(("Find", spans));
+                            lines.push(("Navigator", spans));
                         }
                         ParsedCommand::Search { cmd, query, path } => {
                             let spans = match (query, path) {
