@@ -1,4 +1,5 @@
 use crate::proto::FileCategory;
+use crate::proto::FilterOp;
 use crate::proto::InputFormat;
 use crate::proto::Language;
 use crate::proto::PROTOCOL_VERSION;
@@ -60,6 +61,20 @@ pub struct NavigatorSearchArgs {
     pub autocorrections: Vec<String>,
     #[serde(skip)]
     unknown_freeform_keys: Vec<UnknownFreeformKey>,
+    #[serde(default)]
+    pub remove_languages: Vec<String>,
+    #[serde(default)]
+    pub remove_categories: Vec<String>,
+    #[serde(default)]
+    pub remove_path_globs: Vec<String>,
+    #[serde(default)]
+    pub remove_file_substrings: Vec<String>,
+    #[serde(default)]
+    pub clear_filters: bool,
+    #[serde(default)]
+    pub disable_recent_only: bool,
+    #[serde(default)]
+    pub inherit_filters: bool,
 }
 
 impl Default for NavigatorSearchArgs {
@@ -88,6 +103,13 @@ impl Default for NavigatorSearchArgs {
             hints: Vec::new(),
             autocorrections: Vec::new(),
             unknown_freeform_keys: Vec::new(),
+            remove_languages: Vec::new(),
+            remove_categories: Vec::new(),
+            remove_path_globs: Vec::new(),
+            remove_file_substrings: Vec::new(),
+            clear_filters: false,
+            disable_recent_only: false,
+            inherit_filters: false,
         }
     }
 }
@@ -279,6 +301,28 @@ pub fn plan_search_request(
         &selected_profiles,
     )?;
 
+    let mut filter_ops = Vec::new();
+    if args.clear_filters {
+        filter_ops.push(FilterOp::ClearFilters);
+    }
+    for lang in args.remove_languages.drain(..) {
+        let parsed = parse_language(&lang)?;
+        filter_ops.push(FilterOp::RemoveLanguage(parsed));
+    }
+    for category in args.remove_categories.drain(..) {
+        let parsed = parse_category(&category)?;
+        filter_ops.push(FilterOp::RemoveCategory(parsed));
+    }
+    for glob in args.remove_path_globs.drain(..) {
+        filter_ops.push(FilterOp::RemovePathGlob(glob));
+    }
+    for pattern in args.remove_file_substrings.drain(..) {
+        filter_ops.push(FilterOp::RemoveFileSubstring(pattern));
+    }
+    if args.disable_recent_only {
+        filter_ops.push(FilterOp::SetRecentOnly(false));
+    }
+
     let refine = match args.refine {
         Some(value) => Some(parse_query_id(&value)?),
         None => None,
@@ -301,6 +345,8 @@ pub fn plan_search_request(
         autocorrections: args.autocorrections,
         refs_role,
         text_mode: false,
+        inherit_filters: args.inherit_filters,
+        filter_ops,
     };
 
     if request

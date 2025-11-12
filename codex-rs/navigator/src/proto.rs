@@ -111,6 +111,17 @@ pub struct SearchFilters {
     pub recent_only: bool,
 }
 
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub enum FilterOp {
+    RemoveLanguage(Language),
+    RemoveCategory(FileCategory),
+    RemovePathGlob(String),
+    RemoveFileSubstring(String),
+    SetRecentOnly(bool),
+    ClearFilters,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Default)]
 #[skip_serializing_none]
 pub struct ActiveFilters {
@@ -148,6 +159,10 @@ pub struct SearchRequest {
     pub autocorrections: Vec<String>,
     #[serde(default)]
     pub text_mode: bool,
+    #[serde(default)]
+    pub inherit_filters: bool,
+    #[serde(default)]
+    pub filter_ops: Vec<FilterOp>,
 }
 
 impl Default for SearchRequest {
@@ -169,6 +184,8 @@ impl Default for SearchRequest {
             hints: Vec::new(),
             autocorrections: Vec::new(),
             text_mode: false,
+            inherit_filters: false,
+            filter_ops: Vec::new(),
         }
     }
 }

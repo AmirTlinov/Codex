@@ -16,6 +16,8 @@ pub struct CachedQuery {
     pub candidate_ids: Vec<String>,
     pub query: Option<String>,
     pub filters: SearchFilters,
+    #[serde(default)]
+    pub parent: Option<QueryId>,
 }
 
 pub struct QueryCache {

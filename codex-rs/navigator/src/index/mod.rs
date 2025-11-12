@@ -29,10 +29,12 @@ use crate::proto::CoverageGap;
 use crate::proto::CoverageReason;
 use crate::proto::ErrorPayload;
 use crate::proto::FallbackHit;
+use crate::proto::FilterOp;
 use crate::proto::IndexState;
 use crate::proto::IndexStatus;
 use crate::proto::OpenRequest;
 use crate::proto::OpenResponse;
+use crate::proto::QueryId;
 use crate::proto::Range;
 use crate::proto::SearchDiagnostics;
 use crate::proto::SearchFilters;
@@ -212,7 +214,7 @@ impl IndexCoordinator {
         Ok(coordinator)
     }
 
-    pub async fn handle_search(&self, request: SearchRequest) -> Result<SearchResponse> {
+    pub async fn handle_search(&self, mut request: SearchRequest) -> Result<SearchResponse> {
         let status = self.current_status().await;
         if matches!(status.state, IndexState::Building) {
             let guard = self.inner.snapshot.read().await;
@@ -223,6 +225,9 @@ impl IndexCoordinator {
             }
         }
         let refs_limit = request.refs_limit.unwrap_or(12);
+        if request.inherit_filters {
+            rewrite_inherited_filters(&self.inner.cache, &mut request)?;
+        }
         let snapshot = self.inner.snapshot.read().await;
         let outcome = run_search(
             &snapshot,
@@ -985,6 +990,127 @@ fn summarize_active_filters(filters: &SearchFilters) -> Option<ActiveFilters> {
     })
 }
 
+fn rewrite_inherited_filters(cache: &QueryCache, request: &mut SearchRequest) -> Result<()> {
+    let Some(refine_id) = request.refine else {
+        return Err(anyhow!("inherit_filters requires --from query id"));
+    };
+    let mut chain = Vec::new();
+    let mut cursor = Some(refine_id);
+    while let Some(id) = cursor {
+        let Some(entry) = cache.load(id)? else {
+            break;
+        };
+        cursor = entry.parent;
+        chain.push((id, entry));
+    }
+    if chain.is_empty() {
+        return Err(anyhow!(
+            "refine id {refine_id} missing from navigator cache"
+        ));
+    }
+    let mut filters = chain[0].1.filters.clone();
+    let additions = std::mem::take(&mut request.filters);
+    let ops = std::mem::take(&mut request.filter_ops);
+    for op in ops {
+        apply_filter_op(&mut filters, &op);
+    }
+    merge_filter_additions(&mut filters, additions);
+    let target_refine = select_refine_anchor(&chain, &filters);
+    request.refine = Some(target_refine);
+    request.filters = filters;
+    request.inherit_filters = false;
+    Ok(())
+}
+
+fn apply_filter_op(filters: &mut SearchFilters, op: &FilterOp) {
+    match op {
+        FilterOp::RemoveLanguage(lang) => {
+            filters.languages.retain(|entry| entry != lang);
+        }
+        FilterOp::RemoveCategory(cat) => {
+            filters.categories.retain(|entry| entry != cat);
+        }
+        FilterOp::RemovePathGlob(glob) => {
+            filters.path_globs.retain(|entry| entry != glob);
+        }
+        FilterOp::RemoveFileSubstring(value) => {
+            filters.file_substrings.retain(|entry| entry != value);
+        }
+        FilterOp::SetRecentOnly(value) => {
+            filters.recent_only = *value;
+        }
+        FilterOp::ClearFilters => {
+            filters.languages.clear();
+            filters.categories.clear();
+            filters.path_globs.clear();
+            filters.file_substrings.clear();
+            filters.symbol_exact = None;
+            filters.recent_only = false;
+        }
+    }
+}
+
+fn merge_filter_additions(filters: &mut SearchFilters, additions: SearchFilters) {
+    for lang in additions.languages {
+        if !filters.languages.contains(&lang) {
+            filters.languages.push(lang);
+        }
+    }
+    for category in additions.categories {
+        if !filters.categories.contains(&category) {
+            filters.categories.push(category);
+        }
+    }
+    for glob in additions.path_globs {
+        if !filters.path_globs.contains(&glob) {
+            filters.path_globs.push(glob);
+        }
+    }
+    for pattern in additions.file_substrings {
+        if !filters.file_substrings.contains(&pattern) {
+            filters.file_substrings.push(pattern);
+        }
+    }
+    if let Some(symbol) = additions.symbol_exact {
+        filters.symbol_exact = Some(symbol);
+    }
+    if additions.recent_only {
+        filters.recent_only = true;
+    }
+}
+
+fn select_refine_anchor(
+    chain: &[(QueryId, cache::CachedQuery)],
+    desired: &SearchFilters,
+) -> QueryId {
+    for (id, entry) in chain {
+        if filters_subset(&entry.filters, desired) {
+            return *id;
+        }
+    }
+    chain
+        .last()
+        .map(|(id, _)| *id)
+        .unwrap_or_else(|| chain[0].0)
+}
+
+fn filters_subset(current: &SearchFilters, desired: &SearchFilters) -> bool {
+    subset(&current.languages, &desired.languages)
+        && subset(&current.categories, &desired.categories)
+        && subset(&current.path_globs, &desired.path_globs)
+        && subset(&current.file_substrings, &desired.file_substrings)
+        && (!current.recent_only || desired.recent_only)
+        && match (&current.symbol_exact, &desired.symbol_exact) {
+            (Some(lhs), Some(rhs)) => lhs == rhs,
+            (Some(_), None) => false,
+            (None, _) => true,
+        }
+}
+
+fn subset<T: PartialEq>(needles: &[T], haystack: &[T]) -> bool {
+    needles.iter().all(|needle| haystack.contains(needle))
+}
+
 fn skipped_to_gaps(skipped: Vec<SkippedFile>) -> Vec<CoverageGap> {
     skipped
         .into_iter()
@@ -998,10 +1124,12 @@ fn skipped_to_gaps(skipped: Vec<SkippedFile>) -> Vec<CoverageGap> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::index::cache::CachedQuery;
     use crate::index::model::FileFingerprint;
     use crate::proto::CoverageReason;
     use crate::proto::FileCategory;
     use crate::proto::Language;
+    use tempfile::tempdir;
 
     #[test]
     fn parse_literal_symbol_id_valid_input() {
@@ -1065,5 +1193,84 @@ mod tests {
         assert!(hit.preview.contains("needle"));
         assert!(hit.context_snippet.is_some(), "snippet missing");
         assert_eq!(hit.reason, reason);
+    }
+
+    #[test]
+    fn rewrite_inherited_filters_removes_language_and_promotes_parent() {
+        let dir = tempdir().unwrap();
+        let cache = QueryCache::new(dir.path().join("cache"));
+        let root_id = QueryId::new_v4();
+        let mut root_filters = SearchFilters::default();
+        cache
+            .store(
+                root_id,
+                CachedQuery {
+                    candidate_ids: Vec::new(),
+                    query: None,
+                    filters: root_filters.clone(),
+                    parent: None,
+                },
+            )
+            .unwrap();
+
+        let rust_id = QueryId::new_v4();
+        root_filters.languages.push(Language::Rust);
+        cache
+            .store(
+                rust_id,
+                CachedQuery {
+                    candidate_ids: Vec::new(),
+                    query: None,
+                    filters: root_filters.clone(),
+                    parent: Some(root_id),
+                },
+            )
+            .unwrap();
+
+        let mut request = SearchRequest {
+            refine: Some(rust_id),
+            inherit_filters: true,
+            filter_ops: vec![FilterOp::RemoveLanguage(Language::Rust)],
+            ..Default::default()
+        };
+
+        rewrite_inherited_filters(&cache, &mut request).expect("rewrite");
+        assert_eq!(request.refine, Some(root_id));
+        assert!(request.filters.languages.is_empty());
+    }
+
+    #[test]
+    fn rewrite_inherited_filters_adds_category_without_changing_refine() {
+        let dir = tempdir().unwrap();
+        let cache = QueryCache::new(dir.path().join("cache"));
+        let base_id = QueryId::new_v4();
+        let mut base_filters = SearchFilters::default();
+        base_filters.languages.push(Language::Rust);
+        cache
+            .store(
+                base_id,
+                CachedQuery {
+                    candidate_ids: Vec::new(),
+                    query: None,
+                    filters: base_filters.clone(),
+                    parent: None,
+                },
+            )
+            .unwrap();
+
+        let mut request = SearchRequest {
+            refine: Some(base_id),
+            inherit_filters: true,
+            filters: SearchFilters {
+                categories: vec![FileCategory::Docs],
+                ..SearchFilters::default()
+            },
+            ..Default::default()
+        };
+
+        rewrite_inherited_filters(&cache, &mut request).expect("rewrite");
+        assert_eq!(request.refine, Some(base_id));
+        assert!(request.filters.languages.contains(&Language::Rust));
+        assert!(request.filters.categories.contains(&FileCategory::Docs));
     }
 }

@@ -301,7 +301,7 @@ fn parse_quick_facet(rest: &str) -> Result<NavigatorPayload, PayloadParseError> 
         ));
     }
     let mut args = NavigatorSearchArgs::default();
-    let mut cleared = false;
+    args.inherit_filters = true;
     for token in tokens {
         let trimmed = token.trim();
         let lower = trimmed.to_ascii_lowercase();
@@ -313,14 +313,20 @@ fn parse_quick_facet(rest: &str) -> Result<NavigatorPayload, PayloadParseError> 
             args.languages.push(value.to_string());
             continue;
         }
+        if let Some(value) = lower.strip_prefix("remove_lang=") {
+            args.remove_languages.push(value.to_string());
+            continue;
+        }
         match lower.as_str() {
             "docs" => args.only_docs = Some(true),
             "tests" => args.only_tests = Some(true),
             "deps" => args.only_deps = Some(true),
             "recent" => args.recent_only = Some(true),
-            "clear" | "clear=true" => {
-                cleared = true;
-            }
+            "no_docs" | "no-docs" => args.remove_categories.push("docs".to_string()),
+            "no_tests" | "no-tests" => args.remove_categories.push("tests".to_string()),
+            "no_deps" | "no-deps" => args.remove_categories.push("deps".to_string()),
+            "no_recent" | "no-recent" => args.disable_recent_only = true,
+            "clear" | "clear=true" => args.clear_filters = true,
             _ => args.record_unknown_freeform_key(trimmed, None),
         }
     }
@@ -329,7 +335,7 @@ fn parse_quick_facet(rest: &str) -> Result<NavigatorPayload, PayloadParseError> 
             "facet command requires from=<query_id>",
         ));
     }
-    if cleared {
+    if args.clear_filters {
         args.hints
             .push("cleared previously applied filters".to_string());
     }
@@ -1328,6 +1334,21 @@ mod tests {
                 assert!(args.languages.contains(&"rust".to_string()));
                 assert_eq!(args.only_docs, Some(true));
                 assert!(args.hints.iter().any(|hint| hint.contains("cleared")));
+            }
+            other => panic!("unexpected payload: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_quick_facet_supports_remove_tokens() {
+        match parse_payload("facet from=q123 remove_lang=rust no-docs no-recent")
+            .expect("facet parsed")
+        {
+            NavigatorPayload::Search(args) => {
+                assert!(args.remove_languages.contains(&"rust".to_string()));
+                assert!(args.remove_categories.contains(&"docs".to_string()));
+                assert!(args.disable_recent_only);
+                assert!(args.inherit_filters);
             }
             other => panic!("unexpected payload: {other:?}"),
         }

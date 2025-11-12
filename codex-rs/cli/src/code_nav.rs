@@ -215,21 +215,41 @@ pub struct FacetCommand {
     #[arg(long = "lang", value_enum, action = ArgAction::Append)]
     pub languages: Vec<LangArg>,
 
+    /// Remove language filters (repeatable).
+    #[arg(long = "remove-lang", value_enum, action = ArgAction::Append)]
+    pub remove_languages: Vec<LangArg>,
+
     /// Restrict results to test files.
     #[arg(long = "tests")]
     pub tests: bool,
+
+    /// Drop test filter if it was previously enabled.
+    #[arg(long = "no-tests")]
+    pub no_tests: bool,
 
     /// Restrict results to docs.
     #[arg(long = "docs")]
     pub docs: bool,
 
+    /// Drop docs-only filter if it was previously enabled.
+    #[arg(long = "no-docs")]
+    pub no_docs: bool,
+
     /// Restrict results to dependency files.
     #[arg(long = "deps")]
     pub deps: bool,
 
+    /// Drop dependency filter if it was previously enabled.
+    #[arg(long = "no-deps")]
+    pub no_deps: bool,
+
     /// Only consider recent files.
     #[arg(long = "recent")]
     pub recent_only: bool,
+
+    /// Remove the recent-only filter if present.
+    #[arg(long = "no-recent")]
+    pub no_recent: bool,
 
     /// Clear all previously applied filters before adding new ones.
     #[arg(long = "clear")]
@@ -532,7 +552,9 @@ fn nav_command_to_search_args(cmd: &NavCommand) -> NavigatorSearchArgs {
 fn facet_command_to_search_args(cmd: &FacetCommand) -> NavigatorSearchArgs {
     let mut args = NavigatorSearchArgs::default();
     args.refine = Some(cmd.from.to_string());
+    args.inherit_filters = true;
     if cmd.clear {
+        args.clear_filters = true;
         args.hints
             .push("cleared previously applied filters".to_string());
     }
@@ -541,17 +563,34 @@ fn facet_command_to_search_args(cmd: &FacetCommand) -> NavigatorSearchArgs {
         .iter()
         .map(|lang| format_lang(lang).to_string())
         .collect();
+    args.remove_languages = cmd
+        .remove_languages
+        .iter()
+        .map(|lang| format_lang(lang).to_string())
+        .collect();
     if cmd.tests {
         args.only_tests = Some(true);
+    }
+    if cmd.no_tests {
+        args.remove_categories.push("tests".to_string());
     }
     if cmd.docs {
         args.only_docs = Some(true);
     }
+    if cmd.no_docs {
+        args.remove_categories.push("docs".to_string());
+    }
     if cmd.deps {
         args.only_deps = Some(true);
     }
+    if cmd.no_deps {
+        args.remove_categories.push("deps".to_string());
+    }
     if cmd.recent_only {
         args.recent_only = Some(true);
+    }
+    if cmd.no_recent {
+        args.disable_recent_only = true;
     }
     if cmd.with_refs || cmd.refs_mode != RefsMode::All {
         args.with_refs = Some(true);

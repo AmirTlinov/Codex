@@ -90,6 +90,10 @@ agents.
 - `codex navigator facet --from <query-id> --lang rust --tests` позволяет добавлять
   “стековые” фильтры без повторного набора запроса. Команда шлёт refine-запрос к тому же
   query id, так что фильтры применяются к уже отсортированному списку кандидатов.
+- Тот же `facet` теперь умеет *снимать* ограничения без ручного `clear`: добавьте флаги
+  `--remove-lang <lang>`, `--no-tests|--no-docs|--no-deps` или `--no-recent`, и Navigator
+  сам вернётся к ближайшему предку цепочки refine, пересчитает фильтры и обновит hits —
+  без shelling‑out в `rg` и без знания исходного запроса.
 - The atlas is rebuilt every time the index snapshot changes, so both the tree view and the
   summary metrics stay in sync with coverage/recency signals surfaced in search results.
 

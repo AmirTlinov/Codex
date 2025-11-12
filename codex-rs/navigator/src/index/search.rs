@@ -338,6 +338,7 @@ fn run_search_once(
                 candidate_ids: ordered_ids,
                 query: request.query.clone(),
                 filters: request.filters.clone(),
+                parent: request.refine,
             },
         ))
     };
