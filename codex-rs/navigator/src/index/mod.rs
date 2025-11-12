@@ -7,6 +7,7 @@ mod filter;
 mod git;
 mod language;
 pub(crate) mod model;
+mod personal;
 mod references;
 mod search;
 mod storage;

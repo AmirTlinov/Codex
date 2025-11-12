@@ -4,6 +4,7 @@ use crate::index::model::FileEntry;
 use crate::index::model::FileText;
 use crate::index::model::IndexSnapshot;
 use crate::index::model::SymbolRecord;
+use crate::index::personal::PersonalSignals;
 use crate::index::references;
 use crate::proto::FacetBucket;
 use crate::proto::FacetSummary;
@@ -71,8 +72,9 @@ pub fn run_search(
     project_root: &Path,
     refs_limit: usize,
 ) -> Result<SearchComputation> {
+    let personal = PersonalSignals::load(project_root);
     if request.text_mode {
-        return run_text_search(snapshot, request, project_root);
+        return run_text_search(snapshot, request, project_root, &personal);
     }
     let smart_refine = request.refine.is_some()
         && request
@@ -81,13 +83,27 @@ pub fn run_search(
             .is_some_and(|text| !text.trim().is_empty());
 
     let mut working_request = request.clone();
-    let mut outcome = run_search_once(snapshot, &working_request, cache, project_root, refs_limit)?;
+    let mut outcome = run_search_once(
+        snapshot,
+        &working_request,
+        cache,
+        project_root,
+        refs_limit,
+        &personal,
+    )?;
     let mut hints = request.hints.clone();
 
     if outcome.hits.is_empty() && working_request.refine.is_some() {
         let mut fallback = working_request.clone();
         fallback.refine = None;
-        outcome = run_search_once(snapshot, &fallback, cache, project_root, refs_limit)?;
+        outcome = run_search_once(
+            snapshot,
+            &fallback,
+            cache,
+            project_root,
+            refs_limit,
+            &personal,
+        )?;
         outcome.stats.refine_fallback = true;
         hints.push("refine returned no hits; reran without --from id".to_string());
         working_request = fallback;
@@ -116,12 +132,15 @@ pub fn run_search(
         );
         let literal_elapsed = literal_start.elapsed().as_micros().min(u64::MAX as u128) as u64;
         let LiteralSearchResult {
-            hits,
+            mut hits,
             candidates,
             missing_trigrams,
             scanned_files,
             scanned_bytes,
         } = literal;
+        for hit in &mut hits {
+            hit.score += personal.literal_bonus(&hit.path);
+        }
         literal_metrics = Some(LiteralMetrics {
             candidates,
             elapsed_micros: literal_elapsed,
@@ -173,6 +192,7 @@ fn run_text_search(
     snapshot: &IndexSnapshot,
     request: &SearchRequest,
     project_root: &Path,
+    personal: &PersonalSignals,
 ) -> Result<SearchComputation> {
     let start = Instant::now();
     let query = request
@@ -192,12 +212,15 @@ fn run_text_search(
     );
     let took_ms = start.elapsed().as_millis().min(u64::MAX as u128) as u64;
     let LiteralSearchResult {
-        hits,
+        mut hits,
         candidates,
         missing_trigrams,
         scanned_files,
         scanned_bytes,
     } = literal;
+    for hit in &mut hits {
+        hit.score += personal.literal_bonus(&hit.path);
+    }
     let mut hints = Vec::new();
     hints.push(format!("text search for \"{query}\""));
     let mut stats = SearchStats {
@@ -241,6 +264,7 @@ fn run_search_once(
     cache: &QueryCache,
     project_root: &Path,
     refs_limit: usize,
+    personal: &PersonalSignals,
 ) -> Result<SearchComputation> {
     let start = Instant::now();
     let (candidates, cache_hit) = load_candidates(snapshot, request, cache)?;
@@ -276,7 +300,8 @@ fn run_search_once(
             let haystack: Utf32Str<'_> = Utf32Str::new(haystack_str, &mut utf32buf);
             if let Some(score) = pat.score(haystack, matcher_ref) {
                 let mut total = score as f32;
-                total += heuristic_score(symbol, request.query.as_deref(), &owner_targets);
+                total +=
+                    heuristic_score(symbol, request.query.as_deref(), &owner_targets, personal);
                 total += profile_score(symbol, &request.profiles, request.query.as_deref());
                 scored.push((total, symbol.id.clone()));
                 continue;
@@ -290,7 +315,8 @@ fn run_search_once(
                 .iter()
                 .any(|variant| haystack_lower.contains(variant))
             {
-                let mut total = heuristic_score(symbol, request.query.as_deref(), &owner_targets);
+                let mut total =
+                    heuristic_score(symbol, request.query.as_deref(), &owner_targets, personal);
                 total += profile_score(symbol, &request.profiles, request.query.as_deref());
                 total += SUBSTRING_FALLBACK_BONUS;
                 scored.push((total, symbol.id.clone()));
@@ -300,7 +326,7 @@ fn run_search_once(
         if pattern.is_some() {
             continue;
         }
-        let mut total = heuristic_score(symbol, request.query.as_deref(), &owner_targets);
+        let mut total = heuristic_score(symbol, request.query.as_deref(), &owner_targets, personal);
         total += profile_score(symbol, &request.profiles, request.query.as_deref());
         total += 1.0;
         scored.push((total, symbol.id.clone()));
@@ -450,7 +476,12 @@ fn ensure_haystack<'a>(cache: &'a mut Option<String>, symbol: &SymbolRecord) -> 
     cache.as_deref().unwrap_or("")
 }
 
-fn heuristic_score(symbol: &SymbolRecord, query: Option<&str>, owners: &[String]) -> f32 {
+fn heuristic_score(
+    symbol: &SymbolRecord,
+    query: Option<&str>,
+    owners: &[String],
+    personal: &PersonalSignals,
+) -> f32 {
     let mut score = recency_bonus(symbol.freshness_days, symbol.recent);
     score += attention_bonus(symbol.attention_density);
     if let Some(q) = query {
@@ -473,6 +504,7 @@ fn heuristic_score(symbol: &SymbolRecord, query: Option<&str>, owners: &[String]
         let churn = symbol.churn.min(CHURN_MAX_BUCKET) as f32;
         score += churn * CHURN_WEIGHT;
     }
+    score += personal.symbol_bonus(symbol);
     score - lint_penalty(symbol.lint_density, symbol.lint_suppressions)
 }
 
@@ -1772,9 +1804,10 @@ mod tests {
     #[test]
     fn churn_signal_increases_score() {
         let mut symbol = sample_symbol();
-        let base = heuristic_score(&symbol, None, &[]);
+        let personal = PersonalSignals::default();
+        let base = heuristic_score(&symbol, None, &[], &personal);
         symbol.churn = 12;
-        let boosted = heuristic_score(&symbol, None, &[]);
+        let boosted = heuristic_score(&symbol, None, &[], &personal);
         assert!(boosted > base);
     }
 
@@ -1782,8 +1815,9 @@ mod tests {
     fn owner_filter_boosts_score() {
         let mut symbol = sample_symbol();
         symbol.owners = vec!["core".to_string()];
-        let base = heuristic_score(&symbol, None, &[]);
-        let boosted = heuristic_score(&symbol, None, &["core".to_string()]);
+        let personal = PersonalSignals::default();
+        let base = heuristic_score(&symbol, None, &[], &personal);
+        let boosted = heuristic_score(&symbol, None, &["core".to_string()], &personal);
         assert!(boosted > base);
     }
 
@@ -1794,8 +1828,9 @@ mod tests {
         fresh.recent = true;
         let mut stale = sample_symbol();
         stale.freshness_days = 200;
-        let fresh_score = heuristic_score(&fresh, None, &[]);
-        let stale_score = heuristic_score(&stale, None, &[]);
+        let personal = PersonalSignals::default();
+        let fresh_score = heuristic_score(&fresh, None, &[], &personal);
+        let stale_score = heuristic_score(&stale, None, &[], &personal);
         assert!(fresh_score > stale_score + 20.0);
     }
 
@@ -1804,8 +1839,9 @@ mod tests {
         let regular = sample_symbol();
         let mut noisy = sample_symbol();
         noisy.attention_density = 20;
-        let base = heuristic_score(&regular, None, &[]);
-        let boosted = heuristic_score(&noisy, None, &[]);
+        let personal = PersonalSignals::default();
+        let base = heuristic_score(&regular, None, &[], &personal);
+        let boosted = heuristic_score(&noisy, None, &[], &personal);
         assert!(boosted > base);
     }
 
@@ -1815,8 +1851,9 @@ mod tests {
         let mut suppressed = sample_symbol();
         suppressed.lint_density = 12;
         suppressed.lint_suppressions = 4;
-        let clean_score = heuristic_score(&clean, None, &[]);
-        let suppressed_score = heuristic_score(&suppressed, None, &[]);
+        let personal = PersonalSignals::default();
+        let clean_score = heuristic_score(&clean, None, &[], &personal);
+        let suppressed_score = heuristic_score(&suppressed, None, &[], &personal);
         assert!(clean_score > suppressed_score);
     }
 

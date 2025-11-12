@@ -35,6 +35,7 @@ This roadmap enumerates the concrete work required to turn Navigator into the pr
   2. **Ranking model:** add scoring pipeline combining fuzzy score + context bonuses; make weights configurable via config file.
      - ✅ `heuristic_score` использует новые сигналы: свежие/недавно правленные файлы получают boost, TODO-насыщенные блоки всплывают выше, а lint-heavy результаты штрафуются.
   3. **Personal context:** integrate plan/task files so active epics boost relevant files.
+     - ✅ Navigator читает `.agents/current_plan.md` (или `NAVIGATOR_PLAN_PATH`) и активную ветку, вытягивает ключевые токены/изменённые пути и добавляет соответствующий boost в `heuristic_score` и literal hits.
   4. **Evaluation harness:** snapshot search sessions and assert ordering improvements (A/B tests offline).
 - **Success criteria:** ≥80 % of manual reorder actions disappear in daily use; top hit matches intent in qualitative reviews.
 
