@@ -131,7 +131,7 @@ pub fn find_family_for_model(slug: &str) -> Option<ModelFamily> {
                 "list_dir".to_string(),
                 "read_file".to_string(),
                 "test_sync_tool".to_string(),
-                "code_finder".to_string(),
+                "navigator".to_string(),
             ],
             supports_parallel_tool_calls: true,
             support_verbosity: true,
@@ -149,7 +149,7 @@ pub fn find_family_for_model(slug: &str) -> Option<ModelFamily> {
                 "grep_files".to_string(),
                 "list_dir".to_string(),
                 "read_file".to_string(),
-                "code_finder".to_string(),
+                "navigator".to_string(),
             ],
             supports_parallel_tool_calls: true,
             support_verbosity: true,
@@ -163,7 +163,7 @@ pub fn find_family_for_model(slug: &str) -> Option<ModelFamily> {
             reasoning_summary_format: ReasoningSummaryFormat::Experimental,
             base_instructions: GPT_5_CODEX_INSTRUCTIONS.to_string(),
             apply_patch_tool_type: Some(ApplyPatchToolType::Freeform),
-            experimental_supported_tools: vec!["code_finder".to_string()],
+            experimental_supported_tools: vec!["navigator".to_string()],
             support_verbosity: false,
         )
     } else if slug.starts_with("gpt-5") {

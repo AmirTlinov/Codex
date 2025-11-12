@@ -1,4 +1,5 @@
 //! Bottom pane: shows the ChatComposer or a BottomPaneView, if one is active.
+use std::collections::HashMap;
 use std::path::PathBuf;
 
 use crate::app_event_sender::AppEventSender;
@@ -8,9 +9,11 @@ use crate::render::renderable::Renderable;
 use crate::render::renderable::RenderableItem;
 use crate::tui::FrameRequester;
 use bottom_pane_view::BottomPaneView;
-use codex_code_finder::proto::IndexState as FinderIndexState;
-use codex_code_finder::proto::IndexStatus;
 use codex_file_search::FileMatch;
+use codex_navigator::proto::CoverageDiagnostics;
+use codex_navigator::proto::CoverageReason;
+use codex_navigator::proto::IndexState as FinderIndexState;
+use codex_navigator::proto::IndexStatus;
 use crossterm::event::KeyCode;
 use crossterm::event::KeyEvent;
 use ratatui::buffer::Buffer;
@@ -56,45 +59,109 @@ pub(crate) use list_selection_view::SelectionAction;
 pub(crate) use list_selection_view::SelectionItem;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum CodeFinderIndicatorState {
+pub(crate) enum NavigatorIndicatorState {
     Building,
     Ready,
     Failed,
 }
 
 #[derive(Clone, Debug)]
-pub(crate) struct CodeFinderFooterIndicator {
-    state: CodeFinderIndicatorState,
+pub(crate) struct NavigatorFooterIndicator {
+    state: NavigatorIndicatorState,
     notice: Option<String>,
+    auto_indexing: bool,
+    coverage: Option<NavigatorCoverageSnapshot>,
 }
 
-impl CodeFinderFooterIndicator {
+impl NavigatorFooterIndicator {
     pub fn from_status(status: &IndexStatus) -> Self {
         let state = match status.state {
-            FinderIndexState::Building => CodeFinderIndicatorState::Building,
-            FinderIndexState::Ready => CodeFinderIndicatorState::Ready,
-            FinderIndexState::Failed => CodeFinderIndicatorState::Failed,
+            FinderIndexState::Building => NavigatorIndicatorState::Building,
+            FinderIndexState::Ready => NavigatorIndicatorState::Ready,
+            FinderIndexState::Failed => NavigatorIndicatorState::Failed,
         };
         Self {
             state,
             notice: status.notice.clone(),
+            auto_indexing: status.auto_indexing,
+            coverage: status
+                .coverage
+                .as_ref()
+                .and_then(NavigatorCoverageSnapshot::from_coverage),
         }
     }
 
     pub fn failed_with_notice(notice: String) -> Self {
         Self {
-            state: CodeFinderIndicatorState::Failed,
+            state: NavigatorIndicatorState::Failed,
             notice: Some(notice),
+            auto_indexing: true,
+            coverage: None,
         }
     }
 
-    pub fn state(&self) -> CodeFinderIndicatorState {
+    pub fn state(&self) -> NavigatorIndicatorState {
         self.state
     }
 
     pub fn notice(&self) -> Option<&str> {
         self.notice.as_deref()
     }
+
+    pub fn auto_indexing_enabled(&self) -> bool {
+        self.auto_indexing
+    }
+
+    pub fn coverage_summary(&self) -> Option<&NavigatorCoverageSnapshot> {
+        self.coverage.as_ref().filter(|summary| !summary.is_empty())
+    }
+}
+
+#[derive(Clone, Debug, Default)]
+pub(crate) struct NavigatorCoverageSnapshot {
+    pending: usize,
+    skipped: Vec<(CoverageReason, usize)>,
+    errors: Vec<(CoverageReason, usize)>,
+}
+
+impl NavigatorCoverageSnapshot {
+    fn from_coverage(coverage: &CoverageDiagnostics) -> Option<Self> {
+        if coverage.pending.is_empty() && coverage.skipped.is_empty() && coverage.errors.is_empty()
+        {
+            return None;
+        }
+        Some(Self {
+            pending: coverage.pending.len(),
+            skipped: aggregate_counts(&coverage.skipped),
+            errors: aggregate_counts(&coverage.errors),
+        })
+    }
+
+    fn is_empty(&self) -> bool {
+        self.pending == 0 && self.skipped.is_empty() && self.errors.is_empty()
+    }
+
+    fn skipped(&self) -> &[(CoverageReason, usize)] {
+        &self.skipped
+    }
+
+    fn errors(&self) -> &[(CoverageReason, usize)] {
+        &self.errors
+    }
+
+    fn pending(&self) -> usize {
+        self.pending
+    }
+}
+
+fn aggregate_counts(gaps: &[codex_navigator::proto::CoverageGap]) -> Vec<(CoverageReason, usize)> {
+    let mut counts: HashMap<CoverageReason, usize> = HashMap::new();
+    for gap in gaps {
+        *counts.entry(gap.reason.clone()).or_default() += 1;
+    }
+    let mut entries: Vec<_> = counts.into_iter().collect();
+    entries.sort_by(|a, b| b.1.cmp(&a.1));
+    entries
 }
 
 /// Pane displayed in the lower half of the chat UI.
@@ -119,7 +186,7 @@ pub(crate) struct BottomPane {
     /// Queued user messages to show above the composer while a turn is running.
     queued_user_messages: QueuedUserMessages,
     context_window_percent: Option<i64>,
-    code_finder_indicator: Option<CodeFinderFooterIndicator>,
+    navigator_indicator: Option<NavigatorFooterIndicator>,
 }
 
 pub(crate) struct BottomPaneParams {
@@ -152,7 +219,7 @@ impl BottomPane {
             queued_user_messages: QueuedUserMessages::new(),
             esc_backtrack_hint: false,
             context_window_percent: None,
-            code_finder_indicator: None,
+            navigator_indicator: None,
         }
     }
 
@@ -379,9 +446,9 @@ impl BottomPane {
         self.request_redraw();
     }
 
-    pub(crate) fn set_code_finder_status(&mut self, indicator: Option<CodeFinderFooterIndicator>) {
-        self.code_finder_indicator = indicator.clone();
-        self.composer.set_code_finder_status(indicator);
+    pub(crate) fn set_navigator_status(&mut self, indicator: Option<NavigatorFooterIndicator>) {
+        self.navigator_indicator = indicator.clone();
+        self.composer.set_navigator_status(indicator);
         self.request_redraw();
     }
 

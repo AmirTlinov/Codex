@@ -351,6 +351,18 @@ pub struct Tui {
     pub notifications: Notifications,
 }
 
+#[derive(Deserialize, Debug, Clone, PartialEq, Default)]
+pub struct Navigator {
+    #[serde(default = "Navigator::default_auto_indexing")]
+    pub auto_indexing: bool,
+}
+
+impl Navigator {
+    const fn default_auto_indexing() -> bool {
+        true
+    }
+}
+
 /// Settings for notices we display to users via the tui and app-server clients
 /// (primarily the Codex IDE extension). NOTE: these are different from
 /// notifications - notices are warnings, NUX screens, acknowledgements, etc.

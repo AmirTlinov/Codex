@@ -4,17 +4,29 @@ use clap::ArgAction;
 use clap::Parser;
 use clap::ValueEnum;
 use clap::builder::PossibleValue;
-use codex_code_finder::DaemonOptions;
-use codex_code_finder::client::ClientOptions;
-use codex_code_finder::client::CodeFinderClient;
-use codex_code_finder::client::DaemonSpawn;
-use codex_code_finder::plan_search_request;
-use codex_code_finder::planner::CodeFinderSearchArgs;
-use codex_code_finder::proto::SearchProfile;
-use codex_code_finder::proto::{self};
-use codex_code_finder::resolve_daemon_launcher;
-use codex_code_finder::run_daemon;
 use codex_common::CliConfigOverrides;
+use codex_navigator::AtlasFocus;
+use codex_navigator::DaemonOptions;
+use codex_navigator::atlas_focus;
+use codex_navigator::client::ClientOptions;
+use codex_navigator::client::DaemonSpawn;
+use codex_navigator::client::NavigatorClient;
+use codex_navigator::client::SearchStreamOutcome;
+use codex_navigator::find_atlas_node;
+use codex_navigator::plan_search_request;
+use codex_navigator::planner::NavigatorSearchArgs;
+use codex_navigator::proto::AtlasNode;
+use codex_navigator::proto::AtlasRequest;
+use codex_navigator::proto::CoverageReason;
+use codex_navigator::proto::NavHit;
+use codex_navigator::proto::SearchDiagnostics;
+use codex_navigator::proto::SearchProfile;
+use codex_navigator::proto::SearchStats;
+use codex_navigator::proto::SearchStreamEvent;
+use codex_navigator::proto::{self};
+use codex_navigator::resolve_daemon_launcher;
+use codex_navigator::run_daemon;
+use std::collections::HashMap;
 use std::env;
 use std::path::Path;
 use std::path::PathBuf;
@@ -73,6 +85,10 @@ pub struct NavCommand {
     #[arg(long = "with-refs")]
     pub with_refs: bool,
 
+    /// Filter which references to display (implies --with-refs when not "all").
+    #[arg(long = "refs-mode", value_enum, default_value_t = RefsMode::All)]
+    pub refs_mode: RefsMode,
+
     /// Max references to include (defaults to 12).
     #[arg(long = "with-refs-limit")]
     pub refs_limit: Option<usize>,
@@ -96,6 +112,29 @@ pub struct NavCommand {
     /// Do not wait for the index to finish building.
     #[arg(long = "no-wait")]
     pub no_wait: bool,
+
+    /// Only print diagnostics (skip hits and final payload).
+    #[arg(long = "diagnostics-only")]
+    pub diagnostics_only: bool,
+
+    /// Select the final output format.
+    #[arg(long = "format", value_enum, default_value_t = OutputFormat::Json)]
+    pub output_format: OutputFormat,
+}
+
+#[derive(Copy, Clone, Debug, Default, ValueEnum)]
+pub enum OutputFormat {
+    #[default]
+    Json,
+    Ndjson,
+    Text,
+}
+
+#[derive(Copy, Clone, Debug, ValueEnum, PartialEq, Eq)]
+pub enum RefsMode {
+    All,
+    Definitions,
+    Usages,
 }
 
 #[derive(Debug, Parser)]
@@ -134,35 +173,162 @@ pub struct DaemonCommand {
     pub codex_home: Option<PathBuf>,
 }
 
+#[derive(Debug, Parser)]
+pub struct DoctorCommand {
+    #[clap(skip)]
+    pub config_overrides: CliConfigOverrides,
+
+    #[arg(long = "project-root")]
+    pub project_root: Option<PathBuf>,
+}
+
+#[derive(Debug, Parser)]
+pub struct AtlasCommand {
+    #[clap(skip)]
+    pub config_overrides: CliConfigOverrides,
+
+    #[arg(long = "project-root")]
+    pub project_root: Option<PathBuf>,
+
+    #[arg(value_name = "TARGET", help = "Optional node name or path to focus")]
+    pub target: Option<String>,
+
+    /// Show a detailed summary for the chosen node instead of the full tree.
+    #[arg(long = "summary")]
+    pub summary: bool,
+}
+
+#[derive(Debug, Parser)]
+pub struct FacetCommand {
+    #[clap(skip)]
+    pub config_overrides: CliConfigOverrides,
+
+    /// Reuse candidates from a previous query id.
+    #[arg(long = "from")]
+    pub from: Uuid,
+
+    /// Optional project root override.
+    #[arg(long = "project-root")]
+    pub project_root: Option<PathBuf>,
+
+    /// Add language filters (repeatable).
+    #[arg(long = "lang", value_enum, action = ArgAction::Append)]
+    pub languages: Vec<LangArg>,
+
+    /// Restrict results to test files.
+    #[arg(long = "tests")]
+    pub tests: bool,
+
+    /// Restrict results to docs.
+    #[arg(long = "docs")]
+    pub docs: bool,
+
+    /// Restrict results to dependency files.
+    #[arg(long = "deps")]
+    pub deps: bool,
+
+    /// Only consider recent files.
+    #[arg(long = "recent")]
+    pub recent_only: bool,
+
+    /// Include references in the output.
+    #[arg(long = "with-refs")]
+    pub with_refs: bool,
+
+    /// Limit the number of references (defaults to 12).
+    #[arg(long = "with-refs-limit")]
+    pub refs_limit: Option<usize>,
+
+    /// Reference filtering mode.
+    #[arg(long = "refs-mode", value_enum, default_value_t = RefsMode::All)]
+    pub refs_mode: RefsMode,
+
+    /// Only print diagnostics (skip hits and final payload).
+    #[arg(long = "diagnostics-only")]
+    pub diagnostics_only: bool,
+
+    /// Select the final output format.
+    #[arg(long = "format", value_enum, default_value_t = OutputFormat::Json)]
+    pub output_format: OutputFormat,
+}
+
+#[derive(Debug, Parser)]
+pub struct NavigatorCli {
+    #[clap(skip)]
+    pub config_overrides: CliConfigOverrides,
+
+    #[command(subcommand)]
+    pub command: NavigatorSubcommand,
+}
+
+#[derive(Debug, clap::Subcommand)]
+pub enum NavigatorSubcommand {
+    Doctor(DoctorCommand),
+    Atlas(AtlasCommand),
+    Facet(FacetCommand),
+}
+
 pub async fn run_nav(cmd: NavCommand) -> Result<()> {
     let client = build_client(cmd.project_root.clone()).await?;
     let args = nav_command_to_search_args(&cmd);
     let request = plan_search_request(args)?;
-    if std::env::var("CODE_FINDER_DEBUG_REQUEST").is_ok() {
-        eprintln!("code_finder.nav request: {request:#?}");
+    if std::env::var("NAVIGATOR_DEBUG_REQUEST").is_ok() {
+        eprintln!("navigator.nav request: {request:#?}");
     }
-    let response = client.search(&request).await?;
-    print_json(&response)
+    execute_search(
+        client,
+        request,
+        cmd.output_format,
+        cmd.refs_mode,
+        cmd.with_refs || cmd.refs_mode != RefsMode::All,
+        cmd.diagnostics_only,
+    )
+    .await
+}
+
+pub async fn run_facet(cmd: FacetCommand) -> Result<()> {
+    let client = build_client(cmd.project_root.clone()).await?;
+    let args = facet_command_to_search_args(&cmd);
+    let request = plan_search_request(args)?;
+    execute_search(
+        client,
+        request,
+        cmd.output_format,
+        cmd.refs_mode,
+        cmd.with_refs || cmd.refs_mode != RefsMode::All,
+        cmd.diagnostics_only,
+    )
+    .await
 }
 
 pub async fn run_open(cmd: OpenCommand) -> Result<()> {
+    let project_root_string = cmd
+        .project_root
+        .as_ref()
+        .map(|path| path.display().to_string());
     let client = build_client(cmd.project_root.clone()).await?;
     let request = proto::OpenRequest {
         id: cmd.id,
         schema_version: proto::PROTOCOL_VERSION,
+        project_root: project_root_string,
     };
-    let response = client.open(&request).await?;
+    let response = client.open(request).await?;
     print_json(&response)
 }
 
 pub async fn run_snippet(cmd: SnippetCommand) -> Result<()> {
+    let project_root_string = cmd
+        .project_root
+        .as_ref()
+        .map(|path| path.display().to_string());
     let client = build_client(cmd.project_root.clone()).await?;
     let request = proto::SnippetRequest {
         id: cmd.id,
         context: cmd.context,
         schema_version: proto::PROTOCOL_VERSION,
+        project_root: project_root_string,
     };
-    let response = client.snippet(&request).await?;
+    let response = client.snippet(request).await?;
     print_json(&response)
 }
 
@@ -174,8 +340,147 @@ pub async fn run_daemon_cmd(cmd: DaemonCommand) -> Result<()> {
     .await
 }
 
-fn nav_command_to_search_args(cmd: &NavCommand) -> CodeFinderSearchArgs {
-    let mut args = CodeFinderSearchArgs::default();
+pub async fn run_doctor(mut cmd: DoctorCommand) -> Result<()> {
+    let client = build_client(cmd.project_root.take()).await?;
+    let report = client.doctor().await?;
+    print_json(&report)
+}
+
+pub async fn run_atlas(mut cmd: AtlasCommand) -> Result<()> {
+    let client = build_client(cmd.project_root.take()).await?;
+    let request = AtlasRequest {
+        schema_version: proto::PROTOCOL_VERSION,
+        project_root: None,
+    };
+    let response = client.atlas(request).await?;
+    let Some(root) = response.snapshot.root else {
+        println!("atlas: no indexed files yet");
+        return Ok(());
+    };
+    if cmd.summary {
+        let trimmed_target = cmd
+            .target
+            .as_deref()
+            .map(str::trim)
+            .filter(|token| !token.is_empty())
+            .map(str::to_string);
+        let focus = atlas_focus(&root, trimmed_target.as_deref());
+        if !focus.matched
+            && let Some(target) = trimmed_target.as_deref() {
+                println!("target '{target}' not found; showing workspace summary");
+            }
+        print_atlas_summary(&focus);
+        return Ok(());
+    }
+    if let Some(target) = cmd
+        .target
+        .as_deref()
+        .map(str::trim)
+        .filter(|token| !token.is_empty())
+    {
+        if let Some(node) = find_atlas_node(&root, target) {
+            print_atlas_node(node, 0);
+        } else {
+            println!("target '{target}' not found; showing full workspace");
+            print_atlas_node(&root, 0);
+        }
+    } else {
+        print_atlas_node(&root, 0);
+    }
+    Ok(())
+}
+
+async fn execute_search(
+    client: NavigatorClient,
+    request: proto::SearchRequest,
+    output_format: OutputFormat,
+    refs_mode: RefsMode,
+    show_refs: bool,
+    diagnostics_only: bool,
+) -> Result<()> {
+    if matches!(output_format, OutputFormat::Ndjson) {
+        client
+            .search_with_event_handler(request.clone(), |event| {
+                if diagnostics_only && !matches!(event, SearchStreamEvent::Diagnostics { .. }) {
+                    return;
+                }
+                if let Ok(line) = serde_json::to_string(event) {
+                    println!("{line}");
+                }
+            })
+            .await?;
+        return Ok(());
+    }
+    let mut last_diagnostics: Option<SearchDiagnostics> = None;
+    let mut last_top_hits: Vec<NavHit> = Vec::new();
+    let mut streamed_diag = false;
+    let mut streamed_hits = false;
+    let stream_sideband = matches!(output_format, OutputFormat::Json);
+    let outcome = client
+        .search_with_event_handler(request, |event| match event {
+            SearchStreamEvent::Diagnostics { diagnostics } => {
+                last_diagnostics = Some(diagnostics.clone());
+                if stream_sideband && !streamed_diag {
+                    streamed_diag = true;
+                    print_diagnostics(diagnostics);
+                }
+            }
+            SearchStreamEvent::TopHits { hits } => {
+                last_top_hits = hits.clone();
+                if stream_sideband && !streamed_hits && !diagnostics_only {
+                    streamed_hits = true;
+                    print_top_hits(hits, refs_mode, show_refs);
+                }
+            }
+            _ => {}
+        })
+        .await?;
+
+    match output_format {
+        OutputFormat::Json => {
+            if !streamed_diag
+                && let Some(diag) = outcome.diagnostics.as_ref().or(last_diagnostics.as_ref())
+            {
+                print_diagnostics(diag);
+            }
+            if !streamed_hits && !diagnostics_only {
+                if !outcome.top_hits.is_empty() {
+                    print_top_hits(&outcome.top_hits, refs_mode, show_refs);
+                } else if !last_top_hits.is_empty() {
+                    print_top_hits(&last_top_hits, refs_mode, show_refs);
+                }
+            }
+            if diagnostics_only {
+                if let Some(snapshot) = outcome.diagnostics.or(last_diagnostics.clone()) {
+                    print_json(&snapshot)?;
+                }
+                return Ok(());
+            }
+            if let Some(stats) = outcome.response.stats.as_ref() {
+                print_literal_stats(stats);
+                print_facet_summary(stats);
+            }
+            if let Some(hint) = outcome.response.atlas_hint.as_ref() {
+                print_atlas_hint_sideband(hint);
+            }
+            print_json(&outcome.response)
+        }
+        OutputFormat::Text => {
+            let diag_snapshot = outcome.diagnostics.clone().or(last_diagnostics);
+            print_text_response(
+                &outcome,
+                diag_snapshot,
+                refs_mode,
+                show_refs,
+                diagnostics_only,
+            )
+        }
+        OutputFormat::Ndjson => unreachable!(),
+    }
+}
+
+fn nav_command_to_search_args(cmd: &NavCommand) -> NavigatorSearchArgs {
+    let mut args = NavigatorSearchArgs::default();
     args.query = if cmd.query.is_empty() {
         None
     } else {
@@ -200,7 +505,15 @@ fn nav_command_to_search_args(cmd: &NavCommand) -> CodeFinderSearchArgs {
     args.only_docs = cmd.only_docs.then_some(true);
     args.only_deps = cmd.only_deps.then_some(true);
     args.with_refs = cmd.with_refs.then_some(true);
+    if cmd.refs_mode != RefsMode::All {
+        args.with_refs = Some(true);
+    }
     args.refs_limit = cmd.refs_limit;
+    args.refs_role = match cmd.refs_mode {
+        RefsMode::All => None,
+        RefsMode::Definitions => Some("definitions".to_string()),
+        RefsMode::Usages => Some("usages".to_string()),
+    };
     args.help_symbol = cmd.help_symbol.clone();
     args.refine = cmd.refine.map(|id| id.to_string());
     args.wait_for_index = cmd.no_wait.then_some(false);
@@ -208,7 +521,34 @@ fn nav_command_to_search_args(cmd: &NavCommand) -> CodeFinderSearchArgs {
     args
 }
 
-async fn build_client(project_root: Option<PathBuf>) -> Result<CodeFinderClient> {
+fn facet_command_to_search_args(cmd: &FacetCommand) -> NavigatorSearchArgs {
+    let mut args = NavigatorSearchArgs::default();
+    args.refine = Some(cmd.from.to_string());
+    args.languages = cmd
+        .languages
+        .iter()
+        .map(|lang| format_lang(lang).to_string())
+        .collect();
+    if cmd.tests {
+        args.only_tests = Some(true);
+    }
+    if cmd.docs {
+        args.only_docs = Some(true);
+    }
+    if cmd.deps {
+        args.only_deps = Some(true);
+    }
+    if cmd.recent_only {
+        args.recent_only = Some(true);
+    }
+    if cmd.with_refs || cmd.refs_mode != RefsMode::All {
+        args.with_refs = Some(true);
+    }
+    args.refs_limit = cmd.refs_limit;
+    args
+}
+
+async fn build_client(project_root: Option<PathBuf>) -> Result<NavigatorClient> {
     let resolved_root = match project_root {
         Some(path) => path,
         None => env::current_dir().context("current directory")?,
@@ -219,12 +559,544 @@ async fn build_client(project_root: Option<PathBuf>) -> Result<CodeFinderClient>
         codex_home: env::var("CODEX_HOME").ok().map(PathBuf::from),
         spawn,
     };
-    CodeFinderClient::new(opts).await
+    NavigatorClient::new(opts).await
+}
+
+fn print_diagnostics(diag: &SearchDiagnostics) {
+    let freshness = diag
+        .freshness_secs
+        .map(|secs| format!("{secs}s"))
+        .unwrap_or_else(|| "unknown".to_string());
+    eprintln!(
+        "[navigator] diagnostics: state={:?}, freshness={}, pending={}, skipped={}, errors={}",
+        diag.index_state,
+        freshness,
+        diag.coverage.pending.len(),
+        diag.coverage.skipped.len(),
+        diag.coverage.errors.len()
+    );
+    if let Some(summary) = format_reason_summary(&diag.coverage.skipped, "skipped") {
+        eprintln!("    {summary}");
+    }
+    if let Some(summary) = format_reason_summary(&diag.coverage.errors, "errors") {
+        eprintln!("    {summary}");
+    }
+    if !diag.pending_literals.is_empty() {
+        let preview_count = diag.pending_literals.len().min(4);
+        let preview = diag.pending_literals[..preview_count].join(", ");
+        if diag.pending_literals.len() > preview_count {
+            eprintln!(
+                "    literal pending: {} … (+{} more)",
+                preview,
+                diag.pending_literals.len() - preview_count
+            );
+        } else {
+            eprintln!("    literal pending: {preview}");
+        }
+    }
+}
+
+fn print_literal_stats(stats: &SearchStats) {
+    if let Some(trigrams) = &stats.literal_missing_trigrams
+        && !trigrams.is_empty()
+    {
+        eprintln!(
+            "[navigator] literal missing trigrams: {}",
+            trigrams.join(" ")
+        );
+    }
+    if let Some(paths) = &stats.literal_pending_paths
+        && !paths.is_empty()
+    {
+        let preview_count = paths.len().min(3);
+        let preview = paths[..preview_count].join(", ");
+        if paths.len() > preview_count {
+            eprintln!(
+                "[navigator] literal pending files: {} … (+{} more)",
+                preview,
+                paths.len() - preview_count
+            );
+        } else {
+            eprintln!("[navigator] literal pending files: {preview}");
+        }
+    }
+    if let Some(files) = stats.literal_scanned_files {
+        if files > 0 {
+            match stats.literal_scanned_bytes {
+                Some(bytes) => {
+                    eprintln!("[navigator] literal scanned {files} files ({bytes} bytes)");
+                }
+                None => eprintln!("[navigator] literal scanned {files} files"),
+            }
+        }
+    } else if let Some(bytes) = stats.literal_scanned_bytes
+        && bytes > 0
+    {
+        eprintln!("[navigator] literal scanned {bytes} bytes");
+    }
+}
+
+const MAX_CLI_REFS: usize = 6;
+const TEXT_MAX_HITS: usize = 10;
+
+fn print_top_hits(hits: &[NavHit], refs_mode: RefsMode, show_refs: bool) {
+    if hits.is_empty() {
+        return;
+    }
+    eprintln!("[navigator] top hits ({}):", hits.len());
+    for (idx, hit) in hits.iter().enumerate() {
+        let refs = hit
+            .references
+            .as_ref()
+            .map(codex_navigator::proto::NavReferences::len)
+            .unwrap_or(0);
+        eprintln!(
+            "  {}. {}:{} {:?} score={:.2} refs={} id={}",
+            idx + 1,
+            hit.path,
+            hit.line,
+            hit.kind,
+            hit.score,
+            refs,
+            hit.id
+        );
+        if let Some(snippet) = &hit.context_snippet {
+            for rendered in format_snippet_lines(snippet) {
+                eprintln!("        {rendered}");
+            }
+        }
+        if show_refs && let Some(refs_bucket) = &hit.references {
+            render_references(refs_bucket, refs_mode);
+        }
+    }
+}
+
+fn render_references(references: &proto::NavReferences, mode: RefsMode) {
+    let mut remaining = MAX_CLI_REFS;
+    let mut printed = false;
+    if mode != RefsMode::Usages && !references.definitions.is_empty() {
+        eprintln!("      definitions:");
+        for reference in references.definitions.iter().take(remaining) {
+            eprintln!(
+                "        • {}:{} {}",
+                reference.path, reference.line, reference.preview
+            );
+        }
+        let shown = references.definitions.len().min(remaining);
+        remaining = remaining.saturating_sub(shown);
+        printed = true;
+    }
+    if mode != RefsMode::Definitions && remaining > 0 && !references.usages.is_empty() {
+        eprintln!("      usages:");
+        for reference in references.usages.iter().take(remaining) {
+            eprintln!(
+                "        • {}:{} {}",
+                reference.path, reference.line, reference.preview
+            );
+        }
+        let shown = references.usages.len().min(remaining);
+        remaining = remaining.saturating_sub(shown);
+        printed = true;
+    }
+    if !printed {
+        eprintln!("      (no references)");
+    } else if remaining == 0 && references.len() > MAX_CLI_REFS {
+        eprintln!("      … +{} more refs", references.len() - MAX_CLI_REFS);
+    }
+}
+
+fn print_text_response(
+    outcome: &SearchStreamOutcome,
+    diagnostics: Option<SearchDiagnostics>,
+    refs_mode: RefsMode,
+    show_refs: bool,
+    diagnostics_only: bool,
+) -> Result<()> {
+    if let Some(diag) = diagnostics {
+        print_text_diagnostics(&diag);
+        if diagnostics_only {
+            return Ok(());
+        }
+    } else if diagnostics_only {
+        println!("diagnostics: (unavailable)");
+        return Ok(());
+    }
+
+    let response = &outcome.response;
+    println!(
+        "query_id: {}",
+        response
+            .query_id
+            .map(|id| id.to_string())
+            .unwrap_or_else(|| "n/a".to_string())
+    );
+    if let Some(stats) = &response.stats {
+        print_text_stats(stats);
+    }
+    if !response.hints.is_empty() {
+        println!("hints:");
+        for hint in &response.hints {
+            println!("  - {hint}");
+        }
+    }
+    if let Some(hint) = response.atlas_hint.as_ref() {
+        for line in format_atlas_hint_lines(hint) {
+            println!("{line}");
+        }
+    }
+
+    print_text_hits(&response.hits, refs_mode, show_refs);
+    if !response.fallback_hits.is_empty() {
+        print_text_fallback_hits(&response.fallback_hits);
+    }
+    Ok(())
+}
+
+fn print_text_diagnostics(diag: &SearchDiagnostics) {
+    let freshness = diag
+        .freshness_secs
+        .map(|secs| format!("{secs}s"))
+        .unwrap_or_else(|| "unknown".to_string());
+    println!(
+        "diagnostics: state={:?} freshness={} pending={} skipped={} errors={}",
+        diag.index_state,
+        freshness,
+        diag.coverage.pending.len(),
+        diag.coverage.skipped.len(),
+        diag.coverage.errors.len()
+    );
+    if let Some(summary) = format_reason_summary(&diag.coverage.skipped, "skipped") {
+        println!("  {summary}");
+    }
+    if let Some(summary) = format_reason_summary(&diag.coverage.errors, "errors") {
+        println!("  {summary}");
+    }
+    if !diag.pending_literals.is_empty() {
+        let preview_count = diag.pending_literals.len().min(4);
+        let preview = diag.pending_literals[..preview_count].join(", ");
+        if diag.pending_literals.len() > preview_count {
+            println!(
+                "  literal pending: {} … (+{} more)",
+                preview,
+                diag.pending_literals.len() - preview_count
+            );
+        } else {
+            println!("  literal pending: {preview}");
+        }
+    }
+}
+
+fn print_text_stats(stats: &SearchStats) {
+    let mut parts = vec![format!("took {} ms", stats.took_ms)];
+    parts.push(format!("candidates {}", stats.candidate_size));
+    if stats.cache_hit {
+        parts.push("cache".to_string());
+    }
+    if stats.literal_fallback {
+        parts.push("literal".to_string());
+    }
+    if stats.smart_refine {
+        parts.push("smart_refine".to_string());
+    }
+    if stats.text_mode {
+        parts.push("text".to_string());
+    }
+    println!("stats: {}", parts.join(" · "));
+    if let Some(scan) = stats.literal_scanned_files {
+        if let Some(bytes) = stats.literal_scanned_bytes {
+            println!("  literal scanned {scan} files ({bytes} bytes)");
+        } else {
+            println!("  literal scanned {scan} files");
+        }
+    } else if let Some(bytes) = stats.literal_scanned_bytes {
+        println!("  literal scanned {bytes} bytes");
+    }
+    if let Some(missing) = &stats.literal_missing_trigrams
+        && !missing.is_empty()
+    {
+        println!("  literal missing trigrams: {}", missing.join(" "));
+    }
+    if let Some(paths) = &stats.literal_pending_paths
+        && !paths.is_empty()
+    {
+        println!("  literal pending files: {}", paths.join(", "));
+    }
+    if !stats.autocorrections.is_empty() {
+        println!("  autocorrections: {}", stats.autocorrections.join(", "));
+    }
+    print_facet_summary(stats);
+}
+
+fn print_facet_summary(stats: &SearchStats) {
+    let Some(facets) = &stats.facets else {
+        return;
+    };
+    if facets.languages.is_empty() && facets.categories.is_empty() {
+        return;
+    }
+    eprintln!("facets:");
+    if !facets.languages.is_empty() {
+        eprintln!("  languages: {}", format_facet_line(&facets.languages));
+    }
+    if !facets.categories.is_empty() {
+        eprintln!("  categories: {}", format_facet_line(&facets.categories));
+    }
+}
+
+fn print_atlas_hint_sideband(hint: &proto::AtlasHint) {
+    for line in format_atlas_hint_lines(hint) {
+        eprintln!("[navigator] {line}");
+    }
+}
+
+fn format_facet_line(buckets: &[proto::FacetBucket]) -> String {
+    if buckets.is_empty() {
+        return "n/a".to_string();
+    }
+    let preview = buckets
+        .iter()
+        .take(5)
+        .map(|bucket| format!("{}({})", bucket.value, bucket.count))
+        .collect::<Vec<_>>()
+        .join(", ");
+    if buckets.len() > 5 {
+        format!("{preview} …")
+    } else {
+        preview
+    }
+}
+
+fn print_text_hits(hits: &[NavHit], refs_mode: RefsMode, show_refs: bool) {
+    if hits.is_empty() {
+        println!("hits: none");
+        return;
+    }
+    let shown = hits.len().min(TEXT_MAX_HITS);
+    println!("hits (showing {shown} of {}):", hits.len());
+    for (idx, hit) in hits.iter().take(TEXT_MAX_HITS).enumerate() {
+        let mut tags: Vec<String> = vec![format!("{:?}", hit.kind), format!("{:?}", hit.language)];
+        if hit.recent {
+            tags.push("recent".to_string());
+        }
+        if let Some(layer) = &hit.layer {
+            tags.push(format!("layer={layer}"));
+        }
+        if let Some(module) = &hit.module {
+            tags.push(format!("module={module}"));
+        }
+        println!(
+            "  {:>2}. {}:{} [{}] id={}",
+            idx + 1,
+            hit.path,
+            hit.line,
+            tags.join(" · "),
+            hit.id
+        );
+        if let Some(snippet) = &hit.context_snippet {
+            for rendered in format_snippet_lines(snippet) {
+                println!("        {rendered}");
+            }
+        } else {
+            println!("        {}", hit.preview.trim());
+        }
+        if show_refs && let Some(refs) = &hit.references {
+            render_text_references(refs, refs_mode);
+        }
+    }
+    if hits.len() > TEXT_MAX_HITS {
+        println!("  … +{} more hits", hits.len() - TEXT_MAX_HITS);
+    }
+}
+
+fn render_text_references(references: &proto::NavReferences, mode: RefsMode) {
+    let mut remaining = MAX_CLI_REFS;
+    if mode != RefsMode::Usages && !references.definitions.is_empty() {
+        println!("        definitions:");
+        for reference in references.definitions.iter().take(remaining) {
+            println!(
+                "          - {}:{} {}",
+                reference.path, reference.line, reference.preview
+            );
+        }
+        let shown = references.definitions.len().min(remaining);
+        remaining = remaining.saturating_sub(shown);
+    }
+    if mode != RefsMode::Definitions && remaining > 0 && !references.usages.is_empty() {
+        println!("        usages:");
+        for reference in references.usages.iter().take(remaining) {
+            println!(
+                "          - {}:{} {}",
+                reference.path, reference.line, reference.preview
+            );
+        }
+    }
+}
+
+fn format_snippet_lines(snippet: &proto::TextSnippet) -> Vec<String> {
+    let mut rendered = Vec::new();
+    for line in &snippet.lines {
+        let marker = if line.emphasis { '>' } else { ' ' };
+        rendered.push(format!("{:>4}{marker} {}", line.number, line.content));
+    }
+    if snippet.truncated {
+        rendered.push("... (truncated)".to_string());
+    }
+    rendered
+}
+
+fn print_atlas_node(node: &AtlasNode, depth: usize) {
+    let indent = "  ".repeat(depth);
+    let metrics = format!(
+        "files={} symbols={} loc={} recent={}",
+        node.file_count, node.symbol_count, node.loc, node.recent_files
+    );
+    let mut extras = Vec::new();
+    if node.doc_files > 0 {
+        extras.push(format!("docs {}", node.doc_files));
+    }
+    if node.test_files > 0 {
+        extras.push(format!("tests {}", node.test_files));
+    }
+    if node.dep_files > 0 {
+        extras.push(format!("deps {}", node.dep_files));
+    }
+    if extras.is_empty() {
+        println!("{indent}- {} ({:?}) {metrics}", node.name, node.kind);
+    } else {
+        println!(
+            "{indent}- {} ({:?}) {metrics} [{}]",
+            node.name,
+            node.kind,
+            extras.join(", ")
+        );
+    }
+    for child in &node.children {
+        print_atlas_node(child, depth + 1);
+    }
+}
+
+fn print_atlas_summary(focus: &AtlasFocus) {
+    let node = focus.node;
+    let trail = focus
+        .breadcrumb
+        .iter()
+        .map(|segment| segment.name.as_str())
+        .collect::<Vec<_>>()
+        .join(" / ");
+    println!("atlas summary: {trail}");
+    println!(
+        "kind={:?} files={} symbols={} loc={} recent={} docs={} tests={} deps={}",
+        node.kind,
+        node.file_count,
+        node.symbol_count,
+        node.loc,
+        node.recent_files,
+        node.doc_files,
+        node.test_files,
+        node.dep_files
+    );
+    if node.children.is_empty() {
+        println!("children: none");
+        return;
+    }
+    let mut ranked: Vec<&AtlasNode> = node.children.iter().collect();
+    ranked.sort_by(|a, b| b.file_count.cmp(&a.file_count));
+    println!("top children:");
+    for child in ranked.into_iter().take(6) {
+        println!(
+            "  - {} ({:?}) files={} symbols={} loc={} recent={}",
+            child.name,
+            child.kind,
+            child.file_count,
+            child.symbol_count,
+            child.loc,
+            child.recent_files
+        );
+    }
+}
+
+fn format_atlas_hint_lines(hint: &proto::AtlasHint) -> Vec<String> {
+    let mut lines = Vec::new();
+    let crumb = if hint.breadcrumb.is_empty() {
+        hint.focus.name.clone()
+    } else {
+        hint.breadcrumb.join(" / ")
+    };
+    lines.push(format!(
+        "atlas focus: {} ({:?}) files={} symbols={} loc={} recent={}",
+        crumb,
+        hint.focus.kind,
+        hint.focus.file_count,
+        hint.focus.symbol_count,
+        hint.focus.loc,
+        hint.focus.recent_files
+    ));
+    let mut extras = Vec::new();
+    if hint.focus.doc_files > 0 {
+        extras.push(format!("docs {}", hint.focus.doc_files));
+    }
+    if hint.focus.test_files > 0 {
+        extras.push(format!("tests {}", hint.focus.test_files));
+    }
+    if hint.focus.dep_files > 0 {
+        extras.push(format!("deps {}", hint.focus.dep_files));
+    }
+    if !extras.is_empty() {
+        lines.push(format!("  breakdown: {}", extras.join(", ")));
+    }
+    if !hint.top_children.is_empty() {
+        let preview: Vec<String> = hint
+            .top_children
+            .iter()
+            .take(4)
+            .map(|child| {
+                format!(
+                    "{} ({:?}) files={} loc={} symbols={}",
+                    child.name, child.kind, child.file_count, child.loc, child.symbol_count
+                )
+            })
+            .collect();
+        lines.push(format!("  nearby: {}", preview.join(" · ")));
+    }
+    lines
+}
+
+fn print_text_fallback_hits(hits: &[proto::FallbackHit]) {
+    println!("fallback_hits ({} pending files):", hits.len());
+    for hit in hits {
+        println!("  - {}:{} reason={}", hit.path, hit.line, hit.reason);
+        if let Some(snippet) = &hit.context_snippet {
+            for rendered in format_snippet_lines(snippet) {
+                println!("        {rendered}");
+            }
+        } else if !hit.preview.trim().is_empty() {
+            println!("        {}", hit.preview.trim());
+        }
+    }
+}
+
+fn format_reason_summary(gaps: &[proto::CoverageGap], label: &str) -> Option<String> {
+    if gaps.is_empty() {
+        return None;
+    }
+    let mut counts: HashMap<CoverageReason, usize> = HashMap::new();
+    for gap in gaps {
+        *counts.entry(gap.reason.clone()).or_default() += 1;
+    }
+    let mut entries: Vec<_> = counts.into_iter().collect();
+    entries.sort_by(|a, b| b.1.cmp(&a.1));
+    let rendered = entries
+        .iter()
+        .take(3)
+        .map(|(reason, count)| format!("{reason}={count}"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    Some(format!("{label}: {rendered}"))
 }
 
 fn build_spawn_command(project_root: &Path) -> Result<DaemonSpawn> {
-    let exe = resolve_daemon_launcher().context("resolve code-finder launcher")?;
-    let mut args = vec!["code-finder-daemon".to_string()];
+    let exe = resolve_daemon_launcher().context("resolve navigator launcher")?;
+    let mut args = vec!["navigator-daemon".to_string()];
     args.push("--project-root".to_string());
     args.push(project_root.display().to_string());
     if let Ok(codex_home) = env::var("CODEX_HOME") {
@@ -264,11 +1136,14 @@ mod tests {
             profiles: vec![ProfileArg::Symbols],
             with_refs: true,
             refs_limit: Some(7),
+            refs_mode: RefsMode::Definitions,
             help_symbol: Some("SessionManager".into()),
             refine: None,
             limit: 25,
             project_root: None,
             no_wait: false,
+            diagnostics_only: false,
+            output_format: OutputFormat::Json,
         }
     }
 
@@ -288,6 +1163,7 @@ mod tests {
         assert_eq!(args.only_deps, Some(true));
         assert_eq!(args.with_refs, Some(true));
         assert_eq!(args.refs_limit, Some(7));
+        assert_eq!(args.refs_role.as_deref(), Some("definitions"));
         assert_eq!(args.help_symbol.as_deref(), Some("SessionManager"));
         assert_eq!(args.profiles, vec![SearchProfile::Symbols]);
     }
@@ -405,6 +1281,7 @@ pub enum ProfileArg {
     Deps,
     Recent,
     References,
+    Text,
 }
 
 impl ProfileArg {
@@ -420,6 +1297,7 @@ impl ProfileArg {
             Self::Deps => SearchProfile::Deps,
             Self::Recent => SearchProfile::Recent,
             Self::References => SearchProfile::References,
+            Self::Text => SearchProfile::Text,
         }
     }
 }
@@ -437,6 +1315,7 @@ impl ValueEnum for ProfileArg {
             ProfileArg::Deps,
             ProfileArg::Recent,
             ProfileArg::References,
+            ProfileArg::Text,
         ];
         VARIANTS
     }
@@ -458,6 +1337,7 @@ fn format_profile(profile: &ProfileArg) -> &'static str {
         ProfileArg::Deps => "deps",
         ProfileArg::Recent => "recent",
         ProfileArg::References => "references",
+        ProfileArg::Text => "text",
     }
 }
 

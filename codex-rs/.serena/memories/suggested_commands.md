@@ -1,0 +1,7 @@
+- `just fmt` — run rustfmt across workspace with item-level import granularity.
+- `just fix -p <crate>` — run scoped `cargo clippy --fix` for the changed crate; use plain `just fix` only if shared crates change.
+- `cargo test -p <crate>` — run tests for the touched crate first; if `core`, `common`, or `protocol` change, follow with `cargo test --all-features` (ask before running full suite when interactive).
+- `cargo nextest run --no-fail-fast` (aka `just test`) — faster full test suite via nextest.
+- `cargo insta accept -p codex-tui` — accept new Ratatui snapshots when UI output intentionally changes (install `cargo-insta` if missing).
+- `cargo run --bin codex -- ...`, `just codex`, `just exec`, `just tui` — run CLI, exec, or TUI modes for manual verification.
+- `codex sandbox <platform>` — experiment with sandbox policies; prefer `codex --sandbox <mode>` to force policy.

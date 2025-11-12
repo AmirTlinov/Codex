@@ -12,8 +12,9 @@ use ratatui::text::Span;
 use ratatui::widgets::Paragraph;
 use ratatui::widgets::Widget;
 
-use super::CodeFinderFooterIndicator;
-use super::CodeFinderIndicatorState;
+use super::NavigatorFooterIndicator;
+use super::NavigatorIndicatorState;
+use codex_navigator::proto::CoverageReason;
 
 #[derive(Clone, Debug)]
 pub(crate) struct FooterProps {
@@ -22,7 +23,7 @@ pub(crate) struct FooterProps {
     pub(crate) use_shift_enter_hint: bool,
     pub(crate) is_task_running: bool,
     pub(crate) context_window_percent: Option<i64>,
-    pub(crate) code_finder_status: Option<CodeFinderFooterIndicator>,
+    pub(crate) navigator_status: Option<NavigatorFooterIndicator>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -88,7 +89,7 @@ fn footer_lines(props: &FooterProps) -> Vec<Line<'static>> {
         FooterMode::ShortcutSummary => {
             let mut line = context_window_line(
                 props.context_window_percent,
-                props.code_finder_status.as_ref(),
+                props.navigator_status.as_ref(),
             );
             line.push_span(" · ".dim());
             line.extend(vec![
@@ -104,7 +105,7 @@ fn footer_lines(props: &FooterProps) -> Vec<Line<'static>> {
         FooterMode::EscHint => vec![esc_hint_line(props.esc_backtrack_hint)],
         FooterMode::ContextOnly => vec![context_window_line(
             props.context_window_percent,
-            props.code_finder_status.as_ref(),
+            props.navigator_status.as_ref(),
         )],
     }
 }
@@ -234,36 +235,72 @@ fn build_columns(entries: Vec<Line<'static>>) -> Vec<Line<'static>> {
 
 fn context_window_line(
     percent: Option<i64>,
-    indicator: Option<&CodeFinderFooterIndicator>,
+    indicator: Option<&NavigatorFooterIndicator>,
 ) -> Line<'static> {
     let percent = percent.unwrap_or(100).clamp(0, 100);
     let mut line = Line::from(vec![Span::from(format!("{percent}% context left")).dim()]);
     if let Some(status) = indicator {
-        append_code_finder_status(&mut line, status);
+        append_navigator_status(&mut line, status);
     }
     line
 }
 
-fn append_code_finder_status(line: &mut Line<'static>, indicator: &CodeFinderFooterIndicator) {
+fn append_navigator_status(line: &mut Line<'static>, indicator: &NavigatorFooterIndicator) {
     line.push_span(" · ".dim());
+    let auto_indexing = indicator.auto_indexing_enabled();
     match indicator.state() {
-        CodeFinderIndicatorState::Building => {
+        NavigatorIndicatorState::Building => {
             line.push_span("●".magenta());
             line.push_span(" Indexing".dim());
         }
-        CodeFinderIndicatorState::Ready => {
+        NavigatorIndicatorState::Ready => {
             line.push_span("●".green());
             line.push_span(" Index".dim());
         }
-        CodeFinderIndicatorState::Failed => {
+        NavigatorIndicatorState::Failed => {
             line.push_span("●".red());
             line.push_span(" Index failed — run /index-code".red());
+            if let Some(notice) = indicator.notice() {
+                line.push_span(" — ".dim());
+                line.push_span(Span::from(truncate_text(notice, 80)));
+            }
+            return;
         }
+    }
+    if !auto_indexing {
+        line.push_span(" (paused)".magenta());
     }
     if let Some(notice) = indicator.notice() {
         line.push_span(" — ".dim());
         line.push_span(Span::from(truncate_text(notice, 80)));
     }
+    if let Some(summary) = indicator.coverage_summary() {
+        let mut badges = Vec::new();
+        if summary.pending() > 0 {
+            badges.push(format!("pending {}", summary.pending()));
+        }
+        if !summary.skipped().is_empty() {
+            badges.push(format_reason_badge("skip", summary.skipped()));
+        }
+        if !summary.errors().is_empty() {
+            badges.push(format_reason_badge("err", summary.errors()));
+        }
+        if !badges.is_empty() {
+            line.push_span(" [".dim());
+            line.push_span(badges.join(" | ").dim());
+            line.push_span("]".dim());
+        }
+    }
+}
+
+fn format_reason_badge(label: &str, counts: &[(CoverageReason, usize)]) -> String {
+    let parts = counts
+        .iter()
+        .take(2)
+        .map(|(reason, count)| format!("{reason}={count}"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!("{label} {parts}")
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -440,7 +477,7 @@ mod tests {
                 use_shift_enter_hint: false,
                 is_task_running: false,
                 context_window_percent: None,
-                code_finder_status: None,
+                navigator_status: None,
             },
         );
 
@@ -452,7 +489,7 @@ mod tests {
                 use_shift_enter_hint: true,
                 is_task_running: false,
                 context_window_percent: None,
-                code_finder_status: None,
+                navigator_status: None,
             },
         );
 
@@ -464,7 +501,7 @@ mod tests {
                 use_shift_enter_hint: false,
                 is_task_running: false,
                 context_window_percent: None,
-                code_finder_status: None,
+                navigator_status: None,
             },
         );
 
@@ -476,7 +513,7 @@ mod tests {
                 use_shift_enter_hint: false,
                 is_task_running: true,
                 context_window_percent: None,
-                code_finder_status: None,
+                navigator_status: None,
             },
         );
 
@@ -488,7 +525,7 @@ mod tests {
                 use_shift_enter_hint: false,
                 is_task_running: false,
                 context_window_percent: None,
-                code_finder_status: None,
+                navigator_status: None,
             },
         );
 
@@ -500,7 +537,7 @@ mod tests {
                 use_shift_enter_hint: false,
                 is_task_running: false,
                 context_window_percent: None,
-                code_finder_status: None,
+                navigator_status: None,
             },
         );
 
@@ -512,7 +549,7 @@ mod tests {
                 use_shift_enter_hint: false,
                 is_task_running: true,
                 context_window_percent: Some(72),
-                code_finder_status: None,
+                navigator_status: None,
             },
         );
     }

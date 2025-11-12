@@ -20,7 +20,7 @@ static PARSER: Lazy<Mutex<Parser>> = Lazy::new(|| {
     Mutex::new(parser)
 });
 
-fn parse_tree(source: &str) -> Result<tree_sitter::Tree, String> {
+pub(crate) fn parse_tree(source: &str) -> Result<tree_sitter::Tree, String> {
     parse_with_cached_parser(&PARSER, "rust", source)
 }
 
@@ -111,12 +111,14 @@ fn matches_symbol(path: &SymbolPath, node: Node, source: &str) -> bool {
 
 fn locate_symbol(path: &SymbolPath, source: &str, node: Node) -> Option<SymbolTarget> {
     if matches_symbol(path, node, source) {
+        let name_range = extract_name_bytes(node, source).map(|(_, range)| range);
         Some(SymbolTarget {
             language: "rust",
             header_range: range_from_node(node),
             body_range: body_range(node),
             symbol_path: path.clone(),
             symbol_kind: node.kind().to_string(),
+            name_range,
         })
     } else {
         None

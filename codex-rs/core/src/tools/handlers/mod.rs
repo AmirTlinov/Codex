@@ -1,9 +1,9 @@
 pub mod apply_patch;
-pub mod code_finder;
 mod grep_files;
 mod list_dir;
 mod mcp;
 mod mcp_resource;
+pub mod navigator;
 mod plan;
 mod read_file;
 mod shell;

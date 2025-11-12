@@ -7,13 +7,15 @@
 //! begin_patch: "*** Begin Patch" LF
 //! end_patch: "*** End Patch" LF
 //!
-//! hunk: add_hunk | delete_hunk | update_hunk | insert_before_symbol | insert_after_symbol | replace_symbol_body
+//! hunk: add_hunk | delete_hunk | update_hunk | insert_before_symbol | insert_after_symbol | replace_symbol_body | ast_operation | ast_script
 //! add_hunk: "*** Add File: " filename LF add_line+
 //! delete_hunk: "*** Delete File: " filename LF
 //! update_hunk: "*** Update File: " filename LF move_to? change+
 //! insert_before_symbol: "*** Insert Before Symbol: " target LF add_line+
 //! insert_after_symbol: "*** Insert After Symbol: " target LF add_line+
 //! replace_symbol_body: "*** Replace Symbol Body: " target LF add_line+
+//! ast_operation: "*** Ast Operation: " filename (" " key=value)* LF add_line*
+//! ast_script: "*** Ast Script: " filename (" " key=value)* LF
 //! filename: /(.+)/
 //! target: /(.+)/
 //! add_line: "+" /(.+)/ LF -> line
@@ -28,6 +30,7 @@
 use crate::ApplyPatchArgs;
 use crate::ast::SymbolPath;
 use crate::ast::symbol_path_from_str;
+use std::collections::BTreeMap;
 use std::path::Path;
 use std::path::PathBuf;
 
@@ -41,6 +44,8 @@ const UPDATE_FILE_MARKER: &str = "*** Update File: ";
 const INSERT_BEFORE_SYMBOL_MARKER: &str = "*** Insert Before Symbol: ";
 const INSERT_AFTER_SYMBOL_MARKER: &str = "*** Insert After Symbol: ";
 const REPLACE_SYMBOL_BODY_MARKER: &str = "*** Replace Symbol Body: ";
+const AST_OPERATION_MARKER: &str = "*** Ast Operation: ";
+const AST_SCRIPT_MARKER: &str = "*** Ast Script: ";
 const MOVE_TO_MARKER: &str = "*** Move to: ";
 const EOF_MARKER: &str = "*** End of File";
 const CHANGE_CONTEXT_MARKER: &str = "@@ ";
@@ -96,6 +101,15 @@ pub enum Hunk {
         symbol: SymbolPath,
         new_lines: Vec<String>,
     },
+    AstOperation {
+        path: PathBuf,
+        options: BTreeMap<String, String>,
+        payload: Vec<String>,
+    },
+    AstScript {
+        script: PathBuf,
+        options: BTreeMap<String, String>,
+    },
 }
 
 impl Hunk {
@@ -107,6 +121,8 @@ impl Hunk {
             Hunk::InsertBeforeSymbol { path, .. } => cwd.join(path),
             Hunk::InsertAfterSymbol { path, .. } => cwd.join(path),
             Hunk::ReplaceSymbolBody { path, .. } => cwd.join(path),
+            Hunk::AstOperation { path, .. } => cwd.join(path),
+            Hunk::AstScript { script, .. } => cwd.join(script),
         }
     }
 }
@@ -469,11 +485,25 @@ fn parse_one_hunk(lines: &[&str], line_number: usize) -> Result<(Hunk, usize), P
             },
             consumed + 1,
         ));
+    } else if let Some(rest) = first_line.strip_prefix(AST_OPERATION_MARKER) {
+        let (path, options) = parse_ast_operation_header(rest, line_number)?;
+        let (payload, consumed) = parse_ast_operation_payload(&lines[1..], line_number + 1)?;
+        return Ok((
+            AstOperation {
+                path,
+                options,
+                payload,
+            },
+            consumed + 1,
+        ));
+    } else if let Some(rest) = first_line.strip_prefix(AST_SCRIPT_MARKER) {
+        let (script, options) = parse_ast_script_header(rest, line_number)?;
+        return Ok((AstScript { script, options }, 1));
     }
 
     Err(InvalidHunkError {
         message: format!(
-            "'{first_line}' is not a valid hunk header. Valid hunk headers: '*** Add File: {{path}}', '*** Delete File: {{path}}', '*** Update File: {{path}}'"
+            "'{first_line}' is not a valid hunk header. Valid hunk headers: '*** Add File: {{path}}', '*** Delete File: {{path}}', '*** Update File: {{path}}', symbol directives, '*** Ast Operation: {{path}}', or '*** Ast Script: {{script}}'"
         ),
         line_number,
     })
@@ -530,6 +560,86 @@ fn parse_symbol_lines(
         });
     }
 
+    Ok((collected, consumed))
+}
+
+fn parse_ast_operation_header(
+    raw: &str,
+    line_number: usize,
+) -> Result<(PathBuf, BTreeMap<String, String>), ParseError> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return Err(InvalidHunkError {
+            message: "Ast Operation header must include a path".into(),
+            line_number,
+        });
+    }
+
+    let mut path_parts = Vec::new();
+    let mut options = BTreeMap::new();
+    for token in trimmed.split_whitespace() {
+        if let Some((key, value)) = token.split_once('=') {
+            let key = key.trim();
+            if key.is_empty() {
+                return Err(InvalidHunkError {
+                    message: format!("Invalid key in Ast Operation header: '{token}'"),
+                    line_number,
+                });
+            }
+            let cleaned = value.trim_matches(|c| c == '"' || c == '\'');
+            options.insert(key.to_string(), cleaned.to_string());
+        } else {
+            path_parts.push(token);
+        }
+    }
+
+    if path_parts.is_empty() {
+        return Err(InvalidHunkError {
+            message: "Ast Operation header must specify a path before key=value pairs".into(),
+            line_number,
+        });
+    }
+
+    Ok((PathBuf::from(path_parts.join(" ")), options))
+}
+
+fn parse_ast_script_header(
+    raw: &str,
+    line_number: usize,
+) -> Result<(PathBuf, BTreeMap<String, String>), ParseError> {
+    let (path, options) = parse_ast_operation_header(raw, line_number)?;
+    if path.as_os_str().is_empty() {
+        return Err(InvalidHunkError {
+            message: "Ast Script header must include a script path".into(),
+            line_number,
+        });
+    }
+    Ok((path, options))
+}
+
+fn parse_ast_operation_payload(
+    lines: &[&str],
+    line_number: usize,
+) -> Result<(Vec<String>, usize), ParseError> {
+    let mut collected = Vec::new();
+    let mut consumed = 0;
+    for line in lines {
+        if line.trim().is_empty() {
+            consumed += 1;
+            continue;
+        }
+        if line.starts_with("***") {
+            break;
+        }
+        let Some(rest) = line.strip_prefix('+') else {
+            return Err(InvalidHunkError {
+                message: "Ast Operation payload lines must start with '+'".into(),
+                line_number: line_number + consumed,
+            });
+        };
+        collected.push(rest.to_string());
+        consumed += 1;
+    }
     Ok((collected, consumed))
 }
 
@@ -857,8 +967,7 @@ fn test_parse_one_hunk() {
     assert_eq!(
         parse_one_hunk(&["bad"], 234),
         Err(InvalidHunkError {
-            message: "'bad' is not a valid hunk header. \
-            Valid hunk headers: '*** Add File: {path}', '*** Delete File: {path}', '*** Update File: {path}'".to_string(),
+            message: "'bad' is not a valid hunk header. Valid hunk headers: '*** Add File: {path}', '*** Delete File: {path}', '*** Update File: {path}', symbol directives, '*** Ast Operation: {path}', or '*** Ast Script: {script}'".to_string(),
             line_number: 234
         })
     );

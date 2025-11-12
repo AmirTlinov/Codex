@@ -1,12 +1,17 @@
 mod artifacts;
 mod ast;
+mod ast_ops;
+mod ast_transform;
 mod fallback;
 mod formatting;
 mod parser;
 mod post_checks;
+mod refactor_catalog;
+mod refactor_script;
 mod seek_sequence;
 mod standalone_executable;
 
+use std::collections::BTreeMap;
 use std::collections::HashMap;
 use std::collections::HashSet;
 use std::fmt;
@@ -39,6 +44,10 @@ use ast::SymbolResolution;
 use ast::SymbolTarget;
 use ast::byte_range_to_line_col;
 use ast::resolve_locator;
+use ast::service::global_service_handle;
+use ast_ops::AstOperationKind;
+use ast_ops::AstOperationSpec;
+use ast_transform::apply_ast_operation;
 use encoding_rs::Encoding;
 use fallback::FallbackMatch;
 use filetime::FileTime;
@@ -47,6 +56,10 @@ pub use parser::ParseError;
 use parser::ParseError::*;
 use parser::UpdateFileChunk;
 pub use parser::parse_patch;
+use refactor_catalog::ScriptCatalog;
+use refactor_script::AUTO_SYMBOL_PLACEHOLDER;
+use refactor_script::RefactorScript;
+use refactor_script::ScriptStep;
 use serde_json::json;
 use similar::ChangeTag;
 use similar::TextDiff;
@@ -99,8 +112,29 @@ fn update_symbol_change(
     new_lines: &[String],
     kind: SymbolEditKind,
 ) -> Result<(), ApplyPatchError> {
-    let (mut original_disk, disk_missing) = match fs::read(&path) {
-        Ok(bytes) => (decode_content(&bytes, "utf-8")?, false),
+    let (original_disk, current_content, move_path) = load_edit_state(changes, &path, "utf-8")?;
+
+    let (updated_content, _) = compute_symbol_edit(
+        &current_content,
+        &path,
+        symbol,
+        new_lines,
+        kind,
+        SymbolFallbackMode::Fuzzy,
+    )?;
+
+    persist_update_change(changes, path, original_disk, updated_content, move_path);
+
+    Ok(())
+}
+
+fn load_edit_state(
+    changes: &HashMap<PathBuf, ApplyPatchFileChange>,
+    path: &Path,
+    encoding: &str,
+) -> Result<(String, String, Option<PathBuf>), ApplyPatchError> {
+    let (mut original_disk, disk_missing) = match fs::read(path) {
+        Ok(bytes) => (decode_content(&bytes, encoding)?, false),
         Err(err) => {
             if err.kind() == ErrorKind::NotFound {
                 (String::new(), true)
@@ -114,7 +148,7 @@ fn update_symbol_change(
     };
 
     let mut move_path = None;
-    let current_content = if let Some(existing) = changes.get(&path) {
+    let current_content = if let Some(existing) = changes.get(path) {
         match existing {
             ApplyPatchFileChange::Update {
                 new_content,
@@ -126,13 +160,13 @@ fn update_symbol_change(
             }
             ApplyPatchFileChange::Add { .. } => {
                 return Err(ApplyPatchError::ParseError(InvalidPatchError(format!(
-                    "Cannot apply symbol-directed edit to newly added file {}",
+                    "Cannot apply AST edit to newly added file {}",
                     path.display()
                 ))));
             }
             ApplyPatchFileChange::Delete { .. } => {
                 return Err(ApplyPatchError::ParseError(InvalidPatchError(format!(
-                    "Cannot apply symbol-directed edit to deleted file {}",
+                    "Cannot apply AST edit to deleted file {}",
                     path.display()
                 ))));
             }
@@ -147,19 +181,20 @@ fn update_symbol_change(
         original_disk.clone()
     };
 
-    let (updated_content, _) = compute_symbol_edit(
-        &current_content,
-        &path,
-        symbol,
-        new_lines,
-        kind,
-        SymbolFallbackMode::Fuzzy,
-    )?;
-
     if disk_missing {
-        original_disk = current_content;
+        original_disk = current_content.clone();
     }
 
+    Ok((original_disk, current_content, move_path))
+}
+
+fn persist_update_change(
+    changes: &mut HashMap<PathBuf, ApplyPatchFileChange>,
+    path: PathBuf,
+    original_disk: String,
+    updated_content: String,
+    move_path: Option<PathBuf>,
+) {
     let diff = TextDiff::from_lines(&original_disk, &updated_content);
     let unified_diff = diff.unified_diff().context_radius(3).to_string();
 
@@ -171,8 +206,188 @@ fn update_symbol_change(
             new_content: updated_content,
         },
     );
+}
 
+fn apply_script_hunk_inline(
+    script_path: &Path,
+    options: &BTreeMap<String, String>,
+    cwd: &Path,
+    changes: &mut HashMap<PathBuf, ApplyPatchFileChange>,
+) -> Result<(), ApplyPatchError> {
+    let absolute_script =
+        resolve_path(cwd, script_path).map_err(map_anyhow_to_apply_patch_error)?;
+    let vars = build_script_vars(&absolute_script, options);
+    let format_hint = options.get("format").map(String::as_str);
+    let script = RefactorScript::load_from_path(&absolute_script, &vars, format_hint)?;
+    if let Some(catalog) = ScriptCatalog::load(cwd)? {
+        catalog.verify(script_path, &script.metadata)?;
+    }
+    let script_root = resolve_script_root(cwd, options)?;
+    for step in script.steps.iter() {
+        apply_script_step_inline(step, &script_root, changes)?;
+    }
     Ok(())
+}
+
+fn apply_script_step_inline(
+    step: &ScriptStep,
+    script_root: &Path,
+    changes: &mut HashMap<PathBuf, ApplyPatchFileChange>,
+) -> Result<(), ApplyPatchError> {
+    let absolute =
+        resolve_path(script_root, &step.path).map_err(map_anyhow_to_apply_patch_error)?;
+    if !absolute.exists() {
+        return Err(script_parse_error(format!(
+            "Cannot run script step {} because {} does not exist",
+            step.id,
+            step.path.display()
+        )));
+    }
+    let (_, snapshot, _) = load_edit_state(changes, &absolute, "utf-8")?;
+    let plans = materialize_step_specs(step, &absolute, &snapshot)?;
+    for spec in plans {
+        let (original_disk, current_content, move_path) =
+            load_edit_state(changes, &absolute, "utf-8")?;
+        let plan = apply_ast_operation(&absolute, &current_content, &spec)?;
+        persist_update_change(
+            changes,
+            absolute.clone(),
+            original_disk,
+            plan.new_content,
+            move_path,
+        );
+    }
+    Ok(())
+}
+
+fn materialize_step_specs(
+    step: &ScriptStep,
+    path: &Path,
+    source: &str,
+) -> Result<Vec<AstOperationSpec>, ApplyPatchError> {
+    if let Some(query) = &step.query {
+        let language_hint = step
+            .language
+            .clone()
+            .or_else(|| step.operation.language.clone());
+        let matches = global_service_handle().run_query(
+            path,
+            source.to_string(),
+            language_hint,
+            query.clone(),
+        )?;
+        let mut filtered: Vec<_> = matches
+            .into_iter()
+            .filter(|m| match step.capture.as_deref() {
+                Some("*") | None => true,
+                Some(target) => m.capture_name == target,
+            })
+            .collect();
+        if filtered.is_empty() {
+            return Ok(Vec::new());
+        }
+        let mut seen_symbols: HashSet<String> = HashSet::new();
+        let mut prepared = Vec::with_capacity(filtered.len());
+        for capture in filtered.drain(..) {
+            let dedup_key = capture
+                .symbol
+                .as_ref()
+                .map(std::string::ToString::to_string)
+                .unwrap_or_else(|| {
+                    format!("{}..{}", capture.byte_range.start, capture.byte_range.end)
+                });
+            if !seen_symbols.insert(dedup_key) {
+                continue;
+            }
+            let spec = override_symbol_in_spec(
+                &step.operation,
+                capture.symbol,
+                step.requires_symbol_injection(),
+            )?;
+            prepared.push(spec);
+        }
+        Ok(prepared)
+    } else {
+        Ok(vec![step.operation.clone()])
+    }
+}
+
+fn override_symbol_in_spec(
+    base: &AstOperationSpec,
+    symbol: Option<SymbolPath>,
+    require_symbol: bool,
+) -> Result<AstOperationSpec, ApplyPatchError> {
+    let mut spec = base.clone();
+    match &mut spec.kind {
+        AstOperationKind::RenameSymbol { symbol: target, .. }
+        | AstOperationKind::UpdateSignature { symbol: target, .. }
+        | AstOperationKind::MoveBlock { symbol: target, .. }
+        | AstOperationKind::InsertAttributes { symbol: target, .. } => {
+            if let Some(sym) = symbol {
+                *target = sym;
+            } else if require_symbol && (target.is_empty() || symbol_is_placeholder(target)) {
+                return Err(script_parse_error(
+                    "Query result did not provide a symbol for script step",
+                ));
+            }
+        }
+        AstOperationKind::TemplateEmit { symbol: target, .. } => {
+            if let Some(sym) = symbol {
+                *target = Some(sym);
+            } else if require_symbol
+                && (target.is_none() || target.as_ref().is_some_and(symbol_is_placeholder))
+            {
+                return Err(script_parse_error(
+                    "Query result did not provide a symbol for script template step",
+                ));
+            }
+        }
+        AstOperationKind::UpdateImports { .. } => {}
+    }
+    Ok(spec)
+}
+
+fn symbol_is_placeholder(path: &SymbolPath) -> bool {
+    path.segments().len() == 1
+        && path
+            .segments()
+            .first()
+            .is_some_and(|segment| segment == AUTO_SYMBOL_PLACEHOLDER)
+}
+
+fn script_parse_error(message: impl Into<String>) -> ApplyPatchError {
+    ApplyPatchError::ParseError(InvalidPatchError(message.into()))
+}
+
+fn build_script_vars(
+    script_path: &Path,
+    options: &BTreeMap<String, String>,
+) -> BTreeMap<String, String> {
+    let mut vars = options.clone();
+    let script_path_str = script_path.to_string_lossy().into_owned();
+    vars.entry("script_path".into()).or_insert(script_path_str);
+    let script_dir = script_path
+        .parent()
+        .map(|dir| dir.to_string_lossy().into_owned())
+        .unwrap_or_else(|| ".".into());
+    vars.entry("script_dir".into()).or_insert(script_dir);
+    vars
+}
+
+fn resolve_script_root(
+    default_root: &Path,
+    options: &BTreeMap<String, String>,
+) -> Result<PathBuf, ApplyPatchError> {
+    if let Some(root_override) = options.get("root") {
+        let override_path = Path::new(root_override);
+        if override_path.is_absolute() {
+            Ok(override_path.to_path_buf())
+        } else {
+            Ok(default_root.join(override_path))
+        }
+    } else {
+        Ok(default_root.to_path_buf())
+    }
 }
 
 impl ApplyPatchError {
@@ -1106,6 +1321,28 @@ fn build_apply_patch_action(
                     SymbolEditKind::ReplaceBody,
                 )?;
             }
+            Hunk::AstOperation {
+                path: rel_path,
+                options,
+                payload,
+            } => {
+                let path = resolve_path(&effective_cwd, &rel_path)
+                    .map_err(map_anyhow_to_apply_patch_error)?;
+                let spec = AstOperationSpec::from_raw(&options, &payload)?;
+                let (original_disk, current_content, move_path) =
+                    load_edit_state(&changes, &path, "utf-8")?;
+                let plan = apply_ast_operation(&path, &current_content, &spec)?;
+                persist_update_change(
+                    &mut changes,
+                    path,
+                    original_disk,
+                    plan.new_content,
+                    move_path,
+                );
+            }
+            Hunk::AstScript { script, options } => {
+                apply_script_hunk_inline(&script, &options, &effective_cwd, &mut changes)?;
+            }
         }
     }
 
@@ -1261,6 +1498,7 @@ pub struct OperationSummary {
     pub status: OperationStatus,
     pub message: Option<String>,
     pub symbol: Option<SymbolOperationSummary>,
+    pub preview: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1329,6 +1567,7 @@ impl OperationSummary {
             status: OperationStatus::Applied,
             message: None,
             symbol: None,
+            preview: None,
         }
     }
 
@@ -1354,6 +1593,11 @@ impl OperationSummary {
 
     fn with_symbol(mut self, symbol: SymbolOperationSummary) -> Self {
         self.symbol = Some(symbol);
+        self
+    }
+
+    fn with_preview(mut self, preview: Option<String>) -> Self {
+        self.preview = preview;
         self
     }
 }
@@ -2299,12 +2543,155 @@ fn write_atomic_bytes(path: &Path, bytes: &[u8]) -> anyhow::Result<()> {
     Ok(())
 }
 
+fn schedule_script_plan(
+    script_rel: &Path,
+    options: &BTreeMap<String, String>,
+    config: &ApplyPatchConfig,
+    summaries: &mut Vec<OperationSummary>,
+    planned: &mut Vec<PlannedChange>,
+    diagnostics: &mut Vec<DiagnosticItem>,
+) -> anyhow::Result<()> {
+    let script_path = resolve_path(&config.root, script_rel)?;
+    let vars = build_script_vars(&script_path, options);
+    let format_hint = options.get("format").map(String::as_str);
+    let script = RefactorScript::load_from_path(&script_path, &vars, format_hint)
+        .map_err(anyhow::Error::new)?;
+    if let Some(catalog) = ScriptCatalog::load(&config.root).map_err(anyhow::Error::new)? {
+        catalog
+            .verify(script_rel, &script.metadata)
+            .map_err(anyhow::Error::new)?;
+    }
+    let script_root = resolve_script_root(&config.root, options)?;
+    let mut label = format!("{}@{}", script.metadata.name, script.metadata.version);
+    if let Some(desc) = script.metadata.description.as_deref()
+        && !desc.is_empty()
+    {
+        label.push_str(": ");
+        label.push_str(desc);
+    }
+    if !script.metadata.labels.is_empty() {
+        label.push_str(" [");
+        label.push_str(&script.metadata.labels.join(","));
+        label.push(']');
+    }
+    label.push_str(&format!(" [{}] <", script.metadata.engine));
+    label.push_str(&script.metadata.source_path.display().to_string());
+    label.push('>');
+    let mut script_state: HashMap<PathBuf, String> = HashMap::new();
+    for step in script.steps.iter() {
+        let absolute = resolve_path(&script_root, &step.path)?;
+        let mut working_source = if let Some(buffered) = script_state.get(&absolute) {
+            buffered.clone()
+        } else {
+            if !absolute.exists() {
+                anyhow::bail!(
+                    "Cannot run script step {} because {} does not exist",
+                    step.id,
+                    step.path.display()
+                );
+            }
+            read_file_with_encoding(&absolute, &config.encoding)?
+        };
+        let plans =
+            materialize_step_specs(step, &absolute, &working_source).map_err(anyhow::Error::new)?;
+        for spec in plans {
+            let updated = schedule_ast_operation_plan(
+                &step.path,
+                &absolute,
+                &spec,
+                config,
+                PlanOutputs {
+                    summaries,
+                    planned,
+                    diagnostics,
+                },
+                Some(&label),
+                Some(&working_source),
+            )?;
+            working_source = updated;
+        }
+        script_state.insert(absolute, working_source);
+    }
+    Ok(())
+}
+
+struct PlanOutputs<'a> {
+    summaries: &'a mut Vec<OperationSummary>,
+    planned: &'a mut Vec<PlannedChange>,
+    diagnostics: &'a mut Vec<DiagnosticItem>,
+}
+
+fn schedule_ast_operation_plan(
+    relative: &Path,
+    absolute: &Path,
+    spec: &AstOperationSpec,
+    config: &ApplyPatchConfig,
+    outputs: PlanOutputs<'_>,
+    context_label: Option<&str>,
+    source_override: Option<&str>,
+) -> anyhow::Result<String> {
+    let PlanOutputs {
+        summaries,
+        planned,
+        diagnostics,
+    } = outputs;
+    if !absolute.exists() {
+        anyhow::bail!(
+            "Cannot apply AST operation to {} because it does not exist",
+            relative.display()
+        );
+    }
+    let original_contents = match source_override {
+        Some(source) => source.to_string(),
+        None => read_file_with_encoding(absolute, &config.encoding)?,
+    };
+    let plan =
+        apply_ast_operation(absolute, &original_contents, spec).map_err(anyhow::Error::new)?;
+    let (added_lines, removed_lines) = diff_line_counts(&original_contents, &plan.new_content);
+    let mut summary = OperationSummary::new(OperationAction::Update, relative.to_path_buf())
+        .with_added(added_lines)
+        .with_removed(removed_lines)
+        .with_status(OperationStatus::Planned);
+    summary = summary.with_preview(plan.preview.clone());
+    let message = if let Some(label) = context_label {
+        format!("{label}: {}", plan.message)
+    } else {
+        plan.message.clone()
+    };
+    summary.message = Some(message);
+    let line_ending = LineEnding::detected(&original_contents).unwrap_or_else(LineEnding::native);
+    let metadata = FileMetadataSnapshot::from_path(absolute)?;
+    let reference_had_final_newline = has_trailing_newline(&original_contents);
+    let summary_index = summaries.len();
+    summaries.push(summary);
+    let absolute_buf = absolute.to_path_buf();
+    let updated_content = plan.new_content.clone();
+    planned.push(PlannedChange {
+        summary_index,
+        kind: PlannedChangeKind::Update {
+            original: absolute_buf.clone(),
+            dest: absolute_buf,
+            new_content: plan.new_content,
+            line_ending,
+            metadata,
+            reference_had_final_newline,
+        },
+    });
+    diagnostics.extend(plan.diagnostics);
+    Ok(updated_content)
+}
+
 fn plan_hunks(
     hunks: &[Hunk],
     config: &ApplyPatchConfig,
-) -> anyhow::Result<(Vec<OperationSummary>, Vec<PlannedChange>)> {
+) -> anyhow::Result<(
+    Vec<OperationSummary>,
+    Vec<PlannedChange>,
+    Vec<DiagnosticItem>,
+)> {
     let mut summaries = Vec::new();
     let mut planned = Vec::new();
+    let mut diagnostics = Vec::new();
 
     for hunk in hunks {
         match hunk {
@@ -2474,10 +2861,42 @@ fn plan_hunks(
                     &mut planned,
                 )?;
             }
+            Hunk::AstOperation {
+                path,
+                options,
+                payload,
+            } => {
+                let absolute = resolve_path(&config.root, path)?;
+                let spec =
+                    AstOperationSpec::from_raw(options, payload).map_err(anyhow::Error::new)?;
+                let _ = schedule_ast_operation_plan(
+                    path,
+                    &absolute,
+                    &spec,
+                    config,
+                    PlanOutputs {
+                        summaries: &mut summaries,
+                        planned: &mut planned,
+                        diagnostics: &mut diagnostics,
+                    },
+                    None,
+                    None,
+                )?;
+            }
+            Hunk::AstScript { script, options } => {
+                schedule_script_plan(
+                    script,
+                    options,
+                    config,
+                    &mut summaries,
+                    &mut planned,
+                    &mut diagnostics,
+                )?;
+            }
         }
     }
 
-    Ok((summaries, planned))
+    Ok((summaries, planned, diagnostics))
 }
 
 fn apply_planned_changes(
@@ -2679,7 +3098,7 @@ fn apply_hunks_with_config(
     }
 
     let start_time = Instant::now();
-    let (mut summaries, planned) = match plan_hunks(hunks, config) {
+    let (mut summaries, planned, planning_diagnostics) = match plan_hunks(hunks, config) {
         Ok(value) => value,
         Err(err) => {
             let apply_err = map_anyhow_to_apply_patch_error(err);
@@ -2729,7 +3148,7 @@ fn apply_hunks_with_config(
             options: ReportOptions::from(config),
             formatting: Vec::new(),
             post_checks: Vec::new(),
-            diagnostics: Vec::new(),
+            diagnostics: planning_diagnostics,
             batch: None,
             artifacts: ArtifactSummary::default(),
             amendment_template: None,
@@ -2768,7 +3187,7 @@ fn apply_hunks_with_config(
         options: ReportOptions::from(config),
         formatting: Vec::new(),
         post_checks: Vec::new(),
-        diagnostics: Vec::new(),
+        diagnostics: planning_diagnostics,
         batch: None,
         artifacts: ArtifactSummary::default(),
         amendment_template: None,
@@ -3111,6 +3530,7 @@ pub(crate) fn report_to_json(report: &PatchReport) -> serde_json::Value {
                 },
                 "message": op.message.clone(),
                 "symbol": symbol,
+                "preview": op.preview,
             })
         })
         .collect::<Vec<_>>();

@@ -1,0 +1,6 @@
+- Code: Rust; instructions stress DDD, Ports & Adapters, ModularMonolith_First, low cyclomatic complexity (≤10), high coverage (≥85%), no mocks/fakes/stubs in production.
+- Prefer performance with correctness over readability when needed; flagship-level implementations only.
+- For Rust formatting use `just fmt`; inline `format!` args; collapse nested `if`; avoid redundant closures; prefer signed ints.
+- TUI uses Ratatui Stylize helpers; avoid manual `Span::styled` unless necessary; wrap text with provided helpers; use `.into()` conversions smartly; no hardcoded white.
+- Tests should use `pretty_assertions::assert_eq` when comparing values; prefer full object equality.
+- Comments only for complex logic; code and docs must be in English, but communication with user in Russian.

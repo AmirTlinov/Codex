@@ -1,0 +1,5 @@
+- Rust 1.80+ (workspace with many crates prefixed by `codex-`).
+- Cargo workspaces with `just` recipes for fmt/fix/test. Some crates use Ratatui for TUI, tokio async runtime, serde, and MCP helpers.
+- Snapshot testing via `insta` (especially in tui) and `cargo nextest` for general tests.
+- Auxiliary tooling: `just`, `rg`, `cargo-insta`, `cargo-nextest`, `cargo clippy`, sandbox helpers.
+- Project emphasizes DDD, Ports & Adapters, Modular Monolith design.

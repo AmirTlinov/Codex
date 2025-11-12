@@ -1,0 +1,77 @@
+#!/usr/bin/env python3
+import subprocess
+import sys
+
+def main() -> int:
+    data = sys.stdin.read()
+    if not data:
+        print("apply_patch: empty input", file=sys.stderr)
+        return 1
+    lines = data.splitlines()
+    if not lines or lines[0].strip() != "*** Begin Patch":
+        print("apply_patch: patch must start with '*** Begin Patch'", file=sys.stderr)
+        return 1
+    if not any(line.strip() == "*** End Patch" for line in lines):
+        print("apply_patch: missing '*** End Patch'", file=sys.stderr)
+        return 1
+    diff_lines: list[str] = []
+    i = 1
+    end_index = len(lines)
+    for idx, line in enumerate(lines):
+        if line.strip() == "*** End Patch":
+            end_index = idx
+            break
+    while i < end_index:
+        line = lines[i]
+        if not line:
+            i += 1
+            continue
+        if not line.startswith("*** "):
+            print(f"apply_patch: unexpected line '{line}'", file=sys.stderr)
+            return 1
+        if line.startswith("*** Update File: "):
+            path = line.split(":", 1)[1].strip()
+            i += 1
+            new_path = path
+            if i < end_index and lines[i].startswith("*** Move to: "):
+                new_path = lines[i].split(":", 1)[1].strip()
+                i += 1
+            diff_lines.append(f"--- {path}")
+            diff_lines.append(f"+++ {new_path}")
+            while i < end_index and not lines[i].startswith("*** "):
+                diff_lines.append(lines[i])
+                i += 1
+        elif line.startswith("*** Add File: "):
+            path = line.split(":", 1)[1].strip()
+            i += 1
+            added: list[str] = []
+            while i < end_index and not lines[i].startswith("*** "):
+                added.append(lines[i])
+                i += 1
+            diff_lines.append("--- /dev/null")
+            diff_lines.append(f"+++ {path}")
+            added_lines = [ln for ln in added if ln]
+            count = sum(1 for ln in added_lines if ln.startswith("+"))
+            diff_lines.append(f"@@ -0,0 +{max(count,1)},{max(count,1)} @@")
+            diff_lines.extend(added)
+        elif line.startswith("*** Delete File: "):
+            path = line.split(":", 1)[1].strip()
+            diff_lines.append(f"--- {path}")
+            diff_lines.append("+++ /dev/null")
+            diff_lines.append("@@ -1 +0,0 @@")
+            diff_lines.append("-/*! apply_patch delete placeholder */")
+            i += 1
+        else:
+            print(f"apply_patch: unsupported directive '{line}'", file=sys.stderr)
+            return 1
+    diff_text = "\n".join(diff_lines) + "\n"
+    if not diff_lines:
+        return 0
+    proc = subprocess.run([
+        "patch",
+        "-p0",
+    ], input=diff_text.encode(), stdout=sys.stdout, stderr=sys.stderr)
+    return proc.returncode
+
+if __name__ == "__main__":
+    sys.exit(main())

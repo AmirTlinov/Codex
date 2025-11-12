@@ -1,0 +1,80 @@
+---
+source: core/src/tools/handlers/navigator.rs
+expression: value
+---
+{
+  "diagnostics": {
+    "coverage": {
+      "errors": [],
+      "pending": [],
+      "skipped": []
+    },
+    "freshness_secs": 5,
+    "index_state": "ready"
+  },
+  "response": {
+    "diagnostics": {
+      "coverage": {
+        "errors": [],
+        "pending": [],
+        "skipped": []
+      },
+      "freshness_secs": 5,
+      "index_state": "ready"
+    },
+    "error": null,
+    "fallback_hits": [],
+    "hints": [],
+    "hits": [
+      {
+        "categories": [
+          "source"
+        ],
+        "help": null,
+        "id": "hit-1",
+        "kind": "function",
+        "language": "rust",
+        "layer": null,
+        "line": 10,
+        "module": null,
+        "path": "src/lib.rs",
+        "preview": "fn sample()",
+        "recent": false,
+        "references": null,
+        "score": 0.9
+      }
+    ],
+    "index": {
+      "auto_indexing": true,
+      "coverage": null,
+      "files": 1,
+      "notice": null,
+      "progress": null,
+      "schema_version": 3,
+      "state": "ready",
+      "symbols": 1,
+      "updated_at": null
+    },
+    "query_id": null,
+    "stats": null
+  },
+  "top_hits": [
+    {
+      "categories": [
+        "source"
+      ],
+      "help": null,
+      "id": "hit-1",
+      "kind": "function",
+      "language": "rust",
+      "layer": null,
+      "line": 10,
+      "module": null,
+      "path": "src/lib.rs",
+      "preview": "fn sample()",
+      "recent": false,
+      "references": null,
+      "score": 0.9
+    }
+  ]
+}

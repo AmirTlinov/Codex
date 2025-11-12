@@ -1,6 +1,7 @@
 use codex_protocol::models::FunctionCallOutputContentItem;
 use codex_utils_string::take_bytes_at_char_boundary;
 use codex_utils_string::take_last_bytes_at_char_boundary;
+use serde_json::Value;
 
 // Model-formatting limits: clients get full streams; only content sent to the model is truncated.
 pub(crate) const MODEL_FORMAT_MAX_BYTES: usize = 10 * 1024; // 10 KiB
@@ -19,30 +20,21 @@ pub(crate) fn globally_truncate_function_output_items(
     for it in items {
         match it {
             FunctionCallOutputContentItem::InputText { text } => {
-                if remaining == 0 {
-                    omitted_text_items += 1;
-                    continue;
-                }
-
-                let len = text.len();
-                if len <= remaining {
-                    out.push(FunctionCallOutputContentItem::InputText { text: text.clone() });
-                    remaining -= len;
-                } else {
-                    let slice = take_bytes_at_char_boundary(text, remaining);
-                    if !slice.is_empty() {
-                        out.push(FunctionCallOutputContentItem::InputText {
-                            text: slice.to_string(),
-                        });
-                    }
-                    remaining = 0;
-                }
+                push_text_item(text, &mut out, &mut remaining, &mut omitted_text_items);
             }
             // todo(aibrahim): handle input images; resize
             FunctionCallOutputContentItem::InputImage { image_url } => {
                 out.push(FunctionCallOutputContentItem::InputImage {
                     image_url: image_url.clone(),
                 });
+            }
+            FunctionCallOutputContentItem::ToolEvent {
+                tool_name,
+                kind,
+                payload,
+            } => {
+                let summary = summarize_tool_event(tool_name, kind, payload);
+                push_text_item(&summary, &mut out, &mut remaining, &mut omitted_text_items);
             }
         }
     }
@@ -54,6 +46,40 @@ pub(crate) fn globally_truncate_function_output_items(
     }
 
     out
+}
+
+fn push_text_item(
+    text: &str,
+    out: &mut Vec<FunctionCallOutputContentItem>,
+    remaining: &mut usize,
+    omitted_text_items: &mut usize,
+) {
+    if *remaining == 0 {
+        *omitted_text_items += 1;
+        return;
+    }
+
+    let len = text.len();
+    if len <= *remaining {
+        out.push(FunctionCallOutputContentItem::InputText {
+            text: text.to_string(),
+        });
+        *remaining -= len;
+    } else {
+        let slice = take_bytes_at_char_boundary(text, *remaining);
+        if !slice.is_empty() {
+            out.push(FunctionCallOutputContentItem::InputText {
+                text: slice.to_string(),
+            });
+        }
+        *remaining = 0;
+    }
+}
+
+fn summarize_tool_event(tool_name: &str, kind: &str, payload: &Value) -> String {
+    let payload_text =
+        serde_json::to_string(payload).unwrap_or_else(|_| "<invalid payload>".to_string());
+    format!("[tool_event {tool_name}:{kind}] {payload_text}")
 }
 
 pub(crate) fn format_output_for_model_body(content: &str) -> String {

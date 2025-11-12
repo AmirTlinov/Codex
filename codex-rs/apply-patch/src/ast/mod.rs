@@ -4,6 +4,7 @@ use std::path::Path;
 use std::sync::Mutex;
 
 use once_cell::sync::Lazy;
+use tree_sitter::Language;
 use tree_sitter::Parser;
 use tree_sitter::Tree;
 
@@ -11,7 +12,11 @@ pub mod cpp;
 pub mod go;
 pub mod javascript;
 pub mod python;
+pub mod query;
 pub mod rust;
+pub mod semantic;
+pub mod service;
+pub mod shell;
 pub mod typescript;
 
 use cpp::CppSymbolLocator;
@@ -19,6 +24,7 @@ use go::GoSymbolLocator;
 use javascript::JavaScriptSymbolLocator;
 use python::PythonSymbolLocator;
 use rust::RustSymbolLocator;
+use shell::ShellSymbolLocator;
 use typescript::TypeScriptSymbolLocator;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -57,6 +63,16 @@ impl SymbolPath {
         self.segments.last().map(std::string::String::as_str)
     }
 
+    pub fn replace_last(&self, new_value: impl Into<String>) -> Self {
+        let mut segments = self.segments.clone();
+        if let Some(last) = segments.last_mut() {
+            *last = new_value.into();
+        } else {
+            segments.push(new_value.into());
+        }
+        SymbolPath::new(segments)
+    }
+
     pub fn parent_segments(&self) -> &[String] {
         if self.segments.len() <= 1 {
             &[]
@@ -86,6 +102,7 @@ pub struct SymbolTarget {
     pub body_range: Option<Range<usize>>,
     pub symbol_path: SymbolPath,
     pub symbol_kind: String,
+    pub name_range: Option<Range<usize>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -109,8 +126,35 @@ static REGISTRY: Lazy<Vec<&'static dyn SymbolLocator>> = Lazy::new(|| {
         CppSymbolLocator::instance(),
         GoSymbolLocator::instance(),
         PythonSymbolLocator::instance(),
+        ShellSymbolLocator::instance(),
     ]
 });
+
+pub fn parse_tree_for_language(language: &str, source: &str) -> Result<Tree, String> {
+    match language {
+        "rust" => rust::parse_tree(source),
+        "typescript" => typescript::parse_tree(source),
+        "javascript" => javascript::parse_tree(source),
+        "cpp" => cpp::parse_tree(source),
+        "go" => go::parse_tree(source),
+        "python" => python::parse_tree(source),
+        "shell" => shell::parse_tree(source),
+        other => Err(format!("no parser registered for {other}")),
+    }
+}
+
+pub fn tree_sitter_language(language: &str) -> Option<Language> {
+    match language {
+        "rust" => Some(tree_sitter_rust::LANGUAGE.into()),
+        "typescript" => Some(tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into()),
+        "javascript" => Some(tree_sitter_javascript::LANGUAGE.into()),
+        "cpp" => Some(tree_sitter_cpp::LANGUAGE.into()),
+        "go" => Some(tree_sitter_go::LANGUAGE.into()),
+        "python" => Some(tree_sitter_python::LANGUAGE.into()),
+        "shell" => Some(tree_sitter_bash::LANGUAGE.into()),
+        _ => None,
+    }
+}
 
 pub fn resolve_locator(path: &Path) -> Option<&'static dyn SymbolLocator> {
     let ext = path.extension()?.to_string_lossy().to_ascii_lowercase();
@@ -118,6 +162,13 @@ pub fn resolve_locator(path: &Path) -> Option<&'static dyn SymbolLocator> {
         .iter()
         .copied()
         .find(|locator| locator.extensions().iter().any(|e| *e == ext))
+}
+
+pub fn resolve_locator_by_language(language: &str) -> Option<&'static dyn SymbolLocator> {
+    REGISTRY
+        .iter()
+        .copied()
+        .find(|locator| locator.language() == language)
 }
 
 pub fn symbol_path_from_str(raw: &str) -> SymbolPath {

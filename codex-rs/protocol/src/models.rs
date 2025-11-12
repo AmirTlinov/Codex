@@ -8,6 +8,7 @@ use serde::Deserialize;
 use serde::Deserializer;
 use serde::Serialize;
 use serde::ser::Serializer;
+use serde_json::Value;
 use ts_rs::TS;
 
 use crate::user_input::UserInput;
@@ -313,9 +314,21 @@ pub struct ShellToolCallParams {
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum FunctionCallOutputContentItem {
     // Do not rename, these are serialized and used directly in the responses API.
-    InputText { text: String },
+    InputText {
+        text: String,
+    },
     // Do not rename, these are serialized and used directly in the responses API.
-    InputImage { image_url: String },
+    InputImage {
+        image_url: String,
+    },
+    /// Structured tool-specific event payload. Keeps the raw JSON so downstream
+    /// consumers (CLI/TUI/etc.) can deserialize into strongly typed events
+    /// without paying the stringify/parse penalty.
+    ToolEvent {
+        tool_name: String,
+        kind: String,
+        payload: Value,
+    },
 }
 
 /// The payload we send back to OpenAI when reporting a tool call result.

@@ -7,6 +7,18 @@ use ts_rs::TS;
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize, JsonSchema, TS)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ParsedCommand {
+    Navigator {
+        /// Human-friendly summary (e.g. `Session (rust)`).
+        summary: Option<String>,
+        /// Raw query text, when available.
+        query: Option<String>,
+        /// Optional path/glob context.
+        path: Option<String>,
+        /// Applied profile names (badges) for badge rendering.
+        profiles: Vec<String>,
+        /// Boolean flags such as `recent`, `tests`, `with_refs`.
+        flags: Vec<String>,
+    },
     Read {
         cmd: String,
         name: String,

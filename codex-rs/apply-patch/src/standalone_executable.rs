@@ -1,8 +1,12 @@
 use clap::Parser;
+use clap::Subcommand;
+use serde_json::json;
+use std::collections::BTreeMap;
 use std::io::IsTerminal;
 use std::io::Read;
 use std::io::Write;
 use std::io::{self};
+use std::path::Path;
 use std::path::PathBuf;
 
 use crate::ApplyPatchConfig;
@@ -16,6 +20,8 @@ use crate::apply_patch_with_config;
 use crate::emit_report;
 use crate::formatting::FormattingOutcome;
 use crate::post_checks::PostCheckOutcome;
+use crate::refactor_catalog::ScriptCatalog;
+use crate::refactor_script::RefactorScript;
 use crate::report_to_machine_json;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -24,6 +30,7 @@ enum Mode {
     DryRun,
     Amend,
     Explain,
+    Preview,
 }
 
 #[derive(Parser, Debug)]
@@ -37,14 +44,32 @@ struct ApplyArgs {
     command: Option<Command>,
 }
 
-#[derive(clap::Subcommand, Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Subcommand, Debug, Clone, PartialEq, Eq)]
 enum Command {
+    /// Apply the patch to disk (explicit opt-in).
+    Apply,
     /// Validate the patch and show the summary without writing changes.
     DryRun,
     /// Plan the patch without touching the filesystem; prints the same report as `dry-run`.
     Explain,
     /// Apply only the amended portion of a patch after a previous failure.
     Amend,
+    /// Show per-operation previews in dry-run mode.
+    Preview,
+    /// Script catalog helpers.
+    Scripts {
+        #[command(subcommand)]
+        action: ScriptsCommand,
+    },
+}
+
+#[derive(Subcommand, Debug, Clone, PartialEq, Eq)]
+enum ScriptsCommand {
+    /// List entries from refactors/catalog.json (use --json for machine output).
+    List {
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 pub fn main() -> ! {
@@ -74,23 +99,31 @@ pub fn run_main() -> i32 {
 }
 
 fn run(cli: ApplyArgs) -> Result<(), String> {
+    if let Some(Command::Scripts { action }) = &cli.command {
+        return run_scripts_command(action);
+    }
+
     let patch = load_patch().map_err(|err| err.to_string())?;
     let mut config = build_config();
     let operation_blocks = extract_operation_blocks(&patch);
 
     let mode = match cli.command {
+        Some(Command::Apply) => Mode::Apply,
         Some(Command::DryRun) => Mode::DryRun,
         Some(Command::Explain) => Mode::Explain,
         Some(Command::Amend) => Mode::Amend,
-        None => Mode::Apply,
+        Some(Command::Preview) => Mode::Preview,
+        Some(Command::Scripts { .. }) => unreachable!(),
+        None => Mode::DryRun,
     };
 
-    if matches!(mode, Mode::DryRun | Mode::Explain) {
+    if matches!(mode, Mode::DryRun | Mode::Explain | Mode::Preview) {
         config.mode = PatchReportMode::DryRun;
     }
 
     let mut stdout = io::stdout();
     let stdout_is_terminal = stdout.is_terminal();
+    let stdin_is_terminal = io::stdin().is_terminal();
     let emit_options = EmitOutputsOptions {
         show_summary: true,
         rich_summary: stdout_is_terminal,
@@ -99,6 +132,13 @@ fn run(cli: ApplyArgs) -> Result<(), String> {
     match apply_patch_with_config(&patch, &config) {
         Ok(mut report) => {
             report.amendment_template = None;
+            if matches!(mode, Mode::Preview) {
+                emit_previews(
+                    &report,
+                    &mut stdout,
+                    stdout_is_terminal && stdin_is_terminal,
+                )?;
+            }
             let json_line = emit_outputs(&report, &mut stdout, &emit_options)?;
             writeln!(stdout, "{json_line}").map_err(|err| err.to_string())?;
             Ok(())
@@ -192,6 +232,149 @@ fn write_formatting_section(
         }
         writeln!(stdout, "{line}")?;
     }
+    Ok(())
+}
+
+fn run_scripts_command(action: &ScriptsCommand) -> Result<(), String> {
+    let root = std::env::current_dir().map_err(|err| err.to_string())?;
+    let Some(catalog) = ScriptCatalog::load(&root).map_err(|err| err.to_string())? else {
+        println!("No refactors/catalog.json found under {}", root.display());
+        return Ok(());
+    };
+
+    match action {
+        ScriptsCommand::List { json } => list_scripts(&root, &catalog, *json),
+    }
+}
+
+fn list_scripts(root: &Path, catalog: &ScriptCatalog, emit_json: bool) -> Result<(), String> {
+    let rows = build_script_rows(root, catalog);
+    if emit_json {
+        let payload: Vec<_> = rows
+            .iter()
+            .map(|row| {
+                json!({
+                    "path": row.path,
+                    "name": row.name,
+                    "version": row.version,
+                    "hash": row.hash,
+                    "description": row.description,
+                    "labels": row.labels,
+                })
+            })
+            .collect();
+        let serialized = serde_json::to_string_pretty(&payload).map_err(|err| err.to_string())?;
+        println!("{serialized}");
+        return Ok(());
+    }
+
+    if rows.is_empty() {
+        println!("No scripts registered in refactors/catalog.json.");
+        return Ok(());
+    }
+
+    println!("Scripts in refactors/catalog.json:");
+    println!("{:<32} {:<20} {:<10} Hash", "Path", "Name", "Version");
+    for row in rows {
+        let name = row.name.as_deref().unwrap_or("-");
+        println!(
+            "{:<32} {:<20} {:<10} {}",
+            row.path, name, row.version, row.hash
+        );
+        if let Some(desc) = row.description.as_deref() {
+            println!("    {desc}");
+        }
+        if !row.labels.is_empty() {
+            println!("    labels: {}", row.labels.join(", "));
+        }
+    }
+    Ok(())
+}
+
+fn build_script_rows(root: &Path, catalog: &ScriptCatalog) -> Vec<ScriptListRow> {
+    let mut rows = Vec::new();
+    for entry in catalog.entries() {
+        let path = root.join(&entry.path);
+        let vars = BTreeMap::new();
+        let metadata = match RefactorScript::load_from_path(&path, &vars, None) {
+            Ok(script) => Some(script.metadata),
+            Err(err) => {
+                eprintln!("Warning: failed to load {} ({err})", path.display());
+                None
+            }
+        };
+        let name = entry
+            .name
+            .clone()
+            .or_else(|| metadata.as_ref().map(|meta| meta.name.clone()));
+        let description = metadata.as_ref().and_then(|meta| meta.description.clone());
+        let labels = metadata
+            .as_ref()
+            .map(|meta| meta.labels.clone())
+            .unwrap_or_default();
+        rows.push(ScriptListRow {
+            path: entry.path.clone(),
+            name,
+            version: entry.version.clone(),
+            hash: entry.hash.clone(),
+            description,
+            labels,
+        });
+    }
+    rows
+}
+
+struct ScriptListRow {
+    path: String,
+    name: Option<String>,
+    version: String,
+    hash: String,
+    description: Option<String>,
+    labels: Vec<String>,
+}
+
+fn emit_previews(
+    report: &PatchReport,
+    stdout: &mut impl Write,
+    interactive: bool,
+) -> Result<(), String> {
+    let previews: Vec<_> = report
+        .operations
+        .iter()
+        .filter_map(|op| op.preview.as_ref().map(|text| (op, text)))
+        .collect();
+    if previews.is_empty() {
+        writeln!(stdout, "No AST previews available.").map_err(|err| err.to_string())?;
+        return Ok(());
+    }
+    writeln!(stdout, "AST operation previews:").map_err(|err| err.to_string())?;
+    let mut input = String::new();
+    for (index, (operation, preview)) in previews.iter().enumerate() {
+        writeln!(
+            stdout,
+            "Preview {}/{}: {}",
+            index + 1,
+            previews.len(),
+            operation.path.display()
+        )
+        .map_err(|err| err.to_string())?;
+        if let Some(message) = &operation.message {
+            writeln!(stdout, "  {message}").map_err(|err| err.to_string())?;
+        }
+        writeln!(stdout, "{preview}").map_err(|err| err.to_string())?;
+        if interactive && index + 1 < previews.len() {
+            writeln!(stdout, "Press Enter for next preview (q to quit)...")
+                .map_err(|err| err.to_string())?;
+            input.clear();
+            io::stdin()
+                .read_line(&mut input)
+                .map_err(|err| err.to_string())?;
+            if input.trim().eq_ignore_ascii_case("q") {
+                break;
+            }
+        }
+    }
+    writeln!(stdout).map_err(|err| err.to_string())?;
     Ok(())
 }
 

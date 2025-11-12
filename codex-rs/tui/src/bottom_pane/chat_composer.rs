@@ -15,7 +15,7 @@ use ratatui::widgets::Block;
 use ratatui::widgets::StatefulWidgetRef;
 use ratatui::widgets::WidgetRef;
 
-use super::CodeFinderFooterIndicator;
+use super::NavigatorFooterIndicator;
 use super::chat_composer_history::ChatComposerHistory;
 use super::command_popup::CommandItem;
 use super::command_popup::CommandPopup;
@@ -113,7 +113,7 @@ pub(crate) struct ChatComposer {
     footer_mode: FooterMode,
     footer_hint_override: Option<Vec<(String, String)>>,
     context_window_percent: Option<i64>,
-    code_finder_indicator: Option<CodeFinderFooterIndicator>,
+    navigator_indicator: Option<NavigatorFooterIndicator>,
 }
 
 /// Popup state – at most one can be visible at any time.
@@ -157,7 +157,7 @@ impl ChatComposer {
             footer_mode: FooterMode::ShortcutSummary,
             footer_hint_override: None,
             context_window_percent: None,
-            code_finder_indicator: None,
+            navigator_indicator: None,
         };
         // Apply configuration via the setter to keep side-effects centralized.
         this.set_disable_paste_burst(disable_paste_burst);
@@ -203,8 +203,8 @@ impl ChatComposer {
         self.history.set_metadata(log_id, entry_count);
     }
 
-    pub(crate) fn set_code_finder_status(&mut self, indicator: Option<CodeFinderFooterIndicator>) {
-        self.code_finder_indicator = indicator;
+    pub(crate) fn set_navigator_status(&mut self, indicator: Option<NavigatorFooterIndicator>) {
+        self.navigator_indicator = indicator;
     }
 
     /// Integrate an asynchronous response to an on-demand history lookup. If
@@ -1399,7 +1399,7 @@ impl ChatComposer {
             use_shift_enter_hint: self.use_shift_enter_hint,
             is_task_running: self.is_task_running,
             context_window_percent: self.context_window_percent,
-            code_finder_status: self.code_finder_indicator.clone(),
+            navigator_status: self.navigator_indicator.clone(),
         }
     }
 

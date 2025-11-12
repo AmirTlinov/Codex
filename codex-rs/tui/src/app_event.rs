@@ -1,11 +1,11 @@
 use std::path::PathBuf;
 
-use codex_code_finder::proto::IndexStatus;
 use codex_common::approval_presets::ApprovalPreset;
 use codex_common::model_presets::ModelPreset;
 use codex_core::protocol::ConversationPathResponseEvent;
 use codex_core::protocol::Event;
 use codex_file_search::FileMatch;
+use codex_navigator::proto::IndexStatus;
 
 use crate::bottom_pane::ApprovalRequest;
 use crate::history_cell::HistoryCell;
@@ -61,6 +61,40 @@ pub(crate) enum AppEvent {
     PersistModelSelection {
         model: String,
         effort: Option<ReasoningEffort>,
+    },
+
+    /// Open the model selection popup.
+    OpenModelPopup,
+
+    /// Open the settings hub popup.
+    OpenSettingsPopup,
+
+    /// Open the Navigator indexing popup.
+    OpenIndexingSettings,
+
+    /// Toggle desktop notifications emitted by the TUI.
+    SetDesktopNotifications {
+        enabled: bool,
+    },
+
+    /// Toggle whether reasoning summaries are shown in the transcript.
+    SetHideAgentReasoning {
+        hide: bool,
+    },
+
+    /// Toggle raw reasoning output visibility.
+    SetShowRawAgentReasoning {
+        show: bool,
+    },
+
+    /// Toggle Navigator auto indexing.
+    SetNavigatorAutoIndexing {
+        enabled: bool,
+    },
+
+    /// Request a manual Navigator reindex.
+    RequestNavigatorReindex {
+        announce: bool,
     },
 
     /// Open the reasoning selection popup after picking a model.
@@ -145,11 +179,11 @@ pub(crate) enum AppEvent {
         category: FeedbackCategory,
     },
 
-    /// Latest Code Finder index status (from background daemon).
-    CodeFinderStatus(IndexStatus),
+    /// Latest Navigator index status (from background daemon).
+    NavigatorStatus(IndexStatus),
 
-    /// Background Code Finder failure/warning message.
-    CodeFinderWarning(String),
+    /// Background Navigator failure/warning message.
+    NavigatorWarning(String),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

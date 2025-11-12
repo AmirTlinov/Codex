@@ -126,7 +126,7 @@ async fn model_selects_expected_tools() {
             "read_mcp_resource".to_string(),
             "update_plan".to_string(),
             "apply_patch".to_string(),
-            "code_finder".to_string(),
+            "navigator".to_string(),
             "view_image".to_string()
         ],
         "gpt-5-codex should expose the apply_patch tool",

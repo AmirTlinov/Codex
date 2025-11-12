@@ -21,12 +21,15 @@ pub(crate) struct ExecCall {
     pub(crate) is_user_shell_command: bool,
     pub(crate) start_time: Option<Instant>,
     pub(crate) duration: Option<Duration>,
+    pub(crate) stream_log: Vec<String>,
 }
 
 #[derive(Debug)]
 pub(crate) struct ExecCell {
     pub(crate) calls: Vec<ExecCall>,
 }
+
+pub(crate) const STREAM_LOG_LIMIT: usize = 12;
 
 impl ExecCell {
     pub(crate) fn new(call: ExecCall) -> Self {
@@ -48,6 +51,7 @@ impl ExecCell {
             is_user_shell_command,
             start_time: Some(Instant::now()),
             duration: None,
+            stream_log: Vec::new(),
         };
         if self.is_exploring_cell() && Self::is_exploring_call(&call) {
             Some(Self {
@@ -68,7 +72,23 @@ impl ExecCell {
             call.output = Some(output);
             call.duration = Some(duration);
             call.start_time = None;
+            call.stream_log.clear();
         }
+    }
+
+    pub(crate) fn append_stream_lines(&mut self, call_id: &str, lines: &[String]) -> bool {
+        if lines.is_empty() {
+            return false;
+        }
+        if let Some(call) = self.calls.iter_mut().rev().find(|c| c.call_id == call_id) {
+            call.stream_log.extend(lines.iter().cloned());
+            if call.stream_log.len() > STREAM_LOG_LIMIT {
+                let excess = call.stream_log.len() - STREAM_LOG_LIMIT;
+                call.stream_log.drain(0..excess);
+            }
+            return true;
+        }
+        false
     }
 
     pub(crate) fn should_flush(&self) -> bool {
@@ -120,6 +140,7 @@ impl ExecCell {
                     ParsedCommand::Read { .. }
                         | ParsedCommand::ListFiles { .. }
                         | ParsedCommand::Search { .. }
+                        | ParsedCommand::Navigator { .. }
                 )
             })
     }

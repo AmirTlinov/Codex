@@ -1,0 +1,110 @@
+# Navigator Overview
+
+The canonical usage guide lives in `navigator/navigator_tool_instructions.md` and is
+embedded into the tool handler via `include_str!`. Read that file for quick commands,
+JSON schemas, profiles, and parsing rules. This page captures the operational pieces
+that engineers most often need when integrating Navigator into the CLI, TUI, or other
+agents.
+
+## Launching the Daemon
+
+- The CLI/tool handler automatically spawns the daemon (via `codex navigator-daemon`) the
+  first time a request arrives. No manual setup is required.
+- One daemon manages multiple project roots concurrently through the `WorkspaceRegistry`.
+  Passing `--project-root` (or setting `project_root` in payloads) transparently switches
+  to the right cached workspace; least-recently-used ones are evicted automatically.
+- File-system watchers feed incremental ingest queues, so the index is always up to date.
+  If the tree is still rebuilding, diagnostics will report `index_state=building` plus the
+  specific coverage gaps.
+
+## Protocol Compatibility
+
+- All requests must set `schema_version: 3`; the daemon self-heals (drops stale snapshots,
+  rebuilds, and keeps serving streaming diagnostics) whenever a mismatch is detected.
+- `hints` and `stats.autocorrections` are optional and may be absent.
+
+## Observability & Self-Heal
+
+1. Every search streams diagnostics immediately, so the AI sees `index_state`,
+   `freshness_secs`, and coverage buckets without waiting for the final response.
+2. `fallback_hits` automatically cover pending files, so there is no need to fall back to
+   `rg` or other tools. Each entry explains why the file is not indexed yet (pending,
+   oversize, non UTF-8, ignored, etc.).
+3. Literal fallback kicks in when no symbols match: the daemon searches file contents for
+   the raw query text (token-aware) and produces synthesized hits prefixed with
+   `literal::`, with `stats.literal_fallback` set to `true`. Every workspace maintains a
+   token index *and* a trigram map, so literal fallback always points at the exact files
+   containing the string—even in very large trees—without guessing or scanning random
+   subsets of the repository.
+4. Literal metrics quantify that fallback work: `stats.literal_missing_trigrams`
+   surfaces any query grams not yet indexed, `stats.literal_pending_paths` lists the
+   pending files that were scanned, and `stats.literal_scanned_files` / `_bytes`
+   capture exactly how much literal load the daemon performed. Agents can now tell
+   whether “no hits” means “still ingesting” without running `rg`.
+5. References are emitted as two buckets (`definitions`/`usages`) with short previews, so
+   UIs can display relevant anchors without re-sorting large arrays.
+6. The daemon automatically respawns after crashes or metadata corruption and wipes any
+   broken cache on disk. No manual `rm -rf ~/.codex/navigator` steps should be taken.
+7. `codex navigator doctor [--project-root <repo>]` returns a JSON report describing the
+   daemon (PID, port, protocol version), live workspaces, coverage gaps, and queued
+   self-heal actions. The function tool handler invokes Doctor after every RPC failure and
+   surfaces the summary to the model.
+
+## Operational Notes
+
+- When integrating with the CLI/TUI, display the streamed diagnostics block verbatim; it is
+  the single source of truth for freshness, coverage, and rebuild progress.
+- `codex nav --format text` prints a compact summary (diagnostics, stats, top hits with ids)
+  without the large JSON payload, which keeps agent transcripts lightweight when you only
+  need the highlights.
+- If a request fails, call the Doctor endpoint and surface the structured summary—this is
+  already wired in the function tool handler.
+- Avoid documenting or implementing ad-hoc cache flush commands; the daemon owns every
+  lifecycle transition (spawn, rebuild, eviction, healing).
+- For health checks use `codex nav --diagnostics-only <query?>` to suppress hits/JSON and
+  simply stream the diagnostics heartbeat; use `--format ndjson` when you need the raw
+  daemon events (diagnostics/top_hits/final) without reformatting.
+- To focus on specific references, combine `--with-refs` with `--refs-mode definitions` or
+  `--refs-mode usages`; the daemon already buckets them separately so no client-side sort is
+  needed.
+- The TUI listens to the same NDJSON channel as the CLI/tool handler, so the "Exploring"
+  exec cell now shows streaming diagnostics and the first batch of hits immediately.
+  There's no need for bespoke progress indicators.
+
+### Atlas summaries
+
+- `codex navigator atlas [TARGET]` still renders the full tree, but you can now add
+  `--summary` (or use the quick command `atlas summary core`) to collapse the output into a
+  breadcrumb + metrics block for the chosen node. Each summary shows file/symbol/doc/test/
+  dep counts, recent files, and the new LOC totals so you can compare crates or layers at a
+  glance.
+- The daemon exposes the same capability via the Navigator tool: send `atlas summary core`
+  in a freeform block (or JSON with `{"action":"atlas_summary","target":"core"}`) and
+  the function call returns the structured summary payload.
+- Quick command `atlas jump path/to/domain` converts into a scoped search that applies the
+  path filter and the `files` profile, so you can pivot from the atlas map directly into
+  focused symbol/text results without rewriting filters.
+- Every `navigator search` response now prints the Atlas focus inline (breadcrumbs + top
+  siblings), so you always know где находитесь в дереве без отдельного вызова
+  `navigator atlas`.
+- `codex navigator facet --from <query-id> --lang rust --tests` позволяет добавлять
+  “стековые” фильтры без повторного набора запроса. Команда шлёт refine-запрос к тому же
+  query id, так что фильтры применяются к уже отсортированному списку кандидатов.
+- The atlas is rebuilt every time the index snapshot changes, so both the tree view and the
+  summary metrics stay in sync with coverage/recency signals surfaced in search results.
+
+## Streaming Diagnostics
+
+- `/v1/nav/search` now streams NDJSON events. Clients should expect this sequence:
+  1. `diagnostics` event immediately reports `index_state`, `freshness_secs`, and coverage counts.
+  2. `top_hits` event yields the first five ranked hits as soon as scoring finishes.
+  3. `final` event carries the full `SearchResponse`, which itself includes the latest `diagnostics` block and any `fallback_hits` produced by the live search engine.
+- `fallback_hits` explain results sourced from pending files (e.g., editor just created them). Each entry carries a `CoverageReason` so the model knows *why* the symbol is not indexed yet (oversize, binary, ignored, etc.).
+- CLIs and the TUI render these streamed chunks live; you should never have to poll a
+  spinner to know whether Navigator is alive.
+
+## Autonomous Indexing & Coverage
+
+- The daemon watches the workspace and performs incremental ingest instead of rebuilding from scratch. Coverage milestones (pending/skipped/errors) are tracked per file and exposed via diagnostics/Doctor.
+- Manual rebuilds (`/index-code`, `codex navigator nav --wait`) still work, but they simply reset the incremental queue.
+- You should never need to delete caches when schema changes—self-heal will wipe the corrupted snapshot, rebuild, and keep serving requests while reporting the temporary state via diagnostics.

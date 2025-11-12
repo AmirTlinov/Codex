@@ -48,6 +48,8 @@ use codex_core::protocol::WarningEvent;
 use codex_core::protocol::WebSearchBeginEvent;
 use codex_core::protocol::WebSearchEndEvent;
 use codex_protocol::ConversationId;
+use codex_protocol::models::FunctionCallOutputContentItem;
+use codex_protocol::models::FunctionCallOutputPayload;
 use codex_protocol::models::ResponseItem;
 use codex_protocol::parse_command::ParsedCommand;
 use codex_protocol::user_input::UserInput;
@@ -72,17 +74,14 @@ use crate::bottom_pane::ApprovalRequest;
 use crate::bottom_pane::BottomPane;
 use crate::bottom_pane::BottomPaneParams;
 use crate::bottom_pane::CancellationEvent;
-use crate::bottom_pane::CodeFinderFooterIndicator;
 use crate::bottom_pane::InputResult;
+use crate::bottom_pane::NavigatorFooterIndicator;
 use crate::bottom_pane::SelectionAction;
 use crate::bottom_pane::SelectionItem;
 use crate::bottom_pane::SelectionViewParams;
 use crate::bottom_pane::custom_prompt_view::CustomPromptView;
 use crate::bottom_pane::popup_consts::standard_popup_hint_line;
 use crate::clipboard_paste::paste_image_to_temp_png;
-use crate::code_finder_bootstrap;
-use crate::code_finder_view::summarize_code_finder_request;
-use crate::code_finder_view::summarize_code_finder_response;
 use crate::diff_render::display_path_for;
 use crate::exec_cell::CommandOutput;
 use crate::exec_cell::ExecCell;
@@ -93,6 +92,8 @@ use crate::history_cell::AgentMessageCell;
 use crate::history_cell::HistoryCell;
 use crate::history_cell::McpToolCallCell;
 use crate::markdown::append_markdown;
+use crate::navigator_view::summarize_navigator_request;
+use crate::navigator_view::summarize_navigator_response;
 #[cfg(target_os = "windows")]
 use crate::onboarding::WSL_INSTRUCTIONS;
 use crate::render::Insets;
@@ -113,8 +114,11 @@ use self::agent::spawn_agent_from_existing;
 mod session_header;
 use self::session_header::SessionHeader;
 use crate::streaming::controller::StreamController;
-use codex_code_finder::proto::IndexState;
-use codex_code_finder::proto::IndexStatus;
+use codex_navigator::proto::IndexState;
+use codex_navigator::proto::IndexStatus;
+use codex_navigator::proto::NavHit as FinderNavHit;
+use codex_navigator::proto::SearchDiagnostics as FinderSearchDiagnostics;
+use codex_navigator::proto::SearchStreamEvent;
 use std::path::Path;
 
 use chrono::Local;
@@ -140,7 +144,7 @@ struct RunningCommand {
     is_user_shell_command: bool,
 }
 
-struct CodeFinderInFlight {
+struct NavigatorInFlight {
     command: Vec<String>,
     parsed: Vec<ParsedCommand>,
     started_at: Instant,
@@ -297,9 +301,9 @@ pub(crate) struct ChatWidget {
     is_review_mode: bool,
     // Whether to add a final message separator after the last message
     needs_final_message_separator: bool,
-    code_finder_last_state: Option<IndexState>,
-    code_finder_last_notice: Option<String>,
-    code_finder_calls: HashMap<String, CodeFinderInFlight>,
+    navigator_last_state: Option<IndexState>,
+    navigator_last_notice: Option<String>,
+    navigator_calls: HashMap<String, NavigatorInFlight>,
 
     last_rendered_width: std::cell::Cell<Option<usize>>,
     // Feedback sink for /feedback
@@ -510,49 +514,47 @@ impl ChatWidget {
         }
     }
 
-    pub(crate) fn update_code_finder_status(&mut self, status: IndexStatus) {
-        let indicator = CodeFinderFooterIndicator::from_status(&status);
-        self.bottom_pane.set_code_finder_status(Some(indicator));
+    pub(crate) fn update_navigator_status(&mut self, status: IndexStatus) {
+        let indicator = NavigatorFooterIndicator::from_status(&status);
+        self.bottom_pane.set_navigator_status(Some(indicator));
 
-        let previous = self.code_finder_last_state.replace(status.state.clone());
+        let previous = self.navigator_last_state.replace(status.state.clone());
         match status.notice.as_deref() {
-            Some(notice) if self.code_finder_last_notice.as_deref() != Some(notice) => {
+            Some(notice) if self.navigator_last_notice.as_deref() != Some(notice) => {
                 self.add_info_message(notice.to_string(), None);
-                self.code_finder_last_notice = Some(notice.to_string());
+                self.navigator_last_notice = Some(notice.to_string());
             }
             None => {
-                self.code_finder_last_notice = None;
+                self.navigator_last_notice = None;
             }
             _ => {}
         }
         match status.state {
             IndexState::Failed if previous != Some(IndexState::Failed) => {
                 self.add_error_message(
-                    "Code Finder indexing failed. Run /index-code to retry.".to_string(),
+                    "Navigator indexing failed. Run /index-code to retry.".to_string(),
                 );
             }
             IndexState::Ready if matches!(previous, Some(IndexState::Building)) => {
-                self.add_info_message("Code Finder index is ready.".to_string(), None);
+                self.add_info_message("Navigator index is ready.".to_string(), None);
             }
             IndexState::Building
                 if matches!(previous, Some(IndexState::Ready) | Some(IndexState::Failed)) =>
             {
-                self.add_info_message(
-                    "Code Finder reindex started – hang tight.".to_string(),
-                    None,
-                );
+                self.add_info_message("Navigator reindex started – hang tight.".to_string(), None);
             }
             _ => {}
         }
     }
 
-    pub(crate) fn handle_code_finder_warning(&mut self, message: String) {
+    pub(crate) fn handle_navigator_warning(&mut self, message: String) {
         self.add_error_message(message.clone());
-        self.bottom_pane.set_code_finder_status(Some(
-            CodeFinderFooterIndicator::failed_with_notice(message.clone()),
-        ));
-        self.code_finder_last_state = Some(IndexState::Failed);
-        self.code_finder_last_notice = Some(message);
+        self.bottom_pane
+            .set_navigator_status(Some(NavigatorFooterIndicator::failed_with_notice(
+                message.clone(),
+            )));
+        self.navigator_last_state = Some(IndexState::Failed);
+        self.navigator_last_notice = Some(message);
     }
 
     fn on_rate_limit_snapshot(&mut self, snapshot: Option<RateLimitSnapshot>) {
@@ -1115,9 +1117,9 @@ impl ChatWidget {
             pending_notification: None,
             is_review_mode: false,
             needs_final_message_separator: false,
-            code_finder_last_state: None,
-            code_finder_last_notice: None,
-            code_finder_calls: HashMap::new(),
+            navigator_last_state: None,
+            navigator_last_notice: None,
+            navigator_calls: HashMap::new(),
             last_rendered_width: std::cell::Cell::new(None),
             feedback,
             current_rollout_path: None,
@@ -1185,9 +1187,9 @@ impl ChatWidget {
             pending_notification: None,
             is_review_mode: false,
             needs_final_message_separator: false,
-            code_finder_last_state: None,
-            code_finder_last_notice: None,
-            code_finder_calls: HashMap::new(),
+            navigator_last_state: None,
+            navigator_last_notice: None,
+            navigator_calls: HashMap::new(),
             last_rendered_width: std::cell::Cell::new(None),
             feedback,
             current_rollout_path: None,
@@ -1313,6 +1315,9 @@ impl ChatWidget {
             SlashCommand::Model => {
                 self.open_model_popup();
             }
+            SlashCommand::Settings => {
+                self.open_settings_popup();
+            }
             SlashCommand::Approvals => {
                 self.open_approvals_popup();
             }
@@ -1349,22 +1354,11 @@ impl ChatWidget {
                 });
             }
             SlashCommand::IndexCode => {
-                self.add_info_message("Requesting Code Finder reindex…".to_string(), None);
-                let tx = self.app_event_tx.clone();
-                tokio::spawn(async move {
-                    match code_finder_bootstrap::request_reindex().await {
-                        Ok(status) => {
-                            tx.send(AppEvent::CodeFinderStatus(status));
-                        }
-                        Err(err) => {
-                            tx.send(AppEvent::InsertHistoryCell(Box::new(
-                                history_cell::new_error_event(format!(
-                                    "Code Finder reindex failed: {err}"
-                                )),
-                            )));
-                        }
-                    }
-                });
+                self.app_event_tx
+                    .send(AppEvent::RequestNavigatorReindex { announce: true });
+            }
+            SlashCommand::Indexing => {
+                self.open_indexing_popup();
             }
             SlashCommand::Mention => {
                 self.insert_str("@");
@@ -1709,20 +1703,23 @@ impl ChatWidget {
                 input,
                 ..
             } => {
-                if name == "code_finder" {
-                    self.on_code_finder_tool_call(call_id, input);
+                if name == "navigator" {
+                    self.on_navigator_tool_call(call_id, input);
                 }
             }
             ResponseItem::CustomToolCallOutput { call_id, output } => {
-                self.on_code_finder_tool_call_output(call_id, output);
+                self.on_navigator_tool_call_output(call_id, output);
+            }
+            ResponseItem::FunctionCallOutput { call_id, output } => {
+                self.on_navigator_stream_chunk(call_id, output);
             }
             _ => {}
         }
     }
 
-    fn on_code_finder_tool_call(&mut self, call_id: String, input: String) {
+    fn on_navigator_tool_call(&mut self, call_id: String, input: String) {
         self.flush_answer_stream_with_separator();
-        let summary = summarize_code_finder_request(&input);
+        let summary = summarize_navigator_request(&input);
 
         let mut joined = false;
         if let Some(cell) = self
@@ -1750,9 +1747,9 @@ impl ChatWidget {
             )));
         }
 
-        self.code_finder_calls.insert(
+        self.navigator_calls.insert(
             call_id,
-            CodeFinderInFlight {
+            NavigatorInFlight {
                 command: summary.command,
                 parsed: summary.parsed,
                 started_at: Instant::now(),
@@ -1761,13 +1758,13 @@ impl ChatWidget {
         self.request_redraw();
     }
 
-    fn on_code_finder_tool_call_output(&mut self, call_id: String, output: String) {
+    fn on_navigator_tool_call_output(&mut self, call_id: String, output: String) {
         self.flush_answer_stream_with_separator();
-        let Some(state) = self.code_finder_calls.remove(&call_id) else {
+        let Some(state) = self.navigator_calls.remove(&call_id) else {
             return;
         };
 
-        let result = summarize_code_finder_response(&output);
+        let result = summarize_navigator_response(&output);
         let aggregated = if result.lines.is_empty() {
             String::new()
         } else {
@@ -1810,6 +1807,31 @@ impl ChatWidget {
         );
         self.add_boxed_history(Box::new(exec));
         self.request_redraw();
+    }
+
+    fn on_navigator_stream_chunk(&mut self, call_id: String, output: FunctionCallOutputPayload) {
+        if !self.navigator_calls.contains_key(&call_id) {
+            return;
+        }
+        let Some(event) = decode_navigator_stream_event(&output) else {
+            return;
+        };
+        let lines = format_navigator_stream_event(&event);
+        self.append_navigator_stream(&call_id, lines);
+    }
+
+    fn append_navigator_stream(&mut self, call_id: &str, lines: Vec<String>) {
+        if lines.is_empty() {
+            return;
+        }
+        if let Some(cell) = self
+            .active_cell
+            .as_mut()
+            .and_then(|c| c.as_any_mut().downcast_mut::<ExecCell>())
+            && cell.append_stream_lines(call_id, &lines)
+        {
+            self.request_redraw();
+        }
     }
 
     fn on_user_message_event(&mut self, event: UserMessageEvent) {
@@ -2014,6 +2036,160 @@ impl ChatWidget {
             title: Some("Select Model and Effort".to_string()),
             subtitle: Some("Switch the model for this and future Codex CLI sessions".to_string()),
             footer_hint: Some("Press enter to select reasoning effort, or esc to dismiss.".into()),
+            items,
+            ..Default::default()
+        });
+    }
+
+    pub(crate) fn open_settings_popup(&mut self) {
+        let mut items: Vec<SelectionItem> = Vec::new();
+        items.push(SelectionItem {
+            name: "Model & reasoning".to_string(),
+            description: Some("Switch the default model and reasoning effort.".to_string()),
+            actions: vec![Box::new(|tx| {
+                tx.send(AppEvent::OpenModelPopup);
+            })],
+            dismiss_on_select: true,
+            ..Default::default()
+        });
+        items.push(SelectionItem {
+            name: "Approvals & sandbox".to_string(),
+            description: Some("Adjust approval policy and sandbox permissions.".to_string()),
+            actions: vec![Box::new(|tx| {
+                tx.send(AppEvent::OpenApprovalsPopup);
+            })],
+            dismiss_on_select: true,
+            ..Default::default()
+        });
+
+        let notifications_enabled = match &self.config.tui_notifications {
+            Notifications::Enabled(value) => *value,
+            Notifications::Custom(_) => true,
+        };
+        let notifications_label = match &self.config.tui_notifications {
+            Notifications::Enabled(true) => "On",
+            Notifications::Enabled(false) => "Off",
+            Notifications::Custom(_) => "Custom",
+        };
+        let next_notifications = !notifications_enabled;
+        let notifications_desc =
+            if matches!(self.config.tui_notifications, Notifications::Custom(_)) {
+                "Custom filters defined in config.toml; toggling replaces them with simple on/off."
+                    .to_string()
+            } else {
+                "Notify when turns finish while the terminal is unfocused.".to_string()
+            };
+        items.push(SelectionItem {
+            name: format!("Desktop notifications: {notifications_label}"),
+            description: Some(notifications_desc),
+            actions: vec![Box::new(move |tx| {
+                tx.send(AppEvent::SetDesktopNotifications {
+                    enabled: next_notifications,
+                });
+                tx.send(AppEvent::OpenSettingsPopup);
+            })],
+            dismiss_on_select: true,
+            ..Default::default()
+        });
+
+        let show_reasoning = !self.config.hide_agent_reasoning;
+        let reasoning_label = if show_reasoning { "On" } else { "Off" };
+        items.push(SelectionItem {
+            name: format!("Show reasoning summaries: {reasoning_label}"),
+            description: Some(
+                "Toggle the summarized reasoning blocks in the transcript.".to_string(),
+            ),
+            actions: vec![Box::new(move |tx| {
+                tx.send(AppEvent::SetHideAgentReasoning {
+                    hide: !show_reasoning,
+                });
+                tx.send(AppEvent::OpenSettingsPopup);
+            })],
+            dismiss_on_select: true,
+            ..Default::default()
+        });
+
+        let raw_reasoning_label = if self.config.show_raw_agent_reasoning {
+            "On"
+        } else {
+            "Off"
+        };
+        let next_raw_reasoning = !self.config.show_raw_agent_reasoning;
+        items.push(SelectionItem {
+            name: format!("Show raw reasoning: {raw_reasoning_label}"),
+            description: Some("Mirror the full reasoning stream in the transcript.".to_string()),
+            actions: vec![Box::new(move |tx| {
+                tx.send(AppEvent::SetShowRawAgentReasoning {
+                    show: next_raw_reasoning,
+                });
+                tx.send(AppEvent::OpenSettingsPopup);
+            })],
+            dismiss_on_select: true,
+            ..Default::default()
+        });
+
+        items.push(SelectionItem {
+            name: "Navigator indexing".to_string(),
+            description: Some("Configure auto indexing or trigger a rebuild.".to_string()),
+            actions: vec![Box::new(|tx| {
+                tx.send(AppEvent::OpenIndexingSettings);
+            })],
+            dismiss_on_select: true,
+            ..Default::default()
+        });
+
+        self.bottom_pane.show_selection_view(SelectionViewParams {
+            title: Some("Settings".to_string()),
+            subtitle: Some("Common controls for Codex CLI".to_string()),
+            footer_hint: Some(standard_popup_hint_line()),
+            items,
+            ..Default::default()
+        });
+    }
+
+    pub(crate) fn open_indexing_popup(&mut self) {
+        let mut items: Vec<SelectionItem> = Vec::new();
+        let auto_indexing = self.config.navigator.auto_indexing;
+        let next_state = !auto_indexing;
+        items.push(SelectionItem {
+            name: format!(
+                "Auto indexing: {}",
+                if auto_indexing { "On" } else { "Off" }
+            ),
+            description: Some(
+                "Automatically rebuild the Navigator index when files change.".to_string(),
+            ),
+            actions: vec![Box::new(move |tx| {
+                tx.send(AppEvent::SetNavigatorAutoIndexing {
+                    enabled: next_state,
+                });
+                tx.send(AppEvent::OpenIndexingSettings);
+            })],
+            dismiss_on_select: true,
+            ..Default::default()
+        });
+
+        items.push(SelectionItem {
+            name: "Rebuild index now".to_string(),
+            description: Some("Run /index-code without leaving the settings panel.".to_string()),
+            actions: vec![Box::new(|tx| {
+                tx.send(AppEvent::RequestNavigatorReindex { announce: true });
+            })],
+            dismiss_on_select: true,
+            ..Default::default()
+        });
+
+        let subtitle = match self.navigator_last_state {
+            Some(IndexState::Building) => Some("Indexing in progress…".to_string()),
+            Some(IndexState::Ready) => Some("Index is ready.".to_string()),
+            Some(IndexState::Failed) => Some("Last reindex failed.".to_string()),
+            None => None,
+        };
+
+        self.bottom_pane.show_selection_view(SelectionViewParams {
+            title: Some("Navigator Indexing".to_string()),
+            subtitle,
+            footer_hint: Some(standard_popup_hint_line()),
             items,
             ..Default::default()
         });
@@ -2609,6 +2785,22 @@ impl ChatWidget {
         self.config.model = model.to_string();
     }
 
+    pub(crate) fn set_tui_notifications(&mut self, notifications: Notifications) {
+        self.config.tui_notifications = notifications;
+    }
+
+    pub(crate) fn set_hide_agent_reasoning(&mut self, hide: bool) {
+        self.config.hide_agent_reasoning = hide;
+    }
+
+    pub(crate) fn set_show_raw_agent_reasoning(&mut self, show: bool) {
+        self.config.show_raw_agent_reasoning = show;
+    }
+
+    pub(crate) fn set_navigator_auto_indexing(&mut self, enabled: bool) {
+        self.config.navigator.auto_indexing = enabled;
+    }
+
     pub(crate) fn add_info_message(&mut self, message: String, hint: Option<String>) {
         self.add_to_history(history_cell::new_info_event(message, hint));
         self.request_redraw();
@@ -2901,6 +3093,37 @@ impl ChatWidget {
     }
 }
 
+fn decode_navigator_stream_event(output: &FunctionCallOutputPayload) -> Option<SearchStreamEvent> {
+    if let Some(items) = &output.content_items {
+        for item in items {
+            if let FunctionCallOutputContentItem::ToolEvent {
+                tool_name, payload, ..
+            } = item
+                && tool_name == "navigator"
+            {
+                if let Ok(event) = serde_json::from_value(payload.clone()) {
+                    return Some(event);
+                } else {
+                    tracing::warn!("navigator stream event payload failed to parse");
+                    return None;
+                }
+            }
+        }
+    }
+
+    let payload = output.content.trim();
+    if payload.is_empty() {
+        return None;
+    }
+    match serde_json::from_str(payload) {
+        Ok(ev) => Some(ev),
+        Err(err) => {
+            tracing::warn!("navigator stream event parse error: {err:?}");
+            None
+        }
+    }
+}
+
 impl Renderable for ChatWidget {
     fn render(&self, area: Rect, buf: &mut Buffer) {
         self.as_renderable().render(area, buf);
@@ -3017,6 +3240,65 @@ fn extract_first_bold(s: &str) -> Option<String> {
         i += 1;
     }
     None
+}
+
+fn format_navigator_stream_event(event: &SearchStreamEvent) -> Vec<String> {
+    match event {
+        SearchStreamEvent::Diagnostics { diagnostics } => format_navigator_diag_lines(diagnostics),
+        SearchStreamEvent::TopHits { hits } => format_navigator_hits(hits),
+        SearchStreamEvent::Final { response } => vec![format!(
+            "final: {} hits (query_id {:?})",
+            response.hits.len(),
+            response.query_id
+        )],
+        SearchStreamEvent::Error { message } => vec![format!("error: {message}")],
+    }
+}
+
+fn format_navigator_diag_lines(diag: &FinderSearchDiagnostics) -> Vec<String> {
+    let freshness = diag
+        .freshness_secs
+        .map(|secs| format!("{secs}s"))
+        .unwrap_or_else(|| "unknown".to_string());
+    let mut lines = vec![format!(
+        "diag state={:?} freshness={} pending={} skipped={} errors={}",
+        diag.index_state,
+        freshness,
+        diag.coverage.pending.len(),
+        diag.coverage.skipped.len(),
+        diag.coverage.errors.len()
+    )];
+    if !diag.pending_literals.is_empty() {
+        let preview_count = diag.pending_literals.len().min(3);
+        let preview = diag.pending_literals[..preview_count].join(", ");
+        if diag.pending_literals.len() > preview_count {
+            lines.push(format!(
+                "diag literals: {} … (+{} more)",
+                preview,
+                diag.pending_literals.len() - preview_count
+            ));
+        } else {
+            lines.push(format!("diag literals: {preview}"));
+        }
+    }
+    lines
+}
+
+fn format_navigator_hits(hits: &[FinderNavHit]) -> Vec<String> {
+    if hits.is_empty() {
+        return vec!["top hits: none".to_string()];
+    }
+    let mut lines = vec![format!("top hits ({}):", hits.len())];
+    for (idx, hit) in hits.iter().take(3).enumerate() {
+        lines.push(format!(
+            "  {}. {}:{} {:?}",
+            idx + 1,
+            hit.path,
+            hit.line,
+            hit.kind
+        ));
+    }
+    lines
 }
 
 #[cfg(test)]

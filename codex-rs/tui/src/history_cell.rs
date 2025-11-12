@@ -1880,6 +1880,7 @@ mod tests {
             is_user_shell_command: false,
             start_time: Some(Instant::now()),
             duration: None,
+            stream_log: Vec::new(),
         });
         // Mark call complete so markers are ✓
         cell.complete_call(&call_id, CommandOutput::default(), Duration::from_millis(1));
@@ -1903,6 +1904,7 @@ mod tests {
             is_user_shell_command: false,
             start_time: Some(Instant::now()),
             duration: None,
+            stream_log: Vec::new(),
         });
         // Call 1: Search only
         cell.complete_call("c1", CommandOutput::default(), Duration::from_millis(1));
@@ -1966,6 +1968,7 @@ mod tests {
             is_user_shell_command: false,
             start_time: Some(Instant::now()),
             duration: None,
+            stream_log: Vec::new(),
         });
         cell.complete_call("c1", CommandOutput::default(), Duration::from_millis(1));
         let lines = cell.display_lines(80);
@@ -1986,6 +1989,7 @@ mod tests {
             is_user_shell_command: false,
             start_time: Some(Instant::now()),
             duration: None,
+            stream_log: Vec::new(),
         });
         // Mark call complete so it renders as "Ran"
         cell.complete_call(&call_id, CommandOutput::default(), Duration::from_millis(1));
@@ -2008,6 +2012,7 @@ mod tests {
             is_user_shell_command: false,
             start_time: Some(Instant::now()),
             duration: None,
+            stream_log: Vec::new(),
         });
         cell.complete_call(&call_id, CommandOutput::default(), Duration::from_millis(1));
         // Wide enough that it fits inline
@@ -2028,6 +2033,7 @@ mod tests {
             is_user_shell_command: false,
             start_time: Some(Instant::now()),
             duration: None,
+            stream_log: Vec::new(),
         });
         cell.complete_call(&call_id, CommandOutput::default(), Duration::from_millis(1));
         let lines = cell.display_lines(24);
@@ -2047,6 +2053,7 @@ mod tests {
             is_user_shell_command: false,
             start_time: Some(Instant::now()),
             duration: None,
+            stream_log: Vec::new(),
         });
         cell.complete_call(&call_id, CommandOutput::default(), Duration::from_millis(1));
         let lines = cell.display_lines(80);
@@ -2067,6 +2074,7 @@ mod tests {
             is_user_shell_command: false,
             start_time: Some(Instant::now()),
             duration: None,
+            stream_log: Vec::new(),
         });
         cell.complete_call(&call_id, CommandOutput::default(), Duration::from_millis(1));
         let lines = cell.display_lines(28);
@@ -2087,6 +2095,7 @@ mod tests {
             is_user_shell_command: false,
             start_time: Some(Instant::now()),
             duration: None,
+            stream_log: Vec::new(),
         });
         let stderr: String = (1..=10)
             .map(|n| n.to_string())
@@ -2133,6 +2142,7 @@ mod tests {
             is_user_shell_command: false,
             start_time: Some(Instant::now()),
             duration: None,
+            stream_log: Vec::new(),
         });
 
         let stderr = "error: first line on stderr\nerror: second line on stderr".to_string();

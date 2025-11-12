@@ -8,11 +8,16 @@ use codex_chatgpt::apply_command::run_apply_command;
 use codex_cli::LandlockCommand;
 use codex_cli::SeatbeltCommand;
 use codex_cli::WindowsCommand;
-use codex_cli::code_nav::DaemonCommand as CodeFinderDaemonCommand;
+use codex_cli::code_nav::DaemonCommand as NavigatorDaemonCommand;
 use codex_cli::code_nav::NavCommand as CodeNavCommand;
+use codex_cli::code_nav::NavigatorCli;
+use codex_cli::code_nav::NavigatorSubcommand;
 use codex_cli::code_nav::OpenCommand as CodeOpenCommand;
 use codex_cli::code_nav::SnippetCommand as CodeSnippetCommand;
+use codex_cli::code_nav::run_atlas;
 use codex_cli::code_nav::run_daemon_cmd;
+use codex_cli::code_nav::run_doctor;
+use codex_cli::code_nav::run_facet;
 use codex_cli::code_nav::run_nav;
 use codex_cli::code_nav::run_open;
 use codex_cli::code_nav::run_snippet;
@@ -77,6 +82,10 @@ enum Subcommand {
     #[clap(name = "nav")]
     Nav(CodeNavCommand),
 
+    /// Inspect Navigator daemon state.
+    #[clap(name = "navigator")]
+    Navigator(NavigatorCli),
+
     /// Fetch the full contents of a symbol's file.
     #[clap(name = "open")]
     Open(CodeOpenCommand),
@@ -121,9 +130,9 @@ enum Subcommand {
     /// Internal: generate TypeScript protocol bindings.
     #[clap(hide = true)]
     GenerateTs(GenerateTsCommand),
-    /// Internal: run the code-finder daemon.
-    #[clap(hide = true, name = "code-finder-daemon")]
-    CodeFinderDaemon(CodeFinderDaemonCommand),
+    /// Internal: run the navigator daemon.
+    #[clap(hide = true, name = "navigator-daemon")]
+    NavigatorDaemon(NavigatorDaemonCommand),
     /// [EXPERIMENTAL] Browse tasks from Codex Cloud and apply changes locally.
     #[clap(name = "cloud", alias = "cloud-tasks")]
     Cloud(CloudTasksCli),
@@ -405,6 +414,35 @@ async fn cli_main(codex_linux_sandbox_exe: Option<PathBuf>) -> anyhow::Result<()
             prepend_config_flags(&mut nav_cli.config_overrides, root_config_overrides.clone());
             run_nav(nav_cli).await?;
         }
+        Some(Subcommand::Navigator(mut navigator_cli)) => {
+            prepend_config_flags(
+                &mut navigator_cli.config_overrides,
+                root_config_overrides.clone(),
+            );
+            match navigator_cli.command {
+                NavigatorSubcommand::Doctor(mut doctor_cli) => {
+                    prepend_config_flags(
+                        &mut doctor_cli.config_overrides,
+                        navigator_cli.config_overrides.clone(),
+                    );
+                    run_doctor(doctor_cli).await?;
+                }
+                NavigatorSubcommand::Atlas(mut atlas_cli) => {
+                    prepend_config_flags(
+                        &mut atlas_cli.config_overrides,
+                        navigator_cli.config_overrides.clone(),
+                    );
+                    run_atlas(atlas_cli).await?;
+                }
+                NavigatorSubcommand::Facet(mut facet_cli) => {
+                    prepend_config_flags(
+                        &mut facet_cli.config_overrides,
+                        navigator_cli.config_overrides.clone(),
+                    );
+                    run_facet(facet_cli).await?;
+                }
+            }
+        }
         Some(Subcommand::Open(mut open_cli)) => {
             prepend_config_flags(
                 &mut open_cli.config_overrides,
@@ -554,7 +592,7 @@ async fn cli_main(codex_linux_sandbox_exe: Option<PathBuf>) -> anyhow::Result<()
         Some(Subcommand::GenerateTs(gen_cli)) => {
             codex_protocol_ts::generate_ts(&gen_cli.out_dir, gen_cli.prettier.as_deref())?;
         }
-        Some(Subcommand::CodeFinderDaemon(daemon_cli)) => {
+        Some(Subcommand::NavigatorDaemon(daemon_cli)) => {
             run_daemon_cmd(daemon_cli).await?;
         }
         Some(Subcommand::Features(FeaturesCli { sub })) => match sub {

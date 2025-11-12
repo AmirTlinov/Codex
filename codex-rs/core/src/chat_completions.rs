@@ -274,6 +274,18 @@ pub(crate) async fn stream_chat_completions(
                             FunctionCallOutputContentItem::InputImage { image_url } => {
                                 json!({"type":"image_url","image_url": {"url": image_url}})
                             }
+                            FunctionCallOutputContentItem::ToolEvent {
+                                tool_name,
+                                kind,
+                                payload,
+                            } => {
+                                let payload_text = serde_json::to_string(payload)
+                                    .unwrap_or_else(|_| "<invalid payload>".to_string());
+                                json!({
+                                    "type":"text",
+                                    "text": format!("[tool_event {tool_name}:{kind}] {payload_text}"),
+                                })
+                            }
                         })
                         .collect();
                     json!(mapped)

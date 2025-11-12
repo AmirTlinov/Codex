@@ -8,7 +8,8 @@ use crate::tools::handlers::PLAN_TOOL;
 use crate::tools::handlers::apply_patch::ApplyPatchToolType;
 use crate::tools::handlers::apply_patch::create_apply_patch_freeform_tool;
 use crate::tools::handlers::apply_patch::create_apply_patch_json_tool;
-use crate::tools::handlers::code_finder::CodeFinderHandler;
+use crate::tools::handlers::navigator::NAVIGATOR_HANDLER_USAGE;
+use crate::tools::handlers::navigator::NavigatorHandler;
 use crate::tools::registry::ToolRegistryBuilder;
 use serde::Deserialize;
 use serde::Serialize;
@@ -230,68 +231,14 @@ fn create_write_stdin_tool() -> ToolSpec {
     })
 }
 
-const CODE_FINDER_FREEFORM_USAGE: &str = r#"Blocks follow the apply_patch envelope:
-
-*** Begin <Action>
-key: value
-*** End <Action>
-
-Use exact headers:
-- `*** Begin Search` … `*** End Search`
-- `*** Begin Open` … `*** End Open`
-- `*** Begin Snippet` … `*** End Snippet`
-
-Rules
-- Action name comes from the header; omit `action:` keys.
-- Use `key: value`; repeat a key to append list items. Quote values containing spaces.
-- Unknown keys abort parsing.
-
-Search keys
-- `query`/`q`, `limit` (default 40, min 1).
-- `kinds`, `languages`, `categories` (`source/tests/docs/deps`).
-- `path_globs`, `file_substrings`, `symbol_exact`.
-- `recent`, `tests`, `docs`, `deps` booleans.
-- `with_refs` + `refs_limit`, `help_symbol`.
-- `refine` (`query_id` from a previous response), `wait`/`wait_for_index`.
-
-Open & Snippet keys
-- `id` — required, taken from `hits[].id`.
-- `context` — snippet window (default 8).
-
-Examples
-
-*** Begin Search
-query: session manager resolver
-kinds: function,method
-languages: rust
-path_globs: core/**
-recent: true
-with_refs: true
-refs_limit: 6
-help_symbol: SessionManager
-wait: true
-*** End Search
-
-*** Begin Open
-id: cf_6d053bc1
-*** End Open
-
-*** Begin Snippet
-id: cf_6d053bc1
-context: 16
-*** End Snippet
-
-Responses always return deterministic JSON (`query_id`, `hits`, `index.state`). Use `query_id` with `refine` when iterating on the same search.
-"#;
-
-fn create_code_finder_tool() -> ToolSpec {
+fn create_navigator_tool() -> ToolSpec {
     let description = format!(
         "{}\n\n{}",
-        "Search indexed symbols, fetch full files, or grab snippets via Code Finder.",
-        CODE_FINDER_FREEFORM_USAGE.trim()
+        "Search indexed symbols, fetch full files, or grab snippets via Navigator.",
+        NAVIGATOR_HANDLER_USAGE.trim()
     );
     ToolSpec::Freeform(FreeformTool {
-        name: "code_finder".to_string(),
+        name: "navigator".to_string(),
         description,
         format: None,
     })
@@ -948,7 +895,7 @@ pub(crate) fn build_specs(
     let view_image_handler = Arc::new(ViewImageHandler);
     let mcp_handler = Arc::new(McpHandler);
     let mcp_resource_handler = Arc::new(McpResourceHandler);
-    let code_finder_handler = Arc::new(CodeFinderHandler);
+    let navigator_handler = Arc::new(NavigatorHandler);
 
     match &config.shell_type {
         ConfigShellToolType::Default => {
@@ -994,10 +941,10 @@ pub(crate) fn build_specs(
 
     if config
         .experimental_supported_tools
-        .contains(&"code_finder".to_string())
+        .contains(&"navigator".to_string())
     {
-        builder.push_spec_with_parallel_support(create_code_finder_tool(), true);
-        builder.register_handler("code_finder", code_finder_handler);
+        builder.push_spec_with_parallel_support(create_navigator_tool(), true);
+        builder.register_handler("navigator", navigator_handler);
     }
 
     if config
@@ -1200,7 +1147,7 @@ mod tests {
             create_read_mcp_resource_tool(),
             PLAN_TOOL.clone(),
             create_apply_patch_freeform_tool(),
-            create_code_finder_tool(),
+            create_navigator_tool(),
             ToolSpec::WebSearch {},
             create_view_image_tool(),
         ] {
@@ -1246,7 +1193,7 @@ mod tests {
                 "read_mcp_resource",
                 "update_plan",
                 "apply_patch",
-                "code_finder",
+                "navigator",
                 "view_image",
             ],
         );
@@ -1267,7 +1214,7 @@ mod tests {
                 "read_mcp_resource",
                 "update_plan",
                 "apply_patch",
-                "code_finder",
+                "navigator",
                 "web_search",
                 "view_image",
             ],

@@ -1,0 +1,4 @@
+- Workspace root contains many crates: `core` (business logic), `cli` (multi-tool CLI), `exec` (headless automation runner), `tui` (Ratatui UI), `navigator` (search daemon used by Codex), plus supporting crates (`common`, `protocol`, `utils`, `execpolicy`, etc.).
+- Additional tooling directories: `scripts/`, `.agents/` for automation, `docs/` for user-facing docs, `mcp-server/` for MCP server implementation, `protocol-ts/` for TS bindings, etc.
+- Each crate is named with `codex-` prefix per directory.
+- Configuration and repo-level tools defined in `justfile`, `config.md`, `docs/`.

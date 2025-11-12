@@ -319,9 +319,9 @@ fn make_chatwidget_manual() -> (
         last_rendered_width: std::cell::Cell::new(None),
         feedback: codex_feedback::CodexFeedback::new(),
         current_rollout_path: None,
-        code_finder_last_state: None,
-        code_finder_last_notice: None,
-        code_finder_calls: HashMap::new(),
+        navigator_last_state: None,
+        navigator_last_notice: None,
+        navigator_calls: HashMap::new(),
     };
     (widget, rx, op_rx)
 }

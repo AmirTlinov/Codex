@@ -474,6 +474,38 @@ impl ConfigEditsBuilder {
         self
     }
 
+    pub fn set_hide_agent_reasoning(mut self, hide: bool) -> Self {
+        self.edits.push(ConfigEdit::SetPath {
+            segments: vec!["hide_agent_reasoning".into()],
+            value: value(hide),
+        });
+        self
+    }
+
+    pub fn set_show_raw_agent_reasoning(mut self, show: bool) -> Self {
+        self.edits.push(ConfigEdit::SetPath {
+            segments: vec!["show_raw_agent_reasoning".into()],
+            value: value(show),
+        });
+        self
+    }
+
+    pub fn set_tui_notifications_enabled(mut self, enabled: bool) -> Self {
+        self.edits.push(ConfigEdit::SetPath {
+            segments: vec!["tui".into(), "notifications".into()],
+            value: value(enabled),
+        });
+        self
+    }
+
+    pub fn set_navigator_auto_indexing(mut self, enabled: bool) -> Self {
+        self.edits.push(ConfigEdit::SetPath {
+            segments: vec!["navigator".into(), "auto_indexing".into()],
+            value: value(enabled),
+        });
+        self
+    }
+
     pub fn set_hide_full_access_warning(mut self, acknowledged: bool) -> Self {
         self.edits
             .push(ConfigEdit::SetNoticeHideFullAccessWarning(acknowledged));

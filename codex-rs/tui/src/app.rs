@@ -3,11 +3,11 @@ use crate::app_event::AppEvent;
 use crate::app_event_sender::AppEventSender;
 use crate::bottom_pane::ApprovalRequest;
 use crate::chatwidget::ChatWidget;
-use crate::code_finder_bootstrap;
 use crate::diff_render::DiffSummary;
 use crate::exec_command::strip_bash_lc_and_escape;
 use crate::file_search::FileSearchManager;
 use crate::history_cell::HistoryCell;
+use crate::navigator_bootstrap;
 use crate::pager_overlay::Overlay;
 use crate::render::highlight::highlight_bash_to_lines;
 use crate::render::renderable::Renderable;
@@ -20,6 +20,7 @@ use codex_core::AuthManager;
 use codex_core::ConversationManager;
 use codex_core::config::Config;
 use codex_core::config::edit::ConfigEditsBuilder;
+use codex_core::config::types::Notifications;
 use codex_core::model_family::find_family_for_model;
 use codex_core::protocol::SessionSource;
 use codex_core::protocol::TokenUsage;
@@ -100,7 +101,7 @@ impl App {
         use tokio_stream::StreamExt;
         let (app_event_tx, mut app_event_rx) = unbounded_channel();
         let app_event_tx = AppEventSender::new(app_event_tx);
-        code_finder_bootstrap::spawn_background_indexer(&config, app_event_tx.clone());
+        navigator_bootstrap::spawn_background_indexer(&config, app_event_tx.clone());
 
         let conversation_manager = Arc::new(ConversationManager::new(
             auth_manager.clone(),
@@ -349,11 +350,11 @@ impl App {
             AppEvent::CodexEvent(event) => {
                 self.chat_widget.handle_codex_event(event);
             }
-            AppEvent::CodeFinderStatus(status) => {
-                self.chat_widget.update_code_finder_status(status);
+            AppEvent::NavigatorStatus(status) => {
+                self.chat_widget.update_navigator_status(status);
             }
-            AppEvent::CodeFinderWarning(message) => {
-                self.chat_widget.handle_code_finder_warning(message);
+            AppEvent::NavigatorWarning(message) => {
+                self.chat_widget.handle_navigator_warning(message);
             }
             AppEvent::ConversationHistory(ev) => {
                 self.on_conversation_history_for_backtrack(tui, ev).await?;
@@ -396,8 +397,112 @@ impl App {
                     self.config.model_family = family;
                 }
             }
+            AppEvent::OpenModelPopup => {
+                self.chat_widget.open_model_popup();
+            }
+            AppEvent::OpenSettingsPopup => {
+                self.chat_widget.open_settings_popup();
+            }
+            AppEvent::OpenIndexingSettings => {
+                self.chat_widget.open_indexing_popup();
+            }
             AppEvent::OpenReasoningPopup { model } => {
                 self.chat_widget.open_reasoning_popup(model);
+            }
+            AppEvent::SetDesktopNotifications { enabled } => {
+                let notifications = Notifications::Enabled(enabled);
+                self.chat_widget
+                    .set_tui_notifications(notifications.clone());
+                self.config.tui_notifications = notifications;
+                let result = ConfigEditsBuilder::new(&self.config.codex_home)
+                    .set_tui_notifications_enabled(enabled)
+                    .apply()
+                    .await;
+                match result {
+                    Ok(()) => {
+                        let label = if enabled { "enabled" } else { "disabled" };
+                        self.chat_widget.add_info_message(
+                            format!("Desktop notifications {label} for this session."),
+                            None,
+                        );
+                    }
+                    Err(err) => {
+                        self.chat_widget.add_error_message(format!(
+                            "Failed to persist notification setting: {err}"
+                        ));
+                    }
+                }
+            }
+            AppEvent::SetHideAgentReasoning { hide } => {
+                self.chat_widget.set_hide_agent_reasoning(hide);
+                self.config.hide_agent_reasoning = hide;
+                if let Err(err) = ConfigEditsBuilder::new(&self.config.codex_home)
+                    .set_hide_agent_reasoning(hide)
+                    .apply()
+                    .await
+                {
+                    self.chat_widget
+                        .add_error_message(format!("Failed to persist reasoning setting: {err}"));
+                } else {
+                    let label = if hide { "hidden" } else { "visible" };
+                    self.chat_widget
+                        .add_info_message(format!("Reasoning summaries are now {label}."), None);
+                }
+            }
+            AppEvent::SetShowRawAgentReasoning { show } => {
+                self.chat_widget.set_show_raw_agent_reasoning(show);
+                self.config.show_raw_agent_reasoning = show;
+                if let Err(err) = ConfigEditsBuilder::new(&self.config.codex_home)
+                    .set_show_raw_agent_reasoning(show)
+                    .apply()
+                    .await
+                {
+                    self.chat_widget.add_error_message(format!(
+                        "Failed to persist raw reasoning setting: {err}"
+                    ));
+                } else {
+                    let label = if show { "enabled" } else { "disabled" };
+                    self.chat_widget
+                        .add_info_message(format!("Raw reasoning output {label}."), None);
+                }
+            }
+            AppEvent::SetNavigatorAutoIndexing { enabled } => {
+                self.chat_widget.set_navigator_auto_indexing(enabled);
+                self.config.navigator.auto_indexing = enabled;
+                if let Err(err) = ConfigEditsBuilder::new(&self.config.codex_home)
+                    .set_navigator_auto_indexing(enabled)
+                    .apply()
+                    .await
+                {
+                    self.chat_widget
+                        .add_error_message(format!("Failed to save Navigator setting: {err}"));
+                }
+                match navigator_bootstrap::set_auto_indexing(enabled).await {
+                    Ok(status) => {
+                        self.chat_widget.update_navigator_status(status);
+                        let label = if enabled { "enabled" } else { "disabled" };
+                        self.chat_widget
+                            .add_info_message(format!("Auto indexing {label}."), None);
+                    }
+                    Err(err) => {
+                        self.chat_widget.add_error_message(format!(
+                            "Failed to update Navigator settings: {err}"
+                        ));
+                    }
+                }
+            }
+            AppEvent::RequestNavigatorReindex { announce } => {
+                if announce {
+                    self.chat_widget
+                        .add_info_message("Requesting Navigator reindex…".to_string(), None);
+                }
+                let tx = self.app_event_tx.clone();
+                tokio::spawn(async move {
+                    match navigator_bootstrap::request_reindex().await {
+                        Ok(status) => tx.send(AppEvent::NavigatorStatus(status)),
+                        Err(err) => tx.send(AppEvent::NavigatorWarning(err.to_string())),
+                    }
+                });
             }
             AppEvent::OpenFullAccessConfirmation { preset } => {
                 self.chat_widget.open_full_access_confirmation(preset);

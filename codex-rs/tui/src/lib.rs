@@ -39,8 +39,6 @@ mod bottom_pane;
 mod chatwidget;
 mod cli;
 mod clipboard_paste;
-mod code_finder_bootstrap;
-mod code_finder_view;
 mod color;
 pub mod custom_terminal;
 mod diff_render;
@@ -56,6 +54,8 @@ pub mod live_wrap;
 mod markdown;
 mod markdown_render;
 mod markdown_stream;
+mod navigator_bootstrap;
+mod navigator_view;
 pub mod onboarding;
 mod pager_overlay;
 pub mod public_widgets;
@@ -83,7 +83,7 @@ mod wrapping;
 pub mod test_backend;
 
 #[cfg(any(test, feature = "vt100-tests"))]
-pub use code_finder_view::test_support as history_cell_test_support;
+pub use navigator_view::test_support as history_cell_test_support;
 
 use crate::onboarding::TrustDirectorySelection;
 use crate::onboarding::WSL_INSTRUCTIONS;

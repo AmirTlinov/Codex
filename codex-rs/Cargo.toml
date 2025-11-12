@@ -39,7 +39,7 @@ members = [
     "utils/readiness",
     "utils/string",
     "utils/tokenizer",
-    "code-finder",
+    "navigator",
 ]
 resolver = "2"
 
@@ -63,7 +63,7 @@ codex-async-utils = { path = "async-utils" }
 codex-backend-client = { path = "backend-client" }
 codex-chatgpt = { path = "chatgpt" }
 codex-common = { path = "common" }
-codex-code-finder = { path = "code-finder" }
+codex-navigator = { path = "navigator" }
 codex-core = { path = "core" }
 codex-exec = { path = "exec" }
 codex-feedback = { path = "feedback" }

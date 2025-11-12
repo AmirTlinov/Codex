@@ -242,7 +242,7 @@ async fn prompt_tools_are_consistent_across_requests() {
                 "read_mcp_resource",
                 "update_plan",
                 "apply_patch",
-                "code_finder",
+                "navigator",
                 "view_image",
             ],
         ),

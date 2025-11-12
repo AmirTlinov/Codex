@@ -3,6 +3,7 @@ use std::time::Instant;
 use super::model::CommandOutput;
 use super::model::ExecCall;
 use super::model::ExecCell;
+use super::model::STREAM_LOG_LIMIT;
 use crate::exec_command::strip_bash_lc_and_escape;
 use crate::history_cell::HistoryCell;
 use crate::render::highlight::highlight_bash_to_lines;
@@ -46,6 +47,7 @@ pub(crate) fn new_active_exec_command(
         is_user_shell_command,
         start_time: Some(Instant::now()),
         duration: None,
+        stream_log: Vec::new(),
     })
 }
 
@@ -270,12 +272,40 @@ impl ExecCell {
                         ParsedCommand::ListFiles { cmd, path } => {
                             lines.push(("List", vec![path.clone().unwrap_or(cmd.clone()).into()]));
                         }
+                        ParsedCommand::Navigator {
+                            summary,
+                            query,
+                            path,
+                            profiles,
+                            flags,
+                        } => {
+                            let base = summary.clone().or_else(|| match (query, path) {
+                                (Some(q), Some(p)) => Some(format!("{q} in {p}")),
+                                _ => None,
+                            });
+                            let mut spans = vec![
+                                base.or_else(|| query.clone())
+                                    .or_else(|| path.clone())
+                                    .unwrap_or_else(|| "navigator".to_string())
+                                    .into(),
+                            ];
+                            if !profiles.is_empty() {
+                                spans.push(" ".into());
+                                spans.push(format!("[{}]", profiles.join(", ")).dim());
+                            }
+                            if !flags.is_empty() {
+                                spans.push(" ".into());
+                                spans.push(format!("({})", flags.join(", ")).dim());
+                            }
+                            lines.push(("Find", spans));
+                        }
                         ParsedCommand::Search { cmd, query, path } => {
                             let spans = match (query, path) {
                                 (Some(q), Some(p)) => {
                                     vec![q.clone().into(), " in ".dim(), p.clone().into()]
                                 }
                                 (Some(q), None) => vec![q.clone().into()],
+                                (None, Some(p)) => vec![p.clone().into()],
                                 _ => vec![cmd.clone().into()],
                             };
                             lines.push(("Search", spans));
@@ -299,6 +329,16 @@ impl ExecCell {
                         .subsequent_indent(subsequent_indent),
                 );
                 push_owned_lines(&wrapped, &mut out_indented);
+            }
+
+            if call.output.is_none() && !call.stream_log.is_empty() {
+                let recent_start = call.stream_log.len().saturating_sub(STREAM_LOG_LIMIT);
+                for entry in call.stream_log[recent_start..].iter() {
+                    out_indented.push(Line::from(vec![
+                        "    ↳ ".dim(),
+                        Span::from(entry.clone()).dim(),
+                    ]));
+                }
             }
         }
 

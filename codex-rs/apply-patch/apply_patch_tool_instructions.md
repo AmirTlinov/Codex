@@ -1,80 +1,86 @@
-## `apply_patch`
+## apply_patch: deterministic patch format
 
-Codex CLI for deterministic file edits. Read a single patch from STDIN (or `--patch-file`), apply it relative to the current working directory, and emit both a human summary and machine JSON (`schema: "apply_patch/v2"`).
-
-### Patch structure
-
-1. Wrap the entire edit in:
-   ```
-   *** Begin Patch
-   …
-   *** End Patch
-   ```
-2. Inside the envelope emit operations in sequence:
-   - `*** Add File: <path>` – creates/replaces a file; every following line must start with `+` (content ends when the next header begins).
-   - `*** Delete File: <path>` – removes an existing file; no body allowed.
-   - `*** Update File: <path>` – apply textual hunks to the file; optionally follow immediately with `*** Move to: <new/path>` to rename.
-   - Symbol-aware edits (paths are still workspace-relative):
-     * `*** Insert Before Symbol: <path::Symbol::Path>` – insert after the header with only `+` lines.
-     * `*** Insert After Symbol: …`
-     * `*** Replace Symbol Body: …`
-     Symbol paths use `::` separators. Applications fail if the symbol cannot be located.
-3. Hunks inside Update/Symbol sections:
-   - Start with `@@` (optionally repeat `@@ class Foo` / `@@ fn bar` to scope nested contexts).
-   - Provide ~3 lines of context before/after each change; avoid duplicating context when hunks touch adjacent lines.
-   - Prefix lines: space = context, `-` = removal, `+` = addition. All new/inserted lines **must** begin with `+` even in Add/Symbol blocks.
-4. Rules:
-   - Paths must be workspace-relative; never absolute.
-   - Do not mix multiple files in one operation block—start a new header per file.
-   - Prefer Symbol directives over large textual diffs when adjusting functions/classes.
-   - Ensure the patch is self-contained; no implicit `cd` or shell commands.
-
-### CLI usage
-
-Typical heredoc:
-```bash
-apply_patch <<'PATCH'
+### Envelope
+```
 *** Begin Patch
-*** Update File: src/main.rs
-@@
--fn main() {
--    println!("Hi");
--}
-+fn main() {
-+    println!("Hello, world!");
-+}
+...operations...
 *** End Patch
-PATCH
+```
+- Paths are workspace-relative. One header = one file.
+- `+` required for every body line in Add/Symbol/Ast sections.
+
+### Operations (pick per block)
+| Header | Purpose | Notes |
+| --- | --- | --- |
+| `*** Add File: path` | Create/replace file | Body = `+` lines only |
+| `*** Delete File: path` | Remove file | No body |
+| `*** Update File: path` | Text diff | Hunks start with `@@`; optional `*** Move to: new_path` immediately after header |
+| `*** Insert Before/After Symbol: file::Type::item` | Insert lines near symbol | Body = `+` lines; symbol path uses `::` |
+| `*** Replace Symbol Body: file::Type::item` | Replace function/class body | Body = `+` lines |
+| `*** Ast Operation: path key=value...` | Tree-sitter aware edits | See table below |
+| `*** Ast Script: refactors/foo.toml [format=toml|json|starlark] [root=…]` | Execute reusable script | Script must appear in `refactors/catalog.json` (path, version, name, sha256) |
+
+### AST Operation (`op=…`)
+- `rename-symbol symbol=a::b new_name=Foo [propagate=definition|file]`
+- `update-signature symbol=...` → payload = new header/signature.
+- `move-block symbol=... target=... position=before|after|replace|into-body|delete`
+- `update-imports` → payload lines `+add …` / `+remove …`.
+- `insert-attributes symbol=... placement=before|after|body-start` → payload = attributes.
+- `template mode=file-start|file-end|before-symbol|after-symbol|body-start|body-end [symbol=...]` → payload = template (`{{language}}`, `{{symbol}}`, `{{timestamp}}`).
+Platform auto-detects language; use `lang=` to override ambiguous extensions.
+
+### AST Script schema (TOML)
+```toml
+name = "AddInstrumentation"
+version = "0.3.0"
+
+[[steps]]
+path = "src/lib.rs"
+op = "rename"
+symbol = "worker::run"
+new_name = "run_with_metrics"
+
+[[steps]]
+path = "src/lib.rs"
+lang = "rust"
+query = "(function_item name: (identifier) @name (#match? @name \"^handle_\"))"
+capture = "name"
+op = "template"
+mode = "body-start"
+payload = ["tracing::info!(\"worker\", \"entering %s\");"]
+```
+- JSON scripts mirror the same keys. Starlark scripts must evaluate to the above dictionary.
+- Header `key=value` pairs (e.g., `feature=async`) become `{{feature}}` vars inside the script.
+
+### CLI shortcuts
+| Command | Effect |
+| --- | --- |
+| `apply_patch` | Dry-run (default) |
+| `apply_patch apply` | Write changes + auto-stage |
+| `… dry-run` / `… explain` | Explicit dry-run |
+| `… amend` | Reapply failed hunks from last report |
+| `… preview` | Dry-run + interactive unified diff previews per AST op |
+| `… scripts list [--json]` | Show `refactors/catalog.json` entries (path, version, hash, labels) |
+
+### Output contract
+- Human summary groups operations with `(+added, -removed)` counts.
+- JSON line: `{ "schema": "apply_patch/v2", "report": { … } }` containing operations, diagnostics, formatting/post-check results, `amendment_template` when relevant.
+- Failures leave workspace untouched; amendment template holds only the blocks that failed.
+
+### Examples
+**Rename + template
+```
+*** Begin Patch
+*** Ast Operation: src/lib.rs op=rename-symbol symbol=greet new_name=salute propagate=file
+*** Ast Operation: src/lib.rs op=template mode=body-start symbol=salute
++tracing::info!("salute called");
+*** End Patch
 ```
 
-Subcommands:
-- `apply_patch` – apply and stage changes (if inside a git repo).
-- `apply_patch dry-run` / `apply_patch explain` – parse, validate, and print the report without touching the filesystem.
-- `apply_patch amend` – re-apply only the “Amendment template” emitted after a failure.
-All modes accept `--patch-file`, `--encoding`, newline normalization flags, log destinations, etc.; omit these unless you specifically need them.
-
-### Output and reporting
-
-- Human summary grouped as `Applied operations`, `Attempted operations`, or `Planned operations` (for dry-run). Each line shows action, target, and `(+added, -removed)` counts.
-- Optional sections:
-  * **Formatting:** auto-formatters that were triggered (tool, scope, status, duration, note when the tool is missing).
-  * **Post checks:** follow-up commands/tests (name, command, status, duration, stdout/stderr excerpt).
-  * **Diagnostics:** structured errors/warnings emitted by the parser or symbol locator.
-- Machine JSON (single trailing line): `{ "schema": "apply_patch/v2", "report": { … } }` containing
-  * `status` (`success`/`failed`), `mode` (`apply`/`dry-run`), `duration_ms`.
-  * `operations[]` (action, path, renamed_to, added, removed, status, optional `symbol` { kind, path, strategy, reason }).
-  * `errors[]`, `formatting[]`, `post_checks[]`, `diagnostics[]`, `artifacts` (log/conflict/unapplied paths), optional `batch` stats, optional `amendment_template`.
-
-### Failure handling
-
-- Patches are applied atomically. On failure no workspace files remain partially written; a detailed diagnostic is printed.
-- The report includes `errors` plus an “Amendment template” containing only the hunks that failed (with surrounding headers). Rerun that template via `apply_patch` or `apply_patch amend` after fixing the issues.
-- Exit status is non-zero when any operation fails or when validation detects malformed input.
-
-### Best practices checklist
-
-- Always wrap the entire edit in one Begin/End block—never send raw diff fragments.
-- Keep context minimal but unambiguous. When editing repeated code, scope each hunk with extra `@@` headers (class/function/module).
-- For renames, combine `*** Update File` and `*** Move to` in the same block; do not create separate Add/Delete pairs just to rename.
-- When creating multi-file patches, order operations deterministically (e.g., alphabetical) so reviews are predictable.
-- Avoid blank trailing lines outside headers, and ensure the patch ends exactly with `*** End Patch` followed by a newline.
+**Script invocation
+```
+*** Begin Patch
+*** Ast Script: refactors/add_metrics.toml feature=batch format=toml
+*** End Patch
+```
+- `refactors/catalog.json` must contain `{ path: "refactors/add_metrics.toml", version: "…", hash: "sha256:…" }`.

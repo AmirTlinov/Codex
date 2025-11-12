@@ -502,6 +502,7 @@ dependencies = [
  "axum-core",
  "axum-macros",
  "bytes",
+ "form_urlencoded",
  "futures-util",
  "http",
  "http-body",
@@ -518,6 +519,7 @@ dependencies = [
  "serde",
  "serde_json",
  "serde_path_to_error",
+ "serde_urlencoded",
  "sync_wrapper",
  "tokio",
  "tower",
@@ -938,9 +940,12 @@ dependencies = [
  "filetime",
  "once_cell",
  "pretty_assertions",
+ "semver",
  "serde",
  "serde_json",
+ "sha2",
  "similar",
+ "starlark",
  "tempfile",
  "thiserror 2.0.17",
  "time",
@@ -1024,6 +1029,7 @@ dependencies = [
  "anyhow",
  "assert_cmd",
  "assert_matches",
+ "blake3",
  "clap",
  "clap_complete",
  "codex-app-server",
@@ -1031,12 +1037,12 @@ dependencies = [
  "codex-arg0",
  "codex-chatgpt",
  "codex-cloud-tasks",
- "codex-code-finder",
  "codex-common",
  "codex-core",
  "codex-exec",
  "codex-login",
  "codex-mcp-server",
+ "codex-navigator",
  "codex-process-hardening",
  "codex-protocol",
  "codex-protocol-ts",
@@ -1100,56 +1106,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "codex-code-finder"
-version = "0.0.0"
-dependencies = [
- "anyhow",
- "async-trait",
- "axum",
- "base64",
- "bincode",
- "blake3",
- "dirs",
- "dunce",
- "futures",
- "globset",
- "ignore",
- "log",
- "lru",
- "notify",
- "nucleo-matcher",
- "once_cell",
- "pretty_assertions",
- "rand 0.9.2",
- "regex",
- "reqwest",
- "serde",
- "serde_json",
- "serde_with",
- "smallvec",
- "tempfile",
- "textwrap 0.16.2",
- "thiserror 2.0.17",
- "time",
- "tokio",
- "tokio-stream",
- "tracing",
- "tree-sitter 0.25.10",
- "tree-sitter-bash",
- "tree-sitter-go",
- "tree-sitter-javascript",
- "tree-sitter-json",
- "tree-sitter-markdown",
- "tree-sitter-python",
- "tree-sitter-rust",
- "tree-sitter-toml",
- "tree-sitter-typescript",
- "tree-sitter-yaml",
- "uuid",
- "walkdir",
-]
-
-[[package]]
 name = "codex-common"
 version = "0.0.0"
 dependencies = [
@@ -1177,10 +1133,10 @@ dependencies = [
  "codex-app-server-protocol",
  "codex-apply-patch",
  "codex-async-utils",
- "codex-code-finder",
  "codex-file-search",
  "codex-git",
  "codex-keyring-store",
+ "codex-navigator",
  "codex-otel",
  "codex-protocol",
  "codex-rmcp-client",
@@ -1200,6 +1156,7 @@ dependencies = [
  "http",
  "image",
  "indexmap 2.12.0",
+ "insta",
  "keyring",
  "landlock",
  "libc",
@@ -1408,6 +1365,60 @@ dependencies = [
 ]
 
 [[package]]
+name = "codex-navigator"
+version = "0.0.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "axum",
+ "base64",
+ "bincode",
+ "blake3",
+ "dirs",
+ "dunce",
+ "futures",
+ "globset",
+ "ignore",
+ "log",
+ "lru",
+ "notify",
+ "nucleo-matcher",
+ "once_cell",
+ "percent-encoding",
+ "pretty_assertions",
+ "rand 0.9.2",
+ "regex",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "serde_with",
+ "smallvec",
+ "snap",
+ "tempfile",
+ "textwrap 0.16.2",
+ "thiserror 2.0.17",
+ "time",
+ "tokio",
+ "tokio-stream",
+ "tokio-util",
+ "toml",
+ "tracing",
+ "tree-sitter 0.25.10",
+ "tree-sitter-bash",
+ "tree-sitter-go",
+ "tree-sitter-javascript",
+ "tree-sitter-json",
+ "tree-sitter-markdown",
+ "tree-sitter-python",
+ "tree-sitter-rust",
+ "tree-sitter-toml",
+ "tree-sitter-typescript",
+ "tree-sitter-yaml",
+ "uuid",
+ "walkdir",
+]
+
+[[package]]
 name = "codex-ollama"
 version = "0.0.0"
 dependencies = [
@@ -1557,12 +1568,12 @@ dependencies = [
  "codex-ansi-escape",
  "codex-app-server-protocol",
  "codex-arg0",
- "codex-code-finder",
  "codex-common",
  "codex-core",
  "codex-feedback",
  "codex-file-search",
  "codex-login",
+ "codex-navigator",
  "codex-ollama",
  "codex-protocol",
  "codex-windows-sandbox",
@@ -3410,6 +3421,7 @@ checksum = "46fdb647ebde000f43b5b53f773c30cf9b0cb4300453208713fa38b2c70935a0"
 dependencies = [
  "console",
  "once_cell",
+ "serde",
  "similar",
 ]
 
@@ -5954,6 +5966,12 @@ name = "smawk"
 version = "0.3.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b7c388c1b5e93756d0c740965c41e8822f866621d41acbdf6336a6a168f8840c"
+
+[[package]]
+name = "snap"
+version = "1.1.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1b6b67fb9a61334225b5b790716f609cd58395f895b3fe8b328786812a40bc3b"
 
 [[package]]
 name = "socket2"

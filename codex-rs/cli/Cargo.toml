@@ -24,7 +24,7 @@ codex-arg0 = { workspace = true }
 codex-chatgpt = { workspace = true }
 codex-cloud-tasks = { path = "../cloud-tasks" }
 codex-common = { workspace = true, features = ["cli"] }
-codex-code-finder = { workspace = true }
+codex-navigator = { workspace = true }
 codex-core = { workspace = true }
 codex-exec = { workspace = true }
 codex-login = { workspace = true }
@@ -57,6 +57,7 @@ codex_windows_sandbox = { package = "codex-windows-sandbox", path = "../windows-
 [dev-dependencies]
 assert_cmd = { workspace = true }
 assert_matches = { workspace = true }
+blake3 = { workspace = true }
 predicates = { workspace = true }
 pretty_assertions = { workspace = true }
 tempfile = { workspace = true }
