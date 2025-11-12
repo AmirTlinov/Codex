@@ -94,6 +94,9 @@ agents.
   `--remove-lang <lang>`, `--no-tests|--no-docs|--no-deps` или `--no-recent`, и Navigator
   сам вернётся к ближайшему предку цепочки refine, пересчитает фильтры и обновит hits —
   без shelling‑out в `rg` и без знания исходного запроса.
+- Владелец можно задавать через `--owner <handle>` (CLI) или `owner=@team` в freeform: мы
+  читаем CODEOWNERS, нормализуем `@handles` и фильтруем/ранжируем файлы конкретных команд;
+  `facet --owner foo` и `facet --remove-owner bar` позволяют стековать/сбрасывать ownership.
 - Контекстное ранжирование уже учитывает git churn: мы сжимаем `git log --since=30.days` в
   per-file score, нормализуем (clamp) и прибавляем к эвристике, поэтому горячие файлы
   поднимаются выше даже при слабых fuzzy-совпадениях; attention (TODO/FIXME) остаётся

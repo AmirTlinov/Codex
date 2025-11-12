@@ -30,6 +30,8 @@ pub struct NavigatorSearchArgs {
     #[serde(default)]
     pub file_substrings: Vec<String>,
     #[serde(default)]
+    pub owners: Vec<String>,
+    #[serde(default)]
     pub symbol_exact: Option<String>,
     #[serde(default)]
     pub recent_only: Option<bool>,
@@ -70,6 +72,8 @@ pub struct NavigatorSearchArgs {
     #[serde(default)]
     pub remove_file_substrings: Vec<String>,
     #[serde(default)]
+    pub remove_owners: Vec<String>,
+    #[serde(default)]
     pub clear_filters: bool,
     #[serde(default)]
     pub disable_recent_only: bool,
@@ -87,6 +91,7 @@ impl Default for NavigatorSearchArgs {
             categories: Vec::new(),
             path_globs: Vec::new(),
             file_substrings: Vec::new(),
+            owners: Vec::new(),
             symbol_exact: None,
             recent_only: None,
             only_tests: None,
@@ -107,6 +112,7 @@ impl Default for NavigatorSearchArgs {
             remove_categories: Vec::new(),
             remove_path_globs: Vec::new(),
             remove_file_substrings: Vec::new(),
+            remove_owners: Vec::new(),
             clear_filters: false,
             disable_recent_only: false,
             inherit_filters: false,
@@ -243,6 +249,11 @@ pub fn plan_search_request(
 
     filters.path_globs = args.path_globs;
     filters.file_substrings = args.file_substrings;
+    filters.owners = args
+        .owners
+        .drain(..)
+        .filter_map(|owner| normalize_owner_token(&owner))
+        .collect();
     filters.symbol_exact = args.symbol_exact;
     filters.recent_only = args.recent_only.unwrap_or(false);
 
@@ -296,6 +307,7 @@ pub fn plan_search_request(
         !filters.path_globs.is_empty(),
         !filters.file_substrings.is_empty(),
         has_explicit_profile || !filters.categories.is_empty(),
+        !filters.owners.is_empty(),
         has_refine,
         has_help_symbol,
         &selected_profiles,
@@ -318,6 +330,11 @@ pub fn plan_search_request(
     }
     for pattern in args.remove_file_substrings.drain(..) {
         filter_ops.push(FilterOp::RemoveFileSubstring(pattern));
+    }
+    for owner in args.remove_owners.drain(..) {
+        if let Some(normalized) = normalize_owner_token(&owner) {
+            filter_ops.push(FilterOp::RemoveOwner(normalized));
+        }
     }
     if args.disable_recent_only {
         filter_ops.push(FilterOp::SetRecentOnly(false));
@@ -367,6 +384,7 @@ fn validate_query_requirements(
     has_path_globs: bool,
     has_file_substrings: bool,
     has_category_filter: bool,
+    has_owner_filter: bool,
     has_refine: bool,
     has_help_symbol: bool,
     profiles: &[SearchProfile],
@@ -385,6 +403,7 @@ fn validate_query_requirements(
         && !has_path_globs
         && !has_file_substrings
         && !has_category_filter
+        && !has_owner_filter
         && !has_refine
     {
         return Err(SearchPlannerError::new(
@@ -485,6 +504,15 @@ fn parse_reference_role(raw: &str) -> Result<ReferenceRole, SearchPlannerError> 
 fn parse_query_id(value: &str) -> Result<QueryId, SearchPlannerError> {
     Uuid::parse_str(value)
         .map_err(|err| SearchPlannerError::new(format!("invalid query_id '{value}': {err}")))
+}
+
+fn normalize_owner_token(raw: &str) -> Option<String> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        None
+    } else {
+        Some(trimmed.trim_start_matches('@').to_ascii_lowercase())
+    }
 }
 
 fn apply_profiles(

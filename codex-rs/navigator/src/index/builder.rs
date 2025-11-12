@@ -2,6 +2,7 @@ use crate::atlas::rebuild_atlas;
 use crate::index::classify::classify_categories;
 use crate::index::classify::layer_from_path;
 use crate::index::classify::module_path;
+use crate::index::codeowners::OwnerResolver;
 use crate::index::filter::PathFilter;
 use crate::index::language::detect_language;
 use crate::index::language::extract_symbols;
@@ -68,6 +69,7 @@ pub struct IndexBuilder<'a> {
     root: &'a Path,
     recent: HashSet<String>,
     churn: HashMap<String, u32>,
+    owners: OwnerResolver,
     filter: Arc<PathFilter>,
 }
 
@@ -76,12 +78,14 @@ impl<'a> IndexBuilder<'a> {
         root: &'a Path,
         recent: HashSet<String>,
         churn: HashMap<String, u32>,
+        owners: OwnerResolver,
         filter: Arc<PathFilter>,
     ) -> Self {
         Self {
             root,
             recent,
             churn,
+            owners,
             filter,
         }
     }
@@ -212,6 +216,7 @@ impl<'a> IndexBuilder<'a> {
         let tokens = collect_tokens(content);
         let trigrams = collect_trigrams(content);
         let attention = count_attention_markers(content);
+        let owners = self.owners.owners_for(rel_path);
         let churn = self.churn.get(rel_path).copied().unwrap_or(0);
         let recent = self.recent.contains(rel_path);
         let fingerprint = build_fingerprint(&metadata, &bytes);
@@ -242,6 +247,7 @@ impl<'a> IndexBuilder<'a> {
                 doc_summary: candidate.doc_summary,
                 dependencies: dependencies.clone(),
                 attention,
+                owners: owners.clone(),
                 churn,
             });
         }
@@ -257,6 +263,7 @@ impl<'a> IndexBuilder<'a> {
                 trigrams,
                 line_count,
                 attention,
+            owners,
                 churn,
                 fingerprint,
             };
@@ -280,6 +287,7 @@ impl<'a> IndexBuilder<'a> {
             trigrams,
             line_count,
             attention,
+            owners,
             churn,
             fingerprint,
         };
@@ -460,7 +468,13 @@ mod tests {
         fs::write(root.join("ignored_dir/lib.rs"), "pub fn hidden() {}\n").unwrap();
 
         let filter = Arc::new(PathFilter::new(root).unwrap());
-        let builder = IndexBuilder::new(root, HashSet::new(), HashMap::new(), filter);
+        let builder = IndexBuilder::new(
+            root,
+            HashSet::new(),
+            HashMap::new(),
+            OwnerResolver::default(),
+            filter,
+        );
         let snapshot = builder.build().unwrap().snapshot;
 
         assert!(snapshot.files.contains_key("src/lib.rs"));

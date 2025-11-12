@@ -1,6 +1,7 @@
 mod builder;
 mod cache;
 mod classify;
+mod codeowners;
 mod coverage;
 mod filter;
 mod git;
@@ -20,6 +21,7 @@ use crate::index::builder::MAX_FILE_BYTES;
 use crate::index::builder::SkipReason;
 use crate::index::builder::SkippedFile;
 use crate::index::builder::relative_path;
+use crate::index::codeowners::OwnerResolver;
 use crate::index::coverage::CoverageTracker;
 use crate::index::filter::PathFilter;
 use crate::index::git::churn_scores;
@@ -472,8 +474,9 @@ impl IndexCoordinator {
         let root = self.inner.profile.project_root().to_path_buf();
         let recent = recent_paths(&root);
         let churn = churn_scores(&root);
+        let owners = OwnerResolver::load(&root);
         let filter = self.inner.filter.clone();
-        let builder = IndexBuilder::new(root.as_path(), recent, churn, filter.clone());
+        let builder = IndexBuilder::new(root.as_path(), recent, churn, owners, filter.clone());
         let _guard = self.inner.build_lock.lock().await;
         let mut snapshot = self.inner.snapshot.write().await;
         let mut changed = false;
@@ -542,9 +545,10 @@ impl IndexCoordinator {
         let root = self.inner.profile.project_root().to_path_buf();
         let recent = recent_paths(&root);
         let churn = churn_scores(&root);
+        let owners = OwnerResolver::load(&root);
         let filter = self.inner.filter.clone();
         let snapshot = tokio::task::spawn_blocking(move || {
-            IndexBuilder::new(root.as_path(), recent, churn, filter).build()
+            IndexBuilder::new(root.as_path(), recent, churn, owners, filter).build()
         })
         .await??;
         Ok(snapshot)
@@ -788,6 +792,7 @@ fn build_literal_symbol(literal: &LiteralSymbolId, file_entry: &FileEntry) -> Sy
         dependencies: Vec::new(),
         attention: file_entry.attention,
         churn: file_entry.churn,
+        owners: file_entry.owners.clone(),
     }
 }
 
@@ -981,6 +986,7 @@ fn summarize_active_filters(filters: &SearchFilters) -> Option<ActiveFilters> {
         || !filters.categories.is_empty()
         || !filters.path_globs.is_empty()
         || !filters.file_substrings.is_empty()
+        || !filters.owners.is_empty()
         || filters.recent_only;
     if !has_filters {
         return None;
@@ -990,6 +996,7 @@ fn summarize_active_filters(filters: &SearchFilters) -> Option<ActiveFilters> {
         categories: filters.categories.clone(),
         path_globs: filters.path_globs.clone(),
         file_substrings: filters.file_substrings.clone(),
+        owners: filters.owners.clone(),
         recent_only: filters.recent_only,
     })
 }
@@ -1040,6 +1047,9 @@ fn apply_filter_op(filters: &mut SearchFilters, op: &FilterOp) {
         FilterOp::RemoveFileSubstring(value) => {
             filters.file_substrings.retain(|entry| entry != value);
         }
+        FilterOp::RemoveOwner(owner) => {
+            filters.owners.retain(|entry| entry != owner);
+        }
         FilterOp::SetRecentOnly(value) => {
             filters.recent_only = *value;
         }
@@ -1075,6 +1085,11 @@ fn merge_filter_additions(filters: &mut SearchFilters, additions: SearchFilters)
             filters.file_substrings.push(pattern);
         }
     }
+    for owner in additions.owners {
+        if !filters.owners.contains(&owner) {
+            filters.owners.push(owner);
+        }
+    }
     if let Some(symbol) = additions.symbol_exact {
         filters.symbol_exact = Some(symbol);
     }
@@ -1103,6 +1118,7 @@ fn filters_subset(current: &SearchFilters, desired: &SearchFilters) -> bool {
         && subset(&current.categories, &desired.categories)
         && subset(&current.path_globs, &desired.path_globs)
         && subset(&current.file_substrings, &desired.file_substrings)
+        && subset(&current.owners, &desired.owners)
         && (!current.recent_only || desired.recent_only)
         && match (&current.symbol_exact, &desired.symbol_exact) {
             (Some(lhs), Some(rhs)) => lhs == rhs,
@@ -1167,6 +1183,7 @@ mod tests {
             line_count: 0,
             attention: 0,
             churn: 0,
+            owners: Vec::new(),
             fingerprint: FileFingerprint {
                 mtime: Some(0),
                 size: 0,

@@ -454,6 +454,9 @@ fn active_filter_tokens(filters: &ActiveFilters) -> Vec<String> {
     if !filters.file_substrings.is_empty() {
         tokens.push(format!("file={}", filters.file_substrings.join("|")));
     }
+    if !filters.owners.is_empty() {
+        tokens.push(format!("owner={}", filters.owners.join("|")));
+    }
     if filters.recent_only {
         tokens.push("recent".to_string());
     }

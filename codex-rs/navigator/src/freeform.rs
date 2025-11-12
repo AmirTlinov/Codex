@@ -40,6 +40,8 @@ const FREEFORM_KEY_SUGGESTIONS: &[&str] = &[
     "language",
     "languages",
     "lang",
+    "owners",
+    "owner",
     "category",
     "categories",
     "path",
@@ -99,6 +101,7 @@ const JSON_SEARCH_KEYS: &[&str] = &[
     "limit",
     "kinds",
     "languages",
+    "owners",
     "categories",
     "path_globs",
     "paths_include",
@@ -315,6 +318,14 @@ fn parse_quick_facet(rest: &str) -> Result<NavigatorPayload, PayloadParseError> 
         }
         if let Some(value) = lower.strip_prefix("remove_lang=") {
             args.remove_languages.push(value.to_string());
+            continue;
+        }
+        if let Some(value) = lower.strip_prefix("owner=") {
+            args.owners.push(value.to_string());
+            continue;
+        }
+        if let Some(value) = lower.strip_prefix("remove_owner=") {
+            args.remove_owners.push(value.to_string());
             continue;
         }
         match lower.as_str() {
@@ -837,6 +848,9 @@ fn apply_freeform_pair(
         "file" | "files" | "file_substrings" => {
             args.file_substrings.extend(split_list(&raw_value));
         }
+        "owner" | "owners" => {
+            args.owners.extend(split_list(&raw_value));
+        }
         "symbol" | "symbol_exact" => args.symbol_exact = Some(raw_value),
         "recent" => args.recent_only = Some(parse_bool("recent", &raw_value)?),
         "tests" => args.only_tests = Some(parse_bool("tests", &raw_value)?),
@@ -965,6 +979,16 @@ fn hydrate_json_aliases(map: &serde_json::Map<String, Value>, args: &mut Navigat
         }
         if let Some(Value::String(text)) = map.get("paths_include_glob") {
             args.path_globs.extend(split_list(text));
+        }
+    }
+    if let Some(Value::String(owner)) = map.get("owner") {
+        args.owners.push(owner.clone());
+    }
+    if let Some(Value::Array(values)) = map.get("owners") {
+        for value in values {
+            if let Some(text) = value.as_str() {
+                args.owners.push(text.to_string());
+            }
         }
     }
     if args.refs_role.is_none()
@@ -1341,13 +1365,17 @@ mod tests {
 
     #[test]
     fn parse_quick_facet_supports_remove_tokens() {
-        match parse_payload("facet from=q123 remove_lang=rust no-docs no-recent")
-            .expect("facet parsed")
+        match parse_payload(
+            "facet from=q123 remove_lang=rust no-docs no-recent owner=@core remove_owner=legacy",
+        )
+        .expect("facet parsed")
         {
             NavigatorPayload::Search(args) => {
                 assert!(args.remove_languages.contains(&"rust".to_string()));
                 assert!(args.remove_categories.contains(&"docs".to_string()));
                 assert!(args.disable_recent_only);
+                assert!(args.owners.contains(&"@core".to_string()));
+                assert!(args.remove_owners.contains(&"legacy".to_string()));
                 assert!(args.inherit_filters);
             }
             other => panic!("unexpected payload: {other:?}"),

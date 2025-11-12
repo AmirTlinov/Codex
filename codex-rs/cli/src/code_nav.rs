@@ -49,6 +49,10 @@ pub struct NavCommand {
     #[arg(long = "lang", value_enum, action = ArgAction::Append)]
     pub languages: Vec<LangArg>,
 
+    /// Filter by code owner handle (repeatable).
+    #[arg(long = "owner", action = ArgAction::Append)]
+    pub owners: Vec<String>,
+
     /// Restrict to globbed paths (repeatable).
     #[arg(long = "path", action = ArgAction::Append)]
     pub path_globs: Vec<String>,
@@ -218,6 +222,14 @@ pub struct FacetCommand {
     /// Remove language filters (repeatable).
     #[arg(long = "remove-lang", value_enum, action = ArgAction::Append)]
     pub remove_languages: Vec<LangArg>,
+
+    /// Add owner filters (repeatable).
+    #[arg(long = "owner", action = ArgAction::Append)]
+    pub owners: Vec<String>,
+
+    /// Remove owner filters (repeatable).
+    #[arg(long = "remove-owner", action = ArgAction::Append)]
+    pub remove_owners: Vec<String>,
 
     /// Restrict results to test files.
     #[arg(long = "tests")]
@@ -525,6 +537,7 @@ fn nav_command_to_search_args(cmd: &NavCommand) -> NavigatorSearchArgs {
         .iter()
         .map(|lang| format_lang(lang).to_string())
         .collect();
+    args.owners = cmd.owners.clone();
     args.path_globs = cmd.path_globs.clone();
     args.file_substrings = cmd.file_substrings.clone();
     args.symbol_exact = cmd.symbol_exact.clone();
@@ -568,6 +581,8 @@ fn facet_command_to_search_args(cmd: &FacetCommand) -> NavigatorSearchArgs {
         .iter()
         .map(|lang| format_lang(lang).to_string())
         .collect();
+    args.owners = cmd.owners.clone();
+    args.remove_owners = cmd.remove_owners.clone();
     if cmd.tests {
         args.only_tests = Some(true);
     }
@@ -902,6 +917,9 @@ fn print_facet_summary(stats: &SearchStats) {
     if !facets.categories.is_empty() {
         eprintln!("  categories: {}", format_facet_line(&facets.categories));
     }
+    if !facets.owners.is_empty() {
+        eprintln!("  owners: {}", format_facet_line(&facets.owners));
+    }
 }
 
 fn print_active_filters(filters: &proto::ActiveFilters) {
@@ -958,6 +976,9 @@ fn format_active_filters_lines(filters: &proto::ActiveFilters) -> Vec<String> {
     }
     if !filters.file_substrings.is_empty() {
         tokens.push(format!("file={}", filters.file_substrings.join("|")));
+    }
+    if !filters.owners.is_empty() {
+        tokens.push(format!("owner={}", filters.owners.join("|")));
     }
     if filters.recent_only {
         tokens.push("recent".to_string());
@@ -1255,6 +1276,7 @@ mod tests {
             query: vec!["SessionID".into()],
             kinds: vec![KindArg::Function],
             languages: vec![LangArg::Rust],
+            owners: Vec::new(),
             path_globs: vec!["core/**/*.rs".into()],
             symbol_exact: Some("session_id".into()),
             file_substrings: vec!["mod.rs".into()],

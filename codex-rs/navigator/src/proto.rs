@@ -107,6 +107,7 @@ pub struct SearchFilters {
     pub categories: Vec<FileCategory>,
     pub path_globs: Vec<String>,
     pub file_substrings: Vec<String>,
+    pub owners: Vec<String>,
     pub symbol_exact: Option<String>,
     pub recent_only: bool,
 }
@@ -118,6 +119,7 @@ pub enum FilterOp {
     RemoveCategory(FileCategory),
     RemovePathGlob(String),
     RemoveFileSubstring(String),
+    RemoveOwner(String),
     SetRecentOnly(bool),
     ClearFilters,
 }
@@ -133,6 +135,8 @@ pub struct ActiveFilters {
     pub path_globs: Vec<String>,
     #[serde(default)]
     pub file_substrings: Vec<String>,
+    #[serde(default)]
+    pub owners: Vec<String>,
     #[serde(default)]
     pub recent_only: bool,
 }
@@ -275,6 +279,8 @@ pub struct NavHit {
     pub help: Option<SymbolHelp>,
     #[serde(default)]
     pub context_snippet: Option<TextSnippet>,
+    #[serde(default)]
+    pub owners: Vec<String>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
@@ -337,6 +343,8 @@ pub struct FacetSummary {
     pub languages: Vec<FacetBucket>,
     #[serde(default)]
     pub categories: Vec<FacetBucket>,
+    #[serde(default)]
+    pub owners: Vec<FacetBucket>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]

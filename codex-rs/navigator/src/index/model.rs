@@ -35,6 +35,8 @@ pub struct SymbolRecord {
     pub attention: u32,
     #[serde(default)]
     pub churn: u32,
+    #[serde(default)]
+    pub owners: Vec<String>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -75,6 +77,8 @@ pub struct FileEntry {
     pub attention: u32,
     #[serde(default)]
     pub churn: u32,
+    #[serde(default)]
+    pub owners: Vec<String>,
     pub fingerprint: FileFingerprint,
 }
 

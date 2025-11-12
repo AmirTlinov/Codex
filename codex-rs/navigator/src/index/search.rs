@@ -615,6 +615,7 @@ fn build_hit(
         references,
         help,
         context_snippet: None,
+        owners: symbol.owners.clone(),
     }
 }
 
@@ -917,6 +918,7 @@ fn build_literal_hit(
         references: None,
         help: None,
         context_snippet: Some(matched.snippet),
+        owners: file.owners.clone(),
     })
 }
 
@@ -937,6 +939,7 @@ fn summarize_facets(hits: &[NavHit]) -> Option<FacetSummary> {
     }
     let mut language_counts: HashMap<String, usize> = HashMap::new();
     let mut category_counts: HashMap<String, usize> = HashMap::new();
+    let mut owner_counts: HashMap<String, usize> = HashMap::new();
     for hit in hits {
         let lang = language_label(&hit.language).to_string();
         *language_counts.entry(lang).or_default() += 1;
@@ -944,15 +947,23 @@ fn summarize_facets(hits: &[NavHit]) -> Option<FacetSummary> {
             let label = category_label(category).to_string();
             *category_counts.entry(label).or_default() += 1;
         }
+        for owner in &hit.owners {
+            if owner.is_empty() {
+                continue;
+            }
+            *owner_counts.entry(owner.to_ascii_lowercase()).or_default() += 1;
+        }
     }
     let languages = sort_buckets(language_counts);
     let categories = sort_buckets(category_counts);
-    if languages.is_empty() && categories.is_empty() {
+    let owners = sort_buckets(owner_counts);
+    if languages.is_empty() && categories.is_empty() && owners.is_empty() {
         return None;
     }
     Some(FacetSummary {
         languages,
         categories,
+        owners,
     })
 }
 
@@ -1014,6 +1025,7 @@ struct FilterSet {
     kinds: HashSet<crate::proto::SymbolKind>,
     languages: HashSet<Language>,
     categories: HashSet<FileCategory>,
+    owners: HashSet<String>,
     symbol_exact: Option<String>,
     file_substrings: Vec<String>,
     glob: Option<GlobSet>,
@@ -1033,6 +1045,11 @@ impl FilterSet {
             kinds: filters.kinds.iter().cloned().collect(),
             languages: filters.languages.iter().cloned().collect(),
             categories: filters.categories.iter().cloned().collect(),
+            owners: filters
+                .owners
+                .iter()
+                .map(|owner| owner.to_ascii_lowercase())
+                .collect(),
             symbol_exact: filters
                 .symbol_exact
                 .as_ref()
@@ -1063,6 +1080,15 @@ impl FilterSet {
                 .categories
                 .iter()
                 .any(|cat| self.categories.contains(cat))
+        {
+            return false;
+        }
+        if !self.owners.is_empty()
+            && (symbol.owners.is_empty()
+                || !symbol
+                    .owners
+                    .iter()
+                    .any(|owner| self.owners.contains(&owner.to_ascii_lowercase())))
         {
             return false;
         }
@@ -1114,6 +1140,15 @@ impl FilterSet {
                 return false;
             }
         }
+        if !self.owners.is_empty()
+            && (file.owners.is_empty()
+                || !file
+                    .owners
+                    .iter()
+                    .any(|owner| self.owners.contains(&owner.to_ascii_lowercase())))
+        {
+            return false;
+        }
         if recent_only && !file.recent {
             return false;
         }
@@ -1125,6 +1160,7 @@ impl FilterSet {
 mod tests {
     use super::*;
     use crate::index::builder::IndexBuilder;
+    use crate::index::codeowners::OwnerResolver;
     use crate::index::filter::PathFilter;
     use crate::proto::FileCategory;
     use crate::proto::SearchFilters;
@@ -1154,7 +1190,13 @@ mod tests {
         .unwrap();
 
         let filter = Arc::new(PathFilter::new(root).unwrap());
-        let builder = IndexBuilder::new(root, HashSet::new(), HashMap::new(), filter);
+        let builder = IndexBuilder::new(
+            root,
+            HashSet::new(),
+            HashMap::new(),
+            OwnerResolver::default(),
+            filter,
+        );
         let snapshot = builder.build().unwrap().snapshot;
         assert_eq!(snapshot.files.len(), 2);
         let cache = QueryCache::new(root.join("cache"));
@@ -1191,7 +1233,13 @@ mod tests {
             .and_then(|_| std::fs::write(root.join("src/lib.rs"), "pub fn example() {}"))
             .unwrap();
         let filter = Arc::new(PathFilter::new(root).unwrap());
-        let builder = IndexBuilder::new(root, HashSet::new(), HashMap::new(), filter);
+        let builder = IndexBuilder::new(
+            root,
+            HashSet::new(),
+            HashMap::new(),
+            OwnerResolver::default(),
+            filter,
+        );
         let snapshot = builder.build().unwrap().snapshot;
         let cache = QueryCache::new(root.join("cache"));
 
@@ -1224,7 +1272,13 @@ mod tests {
         )
         .unwrap();
         let filter = Arc::new(PathFilter::new(root).unwrap());
-        let builder = IndexBuilder::new(root, HashSet::new(), HashMap::new(), filter);
+        let builder = IndexBuilder::new(
+            root,
+            HashSet::new(),
+            HashMap::new(),
+            OwnerResolver::default(),
+            filter,
+        );
         let snapshot = builder.build().unwrap().snapshot;
         assert_eq!(snapshot.symbols.len(), 0);
         let cache = QueryCache::new(root.join("cache"));
@@ -1262,7 +1316,13 @@ mod tests {
         std::fs::write(root.join("a/match.txt"), "literal scope needle").unwrap();
         std::fs::write(root.join("b/match.txt"), "literal scope needle").unwrap();
         let filter = Arc::new(PathFilter::new(root).unwrap());
-        let builder = IndexBuilder::new(root, HashSet::new(), HashMap::new(), filter);
+        let builder = IndexBuilder::new(
+            root,
+            HashSet::new(),
+            HashMap::new(),
+            OwnerResolver::default(),
+            filter,
+        );
         let snapshot = builder.build().unwrap().snapshot;
         let filters = SearchFilters {
             path_globs: vec!["a/**".to_string()],
@@ -1288,7 +1348,13 @@ mod tests {
         std::fs::create_dir_all(root.join("src")).unwrap();
         std::fs::write(root.join("src/short.txt"), "AI").unwrap();
         let filter = Arc::new(PathFilter::new(root).unwrap());
-        let builder = IndexBuilder::new(root, HashSet::new(), HashMap::new(), filter);
+        let builder = IndexBuilder::new(
+            root,
+            HashSet::new(),
+            HashMap::new(),
+            OwnerResolver::default(),
+            filter,
+        );
         let snapshot = builder.build().unwrap().snapshot;
         let cache = QueryCache::new(root.join("cache"));
         let request = SearchRequest {
@@ -1317,7 +1383,13 @@ mod tests {
         std::fs::write(root.join("src/needle.txt"), "scoped literal").unwrap();
         std::fs::write(root.join("docs/needle.txt"), "scoped literal").unwrap();
         let filter = Arc::new(PathFilter::new(root).unwrap());
-        let builder = IndexBuilder::new(root, HashSet::new(), HashMap::new(), filter);
+        let builder = IndexBuilder::new(
+            root,
+            HashSet::new(),
+            HashMap::new(),
+            OwnerResolver::default(),
+            filter,
+        );
         let snapshot = builder.build().unwrap().snapshot;
         let cache = QueryCache::new(root.join("cache"));
         let request = SearchRequest {
@@ -1353,7 +1425,13 @@ mod tests {
         )
         .unwrap();
         let filter = Arc::new(PathFilter::new(root).unwrap());
-        let builder = IndexBuilder::new(root, HashSet::new(), HashMap::new(), filter);
+        let builder = IndexBuilder::new(
+            root,
+            HashSet::new(),
+            HashMap::new(),
+            OwnerResolver::default(),
+            filter,
+        );
         let snapshot = builder.build().unwrap().snapshot;
         let cache = QueryCache::new(root.join("cache"));
 
@@ -1380,7 +1458,13 @@ mod tests {
         std::fs::create_dir_all(root.join("src")).unwrap();
         std::fs::write(root.join("src/plain.txt"), "custom literal needle").unwrap();
         let filter = Arc::new(PathFilter::new(root).unwrap());
-        let builder = IndexBuilder::new(root, HashSet::new(), HashMap::new(), filter);
+        let builder = IndexBuilder::new(
+            root,
+            HashSet::new(),
+            HashMap::new(),
+            OwnerResolver::default(),
+            filter,
+        );
         let snapshot = builder.build().unwrap().snapshot;
         let cache = QueryCache::new(root.join("cache"));
 
@@ -1409,7 +1493,13 @@ mod tests {
         std::fs::create_dir_all(root.join("env")).unwrap();
         std::fs::write(root.join("env/payload.txt"), "SANDBOX=1").unwrap();
         let filter = Arc::new(PathFilter::new(root).unwrap());
-        let builder = IndexBuilder::new(root, HashSet::new(), HashMap::new(), filter);
+        let builder = IndexBuilder::new(
+            root,
+            HashSet::new(),
+            HashMap::new(),
+            OwnerResolver::default(),
+            filter,
+        );
         let snapshot = builder.build().unwrap().snapshot;
         let trigrams = literal_query_trigrams("SANDBOX=1");
         let (candidates, missing) = literal_candidate_paths(&snapshot, &trigrams);
@@ -1427,7 +1517,13 @@ mod tests {
         std::fs::create_dir_all(root.join("config")).unwrap();
         std::fs::write(root.join("config/env.toml"), "CODEX_SANDBOX=1\nOTHER_VAR=0").unwrap();
         let filter = Arc::new(PathFilter::new(root).unwrap());
-        let builder = IndexBuilder::new(root, HashSet::new(), HashMap::new(), filter);
+        let builder = IndexBuilder::new(
+            root,
+            HashSet::new(),
+            HashMap::new(),
+            OwnerResolver::default(),
+            filter,
+        );
         let snapshot = builder.build().unwrap().snapshot;
         let candidates =
             literal_token_candidates(&snapshot, "CODEX_SANDBOX").expect("token candidates missing");
@@ -1445,7 +1541,13 @@ mod tests {
             .and_then(|_| std::fs::write(root.join("src/lib.rs"), "pub fn sample() {}"))
             .unwrap();
         let filter = Arc::new(PathFilter::new(root).unwrap());
-        let builder = IndexBuilder::new(root, HashSet::new(), HashMap::new(), filter);
+        let builder = IndexBuilder::new(
+            root,
+            HashSet::new(),
+            HashMap::new(),
+            OwnerResolver::default(),
+            filter,
+        );
         let snapshot = builder.build().unwrap().snapshot;
         let cache = QueryCache::new(root.join("cache"));
 
@@ -1474,7 +1576,13 @@ mod tests {
         let mut recent = HashSet::new();
         recent.insert("src/recent.rs".to_string());
         let filter = Arc::new(PathFilter::new(root).unwrap());
-        let builder = IndexBuilder::new(root, recent, HashMap::new(), filter);
+        let builder = IndexBuilder::new(
+            root,
+            recent,
+            HashMap::new(),
+            OwnerResolver::default(),
+            filter,
+        );
         let snapshot = builder.build().unwrap().snapshot;
         let cache = QueryCache::new(root.join("cache"));
 
@@ -1533,6 +1641,7 @@ mod tests {
             dependencies: Vec::new(),
             attention: 0,
             churn: 0,
+            owners: Vec::new(),
         }
     }
 
@@ -1554,7 +1663,13 @@ mod tests {
         let file_path = root.join("src/value.rs");
         std::fs::write(&file_path, "const NEEDLE: &str = \"token\";").unwrap();
         let filter = Arc::new(PathFilter::new(root).unwrap());
-        let builder = IndexBuilder::new(root, HashSet::new(), HashMap::new(), filter);
+        let builder = IndexBuilder::new(
+            root,
+            HashSet::new(),
+            HashMap::new(),
+            OwnerResolver::default(),
+            filter,
+        );
         let snapshot = builder.build().unwrap().snapshot;
         std::fs::remove_file(&file_path).unwrap();
 
@@ -1587,7 +1702,13 @@ mod tests {
         )
         .unwrap();
         let filter = Arc::new(PathFilter::new(root).unwrap());
-        let builder = IndexBuilder::new(root, HashSet::new(), HashMap::new(), filter);
+        let builder = IndexBuilder::new(
+            root,
+            HashSet::new(),
+            HashMap::new(),
+            OwnerResolver::default(),
+            filter,
+        );
         let snapshot = builder.build().unwrap().snapshot;
 
         let literal = literal_search(&snapshot, root, "needle", 5, None, false);

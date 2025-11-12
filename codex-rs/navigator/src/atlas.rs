@@ -505,6 +505,7 @@ members = ["core", "tui"]
                 line_count: 20,
                 attention: 0,
                 churn: 0,
+                owners: Vec::new(),
                 fingerprint: FileFingerprint {
                     mtime: None,
                     size: 10,
@@ -525,6 +526,7 @@ members = ["core", "tui"]
                 line_count: 12,
                 attention: 0,
                 churn: 0,
+                owners: Vec::new(),
                 fingerprint: FileFingerprint {
                     mtime: None,
                     size: 10,
@@ -551,6 +553,7 @@ members = ["core", "tui"]
             references: None,
             help: None,
             context_snippet: None,
+            owners: Vec::new(),
         }
     }
 }
