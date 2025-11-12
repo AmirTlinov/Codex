@@ -155,11 +155,13 @@ impl WorkspaceRegistry {
             let coordinator = handle.coordinator();
             let status = coordinator.current_status().await;
             let diagnostics = coordinator.diagnostics().await;
+            let health = coordinator.health_panel().await;
             let project_root = coordinator.project_root().to_string_lossy().into_owned();
             workspaces.push(DoctorWorkspace {
                 project_root,
                 index: status,
                 diagnostics,
+                health: Some(health),
             });
         }
         let actions = workspaces

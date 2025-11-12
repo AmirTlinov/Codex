@@ -45,10 +45,13 @@ agents.
    UIs can display relevant anchors without re-sorting large arrays.
 6. The daemon automatically respawns after crashes or metadata corruption and wipes any
    broken cache on disk. No manual `rm -rf ~/.codex/navigator` steps should be taken.
-7. `codex navigator doctor [--project-root <repo>]` returns a JSON report describing the
-   daemon (PID, port, protocol version), live workspaces, coverage gaps, and queued
-   self-heal actions. The function tool handler invokes Doctor after every RPC failure and
-   surfaces the summary to the model.
+7. `codex navigator doctor [--project-root <repo>]` теперь печатает компактную health-panel:
+   для каждого workspace показываем состояние индекса, риск (green/yellow/red), список
+   проблем с подсказками remediation, долю literal fallback, медианные времена текстовых
+   сканов и последние прогонки ingest (kind, длительность, сколько файлов/скипов). При
+   необходимости можно добавить `--json`, чтобы получить оригинальный отчёт / подобрать
+   конкретные пути из coverage. Функциональный хендлер по‑прежнему вызывает Doctor после
+   каждой RPC-ошибки и пересказывает резюме модели.
 
 ## Operational Notes
 
@@ -123,6 +126,11 @@ agents.
   bullet-пунктами — ключевые слова из этого файла (а также из названия ветки и `git diff` против
   origin/main) получают дополнительный вес в `heuristic_score`, а literal-hits из тех же путей
   всплывают выше. Файл опционален: если плана нет, ранжирование просто игнорирует этот сигнал.
+- Health‑телеметрия хранится в `~/.codex/navigator/<hash>/health.bin` и пополняется после каждой
+  индексации и поискового запроса: фиксируем длительность ingest, количество обработанных/пропущенных
+  файлов по причинам, долю literal fallback, объём просканированных файлов и медианный текстовый
+  скан. Эти данные попадают в streamed diagnostics и `navigator doctor`, поэтому риск/рекомендации
+  переживают перезапуски демона.
 - `stats.facets` теперь содержит новые бакеты `freshness` ("0-1d", "2-3d", "4-7d", "8-30d",
   "31-90d", "old") и `attention` ("calm", "low", "medium", "hot"). CLI выводит их в блоке
   `facets:` сразу после languages/categories, так что можно моментально понять, насколько свежи и

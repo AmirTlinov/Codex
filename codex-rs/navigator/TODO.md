@@ -57,8 +57,8 @@ This roadmap enumerates the concrete work required to turn Navigator into the pr
 
 - **Goal:** spot ingest lag, skipped files, or schema drift before users notice.
 - **Milestones:**
-  1. **Telemetry core:** collect ingest duration, skipped paths, literal fallback rates, error trends; persist summary snapshots.
-  2. **Health panel:** extend `doctor` endpoint with risk levels + auto-remediation tips; CLI displays warnings upfront.
+  1. ✅ **Telemetry core:** ingest + search метрики теперь сохраняются в `health.bin`, фиксируют длительность full/delta прогонов, причины skip, literal fallback rate, медианные текстовые сканы и объёмы чтения. Данные переживают рестарт демона и используются в diagnostics/Doctor.
+  2. ✅ **Health panel:** Doctor и streamed diagnostics показывают risk (green/yellow/red), список issues с remediation, резюме literal fallback и последние ingest прогонки; CLI печатает панель по умолчанию, `--json` возвращает сырой отчёт.
   3. **Guardrails:** add alerting hooks (log + optional webhook) when coverage drops or latency spikes.
   4. **Self-heal:** implement automatic rebuild/compaction when corruption or backlog detected, with progress reporting.
 - **Success criteria:** zero “why is navigator stale?” incidents; health panel always green or explains mitigation.

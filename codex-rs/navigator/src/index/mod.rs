@@ -5,6 +5,7 @@ mod codeowners;
 mod coverage;
 mod filter;
 mod git;
+mod health;
 mod language;
 pub(crate) mod model;
 mod personal;
@@ -28,6 +29,7 @@ use crate::index::filter::PathFilter;
 use crate::index::git::churn_scores;
 use crate::index::git::recency_days;
 use crate::index::git::recent_paths;
+use crate::index::health::HealthStore;
 use crate::index::model::FileEntry;
 use crate::index::model::IndexSnapshot;
 use crate::index::model::SymbolRecord;
@@ -39,8 +41,11 @@ use crate::proto::CoverageReason;
 use crate::proto::ErrorPayload;
 use crate::proto::FallbackHit;
 use crate::proto::FilterOp;
+use crate::proto::HealthPanel;
+use crate::proto::HealthSummary;
 use crate::proto::IndexState;
 use crate::proto::IndexStatus;
+use crate::proto::IngestKind;
 use crate::proto::OpenRequest;
 use crate::proto::OpenResponse;
 use crate::proto::QueryId;
@@ -73,6 +78,7 @@ use std::sync::atomic::Ordering;
 use std::sync::mpsc as std_mpsc;
 use std::sync::mpsc::RecvTimeoutError;
 use std::time::Duration;
+use std::time::Instant;
 use storage::SnapshotLoad;
 use storage::load_snapshot;
 use storage::save_snapshot;
@@ -101,6 +107,7 @@ struct Inner {
     filter: std::sync::Arc<PathFilter>,
     auto_indexing: Arc<AtomicBool>,
     coverage: Arc<CoverageTracker>,
+    health: Arc<HealthStore>,
     shutdown: CancellationToken,
 }
 
@@ -154,6 +161,7 @@ impl IndexCoordinator {
     pub async fn new(profile: ProjectProfile, auto_indexing: bool) -> Result<Self> {
         profile.ensure_dirs()?;
         let load_outcome = load_snapshot(&profile.index_path())?;
+        let health = Arc::new(HealthStore::new(&profile)?);
         let (loaded_snapshot, status) = match load_outcome {
             SnapshotLoad::Loaded(snapshot) => {
                 let snapshot = *snapshot;
@@ -211,6 +219,7 @@ impl IndexCoordinator {
             filter,
             auto_indexing: auto_indexing_flag,
             coverage: Arc::new(CoverageTracker::new(Some(COVERAGE_LIMIT))),
+            health,
             shutdown,
         });
         let coordinator = Self { inner };
@@ -303,6 +312,9 @@ impl IndexCoordinator {
                 stats.literal_pending_paths = Some(pending_paths);
             }
         }
+        if let Err(err) = self.inner.health.record_search(&stats).await {
+            warn!("navigator health search metrics failed: {err:?}");
+        }
         Ok(SearchResponse {
             query_id,
             hits: outcome.hits,
@@ -379,12 +391,24 @@ impl IndexCoordinator {
             .map(|gap| gap.path.clone())
             .take(8)
             .collect();
+        let health = self.inner.health.summary(&coverage).await;
         SearchDiagnostics {
             index_state: status.state.clone(),
             freshness_secs,
             coverage,
             pending_literals,
+            health: Some(health),
         }
+    }
+
+    pub async fn health_panel(&self) -> HealthPanel {
+        let coverage = self.inner.coverage.diagnostics().await;
+        self.inner.health.panel(&coverage).await
+    }
+
+    pub async fn health_summary(&self) -> HealthSummary {
+        let coverage = self.inner.coverage.diagnostics().await;
+        self.inner.health.summary(&coverage).await
     }
 
     pub async fn rebuild_index(&self) -> Result<IndexStatus> {
@@ -426,6 +450,7 @@ impl IndexCoordinator {
     }
 
     async fn rebuild_all(&self) -> Result<()> {
+        let ingest_start = Instant::now();
         let _guard = self.inner.build_lock.lock().await;
         self.update_status(IndexState::Building, None).await;
         let artifacts = match self.build_snapshot().await {
@@ -451,10 +476,18 @@ impl IndexCoordinator {
             (guard.symbols.len(), guard.files.len())
         };
         let skipped = skipped_to_gaps(artifacts.skipped);
-        self.inner.coverage.replace_skipped(skipped).await;
+        self.inner.coverage.replace_skipped(skipped.clone()).await;
         self.inner.coverage.clear_pending().await;
         self.update_status(IndexState::Ready, Some(counts)).await;
         self.set_notice(None).await;
+        if let Err(err) = self
+            .inner
+            .health
+            .record_ingest(IngestKind::Full, ingest_start.elapsed(), counts.1, &skipped)
+            .await
+        {
+            warn!("navigator health ingest metrics failed: {err:?}");
+        }
         Ok(())
     }
 
@@ -462,6 +495,9 @@ impl IndexCoordinator {
         if candidates.is_empty() {
             return Ok(());
         }
+        let ingest_start = Instant::now();
+        let mut indexed_files = 0usize;
+        let mut skipped_gaps: Vec<CoverageGap> = Vec::new();
         let mut dedup = HashSet::new();
         let mut pending = Vec::new();
         for path in candidates {
@@ -500,28 +536,38 @@ impl IndexCoordinator {
                 continue;
             }
             match builder.index_path(&rel) {
-                Ok(FileOutcome::Indexed(indexed)) => {
-                    apply_indexed_file(&mut snapshot, indexed);
+                Ok(FileOutcome::Indexed(indexed_file)) => {
+                    indexed_files += 1;
+                    apply_indexed_file(&mut snapshot, indexed_file);
                     self.inner.coverage.record_indexed(&rel).await;
                     changed = true;
                 }
                 Ok(FileOutcome::IndexedTextOnly {
-                    file: indexed,
+                    file: indexed_file,
                     reason,
                 }) => {
-                    apply_indexed_file(&mut snapshot, indexed);
+                    indexed_files += 1;
+                    apply_indexed_file(&mut snapshot, indexed_file);
                     self.inner
                         .coverage
-                        .record_skipped(rel.clone(), coverage_reason_from_skip(reason))
+                        .record_skipped(rel.clone(), coverage_reason_from_skip(reason.clone()))
                         .await;
+                    skipped_gaps.push(CoverageGap {
+                        path: rel.clone(),
+                        reason: coverage_reason_from_skip(reason),
+                    });
                     changed = true;
                 }
                 Ok(FileOutcome::Skipped(reason)) => {
                     drop_file(&mut snapshot, &rel);
                     self.inner
                         .coverage
-                        .record_skipped(rel.clone(), coverage_reason_from_skip(reason))
+                        .record_skipped(rel.clone(), coverage_reason_from_skip(reason.clone()))
                         .await;
+                    skipped_gaps.push(CoverageGap {
+                        path: rel.clone(),
+                        reason: coverage_reason_from_skip(reason),
+                    });
                 }
                 Err(err) => {
                     self.inner
@@ -543,6 +589,19 @@ impl IndexCoordinator {
         if changed {
             let counts = self.snapshot_counts().await;
             self.update_status(IndexState::Ready, Some(counts)).await;
+        }
+        if let Err(err) = self
+            .inner
+            .health
+            .record_ingest(
+                IngestKind::Delta,
+                ingest_start.elapsed(),
+                indexed_files,
+                &skipped_gaps,
+            )
+            .await
+        {
+            warn!("navigator health delta metrics failed: {err:?}");
         }
         Ok(())
     }

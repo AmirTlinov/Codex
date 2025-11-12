@@ -458,6 +458,8 @@ pub struct SearchDiagnostics {
     pub coverage: CoverageDiagnostics,
     #[serde(default)]
     pub pending_literals: Vec<String>,
+    #[serde(default)]
+    pub health: Option<HealthSummary>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Default)]
@@ -468,6 +470,94 @@ pub struct CoverageDiagnostics {
     pub skipped: Vec<CoverageGap>,
     #[serde(default)]
     pub errors: Vec<CoverageGap>,
+}
+
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum IngestKind {
+    Full,
+    Delta,
+}
+
+impl Default for IngestKind {
+    fn default() -> Self {
+        Self::Full
+    }
+}
+
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum HealthRisk {
+    Green,
+    Yellow,
+    Red,
+}
+
+impl Default for HealthRisk {
+    fn default() -> Self {
+        Self::Green
+    }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[skip_serializing_none]
+pub struct HealthIssue {
+    pub level: HealthRisk,
+    pub message: String,
+    #[serde(default)]
+    pub remediation: Option<String>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Default)]
+#[skip_serializing_none]
+pub struct LiteralStatsSummary {
+    pub total_queries: u64,
+    pub literal_fallbacks: u64,
+    #[serde(default)]
+    pub fallback_rate: Option<f32>,
+    #[serde(default)]
+    pub scanned_files: u64,
+    #[serde(default)]
+    pub scanned_bytes: u64,
+    #[serde(default)]
+    pub median_scan_micros: Option<u64>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+pub struct SkippedReasonSummary {
+    pub reason: CoverageReason,
+    pub count: usize,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+#[skip_serializing_none]
+pub struct IngestRunSummary {
+    pub kind: IngestKind,
+    pub completed_at: Option<OffsetDateTime>,
+    pub duration_ms: u64,
+    pub files_indexed: usize,
+    pub skipped_total: usize,
+    #[serde(default)]
+    pub skipped_reasons: Vec<SkippedReasonSummary>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Default)]
+#[skip_serializing_none]
+pub struct HealthPanel {
+    pub risk: HealthRisk,
+    #[serde(default)]
+    pub issues: Vec<HealthIssue>,
+    #[serde(default)]
+    pub ingest: Vec<IngestRunSummary>,
+    pub literal: LiteralStatsSummary,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Default)]
+#[skip_serializing_none]
+pub struct HealthSummary {
+    pub risk: HealthRisk,
+    #[serde(default)]
+    pub issues: Vec<HealthIssue>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, Hash)]
@@ -518,6 +608,8 @@ pub struct DoctorWorkspace {
     pub project_root: String,
     pub index: IndexStatus,
     pub diagnostics: SearchDiagnostics,
+    #[serde(default)]
+    pub health: Option<HealthPanel>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]

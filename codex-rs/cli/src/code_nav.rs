@@ -21,6 +21,12 @@ use codex_navigator::planner::NavigatorSearchArgs;
 use codex_navigator::proto::AtlasNode;
 use codex_navigator::proto::AtlasRequest;
 use codex_navigator::proto::CoverageReason;
+use codex_navigator::proto::DoctorReport;
+use codex_navigator::proto::DoctorWorkspace;
+use codex_navigator::proto::HealthPanel;
+use codex_navigator::proto::HealthRisk;
+use codex_navigator::proto::IngestKind;
+use codex_navigator::proto::IngestRunSummary;
 use codex_navigator::proto::NavHit;
 use codex_navigator::proto::SearchDiagnostics;
 use codex_navigator::proto::SearchProfile;
@@ -33,6 +39,7 @@ use std::collections::HashMap;
 use std::env;
 use std::path::Path;
 use std::path::PathBuf;
+use time::OffsetDateTime;
 use uuid::Uuid;
 
 #[derive(Debug, Parser)]
@@ -201,6 +208,10 @@ pub struct DoctorCommand {
 
     #[arg(long = "project-root")]
     pub project_root: Option<PathBuf>,
+
+    /// Print raw JSON instead of the summarized health panel.
+    #[arg(long = "json")]
+    pub json: bool,
 }
 
 #[derive(Debug, Parser)]
@@ -494,7 +505,188 @@ pub async fn run_daemon_cmd(cmd: DaemonCommand) -> Result<()> {
 pub async fn run_doctor(mut cmd: DoctorCommand) -> Result<()> {
     let client = build_client(cmd.project_root.take()).await?;
     let report = client.doctor().await?;
-    print_json(&report)
+    if cmd.json {
+        print_json(&report)
+    } else {
+        print_doctor_summary(&report);
+        Ok(())
+    }
+}
+
+fn print_doctor_summary(report: &DoctorReport) {
+    println!("navigator daemon pid {}", report.daemon_pid);
+    if report.workspaces.is_empty() {
+        println!("no indexed workspaces yet");
+    }
+    for workspace in &report.workspaces {
+        println!();
+        render_workspace(workspace);
+    }
+    if !report.actions.is_empty() {
+        println!();
+        println!("actions:");
+        for action in &report.actions {
+            println!("  - {action}");
+        }
+    }
+}
+
+fn render_workspace(ws: &DoctorWorkspace) {
+    println!("{}", ws.project_root);
+    println!("  index: {}", describe_index_status(&ws.index));
+    let coverage = &ws.diagnostics.coverage;
+    if !coverage.pending.is_empty() || !coverage.skipped.is_empty() || !coverage.errors.is_empty() {
+        println!(
+            "  coverage: pending {} • skipped {} • errors {}",
+            coverage.pending.len(),
+            coverage.skipped.len(),
+            coverage.errors.len()
+        );
+    }
+    if let Some(health) = &ws.health {
+        render_health_panel(health);
+    } else {
+        println!("  health: unavailable (upgrade navigator daemon)");
+    }
+}
+
+fn describe_index_status(status: &proto::IndexStatus) -> String {
+    let state = match status.state {
+        proto::IndexState::Ready => "ready",
+        proto::IndexState::Building => "building",
+        proto::IndexState::Failed => "failed",
+    };
+    let mut parts = vec![state.to_string(), format!("{} symbols", status.symbols)];
+    parts.push(format!("{} files", status.files));
+    if let Some(updated) = status.updated_at {
+        let age_secs = (OffsetDateTime::now_utc() - updated).whole_seconds().max(0) as u64;
+        parts.push(format!("updated {}", format_age(age_secs)));
+    }
+    if let Some(notice) = &status.notice {
+        if !notice.is_empty() {
+            parts.push(notice.clone());
+        }
+    }
+    parts.join(" • ")
+}
+
+fn render_health_panel(panel: &HealthPanel) {
+    println!("  health: {}", fmt_health_risk(panel.risk));
+    if !panel.issues.is_empty() {
+        println!("  issues:");
+        for issue in &panel.issues {
+            println!("    - [{}] {}", fmt_health_risk(issue.level), issue.message);
+            if let Some(remediation) = &issue.remediation {
+                println!("      hint: {remediation}");
+            }
+        }
+    }
+    if let Some(line) = literal_summary_line(panel) {
+        println!("  {line}");
+    }
+    if !panel.ingest.is_empty() {
+        println!("  last ingest runs:");
+        for run in panel.ingest.iter().rev().take(2) {
+            println!("    - {}", format_ingest_run(run));
+        }
+    }
+}
+
+fn literal_summary_line(panel: &HealthPanel) -> Option<String> {
+    let stats = &panel.literal;
+    if stats.total_queries == 0 {
+        return None;
+    }
+    let rate = stats
+        .fallback_rate
+        .map(|r| format!("{:.0}%", r * 100.0))
+        .unwrap_or_else(|| "n/a".to_string());
+    let mut segments = vec![format!(
+        "literal fallback {rate} ({}/{} queries)",
+        stats.literal_fallbacks, stats.total_queries
+    )];
+    if let Some(median) = stats.median_scan_micros {
+        if median >= 1_000 {
+            segments.push(format!("median scan {:.1}ms", median as f64 / 1_000.0));
+        } else {
+            segments.push(format!("median scan {median}µs"));
+        }
+    }
+    if stats.scanned_files > 0 {
+        segments.push(format!("scanned {} files", stats.scanned_files));
+    }
+    if stats.scanned_bytes > 0 {
+        segments.push(format!("{} scanned", human_bytes(stats.scanned_bytes)));
+    }
+    Some(segments.join(" • "))
+}
+
+fn format_ingest_run(run: &IngestRunSummary) -> String {
+    let mut segments = vec![
+        match run.kind {
+            IngestKind::Full => "full",
+            IngestKind::Delta => "delta",
+        }
+        .to_string(),
+    ];
+    segments.push(format_duration(run.duration_ms));
+    segments.push(format!("{} files", run.files_indexed));
+    if run.skipped_total > 0 {
+        if run.skipped_reasons.is_empty() {
+            segments.push(format!("{} skipped", run.skipped_total));
+        } else {
+            let detail = run
+                .skipped_reasons
+                .iter()
+                .map(|bucket| format!("{}×{}", bucket.count, bucket.reason))
+                .collect::<Vec<_>>()
+                .join(", ");
+            segments.push(format!("{} skipped ({detail})", run.skipped_total));
+        }
+    }
+    if let Some(completed) = run.completed_at {
+        let age = (OffsetDateTime::now_utc() - completed)
+            .whole_seconds()
+            .max(0) as u64;
+        segments.push(format!("{} ago", format_age(age)));
+    }
+    segments.join(" • ")
+}
+
+fn format_duration(ms: u64) -> String {
+    if ms < 1_000 {
+        format!("{ms}ms")
+    } else if ms < 60_000 {
+        format!("{:.1}s", ms as f64 / 1_000.0)
+    } else {
+        format!("{:.1}m", ms as f64 / 60_000.0)
+    }
+}
+
+fn fmt_health_risk(risk: HealthRisk) -> &'static str {
+    match risk {
+        HealthRisk::Green => "green",
+        HealthRisk::Yellow => "yellow",
+        HealthRisk::Red => "red",
+    }
+}
+
+fn human_bytes(bytes: u64) -> String {
+    const UNITS: [&str; 5] = ["B", "KB", "MB", "GB", "TB"];
+    if bytes == 0 {
+        return "0B".to_string();
+    }
+    let mut value = bytes as f64;
+    let mut unit = 0;
+    while value >= 1024.0 && unit < UNITS.len() - 1 {
+        value /= 1024.0;
+        unit += 1;
+    }
+    if unit == 0 {
+        format!("{bytes}{}", UNITS[unit])
+    } else {
+        format!("{value:.1}{}", UNITS[unit])
+    }
 }
 
 pub async fn run_atlas(mut cmd: AtlasCommand) -> Result<()> {

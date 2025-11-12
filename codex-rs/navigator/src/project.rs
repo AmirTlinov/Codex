@@ -13,6 +13,7 @@ const DATA_DIR_NAME: &str = "navigator";
 const METADATA_FILENAME: &str = "daemon.json";
 const LOCK_FILENAME: &str = "daemon.lock";
 const INDEX_FILENAME: &str = "index.bin";
+const HEALTH_FILENAME: &str = "health.bin";
 const QUERIES_DIR: &str = "queries";
 const LOGS_DIR: &str = "logs";
 const TMP_SUFFIX: &str = ".tmp";
@@ -63,6 +64,15 @@ impl ProjectProfile {
     pub fn temp_index_path(&self) -> PathBuf {
         self.data_dir()
             .join(format!("{INDEX_FILENAME}{TMP_SUFFIX}"))
+    }
+
+    pub fn health_path(&self) -> PathBuf {
+        self.data_dir().join(HEALTH_FILENAME)
+    }
+
+    pub fn temp_health_path(&self) -> PathBuf {
+        self.data_dir()
+            .join(format!("{HEALTH_FILENAME}{TMP_SUFFIX}"))
     }
 
     pub fn queries_dir(&self) -> PathBuf {
