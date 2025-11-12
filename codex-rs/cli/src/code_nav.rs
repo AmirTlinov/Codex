@@ -232,6 +232,10 @@ pub struct FacetCommand {
     #[arg(long = "history-index", default_value_t = 0)]
     pub history_index: usize,
 
+    /// Shortcut for history-index=1 (previous query) when --from is not set.
+    #[arg(long = "undo", default_value_t = false)]
+    pub undo: bool,
+
     /// Optional project root override.
     #[arg(long = "project-root")]
     pub project_root: Option<PathBuf>,
@@ -348,26 +352,30 @@ pub async fn run_facet(cmd: FacetCommand) -> Result<()> {
     let client = build_client(cmd.project_root.clone()).await?;
     let history = QueryHistoryStore::new(client.queries_dir());
     let used_explicit = cmd.from.is_some();
+    let mut history_index = cmd.history_index;
+    if cmd.undo && cmd.from.is_none() && history_index == 0 {
+        history_index = 1;
+    }
     let history_item = if let Some(id) = cmd.from {
         (id, None)
     } else {
         let item = history
-            .entry_at(cmd.history_index)
+            .entry_at(history_index)
             .context("load navigator history")?
             .ok_or_else(|| {
                 anyhow!(
                     "history index {} not available; run `codex navigator` first",
-                    cmd.history_index
+                    history_index
                 )
             })?;
         (item.query_id, item.filters)
     };
-    let (base_query, _prior_filters) = history_item;
-    let mut args = facet_command_to_search_args(&cmd, base_query);
+    let (base_query, prior_filters) = history_item;
+    let mut args = facet_command_to_search_args(&cmd, base_query, prior_filters.as_ref());
     if !used_explicit {
         args.hints.push(format!(
             "using history[{index}] query id {base_query}",
-            index = cmd.history_index
+            index = history_index
         ));
     }
     let request = plan_search_request(args)?;
@@ -391,12 +399,11 @@ pub async fn run_history(mut cmd: HistoryCommand) -> Result<()> {
         return Ok(());
     }
     println!("recent navigator query ids (index → query_id):");
+    let now = crate::nav_history::now_secs();
     for (idx, item) in rows.into_iter().enumerate() {
         let chips = format_history_filters(&item);
-        println!(
-            "  [{idx}] {} ({}s){}",
-            item.query_id, item.recorded_at, chips
-        );
+        let age = format_age(now.saturating_sub(item.recorded_at));
+        println!("  [{idx}] {} ({age}){}", item.query_id, chips);
     }
     Ok(())
 }
@@ -434,6 +441,18 @@ fn format_history_filters(item: &HistoryItem) -> String {
         String::new()
     } else {
         format!(" {}", chips.join(""))
+    }
+}
+
+fn format_age(seconds: u64) -> String {
+    if seconds < 60 {
+        format!("{}s ago", seconds)
+    } else if seconds < 3600 {
+        format!("{}m ago", seconds / 60)
+    } else if seconds < 86_400 {
+        format!("{}h ago", seconds / 3600)
+    } else {
+        format!("{}d ago", seconds / 86_400)
     }
 }
 
@@ -666,10 +685,42 @@ fn nav_command_to_search_args(cmd: &NavCommand) -> NavigatorSearchArgs {
     args
 }
 
-fn facet_command_to_search_args(cmd: &FacetCommand, base_query: Uuid) -> NavigatorSearchArgs {
+fn facet_command_to_search_args(
+    cmd: &FacetCommand,
+    base_query: Uuid,
+    base_filters: Option<&proto::ActiveFilters>,
+) -> NavigatorSearchArgs {
     let mut args = NavigatorSearchArgs::default();
     args.refine = Some(base_query.to_string());
     args.inherit_filters = true;
+    if let Some(filters) = base_filters {
+        if !filters.languages.is_empty() {
+            args.languages = filters
+                .languages
+                .iter()
+                .map(|lang| language_label(lang).to_string())
+                .collect();
+        }
+        if !filters.categories.is_empty() {
+            args.categories = filters
+                .categories
+                .iter()
+                .map(|cat| category_label(cat).to_string())
+                .collect();
+        }
+        if !filters.path_globs.is_empty() {
+            args.path_globs = filters.path_globs.clone();
+        }
+        if !filters.file_substrings.is_empty() {
+            args.file_substrings = filters.file_substrings.clone();
+        }
+        if !filters.owners.is_empty() {
+            args.owners = filters.owners.clone();
+        }
+        if filters.recent_only {
+            args.recent_only = Some(true);
+        }
+    }
     if cmd.clear {
         args.clear_filters = true;
         args.hints

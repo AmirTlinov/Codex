@@ -110,7 +110,7 @@ pub struct HistoryItem {
     pub filters: Option<ActiveFilters>,
 }
 
-fn now_secs() -> u64 {
+pub fn now_secs() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_secs())
