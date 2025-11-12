@@ -20,8 +20,10 @@ use codex_cli::code_nav::run_doctor;
 use codex_cli::code_nav::run_facet;
 use codex_cli::code_nav::run_history;
 use codex_cli::code_nav::run_nav;
+use codex_cli::code_nav::run_pin;
 use codex_cli::code_nav::run_open;
 use codex_cli::code_nav::run_profile;
+use codex_cli::code_nav::run_repeat;
 use codex_cli::code_nav::run_snippet;
 use codex_cli::login::read_api_key_from_stdin;
 use codex_cli::login::run_login_status;
@@ -449,6 +451,20 @@ async fn cli_main(codex_linux_sandbox_exe: Option<PathBuf>) -> anyhow::Result<()
                         navigator_cli.config_overrides.clone(),
                     );
                     run_history(history_cli).await?;
+                }
+                NavigatorSubcommand::Repeat(mut repeat_cli) => {
+                    prepend_config_flags(
+                        &mut repeat_cli.config_overrides,
+                        navigator_cli.config_overrides.clone(),
+                    );
+                    run_repeat(repeat_cli).await?;
+                }
+                NavigatorSubcommand::Pin(mut pin_cli) => {
+                    prepend_config_flags(
+                        &mut pin_cli.config_overrides,
+                        navigator_cli.config_overrides.clone(),
+                    );
+                    run_pin(pin_cli).await?;
                 }
                 NavigatorSubcommand::Profile(mut profile_cli) => {
                     prepend_config_flags(

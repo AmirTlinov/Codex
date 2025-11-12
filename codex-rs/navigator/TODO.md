@@ -79,7 +79,7 @@ This roadmap enumerates the concrete work required to turn Navigator into the pr
 - **Milestones:**
   1. **Command palette flows:** prebuilt macros like “audit toolchain”, “trace feature flag” that chain multiple searches.
   2. ✅ **Context banners:** каждый ответ печатает блок `context:` (слои core/tui/... + категории docs/tests/deps) и показывает счётчики; CLI подсвечивает их рядом со stats.
-  3. **Session memory:** persist recent queries, open hits, accepted facets; allow `repeat last` and `pin query`.
+  3. ✅ **Session memory:** history теперь хранит параметры поиска + превью хитов, `codex navigator repeat` повторяет любой запрос (включая закреплённые), а `codex navigator pin` позволяет закреплять/снимать и перечислять избранные цепочки.
   4. **Focus mode:** collapse noisy metadata, emphasize the most relevant info depending on query intent (code vs docs vs config).
 - **Success criteria:** average navigation flow shrinks to ≤2 commands; subjective “cognitive load” score drops in dogfooding surveys.
 

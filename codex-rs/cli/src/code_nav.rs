@@ -1,4 +1,6 @@
+use crate::nav_history::HistoryHit;
 use crate::nav_history::HistoryItem;
+use crate::nav_history::HistoryReplay;
 use crate::nav_history::QueryHistoryStore;
 use anyhow::Context;
 use anyhow::Result;
@@ -41,6 +43,8 @@ use codex_navigator::proto::SearchStreamEvent;
 use codex_navigator::proto::{self};
 use codex_navigator::resolve_daemon_launcher;
 use codex_navigator::run_daemon;
+use serde::Deserialize;
+use serde::Serialize;
 use std::collections::HashMap;
 use std::env;
 use std::path::Path;
@@ -156,7 +160,45 @@ pub struct HistoryCommand {
     pub limit: u32,
 }
 
-#[derive(Copy, Clone, Debug, Default, ValueEnum)]
+#[derive(Debug, Parser)]
+pub struct RepeatCommand {
+    #[clap(skip)]
+    pub config_overrides: CliConfigOverrides,
+
+    #[arg(long = "project-root")]
+    pub project_root: Option<PathBuf>,
+
+    /// Replay a pinned entry instead of chronological history.
+    #[arg(long = "pinned")]
+    pub pinned: bool,
+
+    /// Index inside the selected history list (0 = most recent).
+    #[arg(long = "index", default_value_t = 0)]
+    pub index: usize,
+}
+
+#[derive(Debug, Parser)]
+pub struct PinCommand {
+    #[clap(skip)]
+    pub config_overrides: CliConfigOverrides,
+
+    #[arg(long = "project-root")]
+    pub project_root: Option<PathBuf>,
+
+    /// Pin the given recent entry index.
+    #[arg(long = "index")]
+    pub index: Option<usize>,
+
+    /// Remove the pinned entry at the provided index.
+    #[arg(long = "unpin")]
+    pub unpin: Option<usize>,
+
+    /// List pinned entries.
+    #[arg(long = "list")]
+    pub list: bool,
+}
+
+#[derive(Copy, Clone, Debug, Default, ValueEnum, Serialize, Deserialize, PartialEq, Eq)]
 pub enum OutputFormat {
     #[default]
     Json,
@@ -164,7 +206,7 @@ pub enum OutputFormat {
     Text,
 }
 
-#[derive(Copy, Clone, Debug, ValueEnum, PartialEq, Eq)]
+#[derive(Copy, Clone, Debug, ValueEnum, Serialize, Deserialize, PartialEq, Eq)]
 pub enum RefsMode {
     All,
     Definitions,
@@ -361,12 +403,21 @@ pub enum NavigatorSubcommand {
     Atlas(AtlasCommand),
     Facet(FacetCommand),
     History(HistoryCommand),
+    Repeat(RepeatCommand),
+    Pin(PinCommand),
     Profile(ProfileCommand),
 }
 
 pub async fn run_nav(cmd: NavCommand) -> Result<()> {
     let client = build_client(cmd.project_root.clone()).await?;
     let args = nav_command_to_search_args(&cmd);
+    let recording = HistoryReplay::new(
+        args.clone(),
+        cmd.output_format,
+        cmd.refs_mode,
+        cmd.with_refs || cmd.refs_mode != RefsMode::All,
+        cmd.diagnostics_only,
+    );
     let request = plan_search_request(args)?;
     if std::env::var("NAVIGATOR_DEBUG_REQUEST").is_ok() {
         eprintln!("navigator.nav request: {request:#?}");
@@ -378,6 +429,7 @@ pub async fn run_nav(cmd: NavCommand) -> Result<()> {
         cmd.refs_mode,
         cmd.with_refs || cmd.refs_mode != RefsMode::All,
         cmd.diagnostics_only,
+        Some(recording),
     )
     .await
 }
@@ -408,6 +460,13 @@ pub async fn run_facet(cmd: FacetCommand) -> Result<()> {
             "using history[{history_index}] query id {base_query}"
         ));
     }
+    let recording = HistoryReplay::new(
+        args.clone(),
+        cmd.output_format,
+        cmd.refs_mode,
+        cmd.with_refs || cmd.refs_mode != RefsMode::All,
+        cmd.diagnostics_only,
+    );
     let request = plan_search_request(args)?;
     execute_search(
         client,
@@ -416,6 +475,7 @@ pub async fn run_facet(cmd: FacetCommand) -> Result<()> {
         cmd.refs_mode,
         cmd.with_refs || cmd.refs_mode != RefsMode::All,
         cmd.diagnostics_only,
+        Some(recording),
     )
     .await
 }
@@ -428,12 +488,90 @@ pub async fn run_history(mut cmd: HistoryCommand) -> Result<()> {
         println!("no navigator history recorded yet");
         return Ok(());
     }
-    println!("recent navigator query ids (index → query_id):");
+    println!("recent navigator queries (index → query_id):");
+    if rows.iter().any(|item| item.is_pinned) {
+        println!("(*) indicates pinned entries");
+    }
     let now = crate::nav_history::now_secs();
     for (idx, item) in rows.into_iter().enumerate() {
-        let chips = format_history_filters(&item);
-        let age = format_age(now.saturating_sub(item.recorded_at));
-        println!("  [{idx}] {} ({age}){}", item.query_id, chips);
+        print_history_entry(idx, &item, now, true);
+    }
+    Ok(())
+}
+
+pub async fn run_repeat(mut cmd: RepeatCommand) -> Result<()> {
+    let client = build_client(cmd.project_root.take()).await?;
+    let history = QueryHistoryStore::new(client.queries_dir());
+    let replay = if cmd.pinned {
+        history
+            .replay_pinned(cmd.index)
+            .context("load pinned navigator entry")?
+    } else {
+        history
+            .replay_recent(cmd.index)
+            .context("load navigator history entry")?
+    }
+    .ok_or_else(|| {
+        if cmd.pinned {
+            anyhow!("pinned index {} not available", cmd.index)
+        } else {
+            anyhow!(
+                "history index {} not available; run `codex navigator` first",
+                cmd.index
+            )
+        }
+    })?;
+    let request = plan_search_request(replay.args.clone())?;
+    execute_search(
+        client,
+        request,
+        replay.output_format,
+        replay.refs_mode,
+        replay.show_refs,
+        replay.diagnostics_only,
+        Some(replay),
+    )
+    .await
+}
+
+pub async fn run_pin(mut cmd: PinCommand) -> Result<()> {
+    let client = build_client(cmd.project_root.take()).await?;
+    let history = QueryHistoryStore::new(client.queries_dir());
+    if cmd.list {
+        let rows = history.pinned()?;
+        if rows.is_empty() {
+            println!("no pinned navigator queries yet");
+            return Ok(());
+        }
+        println!("pinned navigator queries:");
+        let now = crate::nav_history::now_secs();
+        for (idx, item) in rows.into_iter().enumerate() {
+            print_history_entry(idx, &item, now, false);
+        }
+        return Ok(());
+    }
+    if let Some(unpin_index) = cmd.unpin {
+        match history
+            .unpin(unpin_index)
+            .context("update pinned navigator entries")?
+        {
+            Some(item) => println!(
+                "unpinned pinned[{unpin_index}] (query_id={})",
+                item.query_id
+            ),
+            None => println!("pinned index {unpin_index} not found"),
+        }
+        return Ok(());
+    }
+    let Some(index) = cmd.index else {
+        return Err(anyhow!(
+            "provide --index to pin, --unpin <i> to remove, or --list to view pinned entries"
+        ));
+    };
+    let item = history.pin_recent(index).context("pin navigator entry")?;
+    println!("pinned history[{index}] → {}", item.query_id);
+    if let Some(summary) = summarize_history_query(&item) {
+        println!("  query: {summary}");
     }
     Ok(())
 }
@@ -484,6 +622,51 @@ fn format_age(seconds: u64) -> String {
     } else {
         format!("{}d ago", seconds / 86_400)
     }
+}
+
+fn print_history_entry(idx: usize, item: &HistoryItem, now: u64, show_pin_marker: bool) {
+    let chips = format_history_filters(item);
+    let age = format_age(now.saturating_sub(item.recorded_at));
+    let marker = if show_pin_marker && item.is_pinned {
+        "*"
+    } else {
+        " "
+    };
+    println!("  [{idx}] {marker}{} ({age}){}", item.query_id, chips);
+    if let Some(summary) = summarize_history_query(item) {
+        println!("       query: {summary}");
+    }
+    for hit in item.hits.iter().take(3) {
+        println!("       ↳ {}:{} {}", hit.path, hit.line, hit.preview);
+    }
+}
+
+fn summarize_history_query(item: &HistoryItem) -> Option<String> {
+    let replay = item.replay.as_ref()?;
+    let text = replay.args.query.clone()?;
+    let trimmed = text.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    const LIMIT: usize = 80;
+    let mut owned = trimmed.to_string();
+    if owned.len() > LIMIT {
+        owned.truncate(LIMIT - 1);
+        owned.push('…');
+    }
+    Some(owned)
+}
+
+fn capture_history_hits(hits: &[NavHit]) -> Vec<HistoryHit> {
+    hits.iter()
+        .take(4)
+        .map(|hit| HistoryHit {
+            path: hit.path.clone(),
+            line: hit.line,
+            layer: hit.layer.clone(),
+            preview: hit.preview.clone(),
+        })
+        .collect()
 }
 
 pub async fn run_open(cmd: OpenCommand) -> Result<()> {
@@ -833,6 +1016,7 @@ async fn execute_search(
     refs_mode: RefsMode,
     show_refs: bool,
     diagnostics_only: bool,
+    recording: Option<HistoryReplay>,
 ) -> Result<()> {
     if matches!(output_format, OutputFormat::Ndjson) {
         client
@@ -872,8 +1056,17 @@ async fn execute_search(
         })
         .await?;
     let history = QueryHistoryStore::new(client.queries_dir());
+    let hits_for_history = if !outcome.response.hits.is_empty() {
+        capture_history_hits(&outcome.response.hits)
+    } else if !outcome.top_hits.is_empty() {
+        capture_history_hits(&outcome.top_hits)
+    } else if !last_top_hits.is_empty() {
+        capture_history_hits(&last_top_hits)
+    } else {
+        Vec::new()
+    };
     history
-        .record_response(&outcome.response)
+        .record_entry(&outcome.response, recording.as_ref(), hits_for_history)
         .context("record navigator history")?;
 
     match output_format {
