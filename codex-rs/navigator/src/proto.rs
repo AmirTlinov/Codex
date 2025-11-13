@@ -282,6 +282,8 @@ pub struct NavHit {
     #[serde(default)]
     pub context_snippet: Option<TextSnippet>,
     #[serde(default)]
+    pub score_reasons: Vec<String>,
+    #[serde(default)]
     pub owners: Vec<String>,
     #[serde(default)]
     pub lint_suppressions: u32,

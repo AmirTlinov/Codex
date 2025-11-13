@@ -465,6 +465,10 @@ pub struct FacetCommand {
     #[arg(long = "clear")]
     pub clear: bool,
 
+    /// Remove filter chip by its index from the last navigator response.
+    #[arg(long = "remove-chip", value_name = "INDEX", action = ArgAction::Append)]
+    pub remove_chips: Vec<usize>,
+
     /// Include references in the output.
     #[arg(long = "with-refs")]
     pub with_refs: bool,
@@ -560,7 +564,7 @@ pub async fn run_facet(cmd: FacetCommand) -> Result<()> {
         (item.query_id, item.filters)
     };
     let (base_query, prior_filters) = history_item;
-    let mut args = facet_command_to_search_args(&cmd, base_query, prior_filters.as_ref());
+    let mut args = facet_command_to_search_args(&cmd, base_query, prior_filters.as_ref())?;
     if !used_explicit {
         args.hints.push(format!(
             "using history[{history_index}] query id {base_query}"
@@ -1441,7 +1445,7 @@ fn facet_command_to_search_args(
     cmd: &FacetCommand,
     base_query: Uuid,
     base_filters: Option<&proto::ActiveFilters>,
-) -> NavigatorSearchArgs {
+) -> Result<NavigatorSearchArgs> {
     let mut args = NavigatorSearchArgs::default();
     args.refine = Some(base_query.to_string());
     args.inherit_filters = true;
@@ -1472,6 +1476,30 @@ fn facet_command_to_search_args(
         if filters.recent_only {
             args.recent_only = Some(true);
         }
+
+        if !cmd.remove_chips.is_empty() {
+            let chips = active_filter_chips(filters);
+            if chips.is_empty() {
+                return Err(anyhow!(
+                    "--remove-chip specified but the previous query has no active filters"
+                ));
+            }
+            for index in &cmd.remove_chips {
+                let Some(chip) = chips.get(*index) else {
+                    return Err(anyhow!(
+                        "filter chip index {index} exceeds available chips ({} total)",
+                        chips.len()
+                    ));
+                };
+                apply_chip_removal(&mut args, chip);
+                args.hints
+                    .push(format!("removed chip[{index}] {}", chip.label));
+            }
+        }
+    } else if !cmd.remove_chips.is_empty() {
+        return Err(anyhow!(
+            "--remove-chip requires a previous navigator query; run `codex navigator` first"
+        ));
     }
     if cmd.clear {
         args.clear_filters = true;
@@ -1523,7 +1551,7 @@ fn facet_command_to_search_args(
         RefsMode::Definitions => Some("definitions".to_string()),
         RefsMode::Usages => Some("usages".to_string()),
     };
-    args
+    Ok(args)
 }
 
 async fn build_client(project_root: Option<PathBuf>) -> Result<NavigatorClient> {
@@ -1656,6 +1684,9 @@ fn print_top_hits(hits: &[NavHit], refs_mode: RefsMode, show_refs: bool, focus_m
             for rendered in format_snippet_lines(snippet) {
                 eprintln!("        {rendered}");
             }
+        }
+        if !hit.score_reasons.is_empty() {
+            eprintln!("        reasons: {}", hit.score_reasons.join(" · "));
         }
         if show_refs && let Some(refs_bucket) = &hit.references {
             render_references(refs_bucket, refs_mode);
@@ -1916,50 +1947,95 @@ fn format_facet_line(buckets: &[proto::FacetBucket]) -> String {
     }
 }
 
+#[derive(Clone)]
+struct ActiveFilterChip {
+    label: String,
+    removal: FilterRemoval,
+}
+
+#[derive(Clone)]
+enum FilterRemoval {
+    Language(String),
+    Category(String),
+    PathGlob(String),
+    FileSubstring(String),
+    Owner(String),
+    RecentOnly,
+}
+
 fn format_active_filters_lines(filters: &proto::ActiveFilters) -> Vec<String> {
-    let mut tokens = Vec::new();
-    if !filters.languages.is_empty() {
-        let values = filters
-            .languages
-            .iter()
-            .map(language_label)
-            .collect::<Vec<_>>()
-            .join("|");
-        tokens.push(format!("lang={values}"));
-    }
-    if !filters.categories.is_empty() {
-        let values = filters
-            .categories
-            .iter()
-            .map(category_label)
-            .collect::<Vec<_>>()
-            .join("|");
-        tokens.push(format!("cat={values}"));
-    }
-    if !filters.path_globs.is_empty() {
-        tokens.push(format!("path={}", filters.path_globs.join("|")));
-    }
-    if !filters.file_substrings.is_empty() {
-        tokens.push(format!("file={}", filters.file_substrings.join("|")));
-    }
-    if !filters.owners.is_empty() {
-        tokens.push(format!("owner={}", filters.owners.join("|")));
-    }
-    if filters.recent_only {
-        tokens.push("recent".to_string());
-    }
-    if tokens.is_empty() {
+    let chips = active_filter_chips(filters);
+    if chips.is_empty() {
         Vec::new()
     } else {
-        let chips = tokens
+        let tokens = chips
             .iter()
-            .map(|token| format!("[{token}]"))
+            .map(|chip| chip.label.clone())
+            .collect::<Vec<_>>();
+        let chip_line = chips
+            .iter()
+            .enumerate()
+            .map(|(idx, chip)| format!("[{idx}:{}]", chip.label))
             .collect::<Vec<_>>()
             .join(" ");
         vec![
             format!("active filters: {}", tokens.join(", ")),
-            format!("  {chips}"),
+            format!("  {chip_line} (use --remove-chip <index> to drop)"),
         ]
+    }
+}
+
+fn active_filter_chips(filters: &proto::ActiveFilters) -> Vec<ActiveFilterChip> {
+    let mut chips = Vec::new();
+    for language in &filters.languages {
+        let label = format!("lang={}", language_label(language));
+        chips.push(ActiveFilterChip {
+            label,
+            removal: FilterRemoval::Language(language_label(language).to_string()),
+        });
+    }
+    for category in &filters.categories {
+        let label = format!("cat={}", category_label(category));
+        chips.push(ActiveFilterChip {
+            label,
+            removal: FilterRemoval::Category(category_label(category).to_string()),
+        });
+    }
+    for glob in &filters.path_globs {
+        chips.push(ActiveFilterChip {
+            label: format!("path={glob}"),
+            removal: FilterRemoval::PathGlob(glob.clone()),
+        });
+    }
+    for value in &filters.file_substrings {
+        chips.push(ActiveFilterChip {
+            label: format!("file={value}"),
+            removal: FilterRemoval::FileSubstring(value.clone()),
+        });
+    }
+    for owner in &filters.owners {
+        chips.push(ActiveFilterChip {
+            label: format!("owner={owner}"),
+            removal: FilterRemoval::Owner(owner.clone()),
+        });
+    }
+    if filters.recent_only {
+        chips.push(ActiveFilterChip {
+            label: "recent".to_string(),
+            removal: FilterRemoval::RecentOnly,
+        });
+    }
+    chips
+}
+
+fn apply_chip_removal(args: &mut NavigatorSearchArgs, chip: &ActiveFilterChip) {
+    match &chip.removal {
+        FilterRemoval::Language(lang) => args.remove_languages.push(lang.clone()),
+        FilterRemoval::Category(cat) => args.remove_categories.push(cat.clone()),
+        FilterRemoval::PathGlob(glob) => args.remove_path_globs.push(glob.clone()),
+        FilterRemoval::FileSubstring(value) => args.remove_file_substrings.push(value.clone()),
+        FilterRemoval::Owner(owner) => args.remove_owners.push(owner.clone()),
+        FilterRemoval::RecentOnly => args.disable_recent_only = true,
     }
 }
 
@@ -2036,6 +2112,9 @@ fn print_text_hits(hits: &[NavHit], refs_mode: RefsMode, show_refs: bool, focus_
             }
         } else {
             println!("        {}", hit.preview.trim());
+        }
+        if !hit.score_reasons.is_empty() {
+            println!("        reasons: {}", hit.score_reasons.join(" · "));
         }
         if show_refs && let Some(refs) = &hit.references {
             render_text_references(refs, refs_mode);
@@ -2821,6 +2900,30 @@ mod tests {
         assert_eq!(mode, FocusMode::Docs);
     }
 
+    #[test]
+    fn format_active_filters_numbers_chips() {
+        let filters = proto::ActiveFilters {
+            languages: vec![proto::Language::Rust],
+            owners: vec!["alice".to_string()],
+            ..Default::default()
+        };
+        let lines = format_active_filters_lines(&filters);
+        assert_eq!(lines.len(), 2);
+        assert!(lines[1].contains("[0:lang=rust]"));
+        assert!(lines[1].contains("[1:owner=alice]"));
+    }
+
+    #[test]
+    fn apply_chip_removal_updates_args() {
+        let mut args = NavigatorSearchArgs::default();
+        let chip = ActiveFilterChip {
+            label: "owner=alice".to_string(),
+            removal: FilterRemoval::Owner("alice".to_string()),
+        };
+        apply_chip_removal(&mut args, &chip);
+        assert_eq!(args.remove_owners, vec!["alice".to_string()]);
+    }
+
     fn sample_hit(path: &str, categories: Vec<FileCategory>) -> NavHit {
         NavHit {
             id: path.to_string(),
@@ -2838,6 +2941,7 @@ mod tests {
             references: None,
             help: None,
             context_snippet: None,
+            score_reasons: Vec::new(),
             owners: Vec::new(),
             lint_suppressions: 0,
             freshness_days: 0,

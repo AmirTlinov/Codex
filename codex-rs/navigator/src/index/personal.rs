@@ -47,6 +47,12 @@ pub struct PersonalSignals {
     focus_paths: HashSet<String>,
 }
 
+#[derive(Clone, Debug, Default)]
+pub struct PersonalMatch {
+    pub bonus: f32,
+    pub reasons: Vec<String>,
+}
+
 impl PersonalSignals {
     pub fn load(project_root: &Path) -> Self {
         let branch_tokens = detect_branch_tokens(project_root);
@@ -59,56 +65,62 @@ impl PersonalSignals {
         }
     }
 
-    pub fn symbol_bonus(&self, symbol: &SymbolRecord) -> f32 {
+    pub fn symbol_match(&self, symbol: &SymbolRecord) -> PersonalMatch {
         if self.branch_tokens.is_empty()
             && self.plan_tokens.is_empty()
             && self.focus_paths.is_empty()
         {
-            return 0.0;
+            return PersonalMatch::default();
         }
         let path_lower = symbol.path.to_ascii_lowercase();
         let identifier_lower = symbol.identifier.to_ascii_lowercase();
         let preview_lower = symbol.preview.to_ascii_lowercase();
-        let mut bonus = 0.0;
+        let mut match_info = PersonalMatch::default();
         if !self.plan_tokens.is_empty()
             && (contains_any(&path_lower, &self.plan_tokens)
                 || contains_any(&identifier_lower, &self.plan_tokens)
                 || contains_any(&preview_lower, &self.plan_tokens))
         {
-            bonus += PLAN_TOKEN_BONUS;
+            match_info.bonus += PLAN_TOKEN_BONUS;
+            match_info.reasons.push("plan token match".to_string());
         }
         if !self.branch_tokens.is_empty() && contains_any(&path_lower, &self.branch_tokens) {
-            bonus += BRANCH_TOKEN_BONUS;
+            match_info.bonus += BRANCH_TOKEN_BONUS;
+            match_info.reasons.push("branch keyword".to_string());
         }
         if self
             .focus_paths
             .iter()
             .any(|focus| path_lower == *focus || path_lower.starts_with(&(focus.clone() + "/")))
         {
-            bonus += BRANCH_PATH_BONUS;
+            match_info.bonus += BRANCH_PATH_BONUS;
+            match_info.reasons.push("branch focus path".to_string());
         }
-        bonus
+        match_info
     }
 
-    pub fn literal_bonus(&self, path: &str) -> f32 {
+    pub fn literal_match(&self, path: &str) -> PersonalMatch {
         if self.branch_tokens.is_empty()
             && self.plan_tokens.is_empty()
             && self.focus_paths.is_empty()
         {
-            return 0.0;
+            return PersonalMatch::default();
         }
         let path_lower = path.to_ascii_lowercase();
-        let mut bonus = 0.0;
+        let mut match_info = PersonalMatch::default();
         if !self.plan_tokens.is_empty() && contains_any(&path_lower, &self.plan_tokens) {
-            bonus += PLAN_TOKEN_BONUS / 2.0;
+            match_info.bonus += PLAN_TOKEN_BONUS / 2.0;
+            match_info.reasons.push("plan token match".to_string());
         }
         if !self.branch_tokens.is_empty() && contains_any(&path_lower, &self.branch_tokens) {
-            bonus += BRANCH_TOKEN_BONUS;
+            match_info.bonus += BRANCH_TOKEN_BONUS;
+            match_info.reasons.push("branch keyword".to_string());
         }
         if self.focus_paths.contains(&path_lower) {
-            bonus += BRANCH_PATH_BONUS;
+            match_info.bonus += BRANCH_PATH_BONUS;
+            match_info.reasons.push("branch focus path".to_string());
         }
-        bonus
+        match_info
     }
 }
 

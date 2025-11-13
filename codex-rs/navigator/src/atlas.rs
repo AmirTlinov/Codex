@@ -615,6 +615,7 @@ members = ["core", "tui"]
             references: None,
             help: None,
             context_snippet: None,
+            score_reasons: Vec::new(),
             owners: Vec::new(),
             lint_suppressions: 0,
             freshness_days: crate::index::model::DEFAULT_FRESHNESS_DAYS,

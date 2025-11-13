@@ -417,6 +417,7 @@ mod tests {
             references: None,
             help: None,
             context_snippet: None,
+            score_reasons: Vec::new(),
             owners: Vec::new(),
             lint_suppressions: 0,
             freshness_days: 0,

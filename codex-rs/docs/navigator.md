@@ -45,51 +45,57 @@ agents.
    `memmem`-скан по блочному текстовому снапшоту: Navigator возвращает `match_count`
    и дифф-подсветки (спаны + diff-маркеры) прямо в `NavHit.context_snippet`, а CLI
    рисует мини-diff без отдельного `rg`.
-6. References are emitted as two buckets (`definitions`/`usages`) with short previews, so
+6. Каждый hit получает `score_reasons`: список сигналов ранжирования (свежесть, owner,
+   TODO-хлопки, плановые токены, штрафы lint). CLI показывает их отдельной строкой
+   `reasons: fresh · owner=...`, что заменяет ручной анализ `heuristic_score`.
+7. References are emitted as two buckets (`definitions`/`usages`) with short previews, so
    UIs can display relevant anchors without re-sorting large arrays.
-7. The daemon automatically respawns after crashes or metadata corruption and wipes any
+8. The daemon automatically respawns after crashes or metadata corruption and wipes any
    broken cache on disk. No manual `rm -rf ~/.codex/navigator` steps should be taken.
-8. `codex navigator doctor [--project-root <repo>]` теперь печатает компактную health-panel:
+9. `codex navigator doctor [--project-root <repo>]` теперь печатает компактную health-panel:
    для каждого workspace показываем состояние индекса, риск (green/yellow/red), список
    проблем с подсказками remediation, долю literal fallback, медианные времена текстовых
    сканов и последние прогонки ingest (kind, длительность, сколько файлов/скипов). При
    необходимости можно добавить `--json`, чтобы получить оригинальный отчёт / подобрать
    конкретные пути из coverage. Функциональный хендлер по‑прежнему вызывает Doctor после
    каждой RPC-ошибки и пересказывает резюме модели.
-9. `codex navigator profile [--limit N] [--json]` выводит последние поисковые запросы с
+10. `codex navigator profile [--limit N] [--json]` выводит последние поисковые запросы с
    временными метриками (candidate load, matcher, hit assembly, references, facets,
    literal scan/fallback). Это тот же payload, что отдаёт `/v1/nav/profile`, поэтому можно
    либо читать JSON, либо просматривать компактную таблицу прямо в CLI.
-10. Каждый ответ выводит "context" блок: слои (core/tui/infra…) и категории (docs/tests/deps)
+11. Каждый ответ выводит "context" блок: слои (core/tui/infra…) и категории (docs/tests/deps)
     с количеством совпадений. Это помогает мгновенно понять распределение результатов и выбрать
     следующий шаг (`codex navigator facet --path ...`, `--tests` и т.п.) без ручного подсчёта.
-11. История запросов превратилась в сессионную память: `codex navigator history` показывает
+12. История запросов превратилась в сессионную память: `codex navigator history` показывает
     query preview + топ‑хиты и помечает закреплённые запросы звёздочкой. Команда
     `codex navigator pin` позволяет закреплять (`--index`) и снимать (`--unpin`) записи
     либо вывести список (`--list`). `codex navigator repeat` переиспользует любой запрос из
     истории (`--index`) или из закреплённого списка (`--pinned`) и повторяет его с исходными
     профилями/опциями без ручного ввода.
-12. `--focus` управляет уровнем шума в текстовом выводе: `auto` (по умолчанию) подсвечивает
+13. `--focus` управляет уровнем шума в текстовом выводе: `auto` (по умолчанию) подсвечивает
     docs/tests/deps, когда они доминируют; режимы `code/docs/tests/deps/all` можно задавать
     явно. Отфильтрованные хиты не теряются — CLI показывает счётчик suppressed и напоминает
     про `--focus all`, а истории/pin сохраняют выбранный режим, так что повторные вызовы
     восстанавливают то же представление.
-13. Появились готовые навигационные сценарии `codex navigator flow <name>`: например,
+14. Появились готовые навигационные сценарии `codex navigator flow <name>`: например,
     `audit-toolchain` проходит по rust-toolchain манифестам и документации, а `trace-feature-flag`
     за один вызов ищет определения и использования флага (`--input flag_name`). Флоу можно
     прогнать в dry-run режиме (`--dry-run`), чтобы увидеть последовательность шагов, либо
     комбинировать с `--focus/--with-refs` для детальной диагностики.
-14. Для оценки ранжирования есть `codex navigator eval suite.json`: описываете кейсы в JSON
+15. Для оценки ранжирования есть `codex navigator eval suite.json`: описываете кейсы в JSON
     (`[ { "name": ..., "query": ..., "expect": [{"pattern": "path", "max_rank": 5}] } ]`),
     и команда прогоняет реальные поиски, проверяя, что целевые файлы попадают в нужный ранг.
     Опционально можно добавить `--snapshot-dir eval_out` чтобы сохранить фактические выдачи.
-15. Atlas summary теперь показывает churn score и топ владельцев по каждому узлу, так что
+16. Atlas summary теперь показывает churn score и топ владельцев по каждому узлу, так что
     `codex navigator atlas --summary core` сразу подсветит ответственность и горячие участки.
 
 ## Operational Notes
 
 - When integrating with the CLI/TUI, display the streamed diagnostics block verbatim; it is
   the single source of truth for freshness, coverage, and rebuild progress.
+- Active filter chips в CLI нумеруются и могут удаляться адресно:
+  `codex navigator facet --remove-chip 0` снимет `[0:lang=rust]`, не требуя помнить
+  соответствующий `--remove-lang`.
 - Planner автоматически выбирает `text` профиль для regex/path/многословных запросов и добавляет
   в hints причину автопереключения; короткие символические запросы остаются на символическом поиске.
 - `codex nav --format text` prints a compact summary (diagnostics, stats, top hits with ids)

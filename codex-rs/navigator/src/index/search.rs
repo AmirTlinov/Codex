@@ -4,6 +4,7 @@ use crate::index::model::FileEntry;
 use crate::index::model::FileText;
 use crate::index::model::IndexSnapshot;
 use crate::index::model::SymbolRecord;
+use crate::index::personal::PersonalMatch;
 use crate::index::personal::PersonalSignals;
 use crate::index::references;
 use crate::proto::FacetBucket;
@@ -164,18 +165,16 @@ pub fn run_search(
             working_request.limit.max(1),
             Some(&literal_filters),
             working_request.filters.recent_only,
+            &personal,
         );
         let literal_elapsed = literal_start.elapsed().as_micros().min(u64::MAX as u128) as u64;
         let LiteralSearchResult {
-            mut hits,
+            hits,
             candidates,
             missing_trigrams,
             scanned_files,
             scanned_bytes,
         } = literal;
-        for hit in &mut hits {
-            hit.score += personal.literal_bonus(&hit.path);
-        }
         literal_metrics = Some(LiteralMetrics {
             candidates,
             elapsed_micros: literal_elapsed,
@@ -261,20 +260,18 @@ fn run_text_search(
         request.limit.max(1),
         Some(&filter_set),
         request.filters.recent_only,
+        personal,
     );
     let took_ms = start.elapsed().as_millis().min(u64::MAX as u128) as u64;
     stages.record_from(SearchStage::LiteralScan, literal_start);
     let facets_start = Instant::now();
     let LiteralSearchResult {
-        mut hits,
+        hits,
         candidates,
         missing_trigrams,
         scanned_files,
         scanned_bytes,
     } = literal;
-    for hit in &mut hits {
-        hit.score += personal.literal_bonus(&hit.path);
-    }
     let mut hints = Vec::new();
     hints.push(format!("text search for \"{query}\""));
     let facets = summarize_facets(&hits);
@@ -414,6 +411,7 @@ fn run_search_once(
                 request,
                 refs_limit,
                 Some(&mut stages),
+                personal,
             ));
         }
     }
@@ -550,30 +548,7 @@ fn heuristic_score(
     owners: &[String],
     personal: &PersonalSignals,
 ) -> f32 {
-    let mut score = recency_bonus(symbol.freshness_days, symbol.recent);
-    score += attention_bonus(symbol.attention_density);
-    if let Some(q) = query {
-        if symbol.identifier.eq_ignore_ascii_case(q) {
-            score += 200.0;
-        } else if symbol.preview.to_lowercase().contains(&q.to_lowercase()) {
-            score += 5.0;
-        }
-    }
-    if !owners.is_empty()
-        && !symbol.owners.is_empty()
-        && symbol
-            .owners
-            .iter()
-            .any(|owner| owners.iter().any(|target| target == owner))
-    {
-        score += OWNER_MATCH_BONUS;
-    }
-    if symbol.churn > 0 {
-        let churn = symbol.churn.min(CHURN_MAX_BUCKET) as f32;
-        score += churn * CHURN_WEIGHT;
-    }
-    score += personal.symbol_bonus(symbol);
-    score - lint_penalty(symbol.lint_density, symbol.lint_suppressions)
+    compute_score_breakdown(symbol, query, owners, personal).total()
 }
 
 fn recency_bonus(days: u32, recent_flag: bool) -> f32 {
@@ -701,6 +676,110 @@ fn profile_score(symbol: &SymbolRecord, profiles: &[SearchProfile], query: Optio
     bonus
 }
 
+#[derive(Default, Clone)]
+struct ScoreBreakdown {
+    recency: f32,
+    attention: f32,
+    query: f32,
+    query_reason: Option<String>,
+    owner: f32,
+    churn: f32,
+    personal: PersonalMatch,
+    lint: f32,
+}
+
+impl ScoreBreakdown {
+    fn total(&self) -> f32 {
+        self.recency + self.attention + self.query + self.owner + self.churn + self.personal.bonus
+            - self.lint
+    }
+}
+
+fn compute_score_breakdown(
+    symbol: &SymbolRecord,
+    query: Option<&str>,
+    owners: &[String],
+    personal: &PersonalSignals,
+) -> ScoreBreakdown {
+    let mut breakdown = ScoreBreakdown {
+        recency: recency_bonus(symbol.freshness_days, symbol.recent),
+        attention: attention_bonus(symbol.attention_density),
+        ..ScoreBreakdown::default()
+    };
+    if let Some(q) = query {
+        if symbol.identifier.eq_ignore_ascii_case(q) {
+            breakdown.query = 200.0;
+            breakdown
+                .query_reason
+                .replace("identifier match".to_string());
+        } else if symbol
+            .preview
+            .to_ascii_lowercase()
+            .contains(&q.to_ascii_lowercase())
+        {
+            breakdown.query = 5.0;
+            breakdown.query_reason.replace("preview match".to_string());
+        }
+    }
+    if !owners.is_empty()
+        && !symbol.owners.is_empty()
+        && symbol
+            .owners
+            .iter()
+            .any(|owner| owners.iter().any(|target| target == owner))
+    {
+        breakdown.owner = OWNER_MATCH_BONUS;
+    }
+    if symbol.churn > 0 {
+        let churn = symbol.churn.min(CHURN_MAX_BUCKET) as f32;
+        breakdown.churn = churn * CHURN_WEIGHT;
+    }
+    breakdown.personal = personal.symbol_match(symbol);
+    breakdown.lint = lint_penalty(symbol.lint_density, symbol.lint_suppressions);
+    breakdown
+}
+
+fn score_reason_labels(symbol: &SymbolRecord, breakdown: &ScoreBreakdown) -> Vec<String> {
+    let mut reasons = Vec::new();
+    if breakdown.recency >= 30.0 {
+        reasons.push(format!("fresh ({}d)", symbol.freshness_days));
+    } else if breakdown.recency > 0.0 {
+        reasons.push("recent edit".to_string());
+    }
+    if breakdown.attention >= ATTENTION_MEDIUM_BONUS {
+        reasons.push("todo hotspot".to_string());
+    } else if breakdown.attention > 0.0 {
+        reasons.push("attention marker".to_string());
+    }
+    if let Some(reason) = &breakdown.query_reason {
+        reasons.push(reason.clone());
+    }
+    if breakdown.owner > 0.0 && !symbol.owners.is_empty() {
+        let preview = symbol
+            .owners
+            .iter()
+            .take(2)
+            .cloned()
+            .collect::<Vec<_>>()
+            .join("|");
+        reasons.push(format!("owner={preview}"));
+    }
+    if breakdown.churn >= CHURN_WEIGHT * 2.0 {
+        reasons.push("high churn".to_string());
+    }
+    reasons.extend(breakdown.personal.reasons.iter().cloned());
+    if breakdown.lint > 0.0 {
+        reasons.push("lint suppressed".to_string());
+    }
+    reasons
+}
+
+fn literal_reason_labels(match_info: &PersonalMatch) -> Vec<String> {
+    let mut reasons = vec!["literal text match".to_string()];
+    reasons.extend(match_info.reasons.iter().cloned());
+    reasons
+}
+
 fn is_symbolic_kind(kind: &SymbolKind) -> bool {
     matches!(
         kind,
@@ -727,6 +806,7 @@ fn is_dependency_path(path: &str) -> bool {
         || lower.contains("/dependencies")
 }
 
+#[allow(clippy::too_many_arguments)]
 fn build_hit(
     symbol: &SymbolRecord,
     score: f32,
@@ -735,6 +815,7 @@ fn build_hit(
     request: &SearchRequest,
     refs_limit: usize,
     stage_recorder: Option<&mut StageRecorder>,
+    personal: &PersonalSignals,
 ) -> NavHit {
     let references = if request.with_refs {
         let refs_start = Instant::now();
@@ -766,6 +847,17 @@ fn build_hit(
         }
     });
 
+    let breakdown = compute_score_breakdown(
+        symbol,
+        request.query.as_deref(),
+        &request.filters.owners,
+        personal,
+    );
+    let mut score_reasons = score_reason_labels(symbol, &breakdown);
+    if score_reasons.len() > 4 {
+        score_reasons.truncate(4);
+    }
+
     NavHit {
         id: symbol.id.clone(),
         path: symbol.path.clone(),
@@ -782,6 +874,7 @@ fn build_hit(
         references,
         help,
         context_snippet: None,
+        score_reasons,
         owners: symbol.owners.clone(),
         lint_suppressions: symbol.lint_suppressions,
         freshness_days: symbol.freshness_days,
@@ -821,6 +914,7 @@ fn literal_search(
     limit: usize,
     filters: Option<&FilterSet>,
     recent_only: bool,
+    personal: &PersonalSignals,
 ) -> LiteralSearchResult {
     let mut missing_trigrams = Vec::new();
     let mut candidates = if let Some(paths) = literal_token_candidates(snapshot, query) {
@@ -868,7 +962,7 @@ fn literal_search(
                 scan_literal_file(&abs, query)
             });
         if let Some(matched) = result
-            && let Some(hit) = build_literal_hit(snapshot, &path, matched)
+            && let Some(hit) = build_literal_hit(snapshot, &path, matched, personal)
         {
             hits.push(hit);
         }
@@ -1104,8 +1198,14 @@ fn build_literal_hit(
     snapshot: &IndexSnapshot,
     path: &str,
     matched: LiteralMatch,
+    personal: &PersonalSignals,
 ) -> Option<NavHit> {
     let file = snapshot.files.get(path)?;
+    let personal_match = personal.literal_match(path);
+    let mut score_reasons = literal_reason_labels(&personal_match);
+    if score_reasons.len() > 4 {
+        score_reasons.truncate(4);
+    }
     Some(NavHit {
         id: format!("literal::{path}#{}", matched.line),
         path: path.to_string(),
@@ -1118,10 +1218,11 @@ fn build_literal_hit(
         recent: file.recent,
         preview: matched.preview,
         match_count: Some(matched.match_count),
-        score: 300.0,
+        score: 300.0 + personal_match.bonus,
         references: None,
         help: None,
         context_snippet: Some(matched.snippet),
+        score_reasons,
         owners: file.owners.clone(),
         lint_suppressions: file.lint_suppressions,
         freshness_days: file.freshness_days,
@@ -1609,7 +1710,15 @@ mod tests {
         assert_eq!(snapshot.symbols.len(), 0);
         let cache = QueryCache::new(root.join("cache"));
 
-        let literal = literal_search(&snapshot, root, "CODEX_SANDBOX", 5, None, false);
+        let literal = literal_search(
+            &snapshot,
+            root,
+            "CODEX_SANDBOX",
+            5,
+            None,
+            false,
+            &PersonalSignals::default(),
+        );
         assert!(
             !literal.hits.is_empty(),
             "literal search should find raw string"
@@ -1664,6 +1773,7 @@ mod tests {
             10,
             Some(&filter_set),
             false,
+            &PersonalSignals::default(),
         );
         assert_eq!(literal.hits.len(), 1);
         assert_eq!(literal.hits[0].path, "a/match.txt");
@@ -2082,7 +2192,15 @@ mod tests {
         let snapshot = builder.build().unwrap().snapshot;
         std::fs::remove_file(&file_path).unwrap();
 
-        let literal = literal_search(&snapshot, root, "token", 5, None, false);
+        let literal = literal_search(
+            &snapshot,
+            root,
+            "token",
+            5,
+            None,
+            false,
+            &PersonalSignals::default(),
+        );
         assert_eq!(
             literal.hits.len(),
             1,
@@ -2133,7 +2251,15 @@ mod tests {
         );
         let snapshot = builder.build().unwrap().snapshot;
 
-        let literal = literal_search(&snapshot, root, "needle", 5, None, false);
+        let literal = literal_search(
+            &snapshot,
+            root,
+            "needle",
+            5,
+            None,
+            false,
+            &PersonalSignals::default(),
+        );
         let hit = literal.hits.first().expect("literal hit present");
         let snippet = hit
             .context_snippet
@@ -2173,5 +2299,65 @@ tail
         );
         let highlight = &emphasis.highlights[0];
         assert!(highlight.end > highlight.start, "non-empty highlight span");
+    }
+
+    #[test]
+    fn score_reasons_capture_owner_and_recency() {
+        let mut symbol = sample_symbol();
+        symbol.recent = true;
+        symbol.freshness_days = 3;
+        symbol.owners = vec!["core-team".to_string()];
+        let breakdown = compute_score_breakdown(
+            &symbol,
+            None,
+            &["core-team".to_string()],
+            &PersonalSignals::default(),
+        );
+        let reasons = score_reason_labels(&symbol, &breakdown);
+        assert!(
+            reasons.iter().any(|reason| reason.contains("fresh")),
+            "expected recency reason: {reasons:?}"
+        );
+        assert!(
+            reasons.iter().any(|reason| reason.contains("owner")),
+            "expected owner reason: {reasons:?}"
+        );
+    }
+
+    #[test]
+    fn literal_hits_include_literal_reason() {
+        let temp = tempdir().unwrap();
+        let root = temp.path();
+        std::fs::create_dir_all(root.join("notes")).unwrap();
+        std::fs::write(root.join("notes/raw.txt"), "literal reason focus").unwrap();
+        let filter = Arc::new(PathFilter::new(root).unwrap());
+        let builder = IndexBuilder::new(
+            root,
+            HashSet::new(),
+            HashMap::new(),
+            HashMap::new(),
+            OwnerResolver::default(),
+            filter,
+            None,
+        );
+        let snapshot = builder.build().unwrap().snapshot;
+        let literal = literal_search(
+            &snapshot,
+            root,
+            "literal reason",
+            5,
+            None,
+            false,
+            &PersonalSignals::default(),
+        );
+        assert!(!literal.hits.is_empty(), "expected literal hits");
+        let hit = literal.hits.first().unwrap();
+        assert!(
+            hit.score_reasons
+                .iter()
+                .any(|reason| reason.contains("literal")),
+            "expected literal reason: {:?}",
+            hit.score_reasons
+        );
     }
 }
