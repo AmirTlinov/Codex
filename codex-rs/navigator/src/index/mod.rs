@@ -1595,6 +1595,7 @@ mod tests {
             categories,
             recent: false,
             preview: "fn sample()".to_string(),
+            match_count: None,
             score: 1.0,
             references: None,
             help: None,

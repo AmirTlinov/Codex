@@ -1383,6 +1383,7 @@ dependencies = [
  "ignore",
  "log",
  "lru",
+ "memchr",
  "notify",
  "nucleo-matcher",
  "once_cell",

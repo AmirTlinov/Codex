@@ -610,6 +610,7 @@ members = ["core", "tui"]
             categories: vec![FileCategory::Source],
             recent: true,
             preview: String::new(),
+            match_count: None,
             score: 0.0,
             references: None,
             help: None,

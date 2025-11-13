@@ -1637,15 +1637,20 @@ fn print_top_hits(hits: &[NavHit], refs_mode: RefsMode, show_refs: bool, focus_m
             .as_ref()
             .map(codex_navigator::proto::NavReferences::len)
             .unwrap_or(0);
+        let match_suffix = hit
+            .match_count
+            .map(|count| format!(" matches={count}"))
+            .unwrap_or_default();
         eprintln!(
-            "  {}. {}:{} {:?} score={:.2} refs={} id={}",
+            "  {}. {}:{} {:?} score={:.2} refs={} id={}{}",
             idx + 1,
             hit.path,
             hit.line,
             hit.kind,
             hit.score,
             refs,
-            hit.id
+            hit.id,
+            match_suffix
         );
         if let Some(snippet) = &hit.context_snippet {
             for rendered in format_snippet_lines(snippet) {
@@ -2014,6 +2019,9 @@ fn print_text_hits(hits: &[NavHit], refs_mode: RefsMode, show_refs: bool, focus_
         if hit.lint_suppressions > 0 {
             tags.push(format!("lint={}#[allow]", hit.lint_suppressions));
         }
+        if let Some(count) = hit.match_count {
+            tags.push(format!("matches={count}"));
+        }
         println!(
             "  {:>2}. {}:{} [{}] id={}",
             idx + 1,
@@ -2067,12 +2075,38 @@ fn format_snippet_lines(snippet: &proto::TextSnippet) -> Vec<String> {
     let mut rendered = Vec::new();
     for line in &snippet.lines {
         let marker = if line.emphasis { '>' } else { ' ' };
-        rendered.push(format!("{:>4}{marker} {}", line.number, line.content));
+        let content = render_cli_highlights(&line.content, &line.highlights);
+        rendered.push(format!("{:>4}{marker} {}", line.number, content));
     }
     if snippet.truncated {
         rendered.push("... (truncated)".to_string());
     }
     rendered
+}
+
+fn render_cli_highlights(content: &str, highlights: &[proto::TextHighlight]) -> String {
+    if highlights.is_empty() {
+        return content.to_string();
+    }
+    let mut output = String::with_capacity(content.len() + highlights.len() * 4);
+    let mut cursor = 0usize;
+    for highlight in highlights {
+        let start = highlight.start.min(highlight.end) as usize;
+        let end = highlight.end as usize;
+        if start > content.len() {
+            continue;
+        }
+        let clamped_end = end.min(content.len()).max(start);
+        output.push_str(&content[cursor..start]);
+        output.push('[');
+        output.push('[');
+        output.push_str(&content[start..clamped_end]);
+        output.push(']');
+        output.push(']');
+        cursor = clamped_end;
+    }
+    output.push_str(&content[cursor..]);
+    output
 }
 
 fn resolve_focus_mode(requested: FocusMode, response: &proto::SearchResponse) -> FocusMode {
@@ -2796,6 +2830,7 @@ mod tests {
             categories,
             recent: false,
             preview: String::new(),
+            match_count: None,
             score: 1.0,
             references: None,
             help: None,

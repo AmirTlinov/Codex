@@ -21,12 +21,14 @@ use crate::proto::SearchStageTiming;
 use crate::proto::SearchStats;
 use crate::proto::SymbolHelp;
 use crate::proto::SymbolKind;
+use crate::proto::TextHighlight;
 use crate::proto::TextSnippet;
 use crate::proto::TextSnippetLine;
 use anyhow::Result;
 use anyhow::anyhow;
 use globset::GlobBuilder;
 use globset::GlobSet;
+use memchr::memmem::Finder;
 use nucleo_matcher::Matcher;
 use nucleo_matcher::Utf32Str;
 use nucleo_matcher::pattern::AtomKind;
@@ -775,6 +777,7 @@ fn build_hit(
         categories: symbol.categories.clone(),
         recent: symbol.recent,
         preview: symbol.preview.clone(),
+        match_count: None,
         score,
         references,
         help,
@@ -808,6 +811,7 @@ pub(crate) struct LiteralMatch {
     pub(crate) line: u32,
     pub(crate) preview: String,
     pub(crate) snippet: TextSnippet,
+    pub(crate) match_count: u32,
 }
 
 fn literal_search(
@@ -1009,45 +1013,74 @@ fn scan_text_entry(entry: &FileText, needle: &str) -> Option<LiteralMatch> {
 }
 
 pub(crate) fn literal_match_from_contents(contents: &str, needle: &str) -> Option<LiteralMatch> {
-    let lower = needle.to_ascii_lowercase();
-    let lines: Vec<&str> = contents.lines().collect();
-    for (idx, line) in lines.iter().enumerate() {
-        if line.to_ascii_lowercase().contains(&lower) {
-            let (preview, snippet) = literal_snippet(&lines, idx, needle);
-            return Some(LiteralMatch {
-                line: (idx + 1) as u32,
-                preview,
-                snippet,
-            });
-        }
+    if needle.trim().is_empty() {
+        return None;
     }
-    None
+    let lower_contents = contents.to_ascii_lowercase();
+    let needle_lower = needle.to_ascii_lowercase();
+    if needle_lower.is_empty() {
+        return None;
+    }
+    let finder = Finder::new(needle_lower.as_bytes());
+    let mut matches = finder.find_iter(lower_contents.as_bytes());
+    let first_pos = matches.next()?;
+    let mut match_count: u32 = 1;
+    for _ in matches {
+        match_count = match_count.saturating_add(1);
+    }
+    let (lines, starts) = lines_with_offsets(contents);
+    if lines.is_empty() {
+        return None;
+    }
+    let line_idx = locate_line(&starts, first_pos)?;
+    let line_start = starts[line_idx];
+    let match_offset = first_pos.saturating_sub(line_start);
+    let (preview, snippet) = literal_snippet(&lines, line_idx, match_offset, needle);
+    Some(LiteralMatch {
+        line: (line_idx + 1) as u32,
+        preview,
+        snippet,
+        match_count,
+    })
 }
 
-fn literal_snippet(lines: &[&str], match_idx: usize, needle: &str) -> (String, TextSnippet) {
+fn literal_snippet(
+    lines: &[&str],
+    match_idx: usize,
+    match_offset: usize,
+    needle: &str,
+) -> (String, TextSnippet) {
     let start = match_idx.saturating_sub(2);
     let end = (match_idx + 3).min(lines.len());
     let mut rendered = String::new();
     let mut snippet_lines = Vec::new();
     let mut truncated = false;
     for (absolute, content_ref) in lines.iter().enumerate().take(end).skip(start) {
-        let line_no = absolute + 1;
         let content = *content_ref;
+        let line_no = absolute + 1;
         let emphasis = absolute == match_idx;
-        let highlight = if emphasis {
-            highlight_literal_preview(content, needle)
+        let highlights = if emphasis {
+            build_highlight(content, match_offset, needle.len())
+                .map(|h| vec![h])
+                .unwrap_or_default()
+        } else {
+            Vec::new()
+        };
+        let display = if emphasis {
+            render_highlighted_content(content, &highlights)
         } else {
             content.to_string()
         };
         let prefix = if emphasis {
-            format!("{line_no:>4}> {highlight}\n")
+            format!("{line_no:>4}> {display}\n")
         } else {
-            format!("{line_no:>4}  {content}\n")
+            format!("{line_no:>4}  {display}\n")
         };
         snippet_lines.push(TextSnippetLine {
             number: line_no as u32,
             content: content.to_string(),
             emphasis,
+            highlights,
         });
         rendered.push_str(&prefix);
         if rendered.len() > MAX_LITERAL_PREVIEW {
@@ -1082,6 +1115,7 @@ fn build_literal_hit(
         categories: file.categories.clone(),
         recent: file.recent,
         preview: matched.preview,
+        match_count: Some(matched.match_count),
         score: 300.0,
         references: None,
         help: None,
@@ -1236,23 +1270,72 @@ fn attention_bucket(density: u32) -> &'static str {
     }
 }
 
-fn highlight_literal_preview(line: &str, needle: &str) -> String {
-    let lower_line = line.to_ascii_lowercase();
-    let lower_needle = needle.to_ascii_lowercase();
-    if let Some(pos) = lower_line.find(&lower_needle) {
-        let end = pos + lower_needle.len();
-        let mut preview = String::with_capacity(line.len() + 4);
-        preview.push_str(&line[..pos]);
-        preview.push('[');
-        preview.push('[');
-        preview.push_str(&line[pos..end]);
-        preview.push(']');
-        preview.push(']');
-        preview.push_str(&line[end..]);
-        preview
-    } else {
-        line.to_string()
+fn lines_with_offsets(contents: &str) -> (Vec<&str>, Vec<usize>) {
+    if contents.is_empty() {
+        return (Vec::new(), Vec::new());
     }
+    let mut lines = Vec::new();
+    let mut starts = Vec::new();
+    let mut cursor = 0usize;
+    for chunk in contents.split_inclusive('\n') {
+        starts.push(cursor);
+        let trimmed = chunk.trim_end_matches('\n').trim_end_matches('\r');
+        lines.push(trimmed);
+        cursor += chunk.len();
+    }
+    (lines, starts)
+}
+
+fn locate_line(starts: &[usize], offset: usize) -> Option<usize> {
+    if starts.is_empty() {
+        return None;
+    }
+    match starts.binary_search(&offset) {
+        Ok(idx) => Some(idx),
+        Err(idx) => {
+            if idx == 0 {
+                Some(0)
+            } else {
+                Some(idx - 1)
+            }
+        }
+    }
+}
+
+fn build_highlight(line: &str, start: usize, len: usize) -> Option<TextHighlight> {
+    if len == 0 || start >= line.len() {
+        return None;
+    }
+    let clamped_end = (start + len).min(line.len());
+    Some(TextHighlight {
+        start: start as u32,
+        end: clamped_end as u32,
+    })
+}
+
+fn render_highlighted_content(line: &str, highlights: &[TextHighlight]) -> String {
+    if highlights.is_empty() {
+        return line.to_string();
+    }
+    let mut rendered = String::with_capacity(line.len() + highlights.len() * 4);
+    let mut cursor = 0usize;
+    for highlight in highlights {
+        let start = highlight.start.min(highlight.end) as usize;
+        let end = highlight.end as usize;
+        if start > line.len() {
+            continue;
+        }
+        let clamped_end = end.min(line.len()).max(start);
+        rendered.push_str(&line[cursor..start]);
+        rendered.push('[');
+        rendered.push('[');
+        rendered.push_str(&line[start..clamped_end]);
+        rendered.push(']');
+        rendered.push(']');
+        cursor = clamped_end;
+    }
+    rendered.push_str(&line[cursor..]);
+    rendered
 }
 
 struct FilterSet {
@@ -2062,5 +2145,31 @@ mod tests {
                 .any(|line| line.emphasis && line.content.contains("needle")),
             "highlight line preserved"
         );
+    }
+
+    #[test]
+    fn literal_match_reports_match_count_and_highlights() {
+        let contents = "\
+alpha line
+target appears here
+middle target again
+tail
+";
+        let matched =
+            literal_match_from_contents(contents, "target").expect("literal match missing");
+        assert_eq!(matched.line, 2);
+        assert_eq!(matched.match_count, 2);
+        let snippet = matched.snippet;
+        let emphasis = snippet
+            .lines
+            .iter()
+            .find(|line| line.emphasis)
+            .expect("emphasis line");
+        assert!(
+            !emphasis.highlights.is_empty(),
+            "expected highlight for emphasis line"
+        );
+        let highlight = &emphasis.highlights[0];
+        assert!(highlight.end > highlight.start, "non-empty highlight span");
     }
 }

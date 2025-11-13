@@ -60,6 +60,7 @@ walkdir = { workspace = true }
 uuid = { workspace = true, features = ["serde", "v4"] }
 regex = "1"
 percent-encoding = "2"
+memchr = "2.7"
 
 [dev-dependencies]
 pretty_assertions = { workspace = true }

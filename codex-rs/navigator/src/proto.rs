@@ -273,6 +273,8 @@ pub struct NavHit {
     pub categories: Vec<FileCategory>,
     pub recent: bool,
     pub preview: String,
+    #[serde(default)]
+    pub match_count: Option<u32>,
     pub score: f32,
     #[serde(default)]
     pub references: Option<NavReferences>,
@@ -301,6 +303,8 @@ pub struct TextSnippetLine {
     pub content: String,
     #[serde(default)]
     pub emphasis: bool,
+    #[serde(default)]
+    pub highlights: Vec<TextHighlight>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Default)]
@@ -308,6 +312,12 @@ pub struct TextSnippet {
     pub lines: Vec<TextSnippetLine>,
     #[serde(default)]
     pub truncated: bool,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Default)]
+pub struct TextHighlight {
+    pub start: u32,
+    pub end: u32,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]

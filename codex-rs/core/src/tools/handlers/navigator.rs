@@ -412,6 +412,7 @@ mod tests {
             categories: vec![FileCategory::Source],
             recent: false,
             preview: "fn sample()".to_string(),
+            match_count: None,
             score: 0.9,
             references: None,
             help: None,
