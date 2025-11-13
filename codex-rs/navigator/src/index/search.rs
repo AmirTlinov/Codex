@@ -7,6 +7,7 @@ use crate::index::model::SymbolRecord;
 use crate::index::personal::PersonalMatch;
 use crate::index::personal::PersonalSignals;
 use crate::index::references;
+use crate::proto::CoverageDiagnostics;
 use crate::proto::FacetBucket;
 use crate::proto::FacetSummary;
 use crate::proto::FileCategory;
@@ -106,10 +107,12 @@ pub fn run_search(
     cache: &QueryCache,
     project_root: &Path,
     refs_limit: usize,
+    coverage: &CoverageContext,
 ) -> Result<SearchComputation> {
     let personal = PersonalSignals::load(project_root);
+    let ranking = RankingContext::new(&personal, coverage);
     if request.text_mode {
-        return run_text_search(snapshot, request, project_root, &personal);
+        return run_text_search(snapshot, request, project_root, &ranking);
     }
     let smart_refine = request.refine.is_some()
         && request
@@ -124,7 +127,7 @@ pub fn run_search(
         cache,
         project_root,
         refs_limit,
-        &personal,
+        &ranking,
     )?;
     let mut hints = request.hints.clone();
 
@@ -137,7 +140,7 @@ pub fn run_search(
             cache,
             project_root,
             refs_limit,
-            &personal,
+            &ranking,
         )?;
         outcome.stats.refine_fallback = true;
         hints.push("refine returned no hits; reran without --from id".to_string());
@@ -165,7 +168,7 @@ pub fn run_search(
             working_request.limit.max(1),
             Some(&literal_filters),
             working_request.filters.recent_only,
-            &personal,
+            &ranking,
         );
         let literal_elapsed = literal_start.elapsed().as_micros().min(u64::MAX as u128) as u64;
         let LiteralSearchResult {
@@ -241,7 +244,7 @@ fn run_text_search(
     snapshot: &IndexSnapshot,
     request: &SearchRequest,
     project_root: &Path,
-    personal: &PersonalSignals,
+    ranking: &RankingContext<'_>,
 ) -> Result<SearchComputation> {
     let mut stages = StageRecorder::default();
     let start = Instant::now();
@@ -260,7 +263,7 @@ fn run_text_search(
         request.limit.max(1),
         Some(&filter_set),
         request.filters.recent_only,
-        personal,
+        ranking,
     );
     let took_ms = start.elapsed().as_millis().min(u64::MAX as u128) as u64;
     stages.record_from(SearchStage::LiteralScan, literal_start);
@@ -319,7 +322,7 @@ fn run_search_once(
     cache: &QueryCache,
     project_root: &Path,
     refs_limit: usize,
-    personal: &PersonalSignals,
+    ranking: &RankingContext<'_>,
 ) -> Result<SearchComputation> {
     let start = Instant::now();
     let mut stages = StageRecorder::default();
@@ -359,8 +362,12 @@ fn run_search_once(
             let haystack: Utf32Str<'_> = Utf32Str::new(haystack_str, &mut utf32buf);
             if let Some(score) = pat.score(haystack, matcher_ref) {
                 let mut total = score as f32;
-                total +=
-                    heuristic_score(symbol, request.query.as_deref(), &owner_targets, personal);
+                total += heuristic_score(
+                    symbol,
+                    request.query.as_deref(),
+                    &owner_targets,
+                    ranking.personal,
+                );
                 total += profile_score(symbol, &request.profiles, request.query.as_deref());
                 scored.push((total, symbol.id.clone()));
                 continue;
@@ -374,8 +381,12 @@ fn run_search_once(
                 .iter()
                 .any(|variant| haystack_lower.contains(variant))
             {
-                let mut total =
-                    heuristic_score(symbol, request.query.as_deref(), &owner_targets, personal);
+                let mut total = heuristic_score(
+                    symbol,
+                    request.query.as_deref(),
+                    &owner_targets,
+                    ranking.personal,
+                );
                 total += profile_score(symbol, &request.profiles, request.query.as_deref());
                 total += SUBSTRING_FALLBACK_BONUS;
                 scored.push((total, symbol.id.clone()));
@@ -385,7 +396,12 @@ fn run_search_once(
         if pattern.is_some() {
             continue;
         }
-        let mut total = heuristic_score(symbol, request.query.as_deref(), &owner_targets, personal);
+        let mut total = heuristic_score(
+            symbol,
+            request.query.as_deref(),
+            &owner_targets,
+            ranking.personal,
+        );
         total += profile_score(symbol, &request.profiles, request.query.as_deref());
         total += 1.0;
         scored.push((total, symbol.id.clone()));
@@ -411,7 +427,7 @@ fn run_search_once(
                 request,
                 refs_limit,
                 Some(&mut stages),
-                personal,
+                ranking,
             ));
         }
     }
@@ -780,6 +796,63 @@ fn literal_reason_labels(match_info: &PersonalMatch) -> Vec<String> {
     reasons
 }
 
+#[derive(Default)]
+pub struct CoverageContext {
+    pending: HashSet<String>,
+    errors: HashSet<String>,
+}
+
+impl CoverageContext {
+    pub fn from_diagnostics(diag: &CoverageDiagnostics) -> Self {
+        let pending = diag.pending.iter().map(|gap| gap.path.clone()).collect();
+        let errors = diag.errors.iter().map(|gap| gap.path.clone()).collect();
+        Self { pending, errors }
+    }
+
+    fn analyze(&self, path: &str) -> Option<CoverageMatch> {
+        if self.errors.contains(path) {
+            Some(CoverageMatch::Error)
+        } else if self.pending.contains(path) {
+            Some(CoverageMatch::Pending)
+        } else {
+            None
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+enum CoverageMatch {
+    Pending,
+    Error,
+}
+
+impl CoverageMatch {
+    fn description(self) -> &'static str {
+        match self {
+            CoverageMatch::Pending => "coverage pending",
+            CoverageMatch::Error => "coverage error",
+        }
+    }
+
+    fn bonus(self) -> f32 {
+        match self {
+            CoverageMatch::Pending => 35.0,
+            CoverageMatch::Error => 60.0,
+        }
+    }
+}
+
+struct RankingContext<'a> {
+    personal: &'a PersonalSignals,
+    coverage: &'a CoverageContext,
+}
+
+impl<'a> RankingContext<'a> {
+    fn new(personal: &'a PersonalSignals, coverage: &'a CoverageContext) -> Self {
+        Self { personal, coverage }
+    }
+}
+
 fn is_symbolic_kind(kind: &SymbolKind) -> bool {
     matches!(
         kind,
@@ -815,7 +888,7 @@ fn build_hit(
     request: &SearchRequest,
     refs_limit: usize,
     stage_recorder: Option<&mut StageRecorder>,
-    personal: &PersonalSignals,
+    ranking: &RankingContext<'_>,
 ) -> NavHit {
     let references = if request.with_refs {
         let refs_start = Instant::now();
@@ -851,9 +924,14 @@ fn build_hit(
         symbol,
         request.query.as_deref(),
         &request.filters.owners,
-        personal,
+        ranking.personal,
     );
+    let mut final_score = score;
     let mut score_reasons = score_reason_labels(symbol, &breakdown);
+    if let Some(label) = ranking.coverage.analyze(&symbol.path) {
+        final_score += label.bonus();
+        score_reasons.push(label.description().to_string());
+    }
     if score_reasons.len() > 4 {
         score_reasons.truncate(4);
     }
@@ -870,7 +948,7 @@ fn build_hit(
         recent: symbol.recent,
         preview: symbol.preview.clone(),
         match_count: None,
-        score,
+        score: final_score,
         references,
         help,
         context_snippet: None,
@@ -914,7 +992,7 @@ fn literal_search(
     limit: usize,
     filters: Option<&FilterSet>,
     recent_only: bool,
-    personal: &PersonalSignals,
+    ranking: &RankingContext<'_>,
 ) -> LiteralSearchResult {
     let mut missing_trigrams = Vec::new();
     let mut candidates = if let Some(paths) = literal_token_candidates(snapshot, query) {
@@ -962,7 +1040,7 @@ fn literal_search(
                 scan_literal_file(&abs, query)
             });
         if let Some(matched) = result
-            && let Some(hit) = build_literal_hit(snapshot, &path, matched, personal)
+            && let Some(hit) = build_literal_hit(snapshot, &path, matched, ranking)
         {
             hits.push(hit);
         }
@@ -1198,11 +1276,16 @@ fn build_literal_hit(
     snapshot: &IndexSnapshot,
     path: &str,
     matched: LiteralMatch,
-    personal: &PersonalSignals,
+    ranking: &RankingContext<'_>,
 ) -> Option<NavHit> {
     let file = snapshot.files.get(path)?;
-    let personal_match = personal.literal_match(path);
+    let personal_match = ranking.personal.literal_match(path);
     let mut score_reasons = literal_reason_labels(&personal_match);
+    let mut literal_score = 300.0 + personal_match.bonus;
+    if let Some(label) = ranking.coverage.analyze(path) {
+        literal_score += label.bonus();
+        score_reasons.push(label.description().to_string());
+    }
     if score_reasons.len() > 4 {
         score_reasons.truncate(4);
     }
@@ -1218,7 +1301,7 @@ fn build_literal_hit(
         recent: file.recent,
         preview: matched.preview,
         match_count: Some(matched.match_count),
-        score: 300.0 + personal_match.bonus,
+        score: literal_score,
         references: None,
         help: None,
         context_snippet: Some(matched.snippet),
@@ -1623,13 +1706,15 @@ mod tests {
         let snapshot = builder.build().unwrap().snapshot;
         assert_eq!(snapshot.files.len(), 2);
         let cache = QueryCache::new(root.join("cache"));
+        let coverage = CoverageContext::default();
 
         let base_request = SearchRequest {
             query: Some("navigator_history_lines_for_test".to_string()),
             limit: 5,
             ..Default::default()
         };
-        let result = run_search(&snapshot, &base_request, &cache, root, 0).expect("search request");
+        let result = run_search(&snapshot, &base_request, &cache, root, 0, &coverage)
+            .expect("search request");
         assert_eq!(result.hits.len(), 1);
         assert_eq!(result.hits[0].path, "tui/src/navigator_view.rs");
 
@@ -1643,7 +1728,7 @@ mod tests {
             ..Default::default()
         };
         let tests_result =
-            run_search(&snapshot, &tests_only, &cache, root, 0).expect("tests request");
+            run_search(&snapshot, &tests_only, &cache, root, 0, &coverage).expect("tests request");
         assert_eq!(tests_result.hits.len(), 1);
         assert_eq!(tests_result.hits[0].path, "tui/tests/navigator_history.rs");
     }
@@ -1667,6 +1752,7 @@ mod tests {
         );
         let snapshot = builder.build().unwrap().snapshot;
         let cache = QueryCache::new(root.join("cache"));
+        let coverage = CoverageContext::default();
 
         let request = SearchRequest {
             query: Some("example".into()),
@@ -1679,7 +1765,7 @@ mod tests {
             ..Default::default()
         };
         assert!(request.filters.recent_only);
-        let result = run_search(&snapshot, &request, &cache, root, 0).expect("search");
+        let result = run_search(&snapshot, &request, &cache, root, 0, &coverage).expect("search");
         assert!(!result.stats.recent_fallback);
         assert!(!result.stats.literal_fallback);
         assert!(result.hits.is_empty());
@@ -1709,16 +1795,11 @@ mod tests {
         let snapshot = builder.build().unwrap().snapshot;
         assert_eq!(snapshot.symbols.len(), 0);
         let cache = QueryCache::new(root.join("cache"));
+        let personal = PersonalSignals::default();
+        let coverage = CoverageContext::default();
+        let ranking = RankingContext::new(&personal, &coverage);
 
-        let literal = literal_search(
-            &snapshot,
-            root,
-            "CODEX_SANDBOX",
-            5,
-            None,
-            false,
-            &PersonalSignals::default(),
-        );
+        let literal = literal_search(&snapshot, root, "CODEX_SANDBOX", 5, None, false, &ranking);
         assert!(
             !literal.hits.is_empty(),
             "literal search should find raw string"
@@ -1729,7 +1810,7 @@ mod tests {
             limit: 5,
             ..Default::default()
         };
-        let result = run_search(&snapshot, &request, &cache, root, 0).expect("search");
+        let result = run_search(&snapshot, &request, &cache, root, 0, &coverage).expect("search");
         if !result.stats.literal_fallback {
             panic!("literal fallback flag missing: {:?}", result.stats);
         }
@@ -1766,6 +1847,9 @@ mod tests {
             ..Default::default()
         };
         let filter_set = FilterSet::new(&filters).expect("filters");
+        let personal = PersonalSignals::default();
+        let coverage = CoverageContext::default();
+        let ranking = RankingContext::new(&personal, &coverage);
         let literal = literal_search(
             &snapshot,
             root,
@@ -1773,7 +1857,7 @@ mod tests {
             10,
             Some(&filter_set),
             false,
-            &PersonalSignals::default(),
+            &ranking,
         );
         assert_eq!(literal.hits.len(), 1);
         assert_eq!(literal.hits[0].path, "a/match.txt");
@@ -1797,6 +1881,7 @@ mod tests {
         );
         let snapshot = builder.build().unwrap().snapshot;
         let cache = QueryCache::new(root.join("cache"));
+        let coverage = CoverageContext::default();
         let request = SearchRequest {
             query: Some("AI".into()),
             filters: SearchFilters {
@@ -1806,7 +1891,7 @@ mod tests {
             limit: 5,
             ..Default::default()
         };
-        let result = run_search(&snapshot, &request, &cache, root, 0).expect("search");
+        let result = run_search(&snapshot, &request, &cache, root, 0, &coverage).expect("search");
         assert!(
             result.stats.literal_fallback,
             "literal fallback not triggered"
@@ -1834,6 +1919,7 @@ mod tests {
         );
         let snapshot = builder.build().unwrap().snapshot;
         let cache = QueryCache::new(root.join("cache"));
+        let coverage = CoverageContext::default();
         let request = SearchRequest {
             query: Some("scoped literal".into()),
             filters: SearchFilters {
@@ -1844,7 +1930,7 @@ mod tests {
             limit: 5,
             ..Default::default()
         };
-        let result = run_search(&snapshot, &request, &cache, root, 0).expect("search");
+        let result = run_search(&snapshot, &request, &cache, root, 0, &coverage).expect("search");
         assert!(result.stats.literal_fallback);
         assert_eq!(result.hits.len(), 1);
         assert_eq!(result.hits[0].path, "src/needle.txt");
@@ -1878,13 +1964,14 @@ mod tests {
         );
         let snapshot = builder.build().unwrap().snapshot;
         let cache = QueryCache::new(root.join("cache"));
+        let coverage = CoverageContext::default();
 
         let request = SearchRequest {
             query: Some("facet_sample".into()),
             limit: 10,
             ..Default::default()
         };
-        let result = run_search(&snapshot, &request, &cache, root, 0).expect("search");
+        let result = run_search(&snapshot, &request, &cache, root, 0, &coverage).expect("search");
         let facets = result.stats.facets.expect("facets computed");
         assert!(
             facets
@@ -1925,6 +2012,7 @@ mod tests {
         );
         let snapshot = builder.build().unwrap().snapshot;
         let cache = QueryCache::new(root.join("cache"));
+        let coverage = CoverageContext::default();
 
         let request = SearchRequest {
             query: Some("literal needle".into()),
@@ -1933,7 +2021,8 @@ mod tests {
             limit: 5,
             ..Default::default()
         };
-        let result = run_search(&snapshot, &request, &cache, root, 0).expect("text search");
+        let result =
+            run_search(&snapshot, &request, &cache, root, 0, &coverage).expect("text search");
         assert!(result.stats.text_mode);
         assert!(
             result
@@ -2014,6 +2103,7 @@ mod tests {
         );
         let snapshot = builder.build().unwrap().snapshot;
         let cache = QueryCache::new(root.join("cache"));
+        let coverage = CoverageContext::default();
 
         let request = SearchRequest {
             query: Some("sample".into()),
@@ -2021,7 +2111,7 @@ mod tests {
             limit: 5,
             ..Default::default()
         };
-        let result = run_search(&snapshot, &request, &cache, root, 0).expect("search");
+        let result = run_search(&snapshot, &request, &cache, root, 0, &coverage).expect("search");
         assert!(result.stats.smart_refine);
     }
 
@@ -2051,6 +2141,7 @@ mod tests {
         );
         let snapshot = builder.build().unwrap().snapshot;
         let cache = QueryCache::new(root.join("cache"));
+        let coverage = CoverageContext::default();
 
         let initial = SearchRequest {
             query: Some("recent_symbol".into()),
@@ -2061,7 +2152,8 @@ mod tests {
             limit: 5,
             ..Default::default()
         };
-        let first = run_search(&snapshot, &initial, &cache, root, 0).expect("initial search");
+        let first =
+            run_search(&snapshot, &initial, &cache, root, 0, &coverage).expect("initial search");
         let (refine_id, payload) = first.cache_entry.expect("cache entry");
         cache.store(refine_id, payload).expect("store cache");
 
@@ -2071,7 +2163,8 @@ mod tests {
             limit: 5,
             ..Default::default()
         };
-        let outcome = run_search(&snapshot, &refine_request, &cache, root, 0).expect("refine");
+        let outcome =
+            run_search(&snapshot, &refine_request, &cache, root, 0, &coverage).expect("refine");
         assert!(outcome.stats.refine_fallback);
         assert!(
             outcome
@@ -2191,16 +2284,11 @@ mod tests {
         );
         let snapshot = builder.build().unwrap().snapshot;
         std::fs::remove_file(&file_path).unwrap();
+        let personal = PersonalSignals::default();
+        let coverage = CoverageContext::default();
+        let ranking = RankingContext::new(&personal, &coverage);
 
-        let literal = literal_search(
-            &snapshot,
-            root,
-            "token",
-            5,
-            None,
-            false,
-            &PersonalSignals::default(),
-        );
+        let literal = literal_search(&snapshot, root, "token", 5, None, false, &ranking);
         assert_eq!(
             literal.hits.len(),
             1,
@@ -2250,16 +2338,11 @@ mod tests {
             None,
         );
         let snapshot = builder.build().unwrap().snapshot;
+        let personal = PersonalSignals::default();
+        let coverage = CoverageContext::default();
+        let ranking = RankingContext::new(&personal, &coverage);
 
-        let literal = literal_search(
-            &snapshot,
-            root,
-            "needle",
-            5,
-            None,
-            false,
-            &PersonalSignals::default(),
-        );
+        let literal = literal_search(&snapshot, root, "needle", 5, None, false, &ranking);
         let hit = literal.hits.first().expect("literal hit present");
         let snippet = hit
             .context_snippet
@@ -2341,15 +2424,10 @@ tail
             None,
         );
         let snapshot = builder.build().unwrap().snapshot;
-        let literal = literal_search(
-            &snapshot,
-            root,
-            "literal reason",
-            5,
-            None,
-            false,
-            &PersonalSignals::default(),
-        );
+        let personal = PersonalSignals::default();
+        let coverage = CoverageContext::default();
+        let ranking = RankingContext::new(&personal, &coverage);
+        let literal = literal_search(&snapshot, root, "literal reason", 5, None, false, &ranking);
         assert!(!literal.hits.is_empty(), "expected literal hits");
         let hit = literal.hits.first().unwrap();
         assert!(

@@ -50,6 +50,7 @@ use crate::proto::FallbackHit;
 use crate::proto::FileCategory;
 use crate::proto::FilterOp;
 use crate::proto::HealthPanel;
+use crate::proto::HealthRisk;
 use crate::proto::HealthSummary;
 use crate::proto::IndexState;
 use crate::proto::IndexStatus;
@@ -76,6 +77,7 @@ use notify::Event;
 use notify::RecommendedWatcher;
 use notify::RecursiveMode;
 use notify::Watcher;
+use search::CoverageContext;
 use search::literal_fallback_allowed;
 use search::literal_match_from_contents;
 use search::run_search;
@@ -326,6 +328,8 @@ impl IndexCoordinator {
                 return Ok(response);
             }
         }
+        let diagnostics = self.diagnostics().await;
+        let coverage_ctx = CoverageContext::from_diagnostics(&diagnostics.coverage);
         let refs_limit = request.refs_limit.unwrap_or(12);
         if request.inherit_filters {
             rewrite_inherited_filters(&self.inner.cache, &mut request)?;
@@ -337,6 +341,7 @@ impl IndexCoordinator {
             &self.inner.cache,
             self.inner.profile.project_root(),
             refs_limit,
+            &coverage_ctx,
         )?;
         let atlas_hint = build_search_hint(&snapshot, &outcome.hits);
         let active_filters = summarize_active_filters(&request.filters);
@@ -386,7 +391,6 @@ impl IndexCoordinator {
             Vec::new()
         };
 
-        let diagnostics = self.diagnostics().await;
         let mut stats = outcome.stats;
         if !diagnostics.coverage.pending.is_empty() {
             let pending_paths: Vec<String> = diagnostics
@@ -410,12 +414,18 @@ impl IndexCoordinator {
         });
         self.record_profile_sample(&request, &stats, query_id).await;
         let context_banner = build_context_banner(&outcome.hits);
+        let mut hints = outcome.hints;
+        if let Some(summary) = diagnostics.health.as_ref()
+            && let Some(hint) = health_hint(summary)
+        {
+            hints.push(hint);
+        }
         Ok(SearchResponse {
             query_id,
             hits: outcome.hits,
             index: self.current_status().await,
             stats: Some(stats),
-            hints: outcome.hints,
+            hints,
             error,
             diagnostics: Some(diagnostics),
             fallback_hits,
@@ -1292,6 +1302,34 @@ fn build_context_banner(hits: &[NavHit]) -> Option<ContextBanner> {
     } else {
         Some(ContextBanner { layers, categories })
     }
+}
+
+fn health_hint(summary: &HealthSummary) -> Option<String> {
+    let label = match summary.risk {
+        HealthRisk::Green => {
+            if summary.issues.is_empty() {
+                return None;
+            }
+            "health issue"
+        }
+        HealthRisk::Yellow => "health yellow",
+        HealthRisk::Red => "health red",
+    };
+    let mut message = summary
+        .issues
+        .first()
+        .map(|issue| issue.message.as_str())
+        .unwrap_or("see doctor panel for remediation")
+        .to_string();
+    if let Some(remediation) = summary
+        .issues
+        .first()
+        .and_then(|issue| issue.remediation.as_deref())
+    {
+        message.push_str(" — ");
+        message.push_str(remediation);
+    }
+    Some(format!("{label}: {message}"))
 }
 
 fn context_category_label(category: &FileCategory) -> Option<&'static str> {
