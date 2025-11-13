@@ -1487,6 +1487,9 @@ async fn execute_search(
             if let Some(filters) = outcome.response.active_filters.as_ref() {
                 print_active_filters(filters);
             }
+            if !outcome.response.facet_suggestions.is_empty() {
+                print_facet_suggestions_sideband(&outcome.response.facet_suggestions);
+            }
             if let Some(hint) = outcome.response.atlas_hint.as_ref() {
                 print_atlas_hint_sideband(hint);
             }
@@ -1891,6 +1894,9 @@ fn print_text_response(
             println!("{line}");
         }
     }
+    if !response.facet_suggestions.is_empty() {
+        print_facet_suggestions_text(&response.facet_suggestions);
+    }
     if let Some(hint) = response.atlas_hint.as_ref() {
         for line in format_atlas_hint_lines(hint) {
             println!("{line}");
@@ -2040,6 +2046,28 @@ fn format_bucket_summary(buckets: &[ContextBucket]) -> String {
 fn print_active_filters(filters: &proto::ActiveFilters) {
     for line in format_active_filters_lines(filters) {
         eprintln!("[navigator] {line}");
+    }
+}
+
+fn print_facet_suggestions_sideband(suggestions: &[proto::FacetSuggestion]) {
+    if suggestions.is_empty() {
+        return;
+    }
+    for suggestion in suggestions {
+        eprintln!(
+            "[navigator] facet suggestion: {} ⇒ {}",
+            suggestion.label, suggestion.command
+        );
+    }
+}
+
+fn print_facet_suggestions_text(suggestions: &[proto::FacetSuggestion]) {
+    if suggestions.is_empty() {
+        return;
+    }
+    println!("suggested facets:");
+    for suggestion in suggestions {
+        println!("  - {} ({})", suggestion.label, suggestion.command);
     }
 }
 
@@ -3082,6 +3110,7 @@ mod tests {
             atlas_hint: None,
             active_filters: None,
             context_banner: None,
+            facet_suggestions: Vec::new(),
         }
     }
 

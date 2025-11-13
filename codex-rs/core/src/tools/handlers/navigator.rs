@@ -445,6 +445,8 @@ mod tests {
             fallback_hits: Vec::new(),
             atlas_hint: None,
             active_filters: None,
+            context_banner: None,
+            facet_suggestions: Vec::new(),
         };
         let payload = SearchToolOutput {
             diagnostics: Some(diagnostics),

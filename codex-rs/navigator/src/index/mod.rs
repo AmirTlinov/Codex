@@ -46,6 +46,9 @@ use crate::proto::CoverageDiagnostics;
 use crate::proto::CoverageGap;
 use crate::proto::CoverageReason;
 use crate::proto::ErrorPayload;
+use crate::proto::FacetBucket;
+use crate::proto::FacetSuggestion;
+use crate::proto::FacetSummary;
 use crate::proto::FallbackHit;
 use crate::proto::FileCategory;
 use crate::proto::FilterOp;
@@ -401,6 +404,7 @@ impl IndexCoordinator {
         };
 
         let mut stats = outcome.stats;
+        let facet_suggestions = build_facet_suggestions(&request.filters, stats.facets.as_ref());
         if !diagnostics.coverage.pending.is_empty() {
             let pending_paths: Vec<String> = diagnostics
                 .coverage
@@ -441,6 +445,7 @@ impl IndexCoordinator {
             atlas_hint,
             active_filters,
             context_banner,
+            facet_suggestions,
         })
     }
 
@@ -1398,6 +1403,69 @@ fn build_context_banner(hits: &[NavHit]) -> Option<ContextBanner> {
     }
 }
 
+fn build_facet_suggestions(
+    filters: &SearchFilters,
+    facets: Option<&FacetSummary>,
+) -> Vec<FacetSuggestion> {
+    let Some(summary) = facets else {
+        return Vec::new();
+    };
+    let mut suggestions = Vec::new();
+    if filters.languages.is_empty()
+        && let Some(bucket) = summary.languages.first()
+    {
+        suggestions.push(FacetSuggestion {
+            label: format!("lang={}", bucket.value),
+            command: format!("codex navigator facet --lang {}", bucket.value),
+        });
+    }
+    if filters.categories.is_empty()
+        && let Some(bucket) = select_category_bucket(&summary.categories)
+        && let Some(flag) = category_flag(&bucket.value)
+    {
+        suggestions.push(FacetSuggestion {
+            label: format!("category={}", bucket.value),
+            command: format!("codex navigator facet {flag}"),
+        });
+    }
+    if filters.owners.is_empty()
+        && let Some(bucket) = summary.owners.first()
+    {
+        suggestions.push(FacetSuggestion {
+            label: format!("owner={}", bucket.value),
+            command: format!("codex navigator facet --owner {}", bucket.value),
+        });
+    }
+    if !filters.recent_only && summary.freshness.iter().any(is_fresh_bucket) {
+        suggestions.push(FacetSuggestion {
+            label: "recent-only".to_string(),
+            command: "codex navigator facet --recent".to_string(),
+        });
+    }
+    suggestions.truncate(3);
+    suggestions
+}
+
+fn select_category_bucket(categories: &[FacetBucket]) -> Option<&FacetBucket> {
+    categories
+        .iter()
+        .filter(|bucket| matches!(bucket.value.as_str(), "tests" | "docs" | "deps"))
+        .max_by_key(|bucket| bucket.count)
+}
+
+fn category_flag(value: &str) -> Option<&'static str> {
+    match value {
+        "tests" => Some("--tests"),
+        "docs" => Some("--docs"),
+        "deps" => Some("--deps"),
+        _ => None,
+    }
+}
+
+fn is_fresh_bucket(bucket: &FacetBucket) -> bool {
+    matches!(bucket.value.as_str(), "0-1d" | "2-3d") && bucket.count > 0
+}
+
 fn health_hint(summary: &HealthSummary) -> Option<String> {
     let label = match summary.risk {
         HealthRisk::Green => {
@@ -1600,9 +1668,12 @@ mod tests {
     use crate::index::cache::CachedQuery;
     use crate::index::model::FileFingerprint;
     use crate::proto::CoverageReason;
+    use crate::proto::FacetBucket;
+    use crate::proto::FacetSummary;
     use crate::proto::FileCategory;
     use crate::proto::Language;
     use crate::proto::NavHit;
+    use crate::proto::SearchFilters;
     use crate::proto::SearchStage;
     use crate::proto::SymbolKind;
     use std::collections::HashMap;
@@ -1741,6 +1812,73 @@ mod tests {
         assert!(stats.as_hotspot(SearchStage::References).is_none());
         stats.observe(40);
         assert!(stats.as_hotspot(SearchStage::References).is_some());
+    }
+
+    #[test]
+    fn facet_suggestions_surface_missing_filters() {
+        let filters = SearchFilters::default();
+        let summary = FacetSummary {
+            languages: vec![FacetBucket {
+                value: "rust".to_string(),
+                count: 42,
+            }],
+            categories: vec![FacetBucket {
+                value: "tests".to_string(),
+                count: 12,
+            }],
+            owners: vec![FacetBucket {
+                value: "core".to_string(),
+                count: 5,
+            }],
+            freshness: vec![FacetBucket {
+                value: "0-1d".to_string(),
+                count: 3,
+            }],
+            ..Default::default()
+        };
+        let suggestions = build_facet_suggestions(&filters, Some(&summary));
+        assert_eq!(suggestions.len(), 3);
+        assert!(
+            suggestions
+                .iter()
+                .any(|s| s.command.contains("--lang rust"))
+        );
+        assert!(suggestions.iter().any(|s| s.command.contains("--tests")));
+        assert!(
+            suggestions
+                .iter()
+                .any(|s| s.command.contains("--owner core"))
+        );
+    }
+
+    #[test]
+    fn facet_suggestions_skip_when_filters_present() {
+        let mut filters = SearchFilters::default();
+        filters.languages.push(Language::Rust);
+        filters.categories.push(FileCategory::Tests);
+        filters.owners.push("core".to_string());
+        filters.recent_only = true;
+        let summary = FacetSummary {
+            languages: vec![FacetBucket {
+                value: "rust".to_string(),
+                count: 42,
+            }],
+            categories: vec![FacetBucket {
+                value: "docs".to_string(),
+                count: 5,
+            }],
+            owners: vec![FacetBucket {
+                value: "core".to_string(),
+                count: 5,
+            }],
+            freshness: vec![FacetBucket {
+                value: "0-1d".to_string(),
+                count: 3,
+            }],
+            ..Default::default()
+        };
+        let suggestions = build_facet_suggestions(&filters, Some(&summary));
+        assert!(suggestions.is_empty());
     }
 
     fn fake_hit(layer: &str, categories: Vec<FileCategory>) -> NavHit {

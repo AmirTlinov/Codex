@@ -554,6 +554,7 @@ mod tests {
             atlas_hint: None,
             active_filters: None,
             context_banner: None,
+            facet_suggestions: Vec::new(),
         }
     }
 

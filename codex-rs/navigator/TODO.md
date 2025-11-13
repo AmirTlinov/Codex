@@ -51,6 +51,7 @@ This roadmap enumerates the concrete work required to turn Navigator into the pr
      - ✅ `codex navigator facet --from <query-id> --lang rust --tests` реализовано и подхватывается freeform `facet from=... lang=...`.
   4. **UX polish:** display active filters + suggestion chips to avoid cognitive overload.
      - ✅ CLI рисует filter-chips и автоматически переиспользует последний query_id, так что `codex navigator facet --lang rust` продолжает предыдущий поиск без ручного `--from`.
+     - ✅ SearchResponse теперь возвращает facet_suggestions, CLI печатает готовые команды (`--lang foo`, `--tests`, `--owner team`), поэтому сужать выдачу можно за один шаг без чтения facets блока.
 - **Success criteria:** users can drill from >10 k hits to <20 hits in ≤3 commands without retyping the query.
 
 ### 5. Index Health & Regression Monitoring

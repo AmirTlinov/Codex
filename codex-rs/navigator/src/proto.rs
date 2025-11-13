@@ -766,6 +766,8 @@ pub struct SearchResponse {
     pub active_filters: Option<ActiveFilters>,
     #[serde(default)]
     pub context_banner: Option<ContextBanner>,
+    #[serde(default)]
+    pub facet_suggestions: Vec<FacetSuggestion>,
 }
 
 impl SearchResponse {
@@ -782,8 +784,15 @@ impl SearchResponse {
             atlas_hint: None,
             active_filters: None,
             context_banner: None,
+            facet_suggestions: Vec::new(),
         }
     }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+pub struct FacetSuggestion {
+    pub label: String,
+    pub command: String,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Default)]
