@@ -1,8 +1,10 @@
 use crate::nav_history::FacetPresetStore;
+use crate::nav_history::HistoryEntryView;
 use crate::nav_history::HistoryHit;
 use crate::nav_history::HistoryItem;
 use crate::nav_history::HistoryReplay;
 use crate::nav_history::QueryHistoryStore;
+use crate::nav_history::SuggestionCommandView;
 use crate::nav_history::now_secs;
 use anyhow::Context;
 use anyhow::Result;
@@ -169,6 +171,10 @@ pub struct HistoryCommand {
     /// Limit the number of entries to display.
     #[arg(long = "limit", default_value_t = 10)]
     pub limit: u32,
+
+    /// Emit JSON with the recorded entries instead of the text view.
+    #[arg(long = "json", default_value_t = false)]
+    pub json: bool,
 }
 
 #[derive(Debug, Parser)]
@@ -756,17 +762,23 @@ pub async fn run_history(mut cmd: HistoryCommand) -> Result<()> {
         println!("no navigator history recorded yet");
         return Ok(());
     }
+    let now = crate::nav_history::now_secs();
+    if cmd.json {
+        let views = rows
+            .iter()
+            .enumerate()
+            .map(|(idx, item)| history_entry_view(item, idx, now))
+            .collect::<Vec<_>>();
+        println!("{}", serde_json::to_string_pretty(&views)?);
+        return Ok(());
+    }
     println!("recent navigator queries (index → query_id):");
     if rows.iter().any(|item| item.is_pinned) {
         println!("(*) indicates pinned entries");
     }
-    let now = crate::nav_history::now_secs();
     for (idx, item) in rows.into_iter().enumerate() {
-        print_history_entry(idx, &item, now, true);
+        print_history_entry(idx, &item, now, true, true);
     }
-    println!(
-        "hint: reuse a recorded filter stack via `codex navigator facet --history-stack <index>` or drop it with `--remove-history-stack <index>`"
-    );
     Ok(())
 }
 
@@ -822,7 +834,7 @@ pub async fn run_pin(mut cmd: PinCommand) -> Result<()> {
         println!("pinned navigator queries:");
         let now = crate::nav_history::now_secs();
         for (idx, item) in rows.into_iter().enumerate() {
-            print_history_entry(idx, &item, now, false);
+            print_history_entry(idx, &item, now, false, false);
         }
         return Ok(());
     }
@@ -1002,6 +1014,61 @@ fn format_history_filters(item: &HistoryItem) -> String {
     }
 }
 
+fn stack_command(index: usize) -> String {
+    format!("codex navigator facet --history-stack {index}")
+}
+
+fn clear_stack_command(index: usize) -> String {
+    format!("codex navigator facet --remove-history-stack {index}")
+}
+
+fn repeat_command(index: usize) -> String {
+    format!("codex navigator repeat --index {index}")
+}
+
+fn suggestion_command(index: usize) -> String {
+    format!("codex navigator facet --suggestion {index}")
+}
+
+fn history_entry_view(item: &HistoryItem, index: usize, now: u64) -> HistoryEntryView {
+    let filter_chips = item
+        .filters
+        .as_ref()
+        .map(|filters| {
+            active_filter_chips(filters)
+                .into_iter()
+                .map(|chip| chip.label)
+                .collect()
+        })
+        .unwrap_or_default();
+    let stack_command = item.filters.as_ref().map(|_| stack_command(index));
+    let clear_command = item.filters.as_ref().map(|_| clear_stack_command(index));
+    let repeat_command = item.replay.as_ref().map(|_| repeat_command(index));
+    let suggestion_commands = item
+        .facet_suggestions
+        .iter()
+        .enumerate()
+        .map(|(s_idx, suggestion)| SuggestionCommandView {
+            index: s_idx,
+            label: suggestion.label.clone(),
+            command: suggestion_command(s_idx),
+        })
+        .collect();
+    HistoryEntryView {
+        index,
+        query_id: item.query_id,
+        recorded_secs_ago: now.saturating_sub(item.recorded_at),
+        is_pinned: item.is_pinned,
+        filters: item.filters.clone(),
+        filter_chips,
+        hits: item.hits.clone(),
+        stack_command,
+        clear_command,
+        repeat_command,
+        suggestion_commands,
+    }
+}
+
 fn format_age(seconds: u64) -> String {
     if seconds < 60 {
         format!("{seconds}s ago")
@@ -1014,7 +1081,13 @@ fn format_age(seconds: u64) -> String {
     }
 }
 
-fn print_history_entry(idx: usize, item: &HistoryItem, now: u64, show_pin_marker: bool) {
+fn print_history_entry(
+    idx: usize,
+    item: &HistoryItem,
+    now: u64,
+    show_pin_marker: bool,
+    show_actions: bool,
+) {
     let chips = format_history_filters(item);
     let age = format_age(now.saturating_sub(item.recorded_at));
     let marker = if show_pin_marker && item.is_pinned {
@@ -1028,6 +1101,9 @@ fn print_history_entry(idx: usize, item: &HistoryItem, now: u64, show_pin_marker
     }
     for hit in item.hits.iter().take(3) {
         println!("       ↳ {}:{} {}", hit.path, hit.line, hit.preview);
+    }
+    if show_actions {
+        print_history_actions(idx, item);
     }
 }
 
@@ -1045,6 +1121,36 @@ fn summarize_history_query(item: &HistoryItem) -> Option<String> {
         owned.push('…');
     }
     Some(owned)
+}
+
+fn print_history_actions(idx: usize, item: &HistoryItem) {
+    if item.filters.is_some() {
+        println!("       stack: {}", stack_command(idx));
+        println!("       clear: {}", clear_stack_command(idx));
+    }
+    if item.replay.is_some() {
+        println!("       repeat: {}", repeat_command(idx));
+    }
+    if !item.facet_suggestions.is_empty() {
+        for (s_idx, suggestion) in item
+            .facet_suggestions
+            .iter()
+            .enumerate()
+            .take(MAX_HISTORY_SUGGESTION_COMMANDS)
+        {
+            println!(
+                "       suggestion[{s_idx}]: {} ({})",
+                suggestion_command(s_idx),
+                suggestion.label
+            );
+        }
+        if item.facet_suggestions.len() > MAX_HISTORY_SUGGESTION_COMMANDS {
+            println!(
+                "       … (+{} more suggestions)",
+                item.facet_suggestions.len() - MAX_HISTORY_SUGGESTION_COMMANDS
+            );
+        }
+    }
 }
 
 fn capture_history_hits(hits: &[NavHit]) -> Vec<HistoryHit> {
@@ -1992,6 +2098,7 @@ fn print_literal_stats(stats: &SearchStats) {
 
 const MAX_CLI_REFS: usize = 6;
 const TEXT_MAX_HITS: usize = 10;
+const MAX_HISTORY_SUGGESTION_COMMANDS: usize = 3;
 fn print_top_hits(hits: &[NavHit], refs_mode: RefsMode, show_refs: bool, focus_mode: FocusMode) {
     if hits.is_empty() {
         return;
@@ -3284,6 +3391,61 @@ mod tests {
         assert_eq!(lines.len(), 2);
         assert!(lines[1].contains("[0:lang=rust]"));
         assert!(lines[1].contains("[1:owner=alice]"));
+    }
+
+    #[test]
+    fn history_entry_view_includes_commands() {
+        let filters = proto::ActiveFilters {
+            languages: vec![proto::Language::Rust],
+            ..Default::default()
+        };
+        let suggestion = proto::FacetSuggestion {
+            label: "lang=rust".to_string(),
+            command: String::new(),
+            kind: FacetSuggestionKind::Language,
+            value: Some("rust".to_string()),
+        };
+        let item = HistoryItem {
+            query_id: Uuid::new_v4(),
+            recorded_at: 4,
+            filters: Some(filters),
+            hits: vec![HistoryHit {
+                path: "src/lib.rs".into(),
+                line: 42,
+                layer: None,
+                preview: "fn demo()".into(),
+            }],
+            is_pinned: false,
+            replay: Some(HistoryReplay::new(
+                NavigatorSearchArgs::default(),
+                OutputFormat::Json,
+                RefsMode::All,
+                false,
+                false,
+                FocusMode::Auto,
+            )),
+            facet_suggestions: vec![suggestion],
+        };
+        let view = history_entry_view(&item, 2, 10);
+        assert_eq!(
+            view.stack_command.as_deref(),
+            Some("codex navigator facet --history-stack 2")
+        );
+        assert_eq!(
+            view.clear_command.as_deref(),
+            Some("codex navigator facet --remove-history-stack 2")
+        );
+        assert_eq!(
+            view.repeat_command.as_deref(),
+            Some("codex navigator repeat --index 2")
+        );
+        assert_eq!(view.recorded_secs_ago, 6);
+        assert_eq!(view.hits.len(), 1);
+        assert_eq!(view.suggestion_commands.len(), 1);
+        assert_eq!(
+            view.suggestion_commands[0].command,
+            "codex navigator facet --suggestion 0"
+        );
     }
 
     #[test]

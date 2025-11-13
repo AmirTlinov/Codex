@@ -310,6 +310,35 @@ pub struct HistoryItem {
     pub facet_suggestions: Vec<FacetSuggestion>,
 }
 
+#[derive(Debug, Clone, Serialize)]
+pub struct HistoryEntryView {
+    pub index: usize,
+    pub query_id: QueryId,
+    pub recorded_secs_ago: u64,
+    pub is_pinned: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub filters: Option<ActiveFilters>,
+    #[serde(default)]
+    pub filter_chips: Vec<String>,
+    #[serde(default)]
+    pub hits: Vec<HistoryHit>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub stack_command: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub clear_command: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub repeat_command: Option<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub suggestion_commands: Vec<SuggestionCommandView>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct SuggestionCommandView {
+    pub index: usize,
+    pub label: String,
+    pub command: String,
+}
+
 impl HistoryItem {
     fn from_entry(entry: &QueryHistoryEntry, is_pinned: bool) -> Self {
         Self {
