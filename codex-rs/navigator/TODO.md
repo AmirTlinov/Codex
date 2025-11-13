@@ -8,8 +8,8 @@ This roadmap enumerates the concrete work required to turn Navigator into the pr
 - **Milestones:**
   1. ✅ **Streaming literal ingestion:** `IndexBuilder` now streams text payloads through a bounded queue and background workers that compress blocks off the hot path (fingerprint-guarded writes, automatic replay on rebuilds). Exit: background ingest keeps the index hot without blocking symbol updates—all literal storage is eventual and never stalls symbol ingest.
   2. ✅ **Search engine integration:** `text` profile теперь использует триграммные кандидаты + векторизованный memmem-поиск по сжатым блокам, отдаёт `match_count` и точные подсветки (спаны) прямо в `NavHit.context_snippet`, а CLI отображает их без дополнительного `rg`.
-  3. **Diff preview:** update `NavHit` to optionally include a `context_snippet` payload (line numbers + emphasis markers). Extend CLI renderer to show miniature diffs.
-  4. **Benchmark & autopick:** wire adaptive planner logic that chooses literal vs text index based on query entropy (<3 chars, regex-like, etc.).
+  3. ✅ **Diff preview:** `NavHit.context_snippet` теперь содержит diff-маркеры (+/ ) и подсветки, CLI форматирует мини-diff без шума.
+  4. ✅ **Benchmark & autopick:** Planner автоматически подбирает `text` профиль для regex/path/многословных запросов и явно документирует причину в hints, чтобы не переключаться на `rg`.
 - **Success criteria:** <300 ms P95 for queries over 100 k files; users never shell out to `rg` during internal dogfooding.
 
 ### 2. Project Atlas (Global Map & Domain Jump)

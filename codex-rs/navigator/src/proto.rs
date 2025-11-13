@@ -305,6 +305,8 @@ pub struct TextSnippetLine {
     pub emphasis: bool,
     #[serde(default)]
     pub highlights: Vec<TextHighlight>,
+    #[serde(default)]
+    pub diff_marker: Option<char>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Default)]

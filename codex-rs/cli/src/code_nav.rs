@@ -2074,7 +2074,10 @@ fn render_text_references(references: &proto::NavReferences, mode: RefsMode) {
 fn format_snippet_lines(snippet: &proto::TextSnippet) -> Vec<String> {
     let mut rendered = Vec::new();
     for line in &snippet.lines {
-        let marker = if line.emphasis { '>' } else { ' ' };
+        let marker = line
+            .diff_marker
+            .or_else(|| if line.emphasis { Some('>') } else { None })
+            .unwrap_or(' ');
         let content = render_cli_highlights(&line.content, &line.highlights);
         rendered.push(format!("{:>4}{marker} {}", line.number, content));
     }

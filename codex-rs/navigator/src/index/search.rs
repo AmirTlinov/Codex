@@ -1066,6 +1066,7 @@ fn literal_snippet(
         } else {
             Vec::new()
         };
+        let diff_marker = if emphasis { Some('+') } else { Some(' ') };
         let display = if emphasis {
             render_highlighted_content(content, &highlights)
         } else {
@@ -1081,6 +1082,7 @@ fn literal_snippet(
             content: content.to_string(),
             emphasis,
             highlights,
+            diff_marker,
         });
         rendered.push_str(&prefix);
         if rendered.len() > MAX_LITERAL_PREVIEW {

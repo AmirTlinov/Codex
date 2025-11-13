@@ -43,8 +43,8 @@ agents.
    whether “no hits” means “still ingesting” without running `rg`.
 5. Text profile (`SearchProfile::Text`) выполняет триграммный отбор и векторизованный
    `memmem`-скан по блочному текстовому снапшоту: Navigator возвращает `match_count`
-   и точные подсветки (спаны) прямо в `NavHit.context_snippet`, а CLI отображает их без
-   отдельного `rg`.
+   и дифф-подсветки (спаны + diff-маркеры) прямо в `NavHit.context_snippet`, а CLI
+   рисует мини-diff без отдельного `rg`.
 6. References are emitted as two buckets (`definitions`/`usages`) with short previews, so
    UIs can display relevant anchors without re-sorting large arrays.
 7. The daemon automatically respawns after crashes or metadata corruption and wipes any
@@ -90,6 +90,8 @@ agents.
 
 - When integrating with the CLI/TUI, display the streamed diagnostics block verbatim; it is
   the single source of truth for freshness, coverage, and rebuild progress.
+- Planner автоматически выбирает `text` профиль для regex/path/многословных запросов и добавляет
+  в hints причину автопереключения; короткие символические запросы остаются на символическом поиске.
 - `codex nav --format text` prints a compact summary (diagnostics, stats, top hits with ids)
   without the large JSON payload, which keeps agent transcripts lightweight when you only
   need the highlights.

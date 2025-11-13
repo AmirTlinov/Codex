@@ -275,11 +275,13 @@ pub fn plan_search_request(
     };
 
     if !has_explicit_profile
-        && should_auto_enable_text_profile(args.query.as_deref(), &filters)
         && !selected_profiles.contains(&SearchProfile::Text)
+        && let Some(reason) = text_autopick_reason(args.query.as_deref(), &filters)
     {
-        args.hints
-            .push("auto-selected text profile for literal query".to_string());
+        args.hints.push(format!(
+            "auto-selected text profile ({})",
+            reason.description()
+        ));
         selected_profiles.push(SearchProfile::Text);
     }
 
@@ -648,36 +650,84 @@ fn infer_profiles(
     profiles
 }
 
-fn should_auto_enable_text_profile(query: Option<&str>, filters: &SearchFilters) -> bool {
-    let Some(raw) = query else {
-        return false;
-    };
+fn text_autopick_reason(
+    query: Option<&str>,
+    filters: &SearchFilters,
+) -> Option<TextAutopickReason> {
+    let raw = query?;
     let trimmed = raw.trim();
-    if trimmed.is_empty()
-        || filters.symbol_exact.is_some()
-        || !filters.kinds.is_empty()
-        || looks_like_symbol_query(trimmed)
+    if trimmed.is_empty() || filters.symbol_exact.is_some() || !filters.kinds.is_empty() {
+        return None;
+    }
+    if trimmed.len() <= 2
+        && trimmed
+            .chars()
+            .all(|ch| ch.is_ascii_alphanumeric() || ch == '_' || ch == '-')
     {
-        return false;
+        return None;
     }
-    if trimmed.len() <= 3 {
-        return true;
+    if contains_regex_tokens(trimmed) {
+        return Some(TextAutopickReason::RegexLike);
     }
-    let word_count = trimmed
-        .split_whitespace()
-        .filter(|token| !token.is_empty())
-        .count();
-    if word_count >= 2 {
-        return true;
+    if looks_like_symbol_query(trimmed) {
+        return None;
     }
-    const LITERAL_CHARS: &[char] = &[
-        '=', '"', '\'', '/', '\\', '.', ':', ';', '{', '}', '[', ']', '(', ')', '<', '>', '|', '&',
-        '%', '$', '#', '@', '-', '+', ',',
-    ];
+    if trimmed.split_whitespace().filter(|t| !t.is_empty()).count() >= 2 {
+        return Some(TextAutopickReason::MultiToken);
+    }
+    if contains_path_separators(trimmed) {
+        return Some(TextAutopickReason::PathLiteral);
+    }
     if trimmed.chars().any(|ch| LITERAL_CHARS.contains(&ch)) {
-        return true;
+        return Some(TextAutopickReason::PunctuationLiteral);
     }
-    false
+    if filters
+        .path_globs
+        .iter()
+        .chain(filters.file_substrings.iter())
+        .any(|token| contains_path_separators(token))
+    {
+        return Some(TextAutopickReason::FilterPathScope);
+    }
+    None
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum TextAutopickReason {
+    MultiToken,
+    PathLiteral,
+    PunctuationLiteral,
+    FilterPathScope,
+    RegexLike,
+}
+
+impl TextAutopickReason {
+    fn description(self) -> &'static str {
+        match self {
+            TextAutopickReason::MultiToken => "multi-token literal",
+            TextAutopickReason::PathLiteral => "path-like literal",
+            TextAutopickReason::PunctuationLiteral => "punctuation-heavy literal",
+            TextAutopickReason::FilterPathScope => "path-scoped filters",
+            TextAutopickReason::RegexLike => "regex-like query",
+        }
+    }
+}
+
+const LITERAL_CHARS: &[char] = &[
+    '=', '"', '\'', '/', '\\', '.', ':', ';', '{', '}', '[', ']', '(', ')', '<', '>', '|', '&',
+    '%', '$', '#', '@', '-', '+', ',', '*', '?',
+];
+
+fn contains_regex_tokens(query: &str) -> bool {
+    query.contains('[')
+        || query.contains(']')
+        || query.contains('*')
+        || query.contains('?')
+        || query.contains('|')
+}
+
+fn contains_path_separators(input: &str) -> bool {
+    input.contains('/') || input.contains('\\') || input.contains("::") || input.contains('.')
 }
 
 fn query_mentions_tests(query: &str) -> bool {
@@ -1011,6 +1061,39 @@ mod tests {
                 .iter()
                 .any(|profile| matches!(profile, SearchProfile::Text)),
             "text profile should not be injected"
+        );
+    }
+
+    #[test]
+    fn short_symbol_query_does_not_enable_text_profile() {
+        let req = plan_search_request(NavigatorSearchArgs {
+            query: Some("id".into()),
+            ..Default::default()
+        })
+        .expect("short query");
+        assert!(
+            !req.text_mode,
+            "two-letter symbolic queries should stay on symbol search"
+        );
+        assert!(
+            !req.profiles.contains(&SearchProfile::Text),
+            "text profile should not be auto-selected"
+        );
+    }
+
+    #[test]
+    fn regex_like_query_prefers_text_profile() {
+        let req = plan_search_request(NavigatorSearchArgs {
+            query: Some("[A-Z]+::foo()".into()),
+            ..Default::default()
+        })
+        .expect("regex query");
+        assert!(req.text_mode, "regex-like query should use text search");
+        assert!(
+            req.hints
+                .iter()
+                .any(|hint| hint.contains("regex-like query")),
+            "hint should explain reasoning"
         );
     }
 }
