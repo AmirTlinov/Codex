@@ -114,6 +114,7 @@ pub(crate) struct ChatComposer {
     footer_hint_override: Option<Vec<(String, String)>>,
     context_window_percent: Option<i64>,
     navigator_indicator: Option<NavigatorFooterIndicator>,
+    navigator_activity: Option<String>,
 }
 
 /// Popup state – at most one can be visible at any time.
@@ -158,6 +159,7 @@ impl ChatComposer {
             footer_hint_override: None,
             context_window_percent: None,
             navigator_indicator: None,
+            navigator_activity: None,
         };
         // Apply configuration via the setter to keep side-effects centralized.
         this.set_disable_paste_burst(disable_paste_burst);
@@ -205,6 +207,10 @@ impl ChatComposer {
 
     pub(crate) fn set_navigator_status(&mut self, indicator: Option<NavigatorFooterIndicator>) {
         self.navigator_indicator = indicator;
+    }
+
+    pub(crate) fn set_navigator_activity(&mut self, activity: Option<String>) {
+        self.navigator_activity = activity;
     }
 
     /// Integrate an asynchronous response to an on-demand history lookup. If
@@ -1400,6 +1406,7 @@ impl ChatComposer {
             is_task_running: self.is_task_running,
             context_window_percent: self.context_window_percent,
             navigator_status: self.navigator_indicator.clone(),
+            navigator_activity: self.navigator_activity.clone(),
         }
     }
 

@@ -24,6 +24,7 @@ pub(crate) struct FooterProps {
     pub(crate) is_task_running: bool,
     pub(crate) context_window_percent: Option<i64>,
     pub(crate) navigator_status: Option<NavigatorFooterIndicator>,
+    pub(crate) navigator_activity: Option<String>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -90,6 +91,7 @@ fn footer_lines(props: &FooterProps) -> Vec<Line<'static>> {
             let mut line = context_window_line(
                 props.context_window_percent,
                 props.navigator_status.as_ref(),
+                props.navigator_activity.as_deref(),
             );
             line.push_span(" · ".dim());
             line.extend(vec![
@@ -106,6 +108,7 @@ fn footer_lines(props: &FooterProps) -> Vec<Line<'static>> {
         FooterMode::ContextOnly => vec![context_window_line(
             props.context_window_percent,
             props.navigator_status.as_ref(),
+            props.navigator_activity.as_deref(),
         )],
     }
 }
@@ -236,11 +239,17 @@ fn build_columns(entries: Vec<Line<'static>>) -> Vec<Line<'static>> {
 fn context_window_line(
     percent: Option<i64>,
     indicator: Option<&NavigatorFooterIndicator>,
+    activity: Option<&str>,
 ) -> Line<'static> {
     let percent = percent.unwrap_or(100).clamp(0, 100);
     let mut line = Line::from(vec![Span::from(format!("{percent}% context left")).dim()]);
     if let Some(status) = indicator {
         append_navigator_status(&mut line, status);
+    }
+    if let Some(task) = activity {
+        let trimmed = truncate_text(task, 60);
+        line.push_span(" · ".dim());
+        line.push_span(format!("Navigator: {trimmed}").dim());
     }
     line
 }
@@ -478,6 +487,7 @@ mod tests {
                 is_task_running: false,
                 context_window_percent: None,
                 navigator_status: None,
+                navigator_activity: None,
             },
         );
 
@@ -490,6 +500,7 @@ mod tests {
                 is_task_running: false,
                 context_window_percent: None,
                 navigator_status: None,
+                navigator_activity: None,
             },
         );
 
@@ -502,6 +513,7 @@ mod tests {
                 is_task_running: false,
                 context_window_percent: None,
                 navigator_status: None,
+                navigator_activity: None,
             },
         );
 
@@ -514,6 +526,7 @@ mod tests {
                 is_task_running: true,
                 context_window_percent: None,
                 navigator_status: None,
+                navigator_activity: None,
             },
         );
 
@@ -526,6 +539,7 @@ mod tests {
                 is_task_running: false,
                 context_window_percent: None,
                 navigator_status: None,
+                navigator_activity: None,
             },
         );
 
@@ -538,6 +552,7 @@ mod tests {
                 is_task_running: false,
                 context_window_percent: None,
                 navigator_status: None,
+                navigator_activity: None,
             },
         );
 
@@ -550,6 +565,7 @@ mod tests {
                 is_task_running: true,
                 context_window_percent: Some(72),
                 navigator_status: None,
+                navigator_activity: Some("search parser bug".into()),
             },
         );
     }

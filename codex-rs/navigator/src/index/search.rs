@@ -8,6 +8,7 @@ use crate::index::personal::PersonalMatch;
 use crate::index::personal::PersonalSignals;
 use crate::index::references;
 use crate::proto::CoverageDiagnostics;
+use crate::proto::CoverageReason;
 use crate::proto::FacetBucket;
 use crate::proto::FacetSummary;
 use crate::proto::FileCategory;
@@ -800,13 +801,23 @@ fn literal_reason_labels(match_info: &PersonalMatch) -> Vec<String> {
 pub struct CoverageContext {
     pending: HashSet<String>,
     errors: HashSet<String>,
+    skipped: HashMap<String, CoverageReason>,
 }
 
 impl CoverageContext {
     pub fn from_diagnostics(diag: &CoverageDiagnostics) -> Self {
         let pending = diag.pending.iter().map(|gap| gap.path.clone()).collect();
         let errors = diag.errors.iter().map(|gap| gap.path.clone()).collect();
-        Self { pending, errors }
+        let skipped = diag
+            .skipped
+            .iter()
+            .map(|gap| (gap.path.clone(), gap.reason.clone()))
+            .collect();
+        Self {
+            pending,
+            errors,
+            skipped,
+        }
     }
 
     fn analyze(&self, path: &str) -> Option<CoverageMatch> {
@@ -815,29 +826,44 @@ impl CoverageContext {
         } else if self.pending.contains(path) {
             Some(CoverageMatch::Pending)
         } else {
-            None
+            self.skipped
+                .get(path)
+                .map(|reason| CoverageMatch::Skipped(reason.clone()))
         }
     }
 }
 
-#[derive(Clone, Copy)]
+#[derive(Debug, Clone)]
 enum CoverageMatch {
     Pending,
     Error,
+    Skipped(CoverageReason),
 }
 
 impl CoverageMatch {
-    fn description(self) -> &'static str {
+    fn description(&self) -> String {
         match self {
-            CoverageMatch::Pending => "coverage pending",
-            CoverageMatch::Error => "coverage error",
+            CoverageMatch::Pending => "coverage pending".to_string(),
+            CoverageMatch::Error => "coverage error".to_string(),
+            CoverageMatch::Skipped(reason) => {
+                format!("coverage skipped ({reason})")
+            }
         }
     }
 
-    fn bonus(self) -> f32 {
+    fn bonus(&self) -> f32 {
         match self {
             CoverageMatch::Pending => 35.0,
             CoverageMatch::Error => 60.0,
+            CoverageMatch::Skipped(reason) => match reason {
+                CoverageReason::Missing => 28.0,
+                CoverageReason::ReadError { .. } => 24.0,
+                CoverageReason::Oversize { .. } => 18.0,
+                CoverageReason::NonUtf8 => 12.0,
+                CoverageReason::NoSymbols => 10.0,
+                CoverageReason::Ignored => 6.0,
+                CoverageReason::PendingIngest => 20.0,
+            },
         }
     }
 }
@@ -930,7 +956,7 @@ fn build_hit(
     let mut score_reasons = score_reason_labels(symbol, &breakdown);
     if let Some(label) = ranking.coverage.analyze(&symbol.path) {
         final_score += label.bonus();
-        score_reasons.push(label.description().to_string());
+        score_reasons.push(label.description());
     }
     if score_reasons.len() > 4 {
         score_reasons.truncate(4);
@@ -1284,7 +1310,7 @@ fn build_literal_hit(
     let mut literal_score = 300.0 + personal_match.bonus;
     if let Some(label) = ranking.coverage.analyze(path) {
         literal_score += label.bonus();
-        score_reasons.push(label.description().to_string());
+        score_reasons.push(label.description());
     }
     if score_reasons.len() > 4 {
         score_reasons.truncate(4);
@@ -1665,6 +1691,9 @@ mod tests {
     use crate::index::builder::IndexBuilder;
     use crate::index::codeowners::OwnerResolver;
     use crate::index::filter::PathFilter;
+    use crate::proto::CoverageDiagnostics;
+    use crate::proto::CoverageGap;
+    use crate::proto::CoverageReason;
     use crate::proto::FileCategory;
     use crate::proto::SearchFilters;
     use crate::proto::SearchRequest;
@@ -2435,6 +2464,68 @@ tail
                 .iter()
                 .any(|reason| reason.contains("literal")),
             "expected literal reason: {:?}",
+            hit.score_reasons
+        );
+    }
+
+    #[test]
+    fn coverage_context_tracks_skipped_paths() {
+        let diag = CoverageDiagnostics {
+            skipped: vec![CoverageGap {
+                path: "src/lib.rs".to_string(),
+                reason: CoverageReason::NonUtf8,
+            }],
+            ..CoverageDiagnostics::default()
+        };
+        let ctx = CoverageContext::from_diagnostics(&diag);
+        match ctx.analyze("src/lib.rs") {
+            Some(CoverageMatch::Skipped(reason)) => {
+                assert!(matches!(reason, CoverageReason::NonUtf8));
+            }
+            other => panic!("unexpected coverage match: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn coverage_skipped_reason_influences_score_reasons() {
+        let temp = tempdir().unwrap();
+        let root = temp.path();
+        std::fs::create_dir_all(root.join("src")).unwrap();
+        std::fs::write(root.join("src/lib.rs"), "pub fn skipped_reason() {}").unwrap();
+        let filter = Arc::new(PathFilter::new(root).unwrap());
+        let builder = IndexBuilder::new(
+            root,
+            HashSet::new(),
+            HashMap::new(),
+            HashMap::new(),
+            OwnerResolver::default(),
+            filter,
+            None,
+        );
+        let snapshot = builder.build().unwrap().snapshot;
+        let cache = QueryCache::new(root.join("cache"));
+        let diag = CoverageDiagnostics {
+            skipped: vec![CoverageGap {
+                path: "src/lib.rs".to_string(),
+                reason: CoverageReason::Missing,
+            }],
+            ..CoverageDiagnostics::default()
+        };
+        let coverage = CoverageContext::from_diagnostics(&diag);
+        let request = SearchRequest {
+            query: Some("skipped_reason".to_string()),
+            limit: 5,
+            ..Default::default()
+        };
+        let result =
+            run_search(&snapshot, &request, &cache, root, 0, &coverage).expect("search executes");
+        assert_eq!(result.hits.len(), 1);
+        let hit = &result.hits[0];
+        assert!(
+            hit.score_reasons
+                .iter()
+                .any(|reason| reason.contains("coverage skipped")),
+            "expected coverage skipped reason: {:?}",
             hit.score_reasons
         );
     }

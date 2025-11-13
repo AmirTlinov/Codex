@@ -789,10 +789,22 @@ impl SearchResponse {
     }
 }
 
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum FacetSuggestionKind {
+    Language,
+    Category,
+    Owner,
+    Recent,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 pub struct FacetSuggestion {
     pub label: String,
     pub command: String,
+    pub kind: FacetSuggestionKind,
+    #[serde(default)]
+    pub value: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Default)]

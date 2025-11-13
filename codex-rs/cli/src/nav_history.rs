@@ -6,6 +6,7 @@ use anyhow::Result;
 use anyhow::anyhow;
 use codex_navigator::planner::NavigatorSearchArgs;
 use codex_navigator::proto::ActiveFilters;
+use codex_navigator::proto::FacetSuggestion;
 use codex_navigator::proto::InputFormat;
 use codex_navigator::proto::QueryId;
 use codex_navigator::proto::SearchProfile;
@@ -73,6 +74,7 @@ impl QueryHistoryStore {
             filters: response.active_filters.clone(),
             hits,
             replay: stored_replay,
+            facet_suggestions: response.facet_suggestions.clone(),
         };
         history
             .recent
@@ -293,6 +295,8 @@ struct QueryHistoryEntry {
     hits: Vec<HistoryHit>,
     #[serde(default)]
     replay: Option<RecordedQuery>,
+    #[serde(default)]
+    facet_suggestions: Vec<FacetSuggestion>,
 }
 
 #[derive(Debug, Clone)]
@@ -303,6 +307,7 @@ pub struct HistoryItem {
     pub hits: Vec<HistoryHit>,
     pub is_pinned: bool,
     pub replay: Option<HistoryReplay>,
+    pub facet_suggestions: Vec<FacetSuggestion>,
 }
 
 impl HistoryItem {
@@ -314,6 +319,7 @@ impl HistoryItem {
             hits: entry.hits.clone(),
             is_pinned,
             replay: entry.replay.clone().map(RecordedQuery::into_replay),
+            facet_suggestions: entry.facet_suggestions.clone(),
         }
     }
 }
@@ -525,6 +531,8 @@ fn is_filters_empty(filters: &ActiveFilters) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use codex_navigator::proto::FacetSuggestion;
+    use codex_navigator::proto::FacetSuggestionKind;
     use codex_navigator::proto::IndexState;
     use codex_navigator::proto::IndexStatus;
     use codex_navigator::proto::Language;
@@ -595,6 +603,12 @@ mod tests {
             layer: Some("core".to_string()),
             preview: "fn demo()".to_string(),
         }];
+        first.facet_suggestions = vec![FacetSuggestion {
+            label: "lang=rust".to_string(),
+            command: "codex navigator facet --lang rust".to_string(),
+            kind: FacetSuggestionKind::Language,
+            value: Some("rust".to_string()),
+        }];
         store.record_entry(&first, Some(&replay), hits).unwrap();
         let second = sample_response(QueryId::new_v4());
         store.record_entry(&second, None, Vec::new()).unwrap();
@@ -605,6 +619,7 @@ mod tests {
         assert!(rows[1].filters.is_some());
         assert!(rows[0].replay.is_none());
         assert_eq!(rows[1].hits.len(), 1);
+        assert_eq!(rows[1].facet_suggestions.len(), 1);
         assert_eq!(
             rows[1].replay.as_ref().expect("replay metadata").focus_mode,
             FocusMode::Docs

@@ -48,6 +48,7 @@ use crate::proto::CoverageReason;
 use crate::proto::ErrorPayload;
 use crate::proto::FacetBucket;
 use crate::proto::FacetSuggestion;
+use crate::proto::FacetSuggestionKind;
 use crate::proto::FacetSummary;
 use crate::proto::FallbackHit;
 use crate::proto::FileCategory;
@@ -1417,6 +1418,8 @@ fn build_facet_suggestions(
         suggestions.push(FacetSuggestion {
             label: format!("lang={}", bucket.value),
             command: format!("codex navigator facet --lang {}", bucket.value),
+            kind: FacetSuggestionKind::Language,
+            value: Some(bucket.value.clone()),
         });
     }
     if filters.categories.is_empty()
@@ -1426,6 +1429,8 @@ fn build_facet_suggestions(
         suggestions.push(FacetSuggestion {
             label: format!("category={}", bucket.value),
             command: format!("codex navigator facet {flag}"),
+            kind: FacetSuggestionKind::Category,
+            value: Some(bucket.value.clone()),
         });
     }
     if filters.owners.is_empty()
@@ -1434,12 +1439,16 @@ fn build_facet_suggestions(
         suggestions.push(FacetSuggestion {
             label: format!("owner={}", bucket.value),
             command: format!("codex navigator facet --owner {}", bucket.value),
+            kind: FacetSuggestionKind::Owner,
+            value: Some(bucket.value.clone()),
         });
     }
     if !filters.recent_only && summary.freshness.iter().any(is_fresh_bucket) {
         suggestions.push(FacetSuggestion {
             label: "recent-only".to_string(),
             command: "codex navigator facet --recent".to_string(),
+            kind: FacetSuggestionKind::Recent,
+            value: None,
         });
     }
     suggestions.truncate(3);
@@ -1838,17 +1847,15 @@ mod tests {
         };
         let suggestions = build_facet_suggestions(&filters, Some(&summary));
         assert_eq!(suggestions.len(), 3);
-        assert!(
-            suggestions
-                .iter()
-                .any(|s| s.command.contains("--lang rust"))
-        );
-        assert!(suggestions.iter().any(|s| s.command.contains("--tests")));
-        assert!(
-            suggestions
-                .iter()
-                .any(|s| s.command.contains("--owner core"))
-        );
+        assert!(suggestions.iter().any(|s| {
+            s.kind == FacetSuggestionKind::Language && s.value.as_deref() == Some("rust")
+        }));
+        assert!(suggestions.iter().any(|s| {
+            s.kind == FacetSuggestionKind::Category && s.value.as_deref() == Some("tests")
+        }));
+        assert!(suggestions.iter().any(|s| {
+            s.kind == FacetSuggestionKind::Owner && s.value.as_deref() == Some("core")
+        }));
     }
 
     #[test]

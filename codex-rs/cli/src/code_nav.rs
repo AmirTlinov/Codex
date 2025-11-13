@@ -15,6 +15,8 @@ use codex_common::CliConfigOverrides;
 use codex_navigator::AtlasFocus;
 use codex_navigator::DaemonOptions;
 use codex_navigator::atlas_focus;
+use codex_navigator::auto_facet::AutoFacetConfig;
+use codex_navigator::auto_facet::{self};
 use codex_navigator::client::ClientOptions;
 use codex_navigator::client::DaemonSpawn;
 use codex_navigator::client::NavigatorClient;
@@ -22,6 +24,7 @@ use codex_navigator::client::SearchStreamOutcome;
 use codex_navigator::find_atlas_node;
 use codex_navigator::plan_search_request;
 use codex_navigator::planner::NavigatorSearchArgs;
+use codex_navigator::planner::apply_facet_suggestion;
 use codex_navigator::proto::AtlasNode;
 use codex_navigator::proto::AtlasRequest;
 use codex_navigator::proto::ContextBanner;
@@ -487,6 +490,10 @@ pub struct FacetCommand {
     #[arg(long = "list-presets", default_value_t = false)]
     pub list_presets: bool,
 
+    /// Apply a facet suggestion captured in history (0 = first suggestion).
+    #[arg(long = "suggestion")]
+    pub suggestion: Option<usize>,
+
     /// Include references in the output.
     #[arg(long = "with-refs")]
     pub with_refs: bool,
@@ -550,6 +557,7 @@ pub struct NavigatorCli {
 }
 
 #[derive(Debug, clap::Subcommand)]
+#[allow(clippy::large_enum_variant)]
 pub enum NavigatorSubcommand {
     Doctor(DoctorCommand),
     Atlas(AtlasCommand),
@@ -565,29 +573,32 @@ pub enum NavigatorSubcommand {
 pub async fn run_nav(cmd: NavCommand) -> Result<()> {
     let client = build_client(cmd.project_root.clone()).await?;
     let args = nav_command_to_search_args(&cmd);
+    let show_refs = cmd.with_refs || cmd.refs_mode != RefsMode::All;
     let recording = HistoryReplay::new(
         args.clone(),
         cmd.output_format,
         cmd.refs_mode,
-        cmd.with_refs || cmd.refs_mode != RefsMode::All,
+        show_refs,
         cmd.diagnostics_only,
         cmd.focus,
     );
-    let request = plan_search_request(args)?;
+    let request = plan_search_request(args.clone())?;
+    let request_snapshot = request.clone();
     if std::env::var("NAVIGATOR_DEBUG_REQUEST").is_ok() {
         eprintln!("navigator.nav request: {request:#?}");
     }
-    let _ = execute_search(
+    let outcome = execute_search(
         &client,
         request,
         cmd.output_format,
         cmd.refs_mode,
-        cmd.with_refs || cmd.refs_mode != RefsMode::All,
+        show_refs,
         cmd.diagnostics_only,
         Some(recording),
         cmd.focus,
     )
     .await?;
+    maybe_run_auto_facet(&client, &cmd, show_refs, &outcome, &request_snapshot).await?;
     Ok(())
 }
 
@@ -628,8 +639,11 @@ pub async fn run_facet(cmd: FacetCommand) -> Result<()> {
     if cmd.undo && cmd.from.is_none() && history_index == 0 {
         history_index = 1;
     }
+    if cmd.suggestion.is_some() && used_explicit {
+        return Err(anyhow!("--suggestion requires using history; omit --from"));
+    }
     let history_item = if let Some(id) = cmd.from {
-        (id, None)
+        (id, None, Vec::new())
     } else {
         let item = history
             .entry_at(history_index)
@@ -637,9 +651,9 @@ pub async fn run_facet(cmd: FacetCommand) -> Result<()> {
             .ok_or_else(|| {
                 anyhow!("history index {history_index} not available; run `codex navigator` first")
             })?;
-        (item.query_id, item.filters)
+        (item.query_id, item.filters, item.facet_suggestions)
     };
-    let (base_query, prior_filters) = history_item;
+    let (base_query, prior_filters, history_suggestions) = history_item;
     let mut preset_filters = Vec::new();
     for name in &cmd.presets {
         let preset = preset_store
@@ -647,8 +661,14 @@ pub async fn run_facet(cmd: FacetCommand) -> Result<()> {
             .ok_or_else(|| anyhow!("facet preset '{name}' not found; run --list-presets"))?;
         preset_filters.push((name.clone(), preset.filters));
     }
-    let mut args =
-        facet_command_to_search_args(&cmd, base_query, prior_filters.as_ref(), &preset_filters)?;
+    let mut args = facet_command_to_search_args(
+        &cmd,
+        base_query,
+        prior_filters.as_ref(),
+        &preset_filters,
+        &history_suggestions,
+        cmd.suggestion,
+    )?;
     if !used_explicit {
         args.hints.push(format!(
             "using history[{history_index}] query id {base_query}"
@@ -1512,6 +1532,84 @@ async fn execute_search(
     Ok(outcome)
 }
 
+async fn maybe_run_auto_facet(
+    client: &NavigatorClient,
+    cmd: &NavCommand,
+    show_refs: bool,
+    outcome: &SearchStreamOutcome,
+    request_snapshot: &proto::SearchRequest,
+) -> Result<()> {
+    if !auto_facet_enabled()
+        || cmd.diagnostics_only
+        || matches!(cmd.output_format, OutputFormat::Ndjson)
+    {
+        return Ok(());
+    }
+    let mut current_request = request_snapshot.clone();
+    let mut current_outcome = outcome.clone();
+    loop {
+        let decision = match auto_facet::plan_auto_facet(
+            &current_request,
+            &current_outcome.response,
+            &AutoFacetConfig::default(),
+        ) {
+            Ok(Some(decision)) => decision,
+            Ok(None) => break,
+            Err(err) => {
+                eprintln!("[navigator] auto facet skipped: {}", err.message());
+                break;
+            }
+        };
+        let hits = current_outcome.response.hits.len();
+        if let Some(stats) = current_outcome.response.stats.as_ref() {
+            eprintln!(
+                "[navigator] auto facet: {} (hits={}, candidates={})",
+                decision.suggestion.label, hits, stats.candidate_size
+            );
+        } else {
+            eprintln!(
+                "[navigator] auto facet: {} (hits={hits})",
+                decision.suggestion.label
+            );
+        }
+        let replay_args = decision.args.clone();
+        let recording = HistoryReplay::new(
+            replay_args.clone(),
+            cmd.output_format,
+            cmd.refs_mode,
+            show_refs,
+            cmd.diagnostics_only,
+            cmd.focus,
+        );
+        let request = plan_search_request(replay_args)?;
+        let request_for_planner = request.clone();
+        let next_outcome = execute_search(
+            client,
+            request,
+            cmd.output_format,
+            cmd.refs_mode,
+            show_refs,
+            cmd.diagnostics_only,
+            Some(recording),
+            cmd.focus,
+        )
+        .await?;
+        current_request = request_for_planner;
+        current_outcome = next_outcome;
+    }
+    Ok(())
+}
+
+fn auto_facet_enabled() -> bool {
+    match env::var("NAVIGATOR_AUTO_FACET") {
+        Ok(value) => {
+            let lowered = value.trim().to_ascii_lowercase();
+            !matches!(lowered.as_str(), "0" | "false" | "off")
+        }
+        Err(_) => true,
+    }
+}
+
 fn nav_command_to_search_args(cmd: &NavCommand) -> NavigatorSearchArgs {
     let mut args = NavigatorSearchArgs::default();
     args.query = if cmd.query.is_empty() {
@@ -1560,6 +1658,8 @@ fn facet_command_to_search_args(
     base_query: Uuid,
     base_filters: Option<&proto::ActiveFilters>,
     preset_filters: &[(String, proto::ActiveFilters)],
+    history_suggestions: &[proto::FacetSuggestion],
+    suggestion_index: Option<usize>,
 ) -> Result<NavigatorSearchArgs> {
     let mut args = NavigatorSearchArgs::default();
     args.refine = Some(base_query.to_string());
@@ -1635,6 +1735,12 @@ fn facet_command_to_search_args(
     if cmd.no_recent {
         args.disable_recent_only = true;
     }
+    if let Some(index) = suggestion_index {
+        let suggestion = history_suggestions.get(index).ok_or_else(|| {
+            anyhow!("facet suggestion index {index} not available; run `codex navigator` first")
+        })?;
+        apply_history_suggestion(&mut args, suggestion)?;
+    }
     if cmd.with_refs || cmd.refs_mode != RefsMode::All {
         args.with_refs = Some(true);
     }
@@ -1674,6 +1780,16 @@ fn apply_active_filters_to_args(args: &mut NavigatorSearchArgs, filters: &proto:
     if filters.recent_only {
         args.recent_only = Some(true);
     }
+}
+
+fn apply_history_suggestion(
+    args: &mut NavigatorSearchArgs,
+    suggestion: &proto::FacetSuggestion,
+) -> Result<()> {
+    apply_facet_suggestion(args, suggestion).map_err(|err| anyhow!(err.message().to_string()))?;
+    args.hints
+        .push(format!("applied suggestion {}", suggestion.label));
+    Ok(())
 }
 
 async fn build_client(project_root: Option<PathBuf>) -> Result<NavigatorClient> {
@@ -1766,7 +1882,6 @@ fn print_literal_stats(stats: &SearchStats) {
 
 const MAX_CLI_REFS: usize = 6;
 const TEXT_MAX_HITS: usize = 10;
-
 fn print_top_hits(hits: &[NavHit], refs_mode: RefsMode, show_refs: bool, focus_mode: FocusMode) {
     if hits.is_empty() {
         return;
@@ -2970,6 +3085,7 @@ fn print_json<T: serde::Serialize>(value: &T) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use codex_navigator::proto::FacetSuggestionKind;
 
     fn sample_nav_command() -> NavCommand {
         NavCommand {
@@ -3058,6 +3174,33 @@ mod tests {
         assert_eq!(lines.len(), 2);
         assert!(lines[1].contains("[0:lang=rust]"));
         assert!(lines[1].contains("[1:owner=alice]"));
+    }
+
+    #[test]
+    fn apply_history_suggestion_language_pushes_filter() {
+        let mut args = NavigatorSearchArgs::default();
+        let suggestion = proto::FacetSuggestion {
+            label: "lang=rust".to_string(),
+            command: String::new(),
+            kind: FacetSuggestionKind::Language,
+            value: Some("rust".to_string()),
+        };
+        apply_history_suggestion(&mut args, &suggestion).unwrap();
+        assert_eq!(args.languages, vec!["rust".to_string()]);
+        assert!(args.hints.iter().any(|hint| hint.contains("lang=rust")));
+    }
+
+    #[test]
+    fn apply_history_suggestion_category_sets_flag() {
+        let mut args = NavigatorSearchArgs::default();
+        let suggestion = proto::FacetSuggestion {
+            label: "category=tests".to_string(),
+            command: String::new(),
+            kind: FacetSuggestionKind::Category,
+            value: Some("tests".to_string()),
+        };
+        apply_history_suggestion(&mut args, &suggestion).unwrap();
+        assert_eq!(args.only_tests, Some(true));
     }
 
     #[test]

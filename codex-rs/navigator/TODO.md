@@ -34,6 +34,7 @@ This roadmap enumerates the concrete work required to turn Navigator into the pr
      - ✅ Снапшот теперь содержит `freshness_days`, `attention_density`, `lint_density`; builder заполняет их на каждом ingest через git log + TODO/#[allow] сканирование.
   2. **Ranking model:** add scoring pipeline combining fuzzy score + context bonuses; make weights configurable via config file.
      - ✅ `heuristic_score` использует новые сигналы: свежие/недавно правленные файлы получают boost, TODO-насыщенные блоки всплывают выше, а lint-heavy результаты штрафуются.
+     - ✅ Coverage diagnostics подмешивают pending/errors/skipped причины в ранжирование: проблемные пути получают bonus и читаемый `score_reason` (например, `coverage skipped (missing)`), поэтому health-сигналы видны прямо в выдаче.
   3. **Personal context:** integrate plan/task files so active epics boost relevant files.
      - ✅ Navigator читает `.agents/current_plan.md` (или `NAVIGATOR_PLAN_PATH`) и активную ветку, вытягивает ключевые токены/изменённые пути и добавляет соответствующий boost в `heuristic_score` и literal hits.
   4. ✅ **Evaluation harness:** `codex navigator eval suite.json` прогоняет записанные кейсы, проверяет ранги и может сохранять snapshots для оффлайн A/B сравнения.
@@ -52,6 +53,8 @@ This roadmap enumerates the concrete work required to turn Navigator into the pr
   4. **UX polish:** display active filters + suggestion chips to avoid cognitive overload.
      - ✅ CLI рисует filter-chips и автоматически переиспользует последний query_id, так что `codex navigator facet --lang rust` продолжает предыдущий поиск без ручного `--from`.
      - ✅ SearchResponse теперь возвращает facet_suggestions, CLI печатает готовые команды (`--lang foo`, `--tests`, `--owner team`), поэтому сужать выдачу можно за один шаг без чтения facets блока.
+     - ✅ Когда выдача перегружена (hits ≥ limit или candidate_size > 450) и фильтры ещё не применялись, CLI автоматически запускает `facet` с верхней подсказкой, печатает `[navigator] auto facet: …` и повторяет поиск; включается по умолчанию и управляется `NAVIGATOR_AUTO_FACET`.
+     - ✅ Автофасет теперь выполняет до двух последовательных шагов (пропуская уже применённые фильтры) и добавляет подсказки в историю, так что цепочки `lang=rust → tests → owner=core` происходят без участия оператора.
 - **Success criteria:** users can drill from >10 k hits to <20 hits in ≤3 commands without retyping the query.
 
 ### 5. Index Health & Regression Monitoring

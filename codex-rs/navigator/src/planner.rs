@@ -1,3 +1,5 @@
+use crate::proto::FacetSuggestion;
+use crate::proto::FacetSuggestionKind;
 use crate::proto::FileCategory;
 use crate::proto::FilterOp;
 use crate::proto::InputFormat;
@@ -377,6 +379,48 @@ pub fn plan_search_request(
     }
 
     Ok(request)
+}
+
+pub fn apply_facet_suggestion(
+    args: &mut NavigatorSearchArgs,
+    suggestion: &FacetSuggestion,
+) -> Result<(), SearchPlannerError> {
+    match suggestion.kind {
+        FacetSuggestionKind::Language => {
+            let value = suggestion
+                .value
+                .as_deref()
+                .ok_or_else(|| SearchPlannerError::new("language suggestion missing value"))?;
+            args.languages.push(value.to_string());
+        }
+        FacetSuggestionKind::Category => {
+            let value = suggestion
+                .value
+                .as_deref()
+                .ok_or_else(|| SearchPlannerError::new("category suggestion missing value"))?;
+            match value {
+                "tests" => args.only_tests = Some(true),
+                "docs" => args.only_docs = Some(true),
+                "deps" => args.only_deps = Some(true),
+                other => {
+                    return Err(SearchPlannerError::new(format!(
+                        "category suggestion '{other}' cannot be applied automatically"
+                    )));
+                }
+            }
+        }
+        FacetSuggestionKind::Owner => {
+            let value = suggestion
+                .value
+                .as_deref()
+                .ok_or_else(|| SearchPlannerError::new("owner suggestion missing value"))?;
+            args.owners.push(value.to_string());
+        }
+        FacetSuggestionKind::Recent => {
+            args.recent_only = Some(true);
+        }
+    }
+    Ok(())
 }
 
 #[allow(clippy::too_many_arguments)]

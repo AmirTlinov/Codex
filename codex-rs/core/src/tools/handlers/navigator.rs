@@ -1,8 +1,11 @@
+use std::env;
 use std::path::PathBuf;
 use std::sync::Arc;
 
 use async_trait::async_trait;
 use codex_navigator::atlas_focus;
+use codex_navigator::auto_facet::AutoFacetConfig;
+use codex_navigator::auto_facet::{self};
 use codex_navigator::client::ClientOptions;
 use codex_navigator::client::DaemonSpawn;
 use codex_navigator::client::NavigatorClient;
@@ -24,6 +27,7 @@ use codex_navigator::resolve_daemon_launcher;
 use once_cell::sync::OnceCell;
 use serde::Serialize;
 use tokio::task;
+use tracing::info;
 use tracing::warn;
 
 use crate::function_tool::FunctionCallError;
@@ -134,6 +138,7 @@ impl ToolHandler for NavigatorHandler {
         match request {
             NavigatorPayload::Search(args) => {
                 let mut req = plan_search_request(*args).map_err(map_planner_error)?;
+                let request_snapshot = req.clone();
                 req.project_root = Some(project_root_string.clone());
                 let mut streamed_diag: Option<SearchDiagnostics> = None;
                 let mut streamed_hits: Vec<NavHit> = Vec::new();
@@ -157,11 +162,22 @@ impl ToolHandler for NavigatorHandler {
                     Ok(outcome) => outcome,
                     Err(err) => return Err(with_doctor_context(err, &client).await),
                 };
+                let mut final_outcome = outcome;
+                if let Some(auto_outcome) = maybe_run_auto_facet_search(
+                    &client,
+                    &project_root_string,
+                    &request_snapshot,
+                    &final_outcome,
+                )
+                .await?
+                {
+                    final_outcome = auto_outcome;
+                }
                 let SearchStreamOutcome {
                     diagnostics,
                     top_hits,
                     response,
-                } = outcome;
+                } = final_outcome;
                 let payload = SearchToolOutput {
                     diagnostics: diagnostics.or(streamed_diag),
                     top_hits: if top_hits.is_empty() {
@@ -211,6 +227,62 @@ impl ToolHandler for NavigatorHandler {
                 Ok(make_json_output(payload)?)
             }
         }
+    }
+}
+
+async fn maybe_run_auto_facet_search(
+    client: &NavigatorClient,
+    project_root: &str,
+    request_snapshot: &codex_navigator::proto::SearchRequest,
+    outcome: &SearchStreamOutcome,
+) -> Result<Option<SearchStreamOutcome>, FunctionCallError> {
+    if !auto_facet_enabled() {
+        return Ok(None);
+    }
+    let mut current_request = request_snapshot.clone();
+    let mut current_outcome = outcome.clone();
+    let mut last_outcome: Option<SearchStreamOutcome> = None;
+    while let Some(decision) = auto_facet::plan_auto_facet(
+        &current_request,
+        &current_outcome.response,
+        &AutoFacetConfig::default(),
+    )
+    .map_err(map_planner_error)?
+    {
+        info!(
+            target: "navigator",
+            "auto facet applying {}",
+            decision.suggestion.label
+        );
+        let args = decision.args;
+        let mut refined_request = plan_search_request(args).map_err(map_planner_error)?;
+        let request_for_loop = refined_request.clone();
+        refined_request.project_root = Some(project_root.to_string());
+        let mut refined = match client
+            .search_with_event_handler(refined_request, |_| {})
+            .await
+        {
+            Ok(value) => value,
+            Err(err) => return Err(with_doctor_context(err, client).await),
+        };
+        refined
+            .response
+            .hints
+            .push(format!("auto facet applied {}", decision.suggestion.label));
+        current_request = request_for_loop;
+        current_outcome = refined.clone();
+        last_outcome = Some(refined);
+    }
+    Ok(last_outcome)
+}
+
+fn auto_facet_enabled() -> bool {
+    match env::var("NAVIGATOR_AUTO_FACET") {
+        Ok(value) => {
+            let lowered = value.trim().to_ascii_lowercase();
+            !matches!(lowered.as_str(), "0" | "false" | "off")
+        }
+        Err(_) => true,
     }
 }
 
@@ -400,6 +472,7 @@ mod tests {
             freshness_secs: Some(5),
             coverage: CoverageDiagnostics::default(),
             pending_literals: Vec::new(),
+            health: None,
         };
         let hit = NavHit {
             id: "hit-1".to_string(),

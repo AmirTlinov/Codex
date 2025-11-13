@@ -452,6 +452,11 @@ impl BottomPane {
         self.request_redraw();
     }
 
+    pub(crate) fn set_navigator_activity(&mut self, activity: Option<String>) {
+        self.composer.set_navigator_activity(activity);
+        self.request_redraw();
+    }
+
     /// Show a generic list selection view with the provided items.
     pub(crate) fn show_selection_view(&mut self, params: list_selection_view::SelectionViewParams) {
         let view = list_selection_view::ListSelectionView::new(params, self.app_event_tx.clone());

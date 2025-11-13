@@ -1755,6 +1755,7 @@ impl ChatWidget {
                 started_at: Instant::now(),
             },
         );
+        self.refresh_navigator_activity();
         self.request_redraw();
     }
 
@@ -1763,6 +1764,7 @@ impl ChatWidget {
         let Some(state) = self.navigator_calls.remove(&call_id) else {
             return;
         };
+        self.refresh_navigator_activity();
 
         let result = summarize_navigator_response(&output);
         let aggregated = if result.lines.is_empty() {
@@ -1818,6 +1820,15 @@ impl ChatWidget {
         };
         let lines = format_navigator_stream_event(&event);
         self.append_navigator_stream(&call_id, lines);
+    }
+
+    fn refresh_navigator_activity(&mut self) {
+        let activity = self
+            .navigator_calls
+            .values()
+            .next()
+            .map(|state| navigator_activity_label(&state.command, &state.parsed));
+        self.bottom_pane.set_navigator_activity(activity);
     }
 
     fn append_navigator_stream(&mut self, call_id: &str, lines: Vec<String>) {
@@ -3091,6 +3102,20 @@ impl ChatWidget {
         );
         RenderableItem::Owned(Box::new(flex))
     }
+}
+
+fn navigator_activity_label(command: &[String], parsed: &[ParsedCommand]) -> String {
+    parsed
+        .iter()
+        .find_map(|entry| match entry {
+            ParsedCommand::Navigator { summary, query, .. } => {
+                summary.clone().or_else(|| query.clone())
+            }
+            ParsedCommand::Read { name, .. } => Some(name.clone()),
+            _ => None,
+        })
+        .or_else(|| (!command.is_empty()).then(|| command.join(" ")))
+        .unwrap_or_else(|| "navigator".to_string())
 }
 
 fn decode_navigator_stream_event(output: &FunctionCallOutputPayload) -> Option<SearchStreamEvent> {

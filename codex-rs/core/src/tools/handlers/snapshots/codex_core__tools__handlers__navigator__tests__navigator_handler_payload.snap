@@ -10,9 +10,14 @@ expression: value
       "skipped": []
     },
     "freshness_secs": 5,
-    "index_state": "ready"
+    "health": null,
+    "index_state": "ready",
+    "pending_literals": []
   },
   "response": {
+    "active_filters": null,
+    "atlas_hint": null,
+    "context_banner": null,
     "diagnostics": {
       "coverage": {
         "errors": [],
@@ -20,28 +25,39 @@ expression: value
         "skipped": []
       },
       "freshness_secs": 5,
-      "index_state": "ready"
+      "health": null,
+      "index_state": "ready",
+      "pending_literals": []
     },
     "error": null,
+    "facet_suggestions": [],
     "fallback_hits": [],
     "hints": [],
     "hits": [
       {
+        "attention_density": 0,
         "categories": [
           "source"
         ],
+        "context_snippet": null,
+        "freshness_days": 0,
         "help": null,
         "id": "hit-1",
         "kind": "function",
         "language": "rust",
         "layer": null,
         "line": 10,
+        "lint_density": 0,
+        "lint_suppressions": 0,
+        "match_count": null,
         "module": null,
+        "owners": [],
         "path": "src/lib.rs",
         "preview": "fn sample()",
         "recent": false,
         "references": null,
-        "score": 0.9
+        "score": 0.9,
+        "score_reasons": []
       }
     ],
     "index": {
@@ -60,21 +76,29 @@ expression: value
   },
   "top_hits": [
     {
+      "attention_density": 0,
       "categories": [
         "source"
       ],
+      "context_snippet": null,
+      "freshness_days": 0,
       "help": null,
       "id": "hit-1",
       "kind": "function",
       "language": "rust",
       "layer": null,
       "line": 10,
+      "lint_density": 0,
+      "lint_suppressions": 0,
+      "match_count": null,
       "module": null,
+      "owners": [],
       "path": "src/lib.rs",
       "preview": "fn sample()",
       "recent": false,
       "references": null,
-      "score": 0.9
+      "score": 0.9,
+      "score_reasons": []
     }
   ]
 }

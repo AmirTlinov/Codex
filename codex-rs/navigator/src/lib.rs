@@ -1,4 +1,5 @@
 mod atlas;
+pub mod auto_facet;
 pub mod client;
 pub mod daemon;
 pub mod freeform;
