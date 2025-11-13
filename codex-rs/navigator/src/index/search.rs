@@ -1432,6 +1432,7 @@ mod tests {
             HashMap::new(),
             OwnerResolver::default(),
             filter,
+            None,
         );
         let snapshot = builder.build().unwrap().snapshot;
         assert_eq!(snapshot.files.len(), 2);
@@ -1476,6 +1477,7 @@ mod tests {
             HashMap::new(),
             OwnerResolver::default(),
             filter,
+            None,
         );
         let snapshot = builder.build().unwrap().snapshot;
         let cache = QueryCache::new(root.join("cache"));
@@ -1516,6 +1518,7 @@ mod tests {
             HashMap::new(),
             OwnerResolver::default(),
             filter,
+            None,
         );
         let snapshot = builder.build().unwrap().snapshot;
         assert_eq!(snapshot.symbols.len(), 0);
@@ -1561,6 +1564,7 @@ mod tests {
             HashMap::new(),
             OwnerResolver::default(),
             filter,
+            None,
         );
         let snapshot = builder.build().unwrap().snapshot;
         let filters = SearchFilters {
@@ -1594,6 +1598,7 @@ mod tests {
             HashMap::new(),
             OwnerResolver::default(),
             filter,
+            None,
         );
         let snapshot = builder.build().unwrap().snapshot;
         let cache = QueryCache::new(root.join("cache"));
@@ -1630,6 +1635,7 @@ mod tests {
             HashMap::new(),
             OwnerResolver::default(),
             filter,
+            None,
         );
         let snapshot = builder.build().unwrap().snapshot;
         let cache = QueryCache::new(root.join("cache"));
@@ -1673,6 +1679,7 @@ mod tests {
             HashMap::new(),
             OwnerResolver::default(),
             filter,
+            None,
         );
         let snapshot = builder.build().unwrap().snapshot;
         let cache = QueryCache::new(root.join("cache"));
@@ -1719,6 +1726,7 @@ mod tests {
             HashMap::new(),
             OwnerResolver::default(),
             filter,
+            None,
         );
         let snapshot = builder.build().unwrap().snapshot;
         let cache = QueryCache::new(root.join("cache"));
@@ -1755,6 +1763,7 @@ mod tests {
             HashMap::new(),
             OwnerResolver::default(),
             filter,
+            None,
         );
         let snapshot = builder.build().unwrap().snapshot;
         let trigrams = literal_query_trigrams("SANDBOX=1");
@@ -1780,6 +1789,7 @@ mod tests {
             HashMap::new(),
             OwnerResolver::default(),
             filter,
+            None,
         );
         let snapshot = builder.build().unwrap().snapshot;
         let candidates =
@@ -1805,6 +1815,7 @@ mod tests {
             HashMap::new(),
             OwnerResolver::default(),
             filter,
+            None,
         );
         let snapshot = builder.build().unwrap().snapshot;
         let cache = QueryCache::new(root.join("cache"));
@@ -1841,6 +1852,7 @@ mod tests {
             HashMap::new(),
             OwnerResolver::default(),
             filter,
+            None,
         );
         let snapshot = builder.build().unwrap().snapshot;
         let cache = QueryCache::new(root.join("cache"));
@@ -1980,6 +1992,7 @@ mod tests {
             HashMap::new(),
             OwnerResolver::default(),
             filter,
+            None,
         );
         let snapshot = builder.build().unwrap().snapshot;
         std::fs::remove_file(&file_path).unwrap();
@@ -2031,6 +2044,7 @@ mod tests {
             HashMap::new(),
             OwnerResolver::default(),
             filter,
+            None,
         );
         let snapshot = builder.build().unwrap().snapshot;
 

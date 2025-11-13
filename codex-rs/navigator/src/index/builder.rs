@@ -12,6 +12,8 @@ use crate::index::model::FileFingerprint;
 use crate::index::model::FileText;
 use crate::index::model::IndexSnapshot;
 use crate::index::model::SymbolRecord;
+use crate::index::text::PendingText;
+use crate::index::text::TextIngestSender;
 use crate::proto::Language;
 use crate::proto::Range;
 use anyhow::Context;
@@ -49,7 +51,7 @@ pub(crate) struct SkippedFile {
 pub(crate) struct IndexedFile {
     pub file: FileEntry,
     pub symbols: Vec<SymbolRecord>,
-    pub text: FileText,
+    pub text: Option<FileText>,
 }
 
 pub(crate) enum FileOutcome {
@@ -73,6 +75,7 @@ pub struct IndexBuilder<'a> {
     freshness_days: HashMap<String, u32>,
     owners: OwnerResolver,
     filter: Arc<PathFilter>,
+    text_sender: Option<TextIngestSender>,
 }
 
 impl<'a> IndexBuilder<'a> {
@@ -83,6 +86,7 @@ impl<'a> IndexBuilder<'a> {
         freshness_days: HashMap<String, u32>,
         owners: OwnerResolver,
         filter: Arc<PathFilter>,
+        text_sender: Option<TextIngestSender>,
     ) -> Self {
         Self {
             root,
@@ -91,6 +95,7 @@ impl<'a> IndexBuilder<'a> {
             freshness_days,
             owners,
             filter,
+            text_sender,
         }
     }
 
@@ -144,7 +149,9 @@ impl<'a> IndexBuilder<'a> {
                         snapshot.symbols.insert(symbol.id.clone(), symbol);
                     }
                     snapshot.files.insert(rel.clone(), file);
-                    snapshot.text.insert(rel.clone(), text);
+                    if let Some(text) = text {
+                        snapshot.text.insert(rel.clone(), text);
+                    }
                     update_token_map(&mut token_map, &rel, tokens);
                     update_trigram_map(&mut trigram_map, &rel, &trigrams);
                 }
@@ -163,7 +170,9 @@ impl<'a> IndexBuilder<'a> {
                         snapshot.symbols.insert(symbol.id.clone(), symbol);
                     }
                     snapshot.files.insert(rel.clone(), file);
-                    snapshot.text.insert(rel.clone(), text);
+                    if let Some(text) = text {
+                        snapshot.text.insert(rel.clone(), text);
+                    }
                     update_token_map(&mut token_map, &rel, tokens);
                     update_trigram_map(&mut trigram_map, &rel, &trigrams);
                     skipped.push(SkippedFile {
@@ -200,7 +209,7 @@ impl<'a> IndexBuilder<'a> {
             }));
         }
         let bytes = match fs::read(path) {
-            Ok(buf) => buf,
+            Ok(buf) => Arc::<[u8]>::from(buf),
             Err(err) => {
                 return Ok(FileOutcome::Skipped(SkipReason::ReadError(err.to_string())));
             }
@@ -232,8 +241,7 @@ impl<'a> IndexBuilder<'a> {
         let attention_density = density_per_kloc(attention, line_count);
         let lint_density = density_per_kloc(lint_suppressions, line_count);
         let fingerprint = build_fingerprint(&metadata, &bytes);
-
-        let text = FileText::from_content(content)?;
+        let text = self.prepare_text(rel_path, &fingerprint, bytes.clone())?;
 
         let mut symbol_ids = Vec::new();
         let mut symbol_records = Vec::new();
@@ -321,6 +329,32 @@ impl<'a> IndexBuilder<'a> {
             symbols: symbol_records,
             text,
         }))
+    }
+
+    fn prepare_text(
+        &self,
+        rel_path: &str,
+        fingerprint: &FileFingerprint,
+        bytes: Arc<[u8]>,
+    ) -> Result<Option<FileText>> {
+        if let Some(sender) = &self.text_sender {
+            let payload = PendingText::new(rel_path.to_string(), fingerprint.clone(), bytes);
+            match sender.send_blocking(payload) {
+                Ok(()) => Ok(None),
+                Err(err) => {
+                    warn!(
+                        "text ingest queue closed for {rel_path}, falling back to inline encode: {err}"
+                    );
+                    let payload = err.into_inner();
+                    let fallback = std::str::from_utf8(&payload.bytes)
+                        .context("pending text payload was not utf-8")?;
+                    FileText::from_content(fallback).map(Some)
+                }
+            }
+        } else {
+            let content = std::str::from_utf8(&bytes).context("text payload was not utf-8")?;
+            FileText::from_content(content).map(Some)
+        }
     }
 }
 
@@ -514,6 +548,7 @@ mod tests {
             HashMap::new(),
             OwnerResolver::default(),
             filter,
+            None,
         );
         let snapshot = builder.build().unwrap().snapshot;
 

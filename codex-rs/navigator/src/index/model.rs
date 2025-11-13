@@ -48,7 +48,7 @@ pub struct SymbolRecord {
     pub owners: Vec<String>,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct FileFingerprint {
     pub mtime: Option<u64>,
     pub size: u64,

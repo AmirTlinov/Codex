@@ -208,5 +208,6 @@ agents.
 ## Autonomous Indexing & Coverage
 
 - The daemon watches the workspace and performs incremental ingest instead of rebuilding from scratch. Coverage milestones (pending/skipped/errors) are tracked per file and exposed via diagnostics/Doctor.
+- Literal text snapshots now stream through a bounded ingest queue: `IndexBuilder` enqueues raw UTF-8 blocks, worker tasks compress them in the background, and fingerprints prevent stale payloads from overwriting fresh files. Symbol updates land immediately while literal storage catches up, so Navigator never blocks on `FileText::from_content`.
 - Manual rebuilds (`/index-code`, `codex navigator nav --wait`) still work, but they simply reset the incremental queue.
 - You should never need to delete caches when schema changes—self-heal will wipe the corrupted snapshot, rebuild, and keep serving requests while reporting the temporary state via diagnostics.

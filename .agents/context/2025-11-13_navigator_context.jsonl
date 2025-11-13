@@ -1,0 +1,1 @@
+{"source":"agent","summary":["Implemented streaming text ingestion: IndexBuilder now enqueues UTF-8 payloads to a bounded queue, tokio workers compress FileText blocks off-thread, and fingerprint guards skip stale jobs so symbol ingest never stalls"],"citation":"codex-rs/navigator/src/index/text.rs"}

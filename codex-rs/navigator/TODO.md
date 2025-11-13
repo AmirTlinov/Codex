@@ -6,7 +6,7 @@ This roadmap enumerates the concrete work required to turn Navigator into the pr
 
 - **Goal:** eliminate dependency on `rg`/IDE for raw text queries; provide diff-style previews with highlighted matches.
 - **Milestones:**
-  1. **Streaming literal ingestion:** extend `IndexBuilder` to store per-line offsets + compressed text blocks for every file (respect ignore rules). Exit: background ingest keeps index hot without blocking symbol updates.
+  1. ✅ **Streaming literal ingestion:** `IndexBuilder` now streams text payloads through a bounded queue and background workers that compress blocks off the hot path (fingerprint-guarded writes, automatic replay on rebuilds). Exit: background ingest keeps the index hot without blocking symbol updates—all literal storage is eventual and never stalls symbol ingest.
   2. **Search engine integration:** add a `text` profile that bypasses symbol matching and scans the text blocks via trigram filters + vectorized scanning; include match counts + highlight spans.
   3. **Diff preview:** update `NavHit` to optionally include a `context_snippet` payload (line numbers + emphasis markers). Extend CLI renderer to show miniature diffs.
   4. **Benchmark & autopick:** wire adaptive planner logic that chooses literal vs text index based on query entropy (<3 chars, regex-like, etc.).

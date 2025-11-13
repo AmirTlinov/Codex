@@ -13,6 +13,7 @@ mod personal;
 mod references;
 mod search;
 mod storage;
+mod text;
 
 use crate::atlas::build_search_hint;
 use crate::atlas::rebuild_atlas;
@@ -35,6 +36,7 @@ use crate::index::health::HealthStore;
 use crate::index::model::FileEntry;
 use crate::index::model::IndexSnapshot;
 use crate::index::model::SymbolRecord;
+use crate::index::text::TextIngestor;
 use crate::project::ProjectProfile;
 use crate::proto::ActiveFilters;
 use crate::proto::AtlasSnapshot;
@@ -112,7 +114,7 @@ pub struct IndexCoordinator {
 
 struct Inner {
     profile: ProjectProfile,
-    snapshot: RwLock<IndexSnapshot>,
+    snapshot: Arc<RwLock<IndexSnapshot>>,
     status: RwLock<IndexStatusInternal>,
     cache: QueryCache,
     build_lock: Mutex<()>,
@@ -121,6 +123,7 @@ struct Inner {
     coverage: Arc<CoverageTracker>,
     health: Arc<HealthStore>,
     guardrails: Arc<GuardrailEmitter>,
+    text_ingest: TextIngestor,
     self_heal: SelfHealPolicy,
     self_heal_state: Mutex<Option<Instant>>,
     profile_history: Mutex<VecDeque<SearchProfileSample>>,
@@ -288,10 +291,12 @@ impl IndexCoordinator {
         };
         let auto_indexing_flag = Arc::new(AtomicBool::new(auto_indexing));
         let shutdown = CancellationToken::new();
+        let snapshot_lock = Arc::new(RwLock::new(loaded_snapshot));
+        let text_ingest = TextIngestor::new(snapshot_lock.clone(), shutdown.clone());
         let inner = Arc::new(Inner {
             cache: QueryCache::new(profile.queries_dir()),
             profile,
-            snapshot: RwLock::new(loaded_snapshot),
+            snapshot: snapshot_lock,
             status: RwLock::new(status),
             build_lock: Mutex::new(()),
             filter,
@@ -299,6 +304,7 @@ impl IndexCoordinator {
             coverage: Arc::new(CoverageTracker::new(Some(COVERAGE_LIMIT))),
             health,
             guardrails,
+            text_ingest,
             self_heal,
             self_heal_state: Mutex::new(None),
             profile_history: Mutex::new(VecDeque::with_capacity(PROFILE_HISTORY_LIMIT)),
@@ -650,6 +656,7 @@ impl IndexCoordinator {
         let freshness = recency_days(&root);
         let owners = OwnerResolver::load(&root);
         let filter = self.inner.filter.clone();
+        let text_sender = self.inner.text_ingest.sender();
         let builder = IndexBuilder::new(
             root.as_path(),
             recent,
@@ -657,6 +664,7 @@ impl IndexCoordinator {
             freshness,
             owners,
             filter.clone(),
+            Some(text_sender),
         );
         let _guard = self.inner.build_lock.lock().await;
         let mut snapshot = self.inner.snapshot.write().await;
@@ -752,8 +760,18 @@ impl IndexCoordinator {
         let freshness = recency_days(&root);
         let owners = OwnerResolver::load(&root);
         let filter = self.inner.filter.clone();
+        let text_sender = self.inner.text_ingest.sender();
         let snapshot = tokio::task::spawn_blocking(move || {
-            IndexBuilder::new(root.as_path(), recent, churn, freshness, owners, filter).build()
+            IndexBuilder::new(
+                root.as_path(),
+                recent,
+                churn,
+                freshness,
+                owners,
+                filter,
+                Some(text_sender),
+            )
+            .build()
         })
         .await??;
         Ok(snapshot)
@@ -1186,7 +1204,9 @@ fn apply_indexed_file(snapshot: &mut IndexSnapshot, indexed: IndexedFile) {
             .or_default()
             .insert(path.clone());
     }
-    snapshot.text.insert(path.clone(), indexed.text);
+    if let Some(text) = indexed.text {
+        snapshot.text.insert(path.clone(), text);
+    }
     snapshot.files.insert(path, indexed.file);
 }
 
