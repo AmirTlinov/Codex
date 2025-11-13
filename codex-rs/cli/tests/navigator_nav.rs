@@ -138,6 +138,34 @@ fn run_nav_raw(
     Ok((stdout, stderr))
 }
 
+fn run_history_raw(
+    codex_home: &Path,
+    project_root: &Path,
+    extra_args: &[&str],
+) -> Result<(String, String)> {
+    let mut cmd = codex_command(codex_home, project_root)?;
+    let mut args = vec![
+        "navigator".to_string(),
+        "history".to_string(),
+        "--project-root".to_string(),
+        project_root
+            .to_str()
+            .ok_or_else(|| anyhow!("project_root must be valid UTF-8"))?
+            .to_string(),
+    ];
+    for arg in extra_args {
+        args.push(arg.to_string());
+    }
+    cmd.args(args);
+    let output = cmd.output()?;
+    let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+    let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+    if !output.status.success() {
+        anyhow::bail!("history command failed: {stderr}");
+    }
+    Ok((stdout, stderr))
+}
+
 #[test]
 fn navigator_nav_round_trip_via_daemon() -> Result<()> {
     let codex_home = TempDir::new()?;
@@ -339,6 +367,71 @@ fn navigator_nav_history_stack_toggles_filters() -> Result<()> {
             .iter()
             .any(|hint| hint.contains("removed history[0] filters"))
     );
+
+    let _ = daemon.kill();
+    let _ = daemon.wait();
+    Ok(())
+}
+
+#[test]
+fn navigator_history_stack_command_runs_search() -> Result<()> {
+    let codex_home = TempDir::new()?;
+    let project_dir = TempDir::new()?;
+    let project_root = project_dir.path();
+    std::fs::create_dir_all(project_root.join("src"))?;
+    std::fs::write(
+        project_root.join("src/cmd.rs"),
+        "pub fn history_stack_cli_symbol() {}",
+    )?;
+
+    let metadata_path = daemon_metadata_path(codex_home.path(), project_root)?;
+    let mut daemon = spawn_daemon_process(codex_home.path(), project_root)?;
+    wait_for_metadata(&metadata_path)?;
+
+    let _ = run_nav_command(
+        codex_home.path(),
+        project_root,
+        &["--lang", "rust", "history_stack_cli_symbol"],
+    )?;
+
+    let (stdout, _) = run_history_raw(codex_home.path(), project_root, &["--stack", "0"])?;
+    let response: SearchResponse = serde_json::from_str(stdout.trim())?;
+    assert!(
+        response
+            .hits
+            .iter()
+            .any(|hit| hit.path.ends_with("src/cmd.rs"))
+    );
+
+    let _ = daemon.kill();
+    let _ = daemon.wait();
+    Ok(())
+}
+
+#[test]
+fn navigator_history_contains_filters_results() -> Result<()> {
+    let codex_home = TempDir::new()?;
+    let project_dir = TempDir::new()?;
+    let project_root = project_dir.path();
+    std::fs::create_dir_all(project_root.join("src"))?;
+    std::fs::write(
+        project_root.join("src/filter.rs"),
+        "pub fn history_filter_symbol() {}",
+    )?;
+
+    let metadata_path = daemon_metadata_path(codex_home.path(), project_root)?;
+    let mut daemon = spawn_daemon_process(codex_home.path(), project_root)?;
+    wait_for_metadata(&metadata_path)?;
+
+    let _ = run_nav_command(codex_home.path(), project_root, &["history_filter_symbol"])?;
+
+    let (stdout, _) = run_history_raw(
+        codex_home.path(),
+        project_root,
+        &["--json", "--contains", "history_filter_symbol"],
+    )?;
+    let entries: Vec<serde_json::Value> = serde_json::from_str(stdout.trim())?;
+    assert!(!entries.is_empty());
 
     let _ = daemon.kill();
     let _ = daemon.wait();

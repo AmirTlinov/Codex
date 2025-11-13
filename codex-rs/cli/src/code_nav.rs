@@ -183,6 +183,18 @@ pub struct HistoryCommand {
     /// Filter entries whose query/filters/suggestions contain this substring (case-insensitive).
     #[arg(long = "contains")]
     pub contains: Option<String>,
+
+    /// Apply the recorded filter stack by index.
+    #[arg(long = "stack")]
+    pub stack: Option<usize>,
+
+    /// Remove the recorded filter stack by index.
+    #[arg(long = "clear-stack")]
+    pub clear_stack: Option<usize>,
+
+    /// Repeat the search stored at the given history index.
+    #[arg(long = "repeat")]
+    pub repeat: Option<usize>,
 }
 
 #[derive(Debug, Parser)]
@@ -765,6 +777,39 @@ fn load_history_filters(
 pub async fn run_history(mut cmd: HistoryCommand) -> Result<()> {
     let client = build_client(cmd.project_root.take()).await?;
     let history = QueryHistoryStore::new(client.queries_dir());
+    let action_count =
+        cmd.stack.iter().count() + cmd.clear_stack.iter().count() + cmd.repeat.iter().count();
+    if action_count > 1 {
+        return Err(anyhow!(
+            "history supports only one action at a time (--stack/--clear-stack/--repeat)"
+        ));
+    }
+    if let Some(index) = cmd.stack {
+        run_history_stack_action(
+            &client,
+            &history,
+            index,
+            cmd.pinned,
+            HistoryStackAction::Apply,
+        )
+        .await?;
+        return Ok(());
+    }
+    if let Some(index) = cmd.clear_stack {
+        run_history_stack_action(
+            &client,
+            &history,
+            index,
+            cmd.pinned,
+            HistoryStackAction::Remove,
+        )
+        .await?;
+        return Ok(());
+    }
+    if let Some(index) = cmd.repeat {
+        run_history_repeat_action(&client, &history, index, cmd.pinned).await?;
+        return Ok(());
+    }
     let mut rows = if cmd.pinned {
         history.pinned()?
     } else {
@@ -1156,6 +1201,129 @@ fn history_entry_view(item: &HistoryItem, index: usize, now: u64) -> HistoryEntr
         repeat_command,
         suggestion_commands,
     }
+}
+
+async fn run_history_stack_action(
+    client: &NavigatorClient,
+    history: &QueryHistoryStore,
+    index: usize,
+    use_pinned: bool,
+    action: HistoryStackAction,
+) -> Result<()> {
+    let item = history_item_by_index(history, index, use_pinned)?;
+    let filters = item.filters.clone().ok_or_else(|| {
+        anyhow!("history[{index}] has no active filters; cannot use stack commands")
+    })?;
+    let mut args = NavigatorSearchArgs::default();
+    args.refine = Some(item.query_id.to_string());
+    args.inherit_filters = true;
+    match action {
+        HistoryStackAction::Apply => {
+            args.clear_filters = true;
+            apply_active_filters_to_args(&mut args, &filters);
+            args.hints.push(format!("applied history[{index}] filters"));
+        }
+        HistoryStackAction::Remove => {
+            remove_active_filters_from_args(&mut args, &filters);
+            args.hints.push(format!("removed history[{index}] filters"));
+        }
+    }
+    execute_history_search(client, args).await
+}
+
+async fn run_history_repeat_action(
+    client: &NavigatorClient,
+    history: &QueryHistoryStore,
+    index: usize,
+    use_pinned: bool,
+) -> Result<()> {
+    let replay_opt = if use_pinned {
+        history
+            .replay_pinned(index)
+            .context("load pinned navigator entry")?
+    } else {
+        history
+            .replay_recent(index)
+            .context("load navigator history entry")?
+    };
+    let mut replay = replay_opt.ok_or_else(|| {
+        if use_pinned {
+            anyhow!("pinned index {index} not available")
+        } else {
+            anyhow!("history index {index} not available; run `codex navigator` first")
+        }
+    })?;
+    execute_history_replay(client, &mut replay).await
+}
+
+async fn execute_history_search(client: &NavigatorClient, args: NavigatorSearchArgs) -> Result<()> {
+    let output_format = OutputFormat::Json;
+    let refs_mode = RefsMode::All;
+    let show_refs = false;
+    let diagnostics_only = false;
+    let focus = FocusMode::Auto;
+    let recording = HistoryReplay::new(
+        args.clone(),
+        output_format,
+        refs_mode,
+        show_refs,
+        diagnostics_only,
+        focus,
+    );
+    let request = plan_search_request(args)?;
+    let _ = execute_search(
+        client,
+        request,
+        output_format,
+        refs_mode,
+        show_refs,
+        diagnostics_only,
+        Some(recording),
+        focus,
+    )
+    .await?;
+    Ok(())
+}
+
+async fn execute_history_replay(
+    client: &NavigatorClient,
+    replay: &mut HistoryReplay,
+) -> Result<()> {
+    let request = plan_search_request(replay.args.clone())?;
+    let _ = execute_search(
+        client,
+        request,
+        replay.output_format,
+        replay.refs_mode,
+        replay.show_refs,
+        replay.diagnostics_only,
+        Some(replay.clone()),
+        replay.focus_mode,
+    )
+    .await?;
+    Ok(())
+}
+
+fn history_item_by_index(
+    history: &QueryHistoryStore,
+    index: usize,
+    use_pinned: bool,
+) -> Result<HistoryItem> {
+    if use_pinned {
+        let rows = history.pinned()?;
+        rows.get(index).cloned().ok_or_else(|| {
+            anyhow!("pinned index {index} not available; run `codex navigator` first")
+        })
+    } else {
+        history.entry_at(index)?.ok_or_else(|| {
+            anyhow!("history index {index} not available; run `codex navigator` first")
+        })
+    }
+}
+
+enum HistoryStackAction {
+    Apply,
+    Remove,
 }
 
 fn format_age(seconds: u64) -> String {
