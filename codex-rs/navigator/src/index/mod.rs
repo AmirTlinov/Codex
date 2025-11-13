@@ -65,6 +65,9 @@ use crate::proto::SearchFilters;
 use crate::proto::SearchProfileSample;
 use crate::proto::SearchRequest;
 use crate::proto::SearchResponse;
+use crate::proto::SearchStage;
+use crate::proto::SearchStageHotspot;
+use crate::proto::SearchStageTiming;
 use crate::proto::SearchStats;
 use crate::proto::SnippetRequest;
 use crate::proto::SnippetResponse;
@@ -81,6 +84,7 @@ use search::CoverageContext;
 use search::literal_fallback_allowed;
 use search::literal_match_from_contents;
 use search::run_search;
+use std::cmp::Reverse;
 use std::collections::HashMap;
 use std::collections::HashSet;
 use std::collections::VecDeque;
@@ -129,6 +133,7 @@ struct Inner {
     self_heal: SelfHealPolicy,
     self_heal_state: Mutex<Option<Instant>>,
     profile_history: Mutex<VecDeque<SearchProfileSample>>,
+    stage_stats: Mutex<HashMap<SearchStage, StageStats>>,
     shutdown: CancellationToken,
 }
 
@@ -153,6 +158,9 @@ const SELF_HEAL_PENDING_LIMIT: usize = 96;
 const SELF_HEAL_ERROR_LIMIT: usize = 4;
 const SELF_HEAL_COOLDOWN_SECS: u64 = 900;
 const PROFILE_HISTORY_LIMIT: usize = 64;
+const HOTSPOT_HISTORY_LIMIT: usize = 48;
+const HOTSPOT_MIN_SAMPLES: u64 = 6;
+const HOTSPOT_REPORT_LIMIT: usize = 6;
 
 #[derive(Clone)]
 struct SelfHealPolicy {
@@ -310,6 +318,7 @@ impl IndexCoordinator {
             self_heal,
             self_heal_state: Mutex::new(None),
             profile_history: Mutex::new(VecDeque::with_capacity(PROFILE_HISTORY_LIMIT)),
+            stage_stats: Mutex::new(HashMap::new()),
             shutdown,
         });
         let coordinator = Self { inner };
@@ -560,6 +569,17 @@ impl IndexCoordinator {
         let cap = limit.unwrap_or(10).clamp(1, PROFILE_HISTORY_LIMIT);
         let guard = self.inner.profile_history.lock().await;
         guard.iter().rev().take(cap).cloned().collect()
+    }
+
+    pub async fn stage_hotspots(&self) -> Vec<SearchStageHotspot> {
+        let guard = self.inner.stage_stats.lock().await;
+        let mut entries: Vec<_> = guard
+            .iter()
+            .filter_map(|(stage, stats)| stats.as_hotspot(*stage))
+            .collect();
+        entries.sort_by_key(|entry| Reverse(entry.avg_ms));
+        entries.truncate(HOTSPOT_REPORT_LIMIT);
+        entries
     }
 
     pub async fn rebuild_index(&self) -> Result<IndexStatus> {
@@ -942,21 +962,40 @@ impl IndexCoordinator {
         stats: &SearchStats,
         query_id: Option<QueryId>,
     ) {
-        let mut guard = self.inner.profile_history.lock().await;
-        if guard.len() >= PROFILE_HISTORY_LIMIT {
-            guard.pop_front();
+        {
+            let mut guard = self.inner.profile_history.lock().await;
+            if guard.len() >= PROFILE_HISTORY_LIMIT {
+                guard.pop_front();
+            }
+            guard.push_back(SearchProfileSample {
+                query_id,
+                query: normalize_query(request.query.as_deref()),
+                took_ms: stats.took_ms,
+                candidate_size: stats.candidate_size,
+                cache_hit: stats.cache_hit,
+                literal_fallback: stats.literal_fallback,
+                text_mode: stats.text_mode,
+                timestamp: OffsetDateTime::now_utc(),
+                stages: stats.stages.clone(),
+            });
         }
-        guard.push_back(SearchProfileSample {
-            query_id,
-            query: normalize_query(request.query.as_deref()),
-            took_ms: stats.took_ms,
-            candidate_size: stats.candidate_size,
-            cache_hit: stats.cache_hit,
-            literal_fallback: stats.literal_fallback,
-            text_mode: stats.text_mode,
-            timestamp: OffsetDateTime::now_utc(),
-            stages: stats.stages.clone(),
-        });
+        self.record_stage_metrics(&stats.stages).await;
+    }
+
+    async fn record_stage_metrics(&self, stages: &[SearchStageTiming]) {
+        if stages.is_empty() {
+            return;
+        }
+        let mut guard = self.inner.stage_stats.lock().await;
+        for timing in stages {
+            if timing.duration_ms == 0 {
+                continue;
+            }
+            guard
+                .entry(timing.stage)
+                .or_insert_with(StageStats::default)
+                .observe(timing.duration_ms);
+        }
     }
 }
 
@@ -972,6 +1011,61 @@ fn normalize_query(query: Option<&str>) -> Option<String> {
         owned.push('…');
     }
     Some(owned)
+}
+
+#[derive(Clone, Default)]
+struct StageStats {
+    total_ms: u128,
+    samples: u64,
+    max_ms: u64,
+    history: VecDeque<u64>,
+}
+
+impl StageStats {
+    fn observe(&mut self, duration_ms: u64) {
+        if duration_ms == 0 {
+            return;
+        }
+        self.total_ms += u128::from(duration_ms);
+        self.samples = self.samples.saturating_add(1);
+        if self.history.len() >= HOTSPOT_HISTORY_LIMIT {
+            self.history.pop_front();
+        }
+        self.history.push_back(duration_ms);
+        self.max_ms = self.max_ms.max(duration_ms);
+    }
+
+    fn avg_ms(&self) -> u64 {
+        if self.samples == 0 {
+            0
+        } else {
+            (self.total_ms / self.samples as u128) as u64
+        }
+    }
+
+    fn percentile_ms(&self, percentile: f32) -> u64 {
+        if self.history.is_empty() {
+            return 0;
+        }
+        let mut values: Vec<u64> = self.history.iter().copied().collect();
+        values.sort_unstable();
+        let target = ((percentile / 100.0) * values.len() as f32).ceil() as usize;
+        let idx = target.saturating_sub(1).min(values.len() - 1);
+        values[idx]
+    }
+
+    fn as_hotspot(&self, stage: SearchStage) -> Option<SearchStageHotspot> {
+        if self.samples < HOTSPOT_MIN_SAMPLES {
+            return None;
+        }
+        Some(SearchStageHotspot {
+            stage,
+            avg_ms: self.avg_ms(),
+            p95_ms: self.percentile_ms(95.0),
+            max_ms: self.max_ms,
+            samples: self.samples,
+        })
+    }
 }
 
 enum WatchEvent {
@@ -1509,6 +1603,7 @@ mod tests {
     use crate::proto::FileCategory;
     use crate::proto::Language;
     use crate::proto::NavHit;
+    use crate::proto::SearchStage;
     use crate::proto::SymbolKind;
     use std::collections::HashMap;
     use tempfile::tempdir;
@@ -1619,6 +1714,33 @@ mod tests {
             .collect();
         assert_eq!(category_map.get("docs"), Some(&expected_docs));
         assert_eq!(category_map.get("tests"), Some(&expected_tests));
+    }
+
+    #[test]
+    fn stage_stats_expose_hotspots() {
+        let mut stats = StageStats::default();
+        for sample in [10, 20, 30, 50, 70, 90] {
+            stats.observe(sample);
+        }
+        let hotspot = stats
+            .as_hotspot(SearchStage::Matcher)
+            .expect("hotspot missing");
+        assert_eq!(hotspot.stage, SearchStage::Matcher);
+        assert_eq!(hotspot.samples, 6);
+        assert!(hotspot.avg_ms >= 45);
+        assert!(hotspot.p95_ms >= 70);
+        assert_eq!(hotspot.max_ms, 90);
+    }
+
+    #[test]
+    fn stage_stats_require_minimum_samples() {
+        let mut stats = StageStats::default();
+        for _ in 0..(HOTSPOT_MIN_SAMPLES as usize - 1) {
+            stats.observe(25);
+        }
+        assert!(stats.as_hotspot(SearchStage::References).is_none());
+        stats.observe(40);
+        assert!(stats.as_hotspot(SearchStage::References).is_some());
     }
 
     fn fake_hit(layer: &str, categories: Vec<FileCategory>) -> NavHit {

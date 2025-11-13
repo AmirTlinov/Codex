@@ -498,7 +498,7 @@ pub struct CoverageDiagnostics {
     pub errors: Vec<CoverageGap>,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, Hash)]
 #[serde(rename_all = "snake_case")]
 pub enum SearchStage {
     CandidateLoad,
@@ -617,6 +617,8 @@ pub struct ProfileRequest {
 pub struct ProfileResponse {
     #[serde(default)]
     pub samples: Vec<SearchProfileSample>,
+    #[serde(default)]
+    pub hotspots: Vec<SearchStageHotspot>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
@@ -634,6 +636,15 @@ pub struct SearchProfileSample {
     pub timestamp: OffsetDateTime,
     #[serde(default)]
     pub stages: Vec<SearchStageTiming>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+pub struct SearchStageHotspot {
+    pub stage: SearchStage,
+    pub avg_ms: u64,
+    pub p95_ms: u64,
+    pub max_ms: u64,
+    pub samples: u64,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, Hash)]

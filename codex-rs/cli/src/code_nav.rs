@@ -1014,6 +1014,20 @@ fn print_profile_summary(response: &ProfileResponse) {
             println!("    stages: {}", format_stage_timings(&sample.stages));
         }
     }
+    if !response.hotspots.is_empty() {
+        println!();
+        println!("stage hotspots:");
+        for hotspot in &response.hotspots {
+            println!(
+                "  - {:<12} avg {:>4}ms | p95 {:>4} | max {:>4} | samples {}",
+                stage_label(&hotspot.stage),
+                hotspot.avg_ms,
+                hotspot.p95_ms,
+                hotspot.max_ms,
+                hotspot.samples,
+            );
+        }
+    }
 }
 
 fn render_workspace(ws: &DoctorWorkspace) {

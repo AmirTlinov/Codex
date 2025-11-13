@@ -221,11 +221,12 @@ async fn profile_handler(
     ensure_authorized(&state, &headers)?;
     ensure_protocol_version(request.schema_version)?;
     let workspace = state.workspace(request.project_root.clone()).await?;
-    let samples = workspace
-        .coordinator()
-        .profile_snapshot(request.limit)
-        .await;
-    Ok(Json(ProfileResponse { samples }))
+    let coordinator = workspace.coordinator();
+    let (samples, hotspots) = tokio::join!(
+        coordinator.profile_snapshot(request.limit),
+        coordinator.stage_hotspots(),
+    );
+    Ok(Json(ProfileResponse { samples, hotspots }))
 }
 
 async fn atlas_handler(

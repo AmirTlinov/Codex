@@ -70,7 +70,7 @@ This roadmap enumerates the concrete work required to turn Navigator into the pr
   1. ✅ **Profiling hooks:** `run_search` / `run_text_search` теперь собирают тайминги (candidate load, matcher, hit assembly, references, facets, literal scan/fallback) и кладут их в `stats.stages`.
   2. ✅ **`/profiler` endpoint:** `/v1/nav/profile` возвращает последние _N_ сэмплов (query_id, урезанный запрос, тайминги, cache hit/literal flags) для любого workspace.
   3. ✅ **CLI view:** `codex navigator profile --limit N [--json]` печатает эти же сэмплы и подсвечивает “виноватые” стадии, так что bottlenecks видны без ручных логов.
-  4. **Optimization backlog:** use profiler data to prioritize hotspots (matching, glob filters, IO) and track regressions.
+  4. ✅ **Optimization backlog:** profiler агрегирует stage hotspots (avg/p95/max по последним запросам), `/v1/nav/profile` и `codex navigator profile` показывают виноватые стадии, так что регрессии matcher/glob/io фиксируются до жалоб пользователей.
 - **Success criteria:** performance regressions get detected within one commit; engineers can self-serve bottleneck analysis.
 
 ### 7. UX Accelerators & Guided Workflows
