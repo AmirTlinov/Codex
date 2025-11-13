@@ -55,6 +55,7 @@ This roadmap enumerates the concrete work required to turn Navigator into the pr
      - ✅ SearchResponse теперь возвращает facet_suggestions, CLI печатает готовые команды (`--lang foo`, `--tests`, `--owner team`), поэтому сужать выдачу можно за один шаг без чтения facets блока.
      - ✅ Когда выдача перегружена (hits ≥ limit или candidate_size > 450) и фильтры ещё не применялись, CLI автоматически запускает `facet` с верхней подсказкой, печатает `[navigator] auto facet: …` и повторяет поиск; включается по умолчанию и управляется `NAVIGATOR_AUTO_FACET`.
      - ✅ Автофасет теперь выполняет до двух последовательных шагов (пропуская уже применённые фильтры) и добавляет подсказки в историю, так что цепочки `lang=rust → tests → owner=core` происходят без участия оператора.
+     - ✅ История хранит готовые стеки фильтров: `codex navigator facet --history-stack <n>` переиспользует комбинацию, `--remove-history-stack <n>` снимает её целиком, поэтому включение/снятие фильтров занимает одну команду.
 - **Success criteria:** users can drill from >10 k hits to <20 hits in ≤3 commands without retyping the query.
 
 ### 5. Index Health & Regression Monitoring

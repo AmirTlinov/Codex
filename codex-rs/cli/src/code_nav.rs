@@ -414,6 +414,14 @@ pub struct FacetCommand {
     #[arg(long = "undo", default_value_t = false)]
     pub undo: bool,
 
+    /// Reapply the entire filter stack captured in history[index].
+    #[arg(long = "history-stack")]
+    pub history_stack: Option<usize>,
+
+    /// Remove every filter from history[index] (inverse of --history-stack).
+    #[arg(long = "remove-history-stack")]
+    pub remove_history_stack: Option<usize>,
+
     /// Optional project root override.
     #[arg(long = "project-root")]
     pub project_root: Option<PathBuf>,
@@ -523,6 +531,8 @@ fn facet_command_needs_search(cmd: &FacetCommand) -> bool {
     cmd.from.is_some()
         || cmd.history_index != 0
         || cmd.undo
+        || cmd.history_stack.is_some()
+        || cmd.remove_history_stack.is_some()
         || !cmd.languages.is_empty()
         || !cmd.remove_languages.is_empty()
         || !cmd.owners.is_empty()
@@ -654,6 +664,20 @@ pub async fn run_facet(cmd: FacetCommand) -> Result<()> {
         (item.query_id, item.filters, item.facet_suggestions)
     };
     let (base_query, prior_filters, history_suggestions) = history_item;
+    let history_stack_filters = if let Some(index) = cmd.history_stack {
+        Some(load_history_filters(&history, index, "--history-stack")?)
+    } else {
+        None
+    };
+    let history_stack_removals = if let Some(index) = cmd.remove_history_stack {
+        Some(load_history_filters(
+            &history,
+            index,
+            "--remove-history-stack",
+        )?)
+    } else {
+        None
+    };
     let mut preset_filters = Vec::new();
     for name in &cmd.presets {
         let preset = preset_store
@@ -668,6 +692,8 @@ pub async fn run_facet(cmd: FacetCommand) -> Result<()> {
         &preset_filters,
         &history_suggestions,
         cmd.suggestion,
+        history_stack_filters.as_ref(),
+        history_stack_removals.as_ref(),
     )?;
     if !used_explicit {
         args.hints.push(format!(
@@ -705,6 +731,23 @@ pub async fn run_facet(cmd: FacetCommand) -> Result<()> {
     Ok(())
 }
 
+fn load_history_filters(
+    history: &QueryHistoryStore,
+    index: usize,
+    flag: &str,
+) -> Result<(usize, proto::ActiveFilters)> {
+    let item = history
+        .entry_at(index)
+        .context("load navigator history")?
+        .ok_or_else(|| {
+            anyhow!("history index {index} not available; run `codex navigator` first")
+        })?;
+    let filters = item.filters.ok_or_else(|| {
+        anyhow!("history[{index}] has no active filters; {flag} requires a filtered query")
+    })?;
+    Ok((index, filters))
+}
+
 pub async fn run_history(mut cmd: HistoryCommand) -> Result<()> {
     let client = build_client(cmd.project_root.take()).await?;
     let history = QueryHistoryStore::new(client.queries_dir());
@@ -721,6 +764,9 @@ pub async fn run_history(mut cmd: HistoryCommand) -> Result<()> {
     for (idx, item) in rows.into_iter().enumerate() {
         print_history_entry(idx, &item, now, true);
     }
+    println!(
+        "hint: reuse a recorded filter stack via `codex navigator facet --history-stack <index>` or drop it with `--remove-history-stack <index>`"
+    );
     Ok(())
 }
 
@@ -1653,6 +1699,7 @@ fn nav_command_to_search_args(cmd: &NavCommand) -> NavigatorSearchArgs {
     args
 }
 
+#[allow(clippy::too_many_arguments)]
 fn facet_command_to_search_args(
     cmd: &FacetCommand,
     base_query: Uuid,
@@ -1660,6 +1707,8 @@ fn facet_command_to_search_args(
     preset_filters: &[(String, proto::ActiveFilters)],
     history_suggestions: &[proto::FacetSuggestion],
     suggestion_index: Option<usize>,
+    history_stack_filters: Option<&(usize, proto::ActiveFilters)>,
+    history_stack_removals: Option<&(usize, proto::ActiveFilters)>,
 ) -> Result<NavigatorSearchArgs> {
     let mut args = NavigatorSearchArgs::default();
     args.refine = Some(base_query.to_string());
@@ -1693,6 +1742,15 @@ fn facet_command_to_search_args(
     for (name, filters) in preset_filters {
         apply_active_filters_to_args(&mut args, filters);
         args.hints.push(format!("applied preset {name}"));
+    }
+    if let Some((index, filters)) = history_stack_filters {
+        args.clear_filters = true;
+        apply_active_filters_to_args(&mut args, filters);
+        args.hints.push(format!("applied history[{index}] filters"));
+    }
+    if let Some((index, filters)) = history_stack_removals {
+        remove_active_filters_from_args(&mut args, filters);
+        args.hints.push(format!("removed history[{index}] filters"));
     }
     if cmd.clear {
         args.clear_filters = true;
@@ -1779,6 +1837,58 @@ fn apply_active_filters_to_args(args: &mut NavigatorSearchArgs, filters: &proto:
     }
     if filters.recent_only {
         args.recent_only = Some(true);
+    }
+}
+
+fn remove_active_filters_from_args(args: &mut NavigatorSearchArgs, filters: &proto::ActiveFilters) {
+    if !filters.languages.is_empty() {
+        let removals: Vec<String> = filters
+            .languages
+            .iter()
+            .map(|lang| language_label(lang).to_string())
+            .collect();
+        args.remove_languages.extend(removals.iter().cloned());
+        args.languages
+            .retain(|lang| !removals.iter().any(|value| value == lang));
+    }
+    if !filters.categories.is_empty() {
+        let removals: Vec<String> = filters
+            .categories
+            .iter()
+            .map(|cat| category_label(cat).to_string())
+            .collect();
+        args.remove_categories.extend(removals.iter().cloned());
+        args.categories
+            .retain(|category| !removals.iter().any(|value| value == category));
+    }
+    if !filters.path_globs.is_empty() {
+        for glob in &filters.path_globs {
+            args.remove_path_globs.push(glob.clone());
+        }
+        args.path_globs
+            .retain(|candidate| !filters.path_globs.iter().any(|glob| glob == candidate));
+    }
+    if !filters.file_substrings.is_empty() {
+        for value in &filters.file_substrings {
+            args.remove_file_substrings.push(value.clone());
+        }
+        args.file_substrings.retain(|candidate| {
+            !filters
+                .file_substrings
+                .iter()
+                .any(|value| value == candidate)
+        });
+    }
+    if !filters.owners.is_empty() {
+        for owner in &filters.owners {
+            args.remove_owners.push(owner.clone());
+        }
+        args.owners
+            .retain(|candidate| !filters.owners.iter().any(|owner| owner == candidate));
+    }
+    if filters.recent_only {
+        args.disable_recent_only = true;
+        args.recent_only = None;
     }
 }
 

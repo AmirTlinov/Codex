@@ -16,6 +16,7 @@ use codex_navigator::client::NavigatorClient;
 use codex_navigator::freeform::NavigatorPayload;
 use codex_navigator::freeform::parse_payload as parse_navigator_payload;
 use codex_navigator::plan_search_request;
+use codex_navigator::proto::FileCategory;
 use codex_navigator::proto::IndexState;
 use codex_navigator::proto::SearchDiagnostics;
 use codex_navigator::proto::SearchResponse;
@@ -75,6 +76,37 @@ fn run_nav_command(
     let (stdout, stderr) = run_nav_raw(codex_home, project_root, extra_args)?;
     let response: SearchResponse = serde_json::from_str(stdout.trim())?;
     Ok(NavCommandOutput { response, stderr })
+}
+
+fn run_facet_command(
+    codex_home: &Path,
+    project_root: &Path,
+    extra_args: &[&str],
+) -> Result<SearchResponse> {
+    let mut cmd = codex_command(codex_home, project_root)?;
+    let mut args = vec![
+        "navigator".to_string(),
+        "facet".to_string(),
+        "--project-root".to_string(),
+        project_root
+            .to_str()
+            .ok_or_else(|| anyhow!("project_root must be valid UTF-8"))?
+            .to_string(),
+    ];
+    for arg in extra_args {
+        args.push(arg.to_string());
+    }
+    cmd.args(args);
+    let output = cmd.output()?;
+    if !output.status.success() {
+        anyhow::bail!(
+            "navigator facet command failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+    let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+    let response: SearchResponse = serde_json::from_str(stdout.trim())?;
+    Ok(response)
 }
 
 fn run_nav_raw(
@@ -241,6 +273,71 @@ fn navigator_nav_supports_refine_flow() -> Result<()> {
             .hints
             .iter()
             .any(|hint| hint.contains("refine returned no hits"))
+    );
+
+    let _ = daemon.kill();
+    let _ = daemon.wait();
+    Ok(())
+}
+
+#[test]
+fn navigator_nav_history_stack_toggles_filters() -> Result<()> {
+    let codex_home = TempDir::new()?;
+    let project_dir = TempDir::new()?;
+    let project_root = project_dir.path();
+    std::fs::create_dir_all(project_root.join("src"))?;
+    std::fs::write(
+        project_root.join("src/lib.rs"),
+        "pub fn history_stack_symbol() {}",
+    )?;
+
+    let metadata_path = daemon_metadata_path(codex_home.path(), project_root)?;
+    let mut daemon = spawn_daemon_process(codex_home.path(), project_root)?;
+    wait_for_metadata(&metadata_path)?;
+
+    let initial = run_nav_command(codex_home.path(), project_root, &["history_stack_symbol"])?;
+    let query_id = initial
+        .response
+        .query_id
+        .context("initial navigator response missing query_id")?;
+
+    let query_arg = query_id.to_string();
+    let seeded = run_facet_command(
+        codex_home.path(),
+        project_root,
+        &["--from", &query_arg, "--tests"],
+    )?;
+    let seeded_filters = seeded
+        .active_filters
+        .as_ref()
+        .expect("seeding facet should record filters");
+    assert!(seeded_filters.categories.contains(&FileCategory::Tests));
+
+    let applied = run_facet_command(codex_home.path(), project_root, &["--history-stack", "0"])?;
+    let applied_filters = applied
+        .active_filters
+        .as_ref()
+        .expect("history stack should install filters");
+    assert!(applied_filters.categories.contains(&FileCategory::Tests));
+    assert!(applied.hints.iter().any(|hint| hint.contains("history[0]")));
+
+    let cleared = run_facet_command(
+        codex_home.path(),
+        project_root,
+        &["--remove-history-stack", "0"],
+    )?;
+    assert!(
+        cleared
+            .active_filters
+            .as_ref()
+            .map(|filters| filters.categories.is_empty())
+            .unwrap_or(true)
+    );
+    assert!(
+        cleared
+            .hints
+            .iter()
+            .any(|hint| hint.contains("removed history[0] filters"))
     );
 
     let _ = daemon.kill();
