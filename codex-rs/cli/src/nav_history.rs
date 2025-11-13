@@ -3,6 +3,7 @@ use crate::code_nav::OutputFormat;
 use crate::code_nav::RefsMode;
 use anyhow::Context;
 use anyhow::Result;
+use anyhow::anyhow;
 use codex_navigator::planner::NavigatorSearchArgs;
 use codex_navigator::proto::ActiveFilters;
 use codex_navigator::proto::InputFormat;
@@ -20,10 +21,31 @@ use std::time::UNIX_EPOCH;
 const HISTORY_FILENAME: &str = "history.json";
 const MAX_RECENT: usize = 10;
 const MAX_PINNED: usize = 5;
+const FACET_PRESETS_FILENAME: &str = "facet_presets.json";
+const MAX_PRESETS: usize = 24;
 
 #[derive(Debug, Clone)]
 pub struct QueryHistoryStore {
     path: PathBuf,
+}
+
+#[derive(Debug, Clone)]
+pub struct FacetPresetStore {
+    path: PathBuf,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FacetPreset {
+    pub name: String,
+    #[serde(default)]
+    pub filters: ActiveFilters,
+    pub saved_at: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+struct FacetPresetBook {
+    #[serde(default)]
+    presets: Vec<FacetPreset>,
 }
 
 impl QueryHistoryStore {
@@ -162,6 +184,93 @@ impl QueryHistoryStore {
         let data =
             serde_json::to_vec_pretty(history).context("serialize navigator query history")?;
         fs::write(&self.path, data).context("write navigator query history")
+    }
+}
+
+impl FacetPresetStore {
+    pub fn new(queries_dir: PathBuf) -> Self {
+        Self {
+            path: queries_dir.join(FACET_PRESETS_FILENAME),
+        }
+    }
+
+    pub fn list(&self) -> Result<Vec<FacetPreset>> {
+        Ok(self.read()?.presets)
+    }
+
+    pub fn get(&self, name: &str) -> Result<Option<FacetPreset>> {
+        let target = normalize_name(name)?;
+        let book = self.read()?;
+        Ok(book
+            .presets
+            .into_iter()
+            .find(|preset| preset.name.eq_ignore_ascii_case(&target)))
+    }
+
+    pub fn save(&self, name: &str, filters: ActiveFilters) -> Result<FacetPreset> {
+        if is_filters_empty(&filters) {
+            return Err(anyhow!("cannot save preset without active filters"));
+        }
+        let normalized = normalize_name(name)?;
+        let mut book = self.read()?;
+        let saved_at = now_secs();
+        if let Some(index) = book
+            .presets
+            .iter()
+            .position(|preset| preset.name.eq_ignore_ascii_case(&normalized))
+        {
+            {
+                let existing = &mut book.presets[index];
+                existing.name = normalized.clone();
+                existing.filters = filters;
+                existing.saved_at = saved_at;
+            }
+            let entry = book.presets[index].clone();
+            self.write(&book)?;
+            return Ok(entry);
+        }
+        let entry = FacetPreset {
+            name: normalized,
+            filters,
+            saved_at,
+        };
+        book.presets.insert(0, entry.clone());
+        if book.presets.len() > MAX_PRESETS {
+            book.presets.truncate(MAX_PRESETS);
+        }
+        self.write(&book)?;
+        Ok(entry)
+    }
+
+    pub fn remove(&self, name: &str) -> Result<bool> {
+        let normalized = normalize_name(name)?;
+        let mut book = self.read()?;
+        let before = book.presets.len();
+        book.presets
+            .retain(|preset| !preset.name.eq_ignore_ascii_case(&normalized));
+        let removed = before != book.presets.len();
+        if removed {
+            self.write(&book)?;
+        }
+        Ok(removed)
+    }
+
+    fn read(&self) -> Result<FacetPresetBook> {
+        match fs::read(&self.path) {
+            Ok(data) => serde_json::from_slice(&data).context("parse facet preset store"),
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+                Ok(FacetPresetBook::default())
+            }
+            Err(err) => Err(err).context("read facet preset store"),
+        }
+    }
+
+    fn write(&self, book: &FacetPresetBook) -> Result<()> {
+        if let Some(parent) = self.path.parent() {
+            fs::create_dir_all(parent).context("create facet preset dir")?;
+        }
+        let data = serde_json::to_vec_pretty(book).context("serialize facet presets")?;
+        fs::write(&self.path, data).context("write facet preset store")
     }
 }
 
@@ -395,11 +504,30 @@ pub fn now_secs() -> u64 {
         .unwrap_or(0)
 }
 
+fn normalize_name(name: &str) -> Result<String> {
+    let trimmed = name.trim();
+    if trimmed.is_empty() {
+        Err(anyhow!("preset name cannot be empty"))
+    } else {
+        Ok(trimmed.to_string())
+    }
+}
+
+fn is_filters_empty(filters: &ActiveFilters) -> bool {
+    filters.languages.is_empty()
+        && filters.categories.is_empty()
+        && filters.path_globs.is_empty()
+        && filters.file_substrings.is_empty()
+        && filters.owners.is_empty()
+        && !filters.recent_only
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use codex_navigator::proto::IndexState;
     use codex_navigator::proto::IndexStatus;
+    use codex_navigator::proto::Language;
     use codex_navigator::proto::PROTOCOL_VERSION;
     use tempfile::tempdir;
 
@@ -508,5 +636,31 @@ mod tests {
         let dir = tempdir().unwrap();
         let store = QueryHistoryStore::new(dir.path().to_path_buf());
         assert!(store.last_query_id().unwrap().is_none());
+    }
+
+    #[test]
+    fn facet_preset_store_round_trip() {
+        let dir = tempdir().unwrap();
+        let store = FacetPresetStore::new(dir.path().to_path_buf());
+        assert!(store.list().unwrap().is_empty());
+        let mut filters = ActiveFilters::default();
+        filters.languages.push(Language::Rust);
+        filters.recent_only = true;
+        let saved = store.save("rust focus", filters.clone()).unwrap();
+        assert_eq!(saved.name, "rust focus");
+        let listed = store.list().unwrap();
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].filters.languages.len(), 1);
+        assert!(store.get("rust focus").unwrap().is_some());
+        assert!(store.remove("rust focus").unwrap());
+        assert!(store.list().unwrap().is_empty());
+    }
+
+    #[test]
+    fn facet_preset_store_rejects_empty_filters() {
+        let dir = tempdir().unwrap();
+        let store = FacetPresetStore::new(dir.path().to_path_buf());
+        let err = store.save("empty", ActiveFilters::default()).unwrap_err();
+        assert!(err.to_string().contains("active filters"));
     }
 }

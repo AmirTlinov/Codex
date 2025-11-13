@@ -1,7 +1,9 @@
+use crate::nav_history::FacetPresetStore;
 use crate::nav_history::HistoryHit;
 use crate::nav_history::HistoryItem;
 use crate::nav_history::HistoryReplay;
 use crate::nav_history::QueryHistoryStore;
+use crate::nav_history::now_secs;
 use anyhow::Context;
 use anyhow::Result;
 use anyhow::anyhow;
@@ -469,6 +471,22 @@ pub struct FacetCommand {
     #[arg(long = "remove-chip", value_name = "INDEX", action = ArgAction::Append)]
     pub remove_chips: Vec<usize>,
 
+    /// Apply a saved facet preset (repeatable).
+    #[arg(long = "preset", value_name = "NAME", action = ArgAction::Append)]
+    pub presets: Vec<String>,
+
+    /// Save the resulting filters as a facet preset with the provided name.
+    #[arg(long = "save-preset", value_name = "NAME")]
+    pub save_preset: Option<String>,
+
+    /// Delete facet presets by name (repeatable).
+    #[arg(long = "delete-preset", value_name = "NAME", action = ArgAction::Append)]
+    pub delete_presets: Vec<String>,
+
+    /// List saved facet presets instead of running a search.
+    #[arg(long = "list-presets", default_value_t = false)]
+    pub list_presets: bool,
+
     /// Include references in the output.
     #[arg(long = "with-refs")]
     pub with_refs: bool,
@@ -492,6 +510,34 @@ pub struct FacetCommand {
     /// Select the final output format.
     #[arg(long = "format", value_enum, default_value_t = OutputFormat::Json)]
     pub output_format: OutputFormat,
+}
+
+fn facet_command_needs_search(cmd: &FacetCommand) -> bool {
+    cmd.from.is_some()
+        || cmd.history_index != 0
+        || cmd.undo
+        || !cmd.languages.is_empty()
+        || !cmd.remove_languages.is_empty()
+        || !cmd.owners.is_empty()
+        || !cmd.remove_owners.is_empty()
+        || cmd.tests
+        || cmd.no_tests
+        || cmd.docs
+        || cmd.no_docs
+        || cmd.deps
+        || cmd.no_deps
+        || cmd.recent_only
+        || cmd.no_recent
+        || cmd.clear
+        || !cmd.remove_chips.is_empty()
+        || !cmd.presets.is_empty()
+        || cmd.save_preset.is_some()
+        || cmd.with_refs
+        || cmd.refs_limit.is_some()
+        || cmd.refs_mode != RefsMode::All
+        || cmd.diagnostics_only
+        || cmd.focus != FocusMode::Auto
+        || cmd.output_format != OutputFormat::Json
 }
 
 #[derive(Debug, Parser)]
@@ -531,7 +577,7 @@ pub async fn run_nav(cmd: NavCommand) -> Result<()> {
     if std::env::var("NAVIGATOR_DEBUG_REQUEST").is_ok() {
         eprintln!("navigator.nav request: {request:#?}");
     }
-    execute_search(
+    let _ = execute_search(
         &client,
         request,
         cmd.output_format,
@@ -541,11 +587,41 @@ pub async fn run_nav(cmd: NavCommand) -> Result<()> {
         Some(recording),
         cmd.focus,
     )
-    .await
+    .await?;
+    Ok(())
 }
 
 pub async fn run_facet(cmd: FacetCommand) -> Result<()> {
     let client = build_client(cmd.project_root.clone()).await?;
+    let preset_store = FacetPresetStore::new(client.queries_dir());
+    if cmd.list_presets {
+        let presets = preset_store.list()?;
+        if presets.is_empty() {
+            println!("no facet presets saved yet");
+        } else {
+            println!("facet presets:");
+            for preset in presets {
+                println!(
+                    "  - {} (saved {}s ago)",
+                    preset.name,
+                    now_secs().saturating_sub(preset.saved_at)
+                );
+            }
+        }
+        return Ok(());
+    }
+    if !cmd.delete_presets.is_empty() {
+        for name in &cmd.delete_presets {
+            match preset_store.remove(name) {
+                Ok(true) => println!("deleted facet preset '{name}'"),
+                Ok(false) => println!("facet preset '{name}' not found"),
+                Err(err) => println!("failed to delete preset '{name}': {err}"),
+            }
+        }
+        if !facet_command_needs_search(&cmd) {
+            return Ok(());
+        }
+    }
     let history = QueryHistoryStore::new(client.queries_dir());
     let used_explicit = cmd.from.is_some();
     let mut history_index = cmd.history_index;
@@ -564,7 +640,15 @@ pub async fn run_facet(cmd: FacetCommand) -> Result<()> {
         (item.query_id, item.filters)
     };
     let (base_query, prior_filters) = history_item;
-    let mut args = facet_command_to_search_args(&cmd, base_query, prior_filters.as_ref())?;
+    let mut preset_filters = Vec::new();
+    for name in &cmd.presets {
+        let preset = preset_store
+            .get(name)?
+            .ok_or_else(|| anyhow!("facet preset '{name}' not found; run --list-presets"))?;
+        preset_filters.push((name.clone(), preset.filters));
+    }
+    let mut args =
+        facet_command_to_search_args(&cmd, base_query, prior_filters.as_ref(), &preset_filters)?;
     if !used_explicit {
         args.hints.push(format!(
             "using history[{history_index}] query id {base_query}"
@@ -579,7 +663,7 @@ pub async fn run_facet(cmd: FacetCommand) -> Result<()> {
         cmd.focus,
     );
     let request = plan_search_request(args)?;
-    execute_search(
+    let outcome = execute_search(
         &client,
         request,
         cmd.output_format,
@@ -589,7 +673,16 @@ pub async fn run_facet(cmd: FacetCommand) -> Result<()> {
         Some(recording),
         cmd.focus,
     )
-    .await
+    .await?;
+    if let Some(name) = cmd.save_preset.as_deref() {
+        if let Some(filters) = outcome.response.active_filters {
+            let saved = preset_store.save(name, filters)?;
+            println!("saved facet preset '{}'", saved.name);
+        } else {
+            println!("skipped saving preset '{name}' because response had no active filters");
+        }
+    }
+    Ok(())
 }
 
 pub async fn run_history(mut cmd: HistoryCommand) -> Result<()> {
@@ -637,7 +730,7 @@ pub async fn run_repeat(mut cmd: RepeatCommand) -> Result<()> {
         replay.focus_mode = cmd.focus;
     }
     let request = plan_search_request(replay.args.clone())?;
-    execute_search(
+    let _ = execute_search(
         &client,
         request,
         replay.output_format,
@@ -647,7 +740,8 @@ pub async fn run_repeat(mut cmd: RepeatCommand) -> Result<()> {
         Some(replay.clone()),
         replay.focus_mode,
     )
-    .await
+    .await?;
+    Ok(())
 }
 
 pub async fn run_pin(mut cmd: PinCommand) -> Result<()> {
@@ -739,7 +833,7 @@ pub async fn run_flow(mut cmd: FlowCommand) -> Result<()> {
         let resolved_refs_mode = step.refs_mode.unwrap_or(cmd.refs_mode);
         let show_refs = cmd.with_refs || step.with_refs || resolved_refs_mode != RefsMode::All;
         let output_format = step.output_format.unwrap_or(cmd.output_format);
-        execute_search(
+        let _ = execute_search(
             &client,
             request,
             output_format,
@@ -1020,7 +1114,7 @@ fn print_profile_summary(response: &ProfileResponse) {
         for hotspot in &response.hotspots {
             println!(
                 "  - {:<12} avg {:>4}ms | p95 {:>4} | max {:>4} | samples {}",
-                stage_label(&hotspot.stage),
+                stage_label(hotspot.stage),
                 hotspot.avg_ms,
                 hotspot.p95_ms,
                 hotspot.max_ms,
@@ -1191,12 +1285,12 @@ fn human_bytes(bytes: u64) -> String {
 fn format_stage_timings(stages: &[SearchStageTiming]) -> String {
     stages
         .iter()
-        .map(|entry| format!("{}={}ms", stage_label(&entry.stage), entry.duration_ms))
+        .map(|entry| format!("{}={}ms", stage_label(entry.stage), entry.duration_ms))
         .collect::<Vec<_>>()
         .join(", ")
 }
 
-fn stage_label(stage: &SearchStage) -> &'static str {
+fn stage_label(stage: SearchStage) -> &'static str {
     match stage {
         SearchStage::CandidateLoad => "candidates",
         SearchStage::Matcher => "matcher",
@@ -1282,7 +1376,7 @@ async fn run_atlas_jump(client: &NavigatorClient, root: &AtlasNode, target: &str
     args.limit = Some(60);
     args.profiles = vec![SearchProfile::Files];
     let request = plan_search_request(args)?;
-    execute_search(
+    let _ = execute_search(
         client,
         request,
         OutputFormat::Text,
@@ -1292,7 +1386,8 @@ async fn run_atlas_jump(client: &NavigatorClient, root: &AtlasNode, target: &str
         None,
         FocusMode::Auto,
     )
-    .await
+    .await?;
+    Ok(())
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1305,9 +1400,9 @@ async fn execute_search(
     diagnostics_only: bool,
     mut recording: Option<HistoryReplay>,
     focus_mode: FocusMode,
-) -> Result<()> {
+) -> Result<SearchStreamOutcome> {
     if matches!(output_format, OutputFormat::Ndjson) {
-        client
+        let outcome = client
             .search_with_event_handler(request.clone(), |event| {
                 if diagnostics_only && !matches!(event, SearchStreamEvent::Diagnostics { .. }) {
                     return;
@@ -1317,7 +1412,7 @@ async fn execute_search(
                 }
             })
             .await?;
-        return Ok(());
+        return Ok(outcome);
     }
     let mut last_diagnostics: Option<SearchDiagnostics> = None;
     let mut last_top_hits: Vec<NavHit> = Vec::new();
@@ -1365,7 +1460,7 @@ async fn execute_search(
         .record_entry(&outcome.response, recording.as_ref(), hits_for_history)
         .context("record navigator history")?;
 
-    match output_format {
+    let print_result = match output_format {
         OutputFormat::Json => {
             if !streamed_diag
                 && let Some(diag) = outcome.diagnostics.as_ref().or(last_diagnostics.as_ref())
@@ -1380,10 +1475,10 @@ async fn execute_search(
                 }
             }
             if diagnostics_only {
-                if let Some(snapshot) = outcome.diagnostics.or(last_diagnostics.clone()) {
+                if let Some(snapshot) = outcome.diagnostics.clone().or(last_diagnostics.clone()) {
                     print_json(&snapshot)?;
                 }
-                return Ok(());
+                return Ok(outcome);
             }
             if let Some(stats) = outcome.response.stats.as_ref() {
                 print_literal_stats(stats);
@@ -1409,7 +1504,9 @@ async fn execute_search(
             )
         }
         OutputFormat::Ndjson => unreachable!(),
-    }
+    };
+    print_result?;
+    Ok(outcome)
 }
 
 fn nav_command_to_search_args(cmd: &NavCommand) -> NavigatorSearchArgs {
@@ -1459,38 +1556,13 @@ fn facet_command_to_search_args(
     cmd: &FacetCommand,
     base_query: Uuid,
     base_filters: Option<&proto::ActiveFilters>,
+    preset_filters: &[(String, proto::ActiveFilters)],
 ) -> Result<NavigatorSearchArgs> {
     let mut args = NavigatorSearchArgs::default();
     args.refine = Some(base_query.to_string());
     args.inherit_filters = true;
     if let Some(filters) = base_filters {
-        if !filters.languages.is_empty() {
-            args.languages = filters
-                .languages
-                .iter()
-                .map(|lang| language_label(lang).to_string())
-                .collect();
-        }
-        if !filters.categories.is_empty() {
-            args.categories = filters
-                .categories
-                .iter()
-                .map(|cat| category_label(cat).to_string())
-                .collect();
-        }
-        if !filters.path_globs.is_empty() {
-            args.path_globs = filters.path_globs.clone();
-        }
-        if !filters.file_substrings.is_empty() {
-            args.file_substrings = filters.file_substrings.clone();
-        }
-        if !filters.owners.is_empty() {
-            args.owners = filters.owners.clone();
-        }
-        if filters.recent_only {
-            args.recent_only = Some(true);
-        }
-
+        apply_active_filters_to_args(&mut args, filters);
         if !cmd.remove_chips.is_empty() {
             let chips = active_filter_chips(filters);
             if chips.is_empty() {
@@ -1514,6 +1586,10 @@ fn facet_command_to_search_args(
         return Err(anyhow!(
             "--remove-chip requires a previous navigator query; run `codex navigator` first"
         ));
+    }
+    for (name, filters) in preset_filters {
+        apply_active_filters_to_args(&mut args, filters);
+        args.hints.push(format!("applied preset {name}"));
     }
     if cmd.clear {
         args.clear_filters = true;
@@ -1566,6 +1642,35 @@ fn facet_command_to_search_args(
         RefsMode::Usages => Some("usages".to_string()),
     };
     Ok(args)
+}
+
+fn apply_active_filters_to_args(args: &mut NavigatorSearchArgs, filters: &proto::ActiveFilters) {
+    if !filters.languages.is_empty() {
+        args.languages = filters
+            .languages
+            .iter()
+            .map(|lang| language_label(lang).to_string())
+            .collect();
+    }
+    if !filters.categories.is_empty() {
+        args.categories = filters
+            .categories
+            .iter()
+            .map(|cat| category_label(cat).to_string())
+            .collect();
+    }
+    if !filters.path_globs.is_empty() {
+        args.path_globs = filters.path_globs.clone();
+    }
+    if !filters.file_substrings.is_empty() {
+        args.file_substrings = filters.file_substrings.clone();
+    }
+    if !filters.owners.is_empty() {
+        args.owners = filters.owners.clone();
+    }
+    if filters.recent_only {
+        args.recent_only = Some(true);
+    }
 }
 
 async fn build_client(project_root: Option<PathBuf>) -> Result<NavigatorClient> {
@@ -2169,7 +2274,7 @@ fn format_snippet_lines(snippet: &proto::TextSnippet) -> Vec<String> {
     for line in &snippet.lines {
         let marker = line
             .diff_marker
-            .or_else(|| if line.emphasis { Some('>') } else { None })
+            .or(if line.emphasis { Some('>') } else { None })
             .unwrap_or(' ');
         let content = render_cli_highlights(&line.content, &line.highlights);
         rendered.push(format!("{:>4}{marker} {}", line.number, content));
