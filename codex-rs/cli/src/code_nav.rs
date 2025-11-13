@@ -175,6 +175,14 @@ pub struct HistoryCommand {
     /// Emit JSON with the recorded entries instead of the text view.
     #[arg(long = "json", default_value_t = false)]
     pub json: bool,
+
+    /// Show pinned history entries instead of the recents list.
+    #[arg(long = "pinned", default_value_t = false)]
+    pub pinned: bool,
+
+    /// Filter entries whose query/filters/suggestions contain this substring (case-insensitive).
+    #[arg(long = "contains")]
+    pub contains: Option<String>,
 }
 
 #[derive(Debug, Parser)]
@@ -757,9 +765,33 @@ fn load_history_filters(
 pub async fn run_history(mut cmd: HistoryCommand) -> Result<()> {
     let client = build_client(cmd.project_root.take()).await?;
     let history = QueryHistoryStore::new(client.queries_dir());
-    let rows = history.recent(cmd.limit as usize)?;
+    let mut rows = if cmd.pinned {
+        history.pinned()?
+    } else {
+        history.recent(cmd.limit as usize)?
+    };
+    if cmd.pinned && rows.len() > cmd.limit as usize {
+        rows.truncate(cmd.limit as usize);
+    }
+    if let Some(filter) = cmd
+        .contains
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
+        let lowered = filter.to_ascii_lowercase();
+        rows.retain(|item| history_item_matches(item, &lowered));
+    }
     if rows.is_empty() {
-        println!("no navigator history recorded yet");
+        if cmd.pinned && cmd.contains.is_some() {
+            println!("no pinned navigator history entries match the filter");
+        } else if cmd.pinned {
+            println!("no pinned navigator history entries");
+        } else if cmd.contains.is_some() {
+            println!("no navigator history entries match the filter");
+        } else {
+            println!("no navigator history recorded yet");
+        }
         return Ok(());
     }
     let now = crate::nav_history::now_secs();
@@ -772,12 +804,16 @@ pub async fn run_history(mut cmd: HistoryCommand) -> Result<()> {
         println!("{}", serde_json::to_string_pretty(&views)?);
         return Ok(());
     }
-    println!("recent navigator queries (index → query_id):");
-    if rows.iter().any(|item| item.is_pinned) {
+    if cmd.pinned {
+        println!("pinned navigator queries (index → query_id):");
+    } else {
+        println!("recent navigator queries (index → query_id):");
+    }
+    if !cmd.pinned && rows.iter().any(|item| item.is_pinned) {
         println!("(*) indicates pinned entries");
     }
     for (idx, item) in rows.into_iter().enumerate() {
-        print_history_entry(idx, &item, now, true, true);
+        print_history_entry(idx, &item, now, !cmd.pinned, true);
     }
     Ok(())
 }
@@ -1012,6 +1048,59 @@ fn format_history_filters(item: &HistoryItem) -> String {
     } else {
         format!(" {}", chips.join(""))
     }
+}
+
+fn history_item_matches(item: &HistoryItem, needle: &str) -> bool {
+    if let Some(replay) = item.replay.as_ref()
+        && replay
+            .args
+            .query
+            .as_deref()
+            .is_some_and(|text| text_contains(text, needle))
+    {
+        return true;
+    }
+    if let Some(filters) = item.filters.as_ref()
+        && (filters
+            .languages
+            .iter()
+            .any(|lang| text_contains(language_label(lang), needle))
+            || filters
+                .categories
+                .iter()
+                .any(|cat| text_contains(category_label(cat), needle))
+            || filters
+                .path_globs
+                .iter()
+                .any(|glob| text_contains(glob, needle))
+            || filters
+                .file_substrings
+                .iter()
+                .any(|pattern| text_contains(pattern, needle))
+            || filters
+                .owners
+                .iter()
+                .any(|owner| text_contains(owner, needle)))
+    {
+        return true;
+    }
+    if item
+        .hits
+        .iter()
+        .any(|hit| text_contains(&hit.path, needle) || text_contains(&hit.preview, needle))
+    {
+        return true;
+    }
+    if item.facet_suggestions.iter().any(|suggestion| {
+        text_contains(&suggestion.label, needle) || text_contains(&suggestion.command, needle)
+    }) {
+        return true;
+    }
+    false
+}
+
+fn text_contains(haystack: &str, needle: &str) -> bool {
+    haystack.to_ascii_lowercase().contains(needle)
 }
 
 fn stack_command(index: usize) -> String {
@@ -3473,6 +3562,65 @@ mod tests {
         };
         apply_history_suggestion(&mut args, &suggestion).unwrap();
         assert_eq!(args.only_tests, Some(true));
+    }
+
+    #[test]
+    fn history_item_matches_queries_hits_and_filters() {
+        let mut replay_args = NavigatorSearchArgs::default();
+        replay_args.query = Some("Refactor planner".to_string());
+        let replay = HistoryReplay::new(
+            replay_args,
+            OutputFormat::Json,
+            RefsMode::All,
+            false,
+            false,
+            FocusMode::Auto,
+        );
+        let mut item = HistoryItem {
+            query_id: Uuid::new_v4(),
+            recorded_at: 0,
+            filters: None,
+            hits: Vec::new(),
+            is_pinned: false,
+            replay: Some(replay),
+            facet_suggestions: Vec::new(),
+        };
+        assert!(history_item_matches(&item, "planner"));
+        assert!(!history_item_matches(&item, "missing"));
+        item.replay = None;
+        item.hits.push(HistoryHit {
+            path: "src/lib.rs".into(),
+            line: 10,
+            layer: None,
+            preview: "// todo: wire suggestions".into(),
+        });
+        assert!(history_item_matches(&item, "todo"));
+    }
+
+    #[test]
+    fn history_item_matches_filters_and_suggestions() {
+        let filters = proto::ActiveFilters {
+            languages: vec![proto::Language::Rust],
+            owners: vec!["core-team".to_string()],
+            ..Default::default()
+        };
+        let suggestion = proto::FacetSuggestion {
+            label: "lang=rust".to_string(),
+            command: "codex navigator facet --lang rust".to_string(),
+            kind: FacetSuggestionKind::Language,
+            value: Some("rust".to_string()),
+        };
+        let item = HistoryItem {
+            query_id: Uuid::new_v4(),
+            recorded_at: 0,
+            filters: Some(filters),
+            hits: Vec::new(),
+            is_pinned: false,
+            replay: None,
+            facet_suggestions: vec![suggestion],
+        };
+        assert!(history_item_matches(&item, "core-team"));
+        assert!(history_item_matches(&item, "lang=rust"));
     }
 
     #[test]
