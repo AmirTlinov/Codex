@@ -2,6 +2,14 @@ use std::env;
 use std::path::PathBuf;
 use std::sync::Arc;
 
+use crate::function_tool::FunctionCallError;
+use crate::protocol::EventMsg;
+use crate::protocol::RawResponseItemEvent;
+use crate::tools::context::ToolInvocation;
+use crate::tools::context::ToolOutput;
+use crate::tools::registry::ToolHandler;
+use crate::tools::registry::ToolKind;
+use anyhow::Result as AnyhowResult;
 use async_trait::async_trait;
 use codex_navigator::atlas_focus;
 use codex_navigator::auto_facet::AutoFacetConfig;
@@ -10,8 +18,18 @@ use codex_navigator::client::ClientOptions;
 use codex_navigator::client::DaemonSpawn;
 use codex_navigator::client::NavigatorClient;
 use codex_navigator::client::SearchStreamOutcome;
+use codex_navigator::freeform::HistoryActionKind;
+use codex_navigator::freeform::NavigatorPayload;
+use codex_navigator::freeform::parse_payload as parse_navigator_payload;
+use codex_navigator::history::HistoryItem;
+use codex_navigator::history::QueryHistoryStore;
+use codex_navigator::history::RecordedQuery;
+use codex_navigator::history::capture_history_hits;
 use codex_navigator::plan_search_request;
+use codex_navigator::planner::NavigatorSearchArgs;
 use codex_navigator::planner::SearchPlannerError;
+use codex_navigator::planner::apply_active_filters_to_args;
+use codex_navigator::planner::remove_active_filters_from_args;
 use codex_navigator::proto::AtlasNode;
 use codex_navigator::proto::AtlasRequest;
 use codex_navigator::proto::AtlasResponse;
@@ -24,24 +42,14 @@ use codex_navigator::proto::SearchResponse;
 use codex_navigator::proto::SearchStreamEvent;
 use codex_navigator::proto::SnippetRequest;
 use codex_navigator::resolve_daemon_launcher;
+use codex_protocol::models::FunctionCallOutputContentItem;
+use codex_protocol::models::FunctionCallOutputPayload;
+use codex_protocol::models::ResponseItem;
 use once_cell::sync::OnceCell;
 use serde::Serialize;
 use tokio::task;
 use tracing::info;
 use tracing::warn;
-
-use crate::function_tool::FunctionCallError;
-use crate::protocol::EventMsg;
-use crate::protocol::RawResponseItemEvent;
-use crate::tools::context::ToolInvocation;
-use crate::tools::context::ToolOutput;
-use crate::tools::registry::ToolHandler;
-use crate::tools::registry::ToolKind;
-use codex_navigator::freeform::NavigatorPayload;
-use codex_navigator::freeform::parse_payload as parse_navigator_payload;
-use codex_protocol::models::FunctionCallOutputContentItem;
-use codex_protocol::models::FunctionCallOutputPayload;
-use codex_protocol::models::ResponseItem;
 
 pub struct NavigatorHandler;
 
@@ -95,6 +103,11 @@ impl StreamEventEmitter {
     }
 }
 
+struct SearchRunResult {
+    payload: SearchToolOutput,
+    recorded_args: NavigatorSearchArgs,
+}
+
 #[async_trait]
 impl ToolHandler for NavigatorHandler {
     fn kind(&self) -> ToolKind {
@@ -137,57 +150,65 @@ impl ToolHandler for NavigatorHandler {
 
         match request {
             NavigatorPayload::Search(args) => {
-                let mut req = plan_search_request(*args).map_err(map_planner_error)?;
-                let request_snapshot = req.clone();
-                req.project_root = Some(project_root_string.clone());
-                let mut streamed_diag: Option<SearchDiagnostics> = None;
-                let mut streamed_hits: Vec<NavHit> = Vec::new();
-                let emitter =
-                    StreamEventEmitter::new(session.clone(), turn.clone(), call_id.clone());
-                let outcome = match client
-                    .search_with_event_handler(req, |event| {
-                        emitter.emit(event.clone());
-                        match event {
-                            SearchStreamEvent::Diagnostics { diagnostics } => {
-                                streamed_diag = Some(diagnostics.clone());
-                            }
-                            SearchStreamEvent::TopHits { hits } => {
-                                streamed_hits = hits.clone();
-                            }
-                            _ => {}
-                        }
-                    })
-                    .await
-                {
-                    Ok(outcome) => outcome,
-                    Err(err) => return Err(with_doctor_context(err, &client).await),
-                };
-                let mut final_outcome = outcome;
-                if let Some(auto_outcome) = maybe_run_auto_facet_search(
+                let history = QueryHistoryStore::new(client.queries_dir());
+                let result = run_search_flow(
                     &client,
+                    session.clone(),
+                    turn.clone(),
+                    &call_id,
                     &project_root_string,
-                    &request_snapshot,
-                    &final_outcome,
+                    *args,
                 )
-                .await?
-                {
-                    final_outcome = auto_outcome;
-                }
-                let SearchStreamOutcome {
-                    diagnostics,
-                    top_hits,
-                    response,
-                } = final_outcome;
-                let payload = SearchToolOutput {
-                    diagnostics: diagnostics.or(streamed_diag),
-                    top_hits: if top_hits.is_empty() {
-                        streamed_hits
-                    } else {
-                        top_hits
+                .await?;
+                record_history_entry(&history, &result.recorded_args, &result.payload).map_err(
+                    |err| {
+                        FunctionCallError::RespondToModel(format!(
+                            "failed to record navigator history: {err:#}"
+                        ))
                     },
-                    response,
+                )?;
+                Ok(make_json_output(result.payload)?)
+            }
+            NavigatorPayload::History {
+                mode,
+                index,
+                pinned,
+            } => {
+                let history = QueryHistoryStore::new(client.queries_dir());
+                let args = match mode {
+                    HistoryActionKind::Stack => build_history_stack_args(
+                        &history,
+                        index,
+                        pinned,
+                        HistoryStackAction::Apply,
+                    )?,
+                    HistoryActionKind::ClearStack => build_history_stack_args(
+                        &history,
+                        index,
+                        pinned,
+                        HistoryStackAction::Remove,
+                    )?,
+                    HistoryActionKind::Repeat => {
+                        build_history_repeat_args(&history, index, pinned)?
+                    }
                 };
-                Ok(make_json_output(payload)?)
+                let result = run_search_flow(
+                    &client,
+                    session.clone(),
+                    turn.clone(),
+                    &call_id,
+                    &project_root_string,
+                    args,
+                )
+                .await?;
+                record_history_entry(&history, &result.recorded_args, &result.payload).map_err(
+                    |err| {
+                        FunctionCallError::RespondToModel(format!(
+                            "failed to record navigator history: {err:#}"
+                        ))
+                    },
+                )?;
+                Ok(make_json_output(result.payload)?)
             }
             NavigatorPayload::Open { id } => {
                 let req = OpenRequest {
@@ -283,6 +304,166 @@ fn auto_facet_enabled() -> bool {
             !matches!(lowered.as_str(), "0" | "false" | "off")
         }
         Err(_) => true,
+    }
+}
+
+async fn run_search_flow(
+    client: &NavigatorClient,
+    session: Arc<crate::codex::Session>,
+    turn: Arc<crate::codex::TurnContext>,
+    call_id: &str,
+    project_root: &str,
+    args: NavigatorSearchArgs,
+) -> Result<SearchRunResult, FunctionCallError> {
+    let recorded_args = args.clone();
+    let mut req = plan_search_request(args).map_err(map_planner_error)?;
+    let request_snapshot = req.clone();
+    req.project_root = Some(project_root.to_string());
+    let mut streamed_diag: Option<SearchDiagnostics> = None;
+    let mut streamed_hits: Vec<NavHit> = Vec::new();
+    let emitter = StreamEventEmitter::new(session, turn, call_id.to_string());
+    let outcome = match client
+        .search_with_event_handler(req, |event| {
+            emitter.emit(event.clone());
+            match event {
+                SearchStreamEvent::Diagnostics { diagnostics } => {
+                    streamed_diag = Some(diagnostics.clone());
+                }
+                SearchStreamEvent::TopHits { hits } => {
+                    streamed_hits = hits.clone();
+                }
+                _ => {}
+            }
+        })
+        .await
+    {
+        Ok(outcome) => outcome,
+        Err(err) => return Err(with_doctor_context(err, client).await),
+    };
+    let mut final_outcome = outcome;
+    if let Some(auto_outcome) =
+        maybe_run_auto_facet_search(client, project_root, &request_snapshot, &final_outcome).await?
+    {
+        final_outcome = auto_outcome;
+    }
+    let SearchStreamOutcome {
+        diagnostics,
+        top_hits,
+        response,
+    } = final_outcome;
+    let payload = SearchToolOutput {
+        diagnostics: diagnostics.or(streamed_diag),
+        top_hits: if top_hits.is_empty() {
+            streamed_hits
+        } else {
+            top_hits
+        },
+        response,
+    };
+    Ok(SearchRunResult {
+        payload,
+        recorded_args,
+    })
+}
+
+fn record_history_entry(
+    history: &QueryHistoryStore,
+    args: &NavigatorSearchArgs,
+    payload: &SearchToolOutput,
+) -> AnyhowResult<()> {
+    let recorded = RecordedQuery::from_args(args);
+    let hits = if !payload.response.hits.is_empty() {
+        capture_history_hits(&payload.response.hits)
+    } else {
+        capture_history_hits(&payload.top_hits)
+    };
+    history.record_entry(&payload.response, Some(recorded), hits)
+}
+
+#[derive(Copy, Clone)]
+enum HistoryStackAction {
+    Apply,
+    Remove,
+}
+
+fn build_history_stack_args(
+    history: &QueryHistoryStore,
+    index: usize,
+    pinned: bool,
+    action: HistoryStackAction,
+) -> Result<NavigatorSearchArgs, FunctionCallError> {
+    let item = load_history_item(history, index, pinned)?;
+    let filters = item.filters.clone().ok_or_else(|| {
+        FunctionCallError::RespondToModel(format!(
+            "{} has no active filters; cannot use stack commands",
+            history_label(index, pinned)
+        ))
+    })?;
+    let mut args = NavigatorSearchArgs::default();
+    args.refine = Some(item.query_id.to_string());
+    args.inherit_filters = true;
+    match action {
+        HistoryStackAction::Apply => {
+            args.clear_filters = true;
+            apply_active_filters_to_args(&mut args, &filters);
+            args.hints
+                .push(format!("applied {} filters", history_label(index, pinned)));
+        }
+        HistoryStackAction::Remove => {
+            remove_active_filters_from_args(&mut args, &filters);
+            args.hints
+                .push(format!("removed {} filters", history_label(index, pinned)));
+        }
+    }
+    Ok(args)
+}
+
+fn build_history_repeat_args(
+    history: &QueryHistoryStore,
+    index: usize,
+    pinned: bool,
+) -> Result<NavigatorSearchArgs, FunctionCallError> {
+    let item = load_history_item(history, index, pinned)?;
+    let recorded = item.recorded_query.ok_or_else(|| {
+        FunctionCallError::RespondToModel(format!(
+            "{} cannot be repeated; missing replay metadata",
+            history_label(index, pinned)
+        ))
+    })?;
+    let mut args = recorded.into_args();
+    args.hints
+        .push(format!("replayed {}", history_label(index, pinned)));
+    Ok(args)
+}
+
+fn load_history_item(
+    history: &QueryHistoryStore,
+    index: usize,
+    pinned: bool,
+) -> Result<HistoryItem, FunctionCallError> {
+    match history.history_item(index, pinned) {
+        Ok(Some(item)) => Ok(item),
+        Ok(None) => Err(history_missing_error(index, pinned)),
+        Err(err) => Err(FunctionCallError::RespondToModel(format!(
+            "failed to load navigator history: {err:#}"
+        ))),
+    }
+}
+
+fn history_missing_error(index: usize, pinned: bool) -> FunctionCallError {
+    let label = if pinned {
+        format!("pinned index {index}")
+    } else {
+        format!("history index {index}")
+    };
+    FunctionCallError::RespondToModel(format!("{label} not available; run navigator first"))
+}
+
+fn history_label(index: usize, pinned: bool) -> String {
+    if pinned {
+        format!("pinned[{index}]")
+    } else {
+        format!("history[{index}]")
     }
 }
 

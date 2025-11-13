@@ -52,6 +52,9 @@ pub(crate) fn summarize_navigator_request(raw_input: &str) -> NavigatorExecReque
         Ok(NavigatorPayload::AtlasSummary { target }) => {
             summarize_atlas_summary_request(target.as_deref())
         }
+        Ok(NavigatorPayload::History { .. }) => {
+            fallback_request("history action unavailable in TUI")
+        }
         Err(_) => fallback_request(trimmed),
     }
 }

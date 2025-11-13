@@ -1,3 +1,4 @@
+use crate::proto::ActiveFilters;
 use crate::proto::FacetSuggestion;
 use crate::proto::FacetSuggestionKind;
 use crate::proto::FileCategory;
@@ -12,6 +13,7 @@ use crate::proto::SearchProfile;
 use crate::proto::SearchRequest;
 use crate::proto::SymbolKind;
 use serde::Deserialize;
+use serde::Serialize;
 use std::fmt;
 use uuid::Uuid;
 
@@ -421,6 +423,218 @@ pub fn apply_facet_suggestion(
         }
     }
     Ok(())
+}
+
+pub fn language_label(language: &Language) -> &'static str {
+    match language {
+        Language::Rust => "rust",
+        Language::Typescript => "ts",
+        Language::Tsx => "tsx",
+        Language::Javascript => "js",
+        Language::Python => "python",
+        Language::Go => "go",
+        Language::Bash => "bash",
+        Language::Markdown => "md",
+        Language::Json => "json",
+        Language::Yaml => "yaml",
+        Language::Toml => "toml",
+        Language::Unknown => "unknown",
+    }
+}
+
+pub fn category_label(category: &FileCategory) -> &'static str {
+    match category {
+        FileCategory::Source => "source",
+        FileCategory::Tests => "tests",
+        FileCategory::Docs => "docs",
+        FileCategory::Deps => "deps",
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct StoredSearchArgs {
+    pub query: Option<String>,
+    pub limit: Option<usize>,
+    pub kinds: Vec<String>,
+    pub languages: Vec<String>,
+    pub categories: Vec<String>,
+    pub path_globs: Vec<String>,
+    pub file_substrings: Vec<String>,
+    pub owners: Vec<String>,
+    pub symbol_exact: Option<String>,
+    pub recent_only: Option<bool>,
+    pub only_tests: Option<bool>,
+    pub only_docs: Option<bool>,
+    pub only_deps: Option<bool>,
+    pub with_refs: Option<bool>,
+    pub refs_limit: Option<usize>,
+    pub refs_role: Option<String>,
+    pub help_symbol: Option<String>,
+    pub refine: Option<String>,
+    pub wait_for_index: Option<bool>,
+    pub profiles: Vec<SearchProfile>,
+    pub remove_languages: Vec<String>,
+    pub remove_categories: Vec<String>,
+    pub remove_path_globs: Vec<String>,
+    pub remove_file_substrings: Vec<String>,
+    pub remove_owners: Vec<String>,
+    pub clear_filters: bool,
+    pub disable_recent_only: bool,
+    pub inherit_filters: bool,
+    pub input_format: InputFormat,
+}
+
+impl From<&NavigatorSearchArgs> for StoredSearchArgs {
+    fn from(args: &NavigatorSearchArgs) -> Self {
+        Self {
+            query: args.query.clone(),
+            limit: args.limit,
+            kinds: args.kinds.clone(),
+            languages: args.languages.clone(),
+            categories: args.categories.clone(),
+            path_globs: args.path_globs.clone(),
+            file_substrings: args.file_substrings.clone(),
+            owners: args.owners.clone(),
+            symbol_exact: args.symbol_exact.clone(),
+            recent_only: args.recent_only,
+            only_tests: args.only_tests,
+            only_docs: args.only_docs,
+            only_deps: args.only_deps,
+            with_refs: args.with_refs,
+            refs_limit: args.refs_limit,
+            refs_role: args.refs_role.clone(),
+            help_symbol: args.help_symbol.clone(),
+            refine: args.refine.clone(),
+            wait_for_index: args.wait_for_index,
+            profiles: args.profiles.clone(),
+            remove_languages: args.remove_languages.clone(),
+            remove_categories: args.remove_categories.clone(),
+            remove_path_globs: args.remove_path_globs.clone(),
+            remove_file_substrings: args.remove_file_substrings.clone(),
+            remove_owners: args.remove_owners.clone(),
+            clear_filters: args.clear_filters,
+            disable_recent_only: args.disable_recent_only,
+            inherit_filters: args.inherit_filters,
+            input_format: args.input_format,
+        }
+    }
+}
+
+impl StoredSearchArgs {
+    pub fn into_args(self) -> NavigatorSearchArgs {
+        let mut args = NavigatorSearchArgs::default();
+        args.query = self.query;
+        args.limit = self.limit;
+        args.kinds = self.kinds;
+        args.languages = self.languages;
+        args.categories = self.categories;
+        args.path_globs = self.path_globs;
+        args.file_substrings = self.file_substrings;
+        args.owners = self.owners;
+        args.symbol_exact = self.symbol_exact;
+        args.recent_only = self.recent_only;
+        args.only_tests = self.only_tests;
+        args.only_docs = self.only_docs;
+        args.only_deps = self.only_deps;
+        args.with_refs = self.with_refs;
+        args.refs_limit = self.refs_limit;
+        args.refs_role = self.refs_role;
+        args.help_symbol = self.help_symbol;
+        args.refine = self.refine;
+        args.wait_for_index = self.wait_for_index;
+        args.profiles = self.profiles;
+        args.remove_languages = self.remove_languages;
+        args.remove_categories = self.remove_categories;
+        args.remove_path_globs = self.remove_path_globs;
+        args.remove_file_substrings = self.remove_file_substrings;
+        args.remove_owners = self.remove_owners;
+        args.clear_filters = self.clear_filters;
+        args.disable_recent_only = self.disable_recent_only;
+        args.inherit_filters = self.inherit_filters;
+        args.input_format = self.input_format;
+        args
+    }
+}
+
+pub fn apply_active_filters_to_args(args: &mut NavigatorSearchArgs, filters: &ActiveFilters) {
+    if !filters.languages.is_empty() {
+        args.languages = filters
+            .languages
+            .iter()
+            .map(|lang| language_label(lang).to_string())
+            .collect();
+    }
+    if !filters.categories.is_empty() {
+        args.categories = filters
+            .categories
+            .iter()
+            .map(|cat| category_label(cat).to_string())
+            .collect();
+    }
+    if !filters.path_globs.is_empty() {
+        args.path_globs = filters.path_globs.clone();
+    }
+    if !filters.file_substrings.is_empty() {
+        args.file_substrings = filters.file_substrings.clone();
+    }
+    if !filters.owners.is_empty() {
+        args.owners = filters.owners.clone();
+    }
+    if filters.recent_only {
+        args.recent_only = Some(true);
+    }
+}
+
+pub fn remove_active_filters_from_args(args: &mut NavigatorSearchArgs, filters: &ActiveFilters) {
+    if !filters.languages.is_empty() {
+        let removals: Vec<String> = filters
+            .languages
+            .iter()
+            .map(|lang| language_label(lang).to_string())
+            .collect();
+        args.remove_languages.extend(removals.iter().cloned());
+        args.languages
+            .retain(|lang| !removals.iter().any(|value| value == lang));
+    }
+    if !filters.categories.is_empty() {
+        let removals: Vec<String> = filters
+            .categories
+            .iter()
+            .map(|cat| category_label(cat).to_string())
+            .collect();
+        args.remove_categories.extend(removals.iter().cloned());
+        args.categories
+            .retain(|category| !removals.iter().any(|value| value == category));
+    }
+    if !filters.path_globs.is_empty() {
+        for glob in &filters.path_globs {
+            args.remove_path_globs.push(glob.clone());
+        }
+        args.path_globs
+            .retain(|candidate| !filters.path_globs.iter().any(|glob| glob == candidate));
+    }
+    if !filters.file_substrings.is_empty() {
+        for value in &filters.file_substrings {
+            args.remove_file_substrings.push(value.clone());
+        }
+        args.file_substrings.retain(|candidate| {
+            !filters
+                .file_substrings
+                .iter()
+                .any(|value| value == candidate)
+        });
+    }
+    if !filters.owners.is_empty() {
+        for owner in &filters.owners {
+            args.remove_owners.push(owner.clone());
+        }
+        args.owners
+            .retain(|candidate| !filters.owners.iter().any(|owner| owner == candidate));
+    }
+    if filters.recent_only {
+        args.disable_recent_only = true;
+        args.recent_only = None;
+    }
 }
 
 #[allow(clippy::too_many_arguments)]

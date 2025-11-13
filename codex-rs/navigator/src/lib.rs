@@ -3,6 +3,7 @@ pub mod auto_facet;
 pub mod client;
 pub mod daemon;
 pub mod freeform;
+pub mod history;
 pub mod index;
 mod metadata;
 pub mod planner;

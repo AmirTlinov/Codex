@@ -57,6 +57,7 @@ This roadmap enumerates the concrete work required to turn Navigator into the pr
      - ✅ Автофасет теперь выполняет до двух последовательных шагов (пропуская уже применённые фильтры) и добавляет подсказки в историю, так что цепочки `lang=rust → tests → owner=core` происходят без участия оператора.
      - ✅ История хранит готовые стеки фильтров: `codex navigator facet --history-stack <n>` переиспользует комбинацию, `--remove-history-stack <n>` снимает её целиком, поэтому включение/снятие фильтров занимает одну команду.
      - ✅ `codex navigator history` показывает готовые команды (stack/clear/repeat/suggestion) и поддерживает `--json`, так что фильтры можно переиспользовать автоматически без парсинга.
+     - ✅ Freeform parser + Navigator handler понимают `history` действия (stack/clear/repeat, pinned), поэтому ИИ-агент повторяет или модифицирует прошлые поиски напрямую через инструмент без вызова CLI.
 - **Success criteria:** users can drill from >10 k hits to <20 hits in ≤3 commands without retyping the query.
 
 ### 5. Index Health & Regression Monitoring
@@ -94,4 +95,4 @@ This roadmap enumerates the concrete work required to turn Navigator into the pr
 - **Iteration cadence:** treat each epic as a 1–2 week slice with demoable value; keep this TODO updated after each milestone.
 - **Quality bar:** every feature ships with planner/CLI documentation, unit + integration tests, and benchmarking notes.
 - **Adoption:** once a milestone lands, dogfood it immediately inside Codex CLI and capture feedback under `.agents/context/`.
-- **UX contract:** TUI остаётся пользовательским слоем: минимум когнитивного шума, только итоговые подсказки (hits, активные фильтры, atlas breadcrumbs). Все продвинутые возможности (`navigator` CLI, facet команды, atlas карты) предназначены для ИИ-оператора, чтобы ускорять его ориентирование.
+- **UX contract:** TUI остаётся исключительно пользовательским слоем: никаких кнопок управления Navigator, только короткий статус вроде `Navigator: <intent>` без лишнего шума. Navigator, CLI, facet/atlas/hints — это рабочий инструмент ИИ-агента, который должен обеспечивать полную навигацию по проекту без IDE/rg.

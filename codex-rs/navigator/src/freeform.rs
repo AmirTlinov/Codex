@@ -23,6 +23,21 @@ pub enum NavigatorPayload {
         #[serde(default)]
         target: Option<String>,
     },
+    History {
+        #[serde(rename = "mode")]
+        mode: HistoryActionKind,
+        index: usize,
+        #[serde(default)]
+        pinned: bool,
+    },
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum HistoryActionKind {
+    Stack,
+    ClearStack,
+    Repeat,
 }
 
 pub const DEFAULT_SNIPPET_CONTEXT: usize = 8;
@@ -183,6 +198,7 @@ fn try_quick_command(input: &str) -> Option<Result<NavigatorPayload, PayloadPars
         "snippet" | "snip" => Some(parse_quick_snippet(rest)),
         "atlas" => Some(parse_quick_atlas(rest)),
         "facet" => Some(parse_quick_facet(rest)),
+        "history" => Some(parse_quick_history(rest)),
         _ => None,
     }
 }
@@ -352,6 +368,46 @@ fn parse_quick_facet(rest: &str) -> Result<NavigatorPayload, PayloadParseError> 
     }
     args.finalize_freeform_hints();
     Ok(NavigatorPayload::Search(Box::new(args)))
+}
+
+fn parse_quick_history(rest: &str) -> Result<NavigatorPayload, PayloadParseError> {
+    let tokens = split_shellwords(rest)?;
+    let mut mode = HistoryActionKind::Repeat;
+    let mut index: usize = 0;
+    let mut pinned = false;
+    for token in tokens {
+        if token.eq_ignore_ascii_case("--pinned") || token.eq_ignore_ascii_case("-p") {
+            pinned = true;
+            continue;
+        }
+        if let Some(value) = token.strip_prefix("--index=") {
+            index = value
+                .parse::<usize>()
+                .map_err(|_| PayloadParseError::new(format!("invalid history index `{value}`")))?;
+            continue;
+        }
+        let lowered = token.to_ascii_lowercase();
+        if lowered.chars().all(|ch| ch.is_ascii_digit()) {
+            index = lowered.parse::<usize>().unwrap_or(0);
+            continue;
+        }
+        match lowered.as_str() {
+            "stack" => mode = HistoryActionKind::Stack,
+            "clear" | "clear-stack" | "remove" => mode = HistoryActionKind::ClearStack,
+            "repeat" | "redo" => mode = HistoryActionKind::Repeat,
+            "" => {}
+            _ => {
+                return Err(PayloadParseError::new(format!(
+                    "unsupported history token `{token}`"
+                )));
+            }
+        }
+    }
+    Ok(NavigatorPayload::History {
+        mode,
+        index,
+        pinned,
+    })
 }
 
 fn parse_snippet_context_token(token: &str) -> Result<usize, PayloadParseError> {
@@ -1377,6 +1433,38 @@ mod tests {
                 assert!(args.owners.contains(&"@core".to_string()));
                 assert!(args.remove_owners.contains(&"legacy".to_string()));
                 assert!(args.inherit_filters);
+            }
+            other => panic!("unexpected payload: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_quick_history_defaults_to_repeat() {
+        match parse_quick_history("").expect("history parsed") {
+            NavigatorPayload::History {
+                mode,
+                index,
+                pinned,
+            } => {
+                assert!(matches!(mode, HistoryActionKind::Repeat));
+                assert_eq!(index, 0);
+                assert!(!pinned);
+            }
+            other => panic!("unexpected payload: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_quick_history_accepts_stack_with_index() {
+        match parse_quick_history("stack 4 --pinned").expect("history parsed") {
+            NavigatorPayload::History {
+                mode,
+                index,
+                pinned,
+            } => {
+                assert!(matches!(mode, HistoryActionKind::Stack));
+                assert_eq!(index, 4);
+                assert!(pinned);
             }
             other => panic!("unexpected payload: {other:?}"),
         }

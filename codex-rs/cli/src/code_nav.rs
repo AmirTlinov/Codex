@@ -5,7 +5,8 @@ use crate::nav_history::HistoryItem;
 use crate::nav_history::HistoryReplay;
 use crate::nav_history::QueryHistoryStore;
 use crate::nav_history::SuggestionCommandView;
-use crate::nav_history::now_secs;
+use crate::nav_history::history_replay_from_item;
+use crate::nav_history::recorded_query_from_replay;
 use anyhow::Context;
 use anyhow::Result;
 use anyhow::anyhow;
@@ -15,6 +16,7 @@ use clap::ValueEnum;
 use clap::builder::PossibleValue;
 use codex_common::CliConfigOverrides;
 use codex_navigator::AtlasFocus;
+use codex_navigator::history::now_secs;
 use codex_navigator::DaemonOptions;
 use codex_navigator::atlas_focus;
 use codex_navigator::auto_facet::AutoFacetConfig;
@@ -26,7 +28,11 @@ use codex_navigator::client::SearchStreamOutcome;
 use codex_navigator::find_atlas_node;
 use codex_navigator::plan_search_request;
 use codex_navigator::planner::NavigatorSearchArgs;
+use codex_navigator::planner::apply_active_filters_to_args;
 use codex_navigator::planner::apply_facet_suggestion;
+use codex_navigator::planner::category_label;
+use codex_navigator::planner::language_label;
+use codex_navigator::planner::remove_active_filters_from_args;
 use codex_navigator::proto::AtlasNode;
 use codex_navigator::proto::AtlasRequest;
 use codex_navigator::proto::ContextBanner;
@@ -839,7 +845,7 @@ pub async fn run_history(mut cmd: HistoryCommand) -> Result<()> {
         }
         return Ok(());
     }
-    let now = crate::nav_history::now_secs();
+    let now = now_secs();
     if cmd.json {
         let views = rows
             .iter()
@@ -866,7 +872,7 @@ pub async fn run_history(mut cmd: HistoryCommand) -> Result<()> {
 pub async fn run_repeat(mut cmd: RepeatCommand) -> Result<()> {
     let client = build_client(cmd.project_root.take()).await?;
     let history = QueryHistoryStore::new(client.queries_dir());
-    let replay_opt = if cmd.pinned {
+    let recorded = if cmd.pinned {
         history
             .replay_pinned(cmd.index)
             .context("load pinned navigator entry")?
@@ -875,7 +881,7 @@ pub async fn run_repeat(mut cmd: RepeatCommand) -> Result<()> {
             .replay_recent(cmd.index)
             .context("load navigator history entry")?
     };
-    let mut replay = replay_opt.ok_or_else(|| {
+    let recorded = recorded.ok_or_else(|| {
         if cmd.pinned {
             anyhow!("pinned index {} not available", cmd.index)
         } else {
@@ -885,6 +891,7 @@ pub async fn run_repeat(mut cmd: RepeatCommand) -> Result<()> {
             )
         }
     })?;
+    let mut replay = HistoryReplay::try_from(&recorded).context("decode replay entry")?;
     if cmd.focus != FocusMode::Auto {
         replay.focus_mode = cmd.focus;
     }
@@ -913,7 +920,7 @@ pub async fn run_pin(mut cmd: PinCommand) -> Result<()> {
             return Ok(());
         }
         println!("pinned navigator queries:");
-        let now = crate::nav_history::now_secs();
+        let now = now_secs();
         for (idx, item) in rows.into_iter().enumerate() {
             print_history_entry(idx, &item, now, false, false);
         }
@@ -1083,7 +1090,7 @@ fn format_history_filters(item: &HistoryItem) -> String {
             chips.push("[recent]".to_string());
         }
     }
-    if let Some(replay) = item.replay.as_ref()
+    if let Some(replay) = history_replay_from_item(item)
         && !matches!(replay.focus_mode, FocusMode::All | FocusMode::Auto)
     {
         chips.push(format!("[focus={}]", focus_label(replay.focus_mode)));
@@ -1096,7 +1103,7 @@ fn format_history_filters(item: &HistoryItem) -> String {
 }
 
 fn history_item_matches(item: &HistoryItem, needle: &str) -> bool {
-    if let Some(replay) = item.replay.as_ref()
+    if let Some(replay) = history_replay_from_item(item)
         && replay
             .args
             .query
@@ -1177,7 +1184,7 @@ fn history_entry_view(item: &HistoryItem, index: usize, now: u64) -> HistoryEntr
         .unwrap_or_default();
     let stack_command = item.filters.as_ref().map(|_| stack_command(index));
     let clear_command = item.filters.as_ref().map(|_| clear_stack_command(index));
-    let repeat_command = item.replay.as_ref().map(|_| repeat_command(index));
+    let repeat_command = history_replay_from_item(item).map(|_| repeat_command(index));
     let suggestion_commands = item
         .facet_suggestions
         .iter()
@@ -1237,7 +1244,7 @@ async fn run_history_repeat_action(
     index: usize,
     use_pinned: bool,
 ) -> Result<()> {
-    let replay_opt = if use_pinned {
+    let recorded = if use_pinned {
         history
             .replay_pinned(index)
             .context("load pinned navigator entry")?
@@ -1246,13 +1253,14 @@ async fn run_history_repeat_action(
             .replay_recent(index)
             .context("load navigator history entry")?
     };
-    let mut replay = replay_opt.ok_or_else(|| {
+    let recorded = recorded.ok_or_else(|| {
         if use_pinned {
             anyhow!("pinned index {index} not available")
         } else {
             anyhow!("history index {index} not available; run `codex navigator` first")
         }
     })?;
+    let mut replay = HistoryReplay::try_from(&recorded).context("decode navigator replay")?;
     execute_history_replay(client, &mut replay).await
 }
 
@@ -1365,8 +1373,8 @@ fn print_history_entry(
 }
 
 fn summarize_history_query(item: &HistoryItem) -> Option<String> {
-    let replay = item.replay.as_ref()?;
-    let text = replay.args.query.clone()?;
+    let replay = history_replay_from_item(item)?;
+    let text = replay.args.query?;
     let trimmed = text.trim();
     if trimmed.is_empty() {
         return None;
@@ -1385,7 +1393,7 @@ fn print_history_actions(idx: usize, item: &HistoryItem) {
         println!("       stack: {}", stack_command(idx));
         println!("       clear: {}", clear_stack_command(idx));
     }
-    if item.replay.is_some() {
+    if history_replay_from_item(item).is_some() {
         println!("       repeat: {}", repeat_command(idx));
     }
     if !item.facet_suggestions.is_empty() {
@@ -1885,8 +1893,11 @@ async fn execute_search(
     } else {
         Vec::new()
     };
+    let recorded_query = recording
+        .as_ref()
+        .map(recorded_query_from_replay);
     history
-        .record_entry(&outcome.response, recording.as_ref(), hits_for_history)
+        .record_entry(&outcome.response, recorded_query, hits_for_history)
         .context("record navigator history")?;
 
     let print_result = match output_format {
@@ -2172,87 +2183,6 @@ fn facet_command_to_search_args(
         RefsMode::Usages => Some("usages".to_string()),
     };
     Ok(args)
-}
-
-fn apply_active_filters_to_args(args: &mut NavigatorSearchArgs, filters: &proto::ActiveFilters) {
-    if !filters.languages.is_empty() {
-        args.languages = filters
-            .languages
-            .iter()
-            .map(|lang| language_label(lang).to_string())
-            .collect();
-    }
-    if !filters.categories.is_empty() {
-        args.categories = filters
-            .categories
-            .iter()
-            .map(|cat| category_label(cat).to_string())
-            .collect();
-    }
-    if !filters.path_globs.is_empty() {
-        args.path_globs = filters.path_globs.clone();
-    }
-    if !filters.file_substrings.is_empty() {
-        args.file_substrings = filters.file_substrings.clone();
-    }
-    if !filters.owners.is_empty() {
-        args.owners = filters.owners.clone();
-    }
-    if filters.recent_only {
-        args.recent_only = Some(true);
-    }
-}
-
-fn remove_active_filters_from_args(args: &mut NavigatorSearchArgs, filters: &proto::ActiveFilters) {
-    if !filters.languages.is_empty() {
-        let removals: Vec<String> = filters
-            .languages
-            .iter()
-            .map(|lang| language_label(lang).to_string())
-            .collect();
-        args.remove_languages.extend(removals.iter().cloned());
-        args.languages
-            .retain(|lang| !removals.iter().any(|value| value == lang));
-    }
-    if !filters.categories.is_empty() {
-        let removals: Vec<String> = filters
-            .categories
-            .iter()
-            .map(|cat| category_label(cat).to_string())
-            .collect();
-        args.remove_categories.extend(removals.iter().cloned());
-        args.categories
-            .retain(|category| !removals.iter().any(|value| value == category));
-    }
-    if !filters.path_globs.is_empty() {
-        for glob in &filters.path_globs {
-            args.remove_path_globs.push(glob.clone());
-        }
-        args.path_globs
-            .retain(|candidate| !filters.path_globs.iter().any(|glob| glob == candidate));
-    }
-    if !filters.file_substrings.is_empty() {
-        for value in &filters.file_substrings {
-            args.remove_file_substrings.push(value.clone());
-        }
-        args.file_substrings.retain(|candidate| {
-            !filters
-                .file_substrings
-                .iter()
-                .any(|value| value == candidate)
-        });
-    }
-    if !filters.owners.is_empty() {
-        for owner in &filters.owners {
-            args.remove_owners.push(owner.clone());
-        }
-        args.owners
-            .retain(|candidate| !filters.owners.iter().any(|owner| owner == candidate));
-    }
-    if filters.recent_only {
-        args.disable_recent_only = true;
-        args.recent_only = None;
-    }
 }
 
 fn apply_history_suggestion(
@@ -2772,32 +2702,6 @@ fn apply_chip_removal(args: &mut NavigatorSearchArgs, chip: &ActiveFilterChip) {
         FilterRemoval::FileSubstring(value) => args.remove_file_substrings.push(value.clone()),
         FilterRemoval::Owner(owner) => args.remove_owners.push(owner.clone()),
         FilterRemoval::RecentOnly => args.disable_recent_only = true,
-    }
-}
-
-fn language_label(language: &proto::Language) -> &'static str {
-    match language {
-        proto::Language::Rust => "rust",
-        proto::Language::Typescript => "ts",
-        proto::Language::Tsx => "tsx",
-        proto::Language::Javascript => "js",
-        proto::Language::Python => "python",
-        proto::Language::Go => "go",
-        proto::Language::Bash => "bash",
-        proto::Language::Markdown => "md",
-        proto::Language::Json => "json",
-        proto::Language::Yaml => "yaml",
-        proto::Language::Toml => "toml",
-        proto::Language::Unknown => "unknown",
-    }
-}
-
-fn category_label(category: &proto::FileCategory) -> &'static str {
-    match category {
-        proto::FileCategory::Source => "source",
-        proto::FileCategory::Tests => "tests",
-        proto::FileCategory::Docs => "docs",
-        proto::FileCategory::Deps => "deps",
     }
 }
 
@@ -3673,14 +3577,14 @@ mod tests {
                 preview: "fn demo()".into(),
             }],
             is_pinned: false,
-            replay: Some(HistoryReplay::new(
+            recorded_query: Some(recorded_query_from_replay(&HistoryReplay::new(
                 NavigatorSearchArgs::default(),
                 OutputFormat::Json,
                 RefsMode::All,
                 false,
                 false,
                 FocusMode::Auto,
-            )),
+            ))),
             facet_suggestions: vec![suggestion],
         };
         let view = history_entry_view(&item, 2, 10);
@@ -3750,12 +3654,12 @@ mod tests {
             filters: None,
             hits: Vec::new(),
             is_pinned: false,
-            replay: Some(replay),
+            recorded_query: Some(recorded_query_from_replay(&replay)),
             facet_suggestions: Vec::new(),
         };
         assert!(history_item_matches(&item, "planner"));
         assert!(!history_item_matches(&item, "missing"));
-        item.replay = None;
+        item.recorded_query = None;
         item.hits.push(HistoryHit {
             path: "src/lib.rs".into(),
             line: 10,
@@ -3784,7 +3688,7 @@ mod tests {
             filters: Some(filters),
             hits: Vec::new(),
             is_pinned: false,
-            replay: None,
+            recorded_query: None,
             facet_suggestions: vec![suggestion],
         };
         assert!(history_item_matches(&item, "core-team"));
