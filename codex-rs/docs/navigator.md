@@ -225,8 +225,10 @@ agents.
   (по умолчанию 1500 мс), Navigator логирует предупреждение (`navigator::guardrail`) и, при наличии
   `NAVIGATOR_GUARDRAIL_WEBHOOK`, шлёт JSON-пэйлоад с деталями (risk/issues или статистика запроса).
   Во избежание шума события дросселируются таймером `NAVIGATOR_GUARDRAIL_COOLDOWN_SECS` (300 с по
-  умолчанию) и отдельным 60‑секундным cooldown для slow-query. Это закрывает пункт 5.3 roadmap и
-  позволяет получать внешние оповещения без опроса Doctor.
+  умолчанию) и отдельным 60‑секундным cooldown для slow-query. Если в trend_summary появляются новые
+  hotspots, guardrail также фиксирует `hotspot spikes +N` в сообщении/вебхуке, так что рост TODO/lint
+  шума виден без запуска `insights`. Это закрывает пункт 5.3 roadmap и позволяет получать внешние
+  оповещения без опроса Doctor.
 - Self-heal: если индекс упал в состояние Failed, либо в coverage накапливается >`NAVIGATOR_SELF_HEAL_ERROR_LIMIT`
   ошибок или >`NAVIGATOR_SELF_HEAL_PENDING_LIMIT` ожидающих файлов, координатор автоматически запускает
   `rebuild_all` (не чаще, чем раз в `NAVIGATOR_SELF_HEAL_COOLDOWN_SECS`, 15 мин по умолчанию). Это
