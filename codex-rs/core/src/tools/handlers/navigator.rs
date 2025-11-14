@@ -21,22 +21,29 @@ use codex_navigator::client::SearchStreamOutcome;
 use codex_navigator::freeform::HistoryActionKind;
 use codex_navigator::freeform::NavigatorPayload;
 use codex_navigator::freeform::parse_payload as parse_navigator_payload;
+use codex_navigator::history::HistoryHit;
 use codex_navigator::history::HistoryItem;
 use codex_navigator::history::QueryHistoryStore;
 use codex_navigator::history::RecordedQuery;
 use codex_navigator::history::capture_history_hits;
+use codex_navigator::history::history_item_matches;
+use codex_navigator::history::now_secs;
+use codex_navigator::history::summarize_history_query;
 use codex_navigator::plan_search_request;
 use codex_navigator::planner::NavigatorSearchArgs;
 use codex_navigator::planner::SearchPlannerError;
 use codex_navigator::planner::apply_active_filters_to_args;
 use codex_navigator::planner::remove_active_filters_from_args;
+use codex_navigator::proto::ActiveFilters;
 use codex_navigator::proto::AtlasNode;
 use codex_navigator::proto::AtlasRequest;
 use codex_navigator::proto::AtlasResponse;
 use codex_navigator::proto::DoctorReport;
+use codex_navigator::proto::FacetSuggestion;
 use codex_navigator::proto::NavHit;
 use codex_navigator::proto::OpenRequest;
 use codex_navigator::proto::PROTOCOL_VERSION;
+use codex_navigator::proto::QueryId;
 use codex_navigator::proto::SearchDiagnostics;
 use codex_navigator::proto::SearchResponse;
 use codex_navigator::proto::SearchStreamEvent;
@@ -69,6 +76,28 @@ struct AtlasSummaryToolOutput {
     breadcrumb: Vec<String>,
     focus: Option<AtlasNode>,
     generated_at: Option<String>,
+}
+
+#[derive(Serialize)]
+struct HistoryListToolOutput {
+    pinned: bool,
+    limit: usize,
+    contains: Option<String>,
+    entries: Vec<HistoryListEntry>,
+}
+
+#[derive(Serialize)]
+struct HistoryListEntry {
+    index: usize,
+    query_id: QueryId,
+    recorded_at: u64,
+    recorded_secs_ago: u64,
+    is_pinned: bool,
+    filters: Option<ActiveFilters>,
+    hits: Vec<HistoryHit>,
+    facet_suggestions: Vec<FacetSuggestion>,
+    summary: Option<String>,
+    has_recorded_query: bool,
 }
 
 #[derive(Clone)]
@@ -209,6 +238,53 @@ impl ToolHandler for NavigatorHandler {
                     },
                 )?;
                 Ok(make_json_output(result.payload)?)
+            }
+            NavigatorPayload::HistoryList {
+                pinned,
+                limit,
+                contains,
+            } => {
+                let limit = limit.max(1);
+                let contains_norm = contains.and_then(|value| {
+                    let trimmed = value.trim().to_string();
+                    if trimmed.is_empty() {
+                        None
+                    } else {
+                        Some(trimmed)
+                    }
+                });
+                let history = QueryHistoryStore::new(client.queries_dir());
+                let entries =
+                    collect_history_entries(&history, pinned, limit, contains_norm.as_deref())
+                        .map_err(|err| {
+                            FunctionCallError::RespondToModel(format!(
+                                "failed to list navigator history: {err:#}"
+                            ))
+                        })?;
+                let now = now_secs();
+                let rendered = entries
+                    .into_iter()
+                    .enumerate()
+                    .map(|(idx, item)| HistoryListEntry {
+                        index: idx,
+                        query_id: item.query_id,
+                        recorded_at: item.recorded_at,
+                        recorded_secs_ago: now.saturating_sub(item.recorded_at),
+                        is_pinned: item.is_pinned,
+                        filters: item.filters.clone(),
+                        hits: item.hits.clone(),
+                        facet_suggestions: item.facet_suggestions.clone(),
+                        summary: summarize_history_query(&item),
+                        has_recorded_query: item.recorded_query.is_some(),
+                    })
+                    .collect();
+                let payload = HistoryListToolOutput {
+                    pinned,
+                    limit,
+                    contains: contains_norm,
+                    entries: rendered,
+                };
+                Ok(make_json_output(payload)?)
             }
             NavigatorPayload::Open { id } => {
                 let req = OpenRequest {
@@ -465,6 +541,36 @@ fn history_label(index: usize, pinned: bool) -> String {
     } else {
         format!("history[{index}]")
     }
+}
+
+fn collect_history_entries(
+    history: &QueryHistoryStore,
+    pinned: bool,
+    limit: usize,
+    contains: Option<&str>,
+) -> AnyhowResult<Vec<HistoryItem>> {
+    let mut rows = if pinned {
+        history.pinned()?
+    } else {
+        history.recent(limit)?
+    };
+    if pinned && rows.len() > limit {
+        rows.truncate(limit);
+    }
+    if let Some(needle) = contains.and_then(|value| {
+        let trimmed = value.trim();
+        if trimmed.is_empty() {
+            None
+        } else {
+            Some(trimmed.to_ascii_lowercase())
+        }
+    }) {
+        rows.retain(|item| history_item_matches(item, &needle));
+    }
+    if !pinned && rows.len() > limit {
+        rows.truncate(limit);
+    }
+    Ok(rows)
 }
 
 fn summarize_atlas_response(

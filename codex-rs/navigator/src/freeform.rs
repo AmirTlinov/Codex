@@ -30,6 +30,14 @@ pub enum NavigatorPayload {
         #[serde(default)]
         pinned: bool,
     },
+    HistoryList {
+        #[serde(default)]
+        pinned: bool,
+        #[serde(default = "default_history_list_limit")]
+        limit: usize,
+        #[serde(default)]
+        contains: Option<String>,
+    },
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -38,6 +46,12 @@ pub enum HistoryActionKind {
     Stack,
     ClearStack,
     Repeat,
+}
+
+const DEFAULT_HISTORY_LIST_LIMIT: usize = 10;
+
+fn default_history_list_limit() -> usize {
+    DEFAULT_HISTORY_LIST_LIMIT
 }
 
 pub const DEFAULT_SNIPPET_CONTEXT: usize = 8;
@@ -372,6 +386,11 @@ fn parse_quick_facet(rest: &str) -> Result<NavigatorPayload, PayloadParseError> 
 
 fn parse_quick_history(rest: &str) -> Result<NavigatorPayload, PayloadParseError> {
     let tokens = split_shellwords(rest)?;
+    if let Some(first) = tokens.first()
+        && matches!(first.to_ascii_lowercase().as_str(), "list" | "ls")
+    {
+        return parse_quick_history_list(&tokens[1..]);
+    }
     let mut mode = HistoryActionKind::Repeat;
     let mut index: usize = 0;
     let mut pinned = false;
@@ -407,6 +426,58 @@ fn parse_quick_history(rest: &str) -> Result<NavigatorPayload, PayloadParseError
         mode,
         index,
         pinned,
+    })
+}
+
+fn parse_quick_history_list(tokens: &[String]) -> Result<NavigatorPayload, PayloadParseError> {
+    let mut pinned = false;
+    let mut limit = DEFAULT_HISTORY_LIST_LIMIT;
+    let mut contains: Option<String> = None;
+    let mut iter = tokens.iter();
+    while let Some(token) = iter.next() {
+        let lowered = token.to_ascii_lowercase();
+        if lowered == "--pinned" || lowered == "-p" {
+            pinned = true;
+            continue;
+        }
+        if let Some(value) = lowered.strip_prefix("--limit=") {
+            limit = value
+                .parse()
+                .map_err(|_| PayloadParseError::new(format!("invalid history limit `{value}`")))?;
+            continue;
+        }
+        if lowered == "--limit" {
+            let Some(value) = iter.next() else {
+                return Err(PayloadParseError::new("--limit requires a value"));
+            };
+            limit = value
+                .parse()
+                .map_err(|_| PayloadParseError::new(format!("invalid history limit `{value}`")))?;
+            continue;
+        }
+        if let Some(value) = lowered.strip_prefix("--contains=") {
+            contains = Some(value.to_string());
+            continue;
+        }
+        if lowered == "--contains" {
+            let Some(value) = iter.next() else {
+                return Err(PayloadParseError::new("--contains requires a value"));
+            };
+            contains = Some(value.to_string());
+            continue;
+        }
+        contains = Some(match contains {
+            None => token.to_string(),
+            Some(existing) => format!("{existing} {token}"),
+        });
+    }
+    if limit == 0 {
+        return Err(PayloadParseError::new("history list limit must be > 0"));
+    }
+    Ok(NavigatorPayload::HistoryList {
+        pinned,
+        limit,
+        contains,
     })
 }
 
@@ -1465,6 +1536,40 @@ mod tests {
                 assert!(matches!(mode, HistoryActionKind::Stack));
                 assert_eq!(index, 4);
                 assert!(pinned);
+            }
+            other => panic!("unexpected payload: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_quick_history_list_defaults() {
+        match parse_quick_history("list").expect("history list parsed") {
+            NavigatorPayload::HistoryList {
+                pinned,
+                limit,
+                contains,
+            } => {
+                assert!(!pinned);
+                assert_eq!(limit, DEFAULT_HISTORY_LIST_LIMIT);
+                assert!(contains.is_none());
+            }
+            other => panic!("unexpected payload: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_quick_history_list_supports_flags() {
+        match parse_quick_history("list --pinned --limit=3 --contains planner")
+            .expect("history list parsed")
+        {
+            NavigatorPayload::HistoryList {
+                pinned,
+                limit,
+                contains,
+            } => {
+                assert!(pinned);
+                assert_eq!(limit, 3);
+                assert_eq!(contains.as_deref(), Some("planner"));
             }
             other => panic!("unexpected payload: {other:?}"),
         }

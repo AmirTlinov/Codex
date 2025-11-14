@@ -57,6 +57,7 @@ This roadmap enumerates the concrete work required to turn Navigator into the pr
      - ✅ Автофасет теперь выполняет до двух последовательных шагов (пропуская уже применённые фильтры) и добавляет подсказки в историю, так что цепочки `lang=rust → tests → owner=core` происходят без участия оператора.
      - ✅ История хранит готовые стеки фильтров: `codex navigator facet --history-stack <n>` переиспользует комбинацию, `--remove-history-stack <n>` снимает её целиком, поэтому включение/снятие фильтров занимает одну команду.
      - ✅ `codex navigator history` показывает готовые команды (stack/clear/repeat/suggestion) и поддерживает `--json`, так что фильтры можно переиспользовать автоматически без парсинга.
+     - ✅ Navigator handler понимает `history` и `history_list` payload'ы, поэтому ИИ может как вызывать stack/repeat напрямую, так и получать JSON с последними запросами/подсказками без CLI.
      - ✅ Freeform parser + Navigator handler понимают `history` действия (stack/clear/repeat, pinned), поэтому ИИ-агент повторяет или модифицирует прошлые поиски напрямую через инструмент без вызова CLI.
 - **Success criteria:** users can drill from >10 k hits to <20 hits in ≤3 commands without retyping the query.
 

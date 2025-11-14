@@ -16,7 +16,6 @@ use clap::ValueEnum;
 use clap::builder::PossibleValue;
 use codex_common::CliConfigOverrides;
 use codex_navigator::AtlasFocus;
-use codex_navigator::history::now_secs;
 use codex_navigator::DaemonOptions;
 use codex_navigator::atlas_focus;
 use codex_navigator::auto_facet::AutoFacetConfig;
@@ -26,6 +25,9 @@ use codex_navigator::client::DaemonSpawn;
 use codex_navigator::client::NavigatorClient;
 use codex_navigator::client::SearchStreamOutcome;
 use codex_navigator::find_atlas_node;
+use codex_navigator::history::history_item_matches;
+use codex_navigator::history::now_secs;
+use codex_navigator::history::summarize_history_query;
 use codex_navigator::plan_search_request;
 use codex_navigator::planner::NavigatorSearchArgs;
 use codex_navigator::planner::apply_active_filters_to_args;
@@ -1102,59 +1104,6 @@ fn format_history_filters(item: &HistoryItem) -> String {
     }
 }
 
-fn history_item_matches(item: &HistoryItem, needle: &str) -> bool {
-    if let Some(replay) = history_replay_from_item(item)
-        && replay
-            .args
-            .query
-            .as_deref()
-            .is_some_and(|text| text_contains(text, needle))
-    {
-        return true;
-    }
-    if let Some(filters) = item.filters.as_ref()
-        && (filters
-            .languages
-            .iter()
-            .any(|lang| text_contains(language_label(lang), needle))
-            || filters
-                .categories
-                .iter()
-                .any(|cat| text_contains(category_label(cat), needle))
-            || filters
-                .path_globs
-                .iter()
-                .any(|glob| text_contains(glob, needle))
-            || filters
-                .file_substrings
-                .iter()
-                .any(|pattern| text_contains(pattern, needle))
-            || filters
-                .owners
-                .iter()
-                .any(|owner| text_contains(owner, needle)))
-    {
-        return true;
-    }
-    if item
-        .hits
-        .iter()
-        .any(|hit| text_contains(&hit.path, needle) || text_contains(&hit.preview, needle))
-    {
-        return true;
-    }
-    if item.facet_suggestions.iter().any(|suggestion| {
-        text_contains(&suggestion.label, needle) || text_contains(&suggestion.command, needle)
-    }) {
-        return true;
-    }
-    false
-}
-
-fn text_contains(haystack: &str, needle: &str) -> bool {
-    haystack.to_ascii_lowercase().contains(needle)
-}
-
 fn stack_command(index: usize) -> String {
     format!("codex navigator facet --history-stack {index}")
 }
@@ -1370,22 +1319,6 @@ fn print_history_entry(
     if show_actions {
         print_history_actions(idx, item);
     }
-}
-
-fn summarize_history_query(item: &HistoryItem) -> Option<String> {
-    let replay = history_replay_from_item(item)?;
-    let text = replay.args.query?;
-    let trimmed = text.trim();
-    if trimmed.is_empty() {
-        return None;
-    }
-    const LIMIT: usize = 80;
-    let mut owned = trimmed.to_string();
-    if owned.len() > LIMIT {
-        owned.truncate(LIMIT - 1);
-        owned.push('…');
-    }
-    Some(owned)
 }
 
 fn print_history_actions(idx: usize, item: &HistoryItem) {
@@ -1893,9 +1826,7 @@ async fn execute_search(
     } else {
         Vec::new()
     };
-    let recorded_query = recording
-        .as_ref()
-        .map(recorded_query_from_replay);
+    let recorded_query = recording.as_ref().map(recorded_query_from_replay);
     history
         .record_entry(&outcome.response, recorded_query, hits_for_history)
         .context("record navigator history")?;

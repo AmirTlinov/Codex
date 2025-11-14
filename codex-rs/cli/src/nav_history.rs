@@ -295,12 +295,12 @@ mod tests {
     use super::*;
     use codex_navigator::proto::FacetSuggestion;
     use codex_navigator::proto::FacetSuggestionKind;
-    use codex_navigator::proto::SearchProfile;
-    use codex_navigator::proto::SearchResponse;
     use codex_navigator::proto::IndexState;
     use codex_navigator::proto::IndexStatus;
     use codex_navigator::proto::Language;
     use codex_navigator::proto::PROTOCOL_VERSION;
+    use codex_navigator::proto::SearchProfile;
+    use codex_navigator::proto::SearchResponse;
     use tempfile::tempdir;
 
     fn sample_response(id: QueryId) -> SearchResponse {

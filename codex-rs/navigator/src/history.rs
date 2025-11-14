@@ -1,5 +1,7 @@
 use crate::planner::NavigatorSearchArgs;
 use crate::planner::StoredSearchArgs;
+use crate::planner::category_label;
+use crate::planner::language_label;
 use crate::proto::ActiveFilters;
 use crate::proto::FacetSuggestion;
 use crate::proto::NavHit;
@@ -282,6 +284,122 @@ pub fn capture_history_hits(hits: &[NavHit]) -> Vec<HistoryHit> {
         .collect()
 }
 
+pub fn summarize_history_query(item: &HistoryItem) -> Option<String> {
+    let recorded = item.recorded_query.as_ref()?;
+    let query = recorded.args.query.as_ref()?;
+    let trimmed = query.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    const LIMIT: usize = 80;
+    if trimmed.len() <= LIMIT {
+        Some(trimmed.to_string())
+    } else {
+        let mut owned = trimmed[..LIMIT - 1].to_string();
+        owned.push('…');
+        Some(owned)
+    }
+}
+
+pub fn history_item_matches(item: &HistoryItem, needle: &str) -> bool {
+    let needle = needle.trim();
+    if needle.is_empty() {
+        return true;
+    }
+    let lowered = needle.to_ascii_lowercase();
+    if let Some(recorded) = item.recorded_query.as_ref()
+        && recorded
+            .args
+            .query
+            .as_deref()
+            .is_some_and(|text| text.to_ascii_lowercase().contains(&lowered))
+    {
+        return true;
+    }
+    if let Some(filters) = item.filters.as_ref()
+        && filters_match(filters, &lowered)
+    {
+        return true;
+    }
+    if item.facet_suggestions.iter().any(|suggestion| {
+        suggestion.label.to_ascii_lowercase().contains(&lowered)
+            || suggestion.command.to_ascii_lowercase().contains(&lowered)
+    }) {
+        return true;
+    }
+    if item.hits.iter().any(|hit| hit_matches(hit, &lowered)) {
+        return true;
+    }
+    if let Some(recorded) = item.recorded_query.as_ref() {
+        if recorded
+            .args
+            .path_globs
+            .iter()
+            .any(|glob| glob.to_ascii_lowercase().contains(&lowered))
+        {
+            return true;
+        }
+        if recorded
+            .args
+            .file_substrings
+            .iter()
+            .any(|value| value.to_ascii_lowercase().contains(&lowered))
+        {
+            return true;
+        }
+        if recorded
+            .args
+            .owners
+            .iter()
+            .any(|owner| owner.to_ascii_lowercase().contains(&lowered))
+        {
+            return true;
+        }
+    }
+    if lowered == "repeat" && item.recorded_query.is_some() {
+        return true;
+    }
+    item.query_id
+        .to_string()
+        .to_ascii_lowercase()
+        .contains(&lowered)
+}
+
+fn filters_match(filters: &ActiveFilters, needle: &str) -> bool {
+    filters
+        .languages
+        .iter()
+        .map(language_label)
+        .any(|label| label.contains(needle))
+        || filters
+            .categories
+            .iter()
+            .map(category_label)
+            .any(|label| label.contains(needle))
+        || filters
+            .owners
+            .iter()
+            .any(|owner| owner.to_ascii_lowercase().contains(needle))
+        || filters
+            .path_globs
+            .iter()
+            .any(|glob| glob.to_ascii_lowercase().contains(needle))
+        || filters
+            .file_substrings
+            .iter()
+            .any(|value| value.to_ascii_lowercase().contains(needle))
+        || (filters.recent_only && needle == "recent")
+}
+
+fn hit_matches(hit: &HistoryHit, needle: &str) -> bool {
+    hit.path.to_ascii_lowercase().contains(needle)
+        || hit.preview.to_ascii_lowercase().contains(needle)
+        || hit
+            .layer
+            .as_ref()
+            .is_some_and(|layer| layer.to_ascii_lowercase().contains(needle))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -386,5 +504,4 @@ mod tests {
         store.unpin(0).unwrap();
         assert!(store.pinned().unwrap().is_empty());
     }
-
 }
