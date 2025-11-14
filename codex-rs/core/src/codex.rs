@@ -5,6 +5,7 @@ use std::sync::Arc;
 use std::sync::atomic::AtomicU64;
 
 use crate::AuthManager;
+use crate::background_shell::BackgroundShellManager;
 use crate::client_common::REVIEW_PROMPT;
 use crate::features::Feature;
 use crate::function_tool::FunctionCallError;
@@ -599,6 +600,7 @@ impl Session {
             auth_manager: Arc::clone(&auth_manager),
             otel_event_manager,
             tool_approvals: Mutex::new(ApprovalStore::default()),
+            background_shell: BackgroundShellManager::new(),
         };
 
         let sess = Arc::new(Session {
@@ -767,7 +769,26 @@ impl Session {
     }
 
     pub(crate) async fn send_event_raw(&self, event: Event) {
-        // Persist the event into rollout (recorder filters as needed)
+        match &event.msg {
+            EventMsg::ExecCommandBegin(_)
+            | EventMsg::ExecCommandOutputDelta(_)
+            | EventMsg::ExecCommandEnd(_)
+            | EventMsg::ExecCommandPid(_) => {
+                self.services
+                    .background_shell
+                    .handle_protocol_event(&event.msg)
+                    .await;
+            }
+            _ => {}
+        }
+        self.send_event_raw_inner(event).await;
+    }
+
+    pub(crate) async fn send_event_raw_from_background(&self, event: Event) {
+        self.send_event_raw_inner(event).await;
+    }
+
+    async fn send_event_raw_inner(&self, event: Event) {
         let rollout_items = vec![RolloutItem::EventMsg(event.msg.clone())];
         self.persist_rollout_items(&rollout_items).await;
         if let Err(e) = self.tx_event.send(event).await {
@@ -1114,6 +1135,7 @@ impl Session {
     ) {
         let event = EventMsg::BackgroundEvent(BackgroundEventEvent {
             message: message.into(),
+            shell_event: None,
         });
         self.send_event(turn_context, event).await;
     }
@@ -1330,6 +1352,9 @@ async fn submission_loop(sess: Arc<Session>, config: Arc<Config>, rx_sub: Receiv
             Op::Review { review_request } => {
                 handlers::review(&sess, &config, sub.id.clone(), review_request).await;
             }
+            Op::BackgroundShellControl { shell_id, action } => {
+                handlers::background_shell_control(&sess, shell_id, action).await;
+            }
             _ => {} // Ignore unknown ops; enum is non_exhaustive to allow extensions.
         }
     }
@@ -1341,6 +1366,8 @@ mod handlers {
     use crate::codex::Session;
     use crate::codex::SessionSettingsUpdate;
     use crate::codex::TurnContext;
+    use crate::tools::handlers::background_shell::spawn_shell_task;
+    use crate::turn_diff_tracker::TurnDiffTracker;
 
     use crate::codex::spawn_review_thread;
     use crate::config::Config;
@@ -1350,6 +1377,11 @@ mod handlers {
     use crate::tasks::UndoTask;
     use crate::tasks::UserShellCommandTask;
     use codex_protocol::custom_prompts::CustomPrompt;
+    use codex_protocol::models::BackgroundShellActionResult;
+    use codex_protocol::models::BackgroundShellEndedBy;
+    use codex_protocol::models::BackgroundShellKillParams;
+    use codex_protocol::models::BackgroundShellResumeParams;
+    use codex_protocol::protocol::BackgroundShellControlAction;
     use codex_protocol::protocol::ErrorEvent;
     use codex_protocol::protocol::Event;
     use codex_protocol::protocol::EventMsg;
@@ -1551,6 +1583,78 @@ mod handlers {
             }),
         };
         sess.send_event_raw(event).await;
+    }
+
+    pub async fn background_shell_control(
+        sess: &Arc<Session>,
+        shell_id: String,
+        action: BackgroundShellControlAction,
+    ) {
+        match action {
+            BackgroundShellControlAction::BackgroundRequest => {
+                if !sess
+                    .services
+                    .background_shell
+                    .force_background(&shell_id)
+                    .await
+                {
+                    warn!(
+                        "background shell control failed: shell {shell_id} not found for background request"
+                    );
+                }
+            }
+            BackgroundShellControlAction::Kill => {
+                if let Err(err) = handle_shell_control_kill(sess, &shell_id).await {
+                    warn!("failed to kill shell {shell_id}: {err}");
+                }
+            }
+            BackgroundShellControlAction::Resume => {
+                if let Err(err) = handle_shell_control_resume(sess, &shell_id).await {
+                    warn!("failed to resume shell {shell_id}: {err}");
+                }
+            }
+        }
+    }
+
+    async fn handle_shell_control_kill(sess: &Arc<Session>, shell_id: &str) -> Result<(), String> {
+        let params = BackgroundShellKillParams {
+            shell_id: Some(shell_id.to_string()),
+            pid: None,
+            reason: Some("killed by user (Shell panel)".to_string()),
+            initiator: Some(BackgroundShellEndedBy::User),
+        };
+        let result = sess.services.background_shell.kill_process(&params).await;
+        match result.result {
+            BackgroundShellActionResult::Submitted => Ok(()),
+            BackgroundShellActionResult::AlreadyFinished => {
+                Err("process already finished".to_string())
+            }
+            BackgroundShellActionResult::NotFound => Err("unknown shell id".to_string()),
+        }
+    }
+
+    async fn handle_shell_control_resume(
+        sess: &Arc<Session>,
+        shell_id: &str,
+    ) -> Result<(), String> {
+        let params = BackgroundShellResumeParams {
+            shell_id: shell_id.to_string(),
+        };
+        let manager = Arc::clone(&sess.services.background_shell);
+        let (result, run_ctx) = manager.prepare_resume(&params).await;
+        match result.result {
+            BackgroundShellActionResult::Submitted => {
+                let ctx = run_ctx.ok_or_else(|| "resume context missing".to_string())?;
+                let turn = sess.new_turn(SessionSettingsUpdate::default()).await;
+                let tracker = Arc::new(tokio::sync::Mutex::new(TurnDiffTracker::new()));
+                spawn_shell_task(manager, ctx, Arc::clone(sess), turn, tracker).await;
+                Ok(())
+            }
+            BackgroundShellActionResult::AlreadyFinished => {
+                Err("cannot resume a running shell".to_string())
+            }
+            BackgroundShellActionResult::NotFound => Err("unknown shell id".to_string()),
+        }
     }
 
     pub async fn undo(sess: &Arc<Session>, sub_id: String) {
@@ -2297,6 +2401,8 @@ fn is_mcp_client_startup_timeout_error(error: &anyhow::Error) -> bool {
 use crate::features::Features;
 #[cfg(test)]
 pub(crate) use tests::make_session_and_context;
+#[cfg(test)]
+pub(crate) use tests::make_session_and_context_with_rx;
 
 #[cfg(test)]
 mod tests {
@@ -2548,6 +2654,7 @@ mod tests {
             auth_manager: Arc::clone(&auth_manager),
             otel_event_manager: otel_event_manager.clone(),
             tool_approvals: Mutex::new(ApprovalStore::default()),
+            background_shell: BackgroundShellManager::new(),
         };
 
         let turn_context = Session::make_turn_context(
@@ -2573,7 +2680,7 @@ mod tests {
 
     // Like make_session_and_context, but returns Arc<Session> and the event receiver
     // so tests can assert on emitted events.
-    fn make_session_and_context_with_rx() -> (
+    pub(crate) fn make_session_and_context_with_rx() -> (
         Arc<Session>,
         Arc<TurnContext>,
         async_channel::Receiver<Event>,
@@ -2624,6 +2731,7 @@ mod tests {
             auth_manager: Arc::clone(&auth_manager),
             otel_event_manager: otel_event_manager.clone(),
             tool_approvals: Mutex::new(ApprovalStore::default()),
+            background_shell: BackgroundShellManager::new(),
         };
 
         let turn_context = Arc::new(Session::make_turn_context(
@@ -2804,7 +2912,7 @@ mod tests {
             id: None,
             status: None,
             call_id: "call-1".to_string(),
-            name: "shell".to_string(),
+            name: "shell_run".to_string(),
             input: "{}".to_string(),
         };
 
@@ -2824,7 +2932,7 @@ mod tests {
 
         match err {
             FunctionCallError::Fatal(message) => {
-                assert_eq!(message, "tool shell invoked with incompatible payload");
+                assert_eq!(message, "tool shell_run invoked with incompatible payload");
             }
             other => panic!("expected FunctionCallError::Fatal, got {other:?}"),
         }

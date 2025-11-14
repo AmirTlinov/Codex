@@ -20,8 +20,10 @@ use super::chat_composer_history::ChatComposerHistory;
 use super::command_popup::CommandItem;
 use super::command_popup::CommandPopup;
 use super::file_search_popup::FileSearchPopup;
+use super::footer::ContextLineMode;
 use super::footer::FooterMode;
 use super::footer::FooterProps;
+use super::footer::ShellFooterIndicator;
 use super::footer::esc_hint_mode;
 use super::footer::footer_height;
 use super::footer::render_footer;
@@ -42,6 +44,7 @@ use crate::render::renderable::Renderable;
 use crate::slash_command::SlashCommand;
 use crate::slash_command::built_in_slash_commands;
 use crate::style::user_message_style;
+use crate::tui::FrameRequester;
 use codex_protocol::custom_prompts::CustomPrompt;
 use codex_protocol::custom_prompts::PROMPTS_CMD_PREFIX;
 
@@ -64,6 +67,7 @@ use std::time::Instant;
 /// If the pasted content exceeds this number of characters, replace it with a
 /// placeholder in the UI.
 const LARGE_PASTE_CHAR_THRESHOLD: usize = 1000;
+const CONTEXT_ACTIVITY_GRACE: Duration = Duration::from_secs(5);
 
 /// Result returned when the user interacts with the text area.
 #[derive(Debug, PartialEq)]
@@ -114,6 +118,10 @@ pub(crate) struct ChatComposer {
     footer_hint_override: Option<Vec<(String, String)>>,
     context_window_percent: Option<i64>,
     navigator_indicator: Option<NavigatorFooterIndicator>,
+    shell_indicator: Option<ShellFooterIndicator>,
+    shell_indicator_focused: bool,
+    frame_requester: FrameRequester,
+    last_text_activity: Option<Instant>,
     navigator_activity: Option<String>,
 }
 
@@ -133,6 +141,24 @@ impl ChatComposer {
         enhanced_keys_supported: bool,
         placeholder_text: String,
         disable_paste_burst: bool,
+    ) -> Self {
+        Self::with_frame_requester(
+            has_input_focus,
+            app_event_tx,
+            enhanced_keys_supported,
+            placeholder_text,
+            disable_paste_burst,
+            FrameRequester::noop(),
+        )
+    }
+
+    pub fn with_frame_requester(
+        has_input_focus: bool,
+        app_event_tx: AppEventSender,
+        enhanced_keys_supported: bool,
+        placeholder_text: String,
+        disable_paste_burst: bool,
+        frame_requester: FrameRequester,
     ) -> Self {
         let use_shift_enter_hint = enhanced_keys_supported;
 
@@ -159,6 +185,10 @@ impl ChatComposer {
             footer_hint_override: None,
             context_window_percent: None,
             navigator_indicator: None,
+            shell_indicator: None,
+            shell_indicator_focused: false,
+            frame_requester,
+            last_text_activity: None,
             navigator_activity: None,
         };
         // Apply configuration via the setter to keep side-effects centralized.
@@ -213,6 +243,56 @@ impl ChatComposer {
         self.navigator_activity = activity;
     }
 
+    pub(crate) fn set_shell_indicator(&mut self, indicator: Option<ShellFooterIndicator>) {
+        self.shell_indicator = indicator.map(|mut ind| {
+            ind.focused = self.shell_indicator_focused;
+            ind
+        });
+        if self.shell_indicator.is_none() {
+            self.shell_indicator_focused = false;
+        }
+    }
+
+    pub(crate) fn focus_shell_indicator(&mut self) -> bool {
+        if self.shell_indicator.is_none()
+            || self.shell_indicator_focused
+            || self.popup_active()
+            || !self.is_empty()
+        {
+            return false;
+        }
+        self.shell_indicator_focused = true;
+        if let Some(ind) = self.shell_indicator.as_mut() {
+            ind.focused = true;
+        }
+        true
+    }
+
+    pub(crate) fn shell_indicator_has_focus(&self) -> bool {
+        self.shell_indicator_focused
+    }
+
+    pub(crate) fn clear_shell_indicator_focus(&mut self) -> bool {
+        if !self.shell_indicator_focused {
+            return false;
+        }
+        self.shell_indicator_focused = false;
+        if let Some(ind) = self.shell_indicator.as_mut() {
+            ind.focused = false;
+        }
+        true
+    }
+
+    pub(crate) fn blur_shell_indicator_for_key(&mut self, key_event: &KeyEvent) -> bool {
+        if !self.shell_indicator_focused {
+            return false;
+        }
+        match key_event.code {
+            KeyCode::Down | KeyCode::Enter => false,
+            _ => self.clear_shell_indicator_focus(),
+        }
+    }
+
     /// Integrate an asynchronous response to an on-demand history lookup. If
     /// the entry is present and the offset matches the current cursor we
     /// immediately populate the textarea.
@@ -250,6 +330,7 @@ impl ChatComposer {
         } else {
             self.sync_file_search_popup();
         }
+        self.record_text_activity();
         true
     }
 
@@ -296,6 +377,7 @@ impl ChatComposer {
         self.textarea.set_cursor(0);
         self.sync_command_popup();
         self.sync_file_search_popup();
+        self.record_text_activity();
     }
 
     pub(crate) fn clear_for_ctrl_c(&mut self) -> Option<String> {
@@ -326,6 +408,7 @@ impl ChatComposer {
         self.textarea.insert_element(&placeholder);
         self.attached_images
             .push(AttachedImage { placeholder, path });
+        self.record_text_activity();
     }
 
     pub fn take_recent_submission_images(&mut self) -> Vec<PathBuf> {
@@ -580,7 +663,8 @@ impl ChatComposer {
             self.handle_paste(pasted);
         }
         self.textarea.input(input);
-        let text_after = self.textarea.text();
+        let text_after = self.textarea.text().to_string();
+        self.record_text_activity();
         self.pending_pastes
             .retain(|(placeholder, _)| text_after.contains(placeholder));
         (InputResult::None, true)
@@ -1174,12 +1258,14 @@ impl ChatComposer {
         } = input
             && self.try_remove_any_placeholder_at_cursor()
         {
+            self.record_text_activity();
             return (InputResult::None, true);
         }
 
         // Normal input handling
         self.textarea.input(input);
-        let text_after = self.textarea.text();
+        let text_after = self.textarea.text().to_string();
+        self.record_text_activity();
 
         // Update paste-burst heuristic for plain Char (no Ctrl/Alt) events.
         let crossterm::event::KeyEvent {
@@ -1286,6 +1372,7 @@ impl ChatComposer {
         if let Some((idx, placeholder)) = out {
             self.textarea.replace_range(p - placeholder.len()..p, "");
             self.attached_images.remove(idx);
+            self.record_text_activity();
             return true;
         }
 
@@ -1335,6 +1422,7 @@ impl ChatComposer {
         if let Some((idx, placeholder)) = out {
             self.textarea.replace_range(p..p + placeholder.len(), "");
             self.attached_images.remove(idx);
+            self.record_text_activity();
             return true;
         }
 
@@ -1352,6 +1440,7 @@ impl ChatComposer {
         }) {
             self.textarea.replace_range(p - placeholder.len()..p, "");
             self.pending_pastes.retain(|(ph, _)| ph != &placeholder);
+            self.record_text_activity();
             return true;
         }
 
@@ -1368,6 +1457,7 @@ impl ChatComposer {
         }) {
             self.textarea.replace_range(p..p + placeholder.len(), "");
             self.pending_pastes.retain(|(ph, _)| ph != &placeholder);
+            self.record_text_activity();
             return true;
         }
 
@@ -1407,6 +1497,8 @@ impl ChatComposer {
             context_window_percent: self.context_window_percent,
             navigator_status: self.navigator_indicator.clone(),
             navigator_activity: self.navigator_activity.clone(),
+            shell_indicator: self.shell_indicator.clone(),
+            context_mode: self.context_line_mode(),
         }
     }
 
@@ -1419,6 +1511,32 @@ impl ChatComposer {
             FooterMode::ShortcutSummary if !self.is_empty() => FooterMode::ContextOnly,
             other => other,
         }
+    }
+
+    fn context_line_mode(&self) -> ContextLineMode {
+        if self.prefer_context_line() {
+            ContextLineMode::ForceContext
+        } else {
+            ContextLineMode::PreferIndex
+        }
+    }
+
+    fn prefer_context_line(&self) -> bool {
+        if !self.is_empty() {
+            return true;
+        }
+        if let Some(last) = self.last_text_activity
+            && last.elapsed() < CONTEXT_ACTIVITY_GRACE
+        {
+            return true;
+        }
+        false
+    }
+
+    fn record_text_activity(&mut self) {
+        self.last_text_activity = Some(Instant::now());
+        self.frame_requester
+            .schedule_frame_in(CONTEXT_ACTIVITY_GRACE);
     }
 
     fn custom_footer_height(&self) -> Option<u16> {

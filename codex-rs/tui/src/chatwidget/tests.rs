@@ -1,6 +1,7 @@
 use super::*;
 use crate::app_event::AppEvent;
 use crate::app_event_sender::AppEventSender;
+use crate::history_cell::new_shell_card;
 use crate::test_backend::VT100Backend;
 use crate::tui::FrameRequester;
 use assert_matches::assert_matches;
@@ -18,6 +19,9 @@ use codex_core::protocol::AgentMessageEvent;
 use codex_core::protocol::AgentReasoningDeltaEvent;
 use codex_core::protocol::AgentReasoningEvent;
 use codex_core::protocol::ApplyPatchApprovalRequestEvent;
+use codex_core::protocol::BackgroundEventEvent;
+use codex_core::protocol::BackgroundShellEvent;
+use codex_core::protocol::BackgroundShellEventKind;
 use codex_core::protocol::Event;
 use codex_core::protocol::EventMsg;
 use codex_core::protocol::ExecApprovalRequestEvent;
@@ -42,10 +46,15 @@ use codex_core::protocol::UndoStartedEvent;
 use codex_core::protocol::ViewImageToolCallEvent;
 use codex_core::protocol::WarningEvent;
 use codex_protocol::ConversationId;
+use codex_protocol::models::BackgroundShellEndedBy;
+use codex_protocol::models::BackgroundShellStartMode;
+use codex_protocol::models::BackgroundShellStatus;
 use codex_protocol::parse_command::ParsedCommand;
 use codex_protocol::plan_tool::PlanItemArg;
 use codex_protocol::plan_tool::StepStatus;
 use codex_protocol::plan_tool::UpdatePlanArgs;
+use codex_shell_model::ShellState;
+use codex_shell_model::ShellTail;
 use crossterm::event::KeyCode;
 use crossterm::event::KeyEvent;
 use crossterm::event::KeyModifiers;
@@ -55,6 +64,7 @@ use std::fs::File;
 use std::io::BufRead;
 use std::io::BufReader;
 use std::path::PathBuf;
+use std::sync::Arc;
 use tempfile::NamedTempFile;
 use tempfile::tempdir;
 use tokio::sync::mpsc::error::TryRecvError;
@@ -114,6 +124,15 @@ fn snapshot(percent: f64) -> RateLimitSnapshot {
         }),
         secondary: None,
     }
+}
+
+#[test]
+fn ctrl_r_hint_hides_after_promotion() {
+    let mut state = ShellState::new("shell-1", 0, BackgroundShellStartMode::Foreground);
+    state.status = BackgroundShellStatus::Running;
+    assert!(should_show_ctrl_r_hint(&state));
+    state.promoted_by = Some(BackgroundShellEndedBy::User);
+    assert!(!should_show_ctrl_r_hint(&state));
 }
 
 #[test]
@@ -302,6 +321,7 @@ fn make_chatwidget_manual() -> (
         rate_limit_switch_prompt: RateLimitSwitchPromptState::default(),
         stream_controller: None,
         running_commands: HashMap::new(),
+        suppressed_exec_calls: HashSet::new(),
         task_complete_pending: false,
         interrupts: InterruptManager::new(),
         reasoning_buffer: String::new(),
@@ -322,6 +342,9 @@ fn make_chatwidget_manual() -> (
         navigator_last_state: None,
         navigator_last_notice: None,
         navigator_calls: HashMap::new(),
+        shell_cards: HashMap::new(),
+        shell_card_order: Vec::new(),
+        foreground_shell_id: None,
     };
     (widget, rx, op_rx)
 }
@@ -335,6 +358,42 @@ pub(crate) fn make_chatwidget_manual_with_sender() -> (
     let (widget, rx, op_rx) = make_chatwidget_manual();
     let app_event_tx = widget.app_event_tx.clone();
     (widget, app_event_tx, rx, op_rx)
+}
+
+fn seed_running_shell(chat: &mut ChatWidget, shell_id: &str) {
+    seed_shell_with_mode(chat, shell_id, BackgroundShellStartMode::Foreground);
+}
+
+fn seed_shell_with_mode(
+    chat: &mut ChatWidget,
+    shell_id: &str,
+    start_mode: BackgroundShellStartMode,
+) {
+    let event = BackgroundEventEvent {
+        message: format!("{shell_id} started"),
+        shell_event: Some(BackgroundShellEvent {
+            shell_id: shell_id.to_string(),
+            call_id: Some(format!("{shell_id}-call")),
+            status: BackgroundShellStatus::Running,
+            kind: BackgroundShellEventKind::Started,
+            start_mode,
+            friendly_label: Some("sleep 10".to_string()),
+            ended_by: None,
+            promoted_by: None,
+            exit_code: None,
+            command: Some(vec!["bash".into(), "-lc".into(), "sleep 10".into()]),
+            message: None,
+            action_result: None,
+            last_log: None,
+            pid: None,
+            tail: None,
+            state: None,
+        }),
+    };
+    chat.handle_codex_event(Event {
+        id: shell_id.to_string(),
+        msg: EventMsg::BackgroundEvent(event),
+    });
 }
 
 fn drain_insert_history(
@@ -393,6 +452,183 @@ fn rate_limit_warnings_emit_thresholds() {
             ),
         ],
         "expected one warning per limit for the highest crossed threshold"
+    );
+}
+
+#[test]
+fn shell_indicator_focus_and_enter_open_panel() {
+    let (mut chat, mut rx, _ops) = make_chatwidget_manual();
+    seed_running_shell(&mut chat, "shell-focus");
+    // Drain the emitted history card so later AppEvents are easy to inspect.
+    drain_insert_history(&mut rx);
+    assert!(!chat.bottom_pane.shell_indicator_has_focus());
+
+    chat.handle_key_event(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+    assert!(chat.bottom_pane.shell_indicator_has_focus());
+
+    chat.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+
+    let mut opened = false;
+    while let Ok(ev) = rx.try_recv() {
+        match ev {
+            AppEvent::OpenShellPanel { cards, .. } => {
+                opened = true;
+                assert_eq!(cards.len(), 1, "expected one shell card snapshot");
+                break;
+            }
+            AppEvent::InsertHistoryCell(_) => continue,
+            other => panic!("unexpected AppEvent: {other:?}"),
+        }
+    }
+    assert!(opened, "Enter should open the Shell panel");
+    assert!(!chat.bottom_pane.shell_indicator_has_focus());
+}
+
+#[test]
+fn shell_events_update_cards_without_extra_history_cells() {
+    let (mut chat, mut rx, _ops) = make_chatwidget_manual();
+    let shell_id = "shell-card";
+    seed_running_shell(&mut chat, shell_id);
+    drain_insert_history(&mut rx);
+
+    let promote_event = BackgroundEventEvent {
+        message: "auto background".to_string(),
+        shell_event: Some(BackgroundShellEvent {
+            shell_id: shell_id.to_string(),
+            call_id: Some(format!("{shell_id}-call")),
+            status: BackgroundShellStatus::Running,
+            kind: BackgroundShellEventKind::Promoted,
+            start_mode: BackgroundShellStartMode::Background,
+            friendly_label: Some("sleep 10".to_string()),
+            ended_by: None,
+            promoted_by: Some(BackgroundShellEndedBy::System),
+            exit_code: None,
+            command: Some(vec!["bash".into(), "-lc".into(), "sleep 10".into()]),
+            message: Some("moved to background".to_string()),
+            action_result: None,
+            last_log: Some(vec!["tick".to_string()]),
+            pid: None,
+            tail: Some(ShellTail::new(vec!["tick".to_string()], false, 5)),
+            state: None,
+        }),
+    };
+    chat.handle_codex_event(Event {
+        id: shell_id.to_string(),
+        msg: EventMsg::BackgroundEvent(promote_event),
+    });
+    assert!(drain_insert_history(&mut rx).is_empty());
+    {
+        let card = chat.shell_cards.get(shell_id).expect("card").lock();
+        assert_eq!(card.state.promoted_by, Some(BackgroundShellEndedBy::System));
+        assert_eq!(card.state.reason.as_deref(), Some("moved to background"));
+        assert_eq!(
+            card.state
+                .tail
+                .as_ref()
+                .map(|tail| tail.lines.clone())
+                .unwrap_or_default(),
+            vec!["tick".to_string()]
+        );
+    }
+
+    let done_event = BackgroundEventEvent {
+        message: "done".to_string(),
+        shell_event: Some(BackgroundShellEvent {
+            shell_id: shell_id.to_string(),
+            call_id: Some(format!("{shell_id}-call")),
+            status: BackgroundShellStatus::Completed,
+            kind: BackgroundShellEventKind::Terminated,
+            start_mode: BackgroundShellStartMode::Background,
+            friendly_label: Some("sleep 10".to_string()),
+            ended_by: Some(BackgroundShellEndedBy::Agent),
+            promoted_by: Some(BackgroundShellEndedBy::System),
+            exit_code: Some(0),
+            command: Some(vec!["bash".into(), "-lc".into(), "sleep 10".into()]),
+            message: Some("command finished".to_string()),
+            action_result: None,
+            last_log: Some(vec!["done".to_string()]),
+            pid: None,
+            tail: Some(ShellTail::new(vec!["done".to_string()], false, 5)),
+            state: None,
+        }),
+    };
+    chat.handle_codex_event(Event {
+        id: shell_id.to_string(),
+        msg: EventMsg::BackgroundEvent(done_event),
+    });
+    let info_cells = drain_insert_history(&mut rx);
+    assert_eq!(info_cells.len(), 1, "expected completion summary");
+    let summary = lines_to_single_string(&info_cells[0]);
+    assert!(
+        summary.contains("Completed shell-card (sleep 10)"),
+        "summary={summary:?}"
+    );
+
+    let card_handle = chat.shell_cards.get(shell_id).expect("card");
+    let card_lines = new_shell_card(Arc::clone(card_handle)).display_lines(120);
+    let rendered = lines_to_single_string(&card_lines);
+    assert!(
+        rendered.contains("Completed shell-card (sleep 10)"),
+        "card summary missing: {rendered:?}"
+    );
+
+    let card = chat.shell_cards.get(shell_id).expect("card").lock();
+    assert_eq!(card.state.ended_by, Some(BackgroundShellEndedBy::Agent));
+    assert_eq!(card.state.reason.as_deref(), Some("command finished"));
+    assert_eq!(card.state.promoted_by, Some(BackgroundShellEndedBy::System));
+}
+
+#[test]
+fn ctrl_r_hint_hidden_for_background_shells() {
+    let (mut chat, mut rx, _ops) = make_chatwidget_manual();
+    let shell_id = "shell-bg";
+    seed_shell_with_mode(&mut chat, shell_id, BackgroundShellStartMode::Background);
+    drain_insert_history(&mut rx);
+
+    let handle = chat.shell_cards.get(shell_id).expect("card");
+    assert!(!handle.lock().show_ctrl_r_hint, "hint must be hidden");
+
+    let lines = new_shell_card(Arc::clone(handle)).display_lines(120);
+    let rendered = lines_to_single_string(&lines);
+    assert!(rendered.contains("Mode: background"));
+    assert!(!rendered.contains("Hint: "));
+}
+
+#[test]
+fn ctrl_r_hint_hidden_for_ampersand_commands() {
+    let (mut chat, mut rx, _ops) = make_chatwidget_manual();
+    let shell_id = "shell-amp";
+    let event = BackgroundEventEvent {
+        message: "started".to_string(),
+        shell_event: Some(BackgroundShellEvent {
+            shell_id: shell_id.to_string(),
+            call_id: Some(format!("{shell_id}-call")),
+            status: BackgroundShellStatus::Running,
+            kind: BackgroundShellEventKind::Started,
+            start_mode: BackgroundShellStartMode::Foreground,
+            friendly_label: Some("sleep 5 &".to_string()),
+            ended_by: None,
+            promoted_by: None,
+            exit_code: None,
+            command: Some(vec!["bash".into(), "-lc".into(), "sleep 5 &".into()]),
+            message: None,
+            action_result: None,
+            last_log: None,
+            pid: None,
+            tail: None,
+            state: None,
+        }),
+    };
+    chat.handle_codex_event(Event {
+        id: shell_id.to_string(),
+        msg: EventMsg::BackgroundEvent(event),
+    });
+    drain_insert_history(&mut rx);
+
+    let handle = chat.shell_cards.get(shell_id).expect("card");
+    assert!(
+        !handle.lock().show_ctrl_r_hint,
+        "ampersand commands should not show hint"
     );
 }
 
@@ -533,6 +769,42 @@ fn exec_approval_emits_proposed_command_and_decision_history() {
 }
 
 #[test]
+fn agent_exec_command_does_not_emit_exec_cell() {
+    let (mut chat, mut rx, _ops) = make_chatwidget_manual();
+    let command = vec!["bash".to_string(), "-lc".to_string(), "echo hi".to_string()];
+    let parsed_cmd: Vec<ParsedCommand> = codex_core::parse_command::parse_command(&command);
+    chat.handle_codex_event(Event {
+        id: "agent-call".to_string(),
+        msg: EventMsg::ExecCommandBegin(ExecCommandBeginEvent {
+            call_id: "agent-call".to_string(),
+            command: command.clone(),
+            cwd: std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
+            parsed_cmd,
+            is_user_shell_command: false,
+        }),
+    });
+    chat.handle_codex_event(Event {
+        id: "agent-call".to_string(),
+        msg: EventMsg::ExecCommandEnd(ExecCommandEndEvent {
+            call_id: "agent-call".to_string(),
+            stdout: String::new(),
+            stderr: String::new(),
+            aggregated_output: String::new(),
+            exit_code: 0,
+            duration: std::time::Duration::from_millis(1),
+            formatted_output: String::new(),
+        }),
+    });
+
+    assert!(
+        chat.active_cell.is_none(),
+        "agent exec should not create ExecCell"
+    );
+    assert!(chat.running_commands.is_empty());
+    assert!(drain_insert_history(&mut rx).is_empty());
+}
+
+#[test]
 fn exec_approval_decision_truncates_multiline_and_long_commands() {
     let (mut chat, mut rx, _op_rx) = make_chatwidget_manual();
 
@@ -628,7 +900,7 @@ fn begin_exec(chat: &mut ChatWidget, call_id: &str, raw_cmd: &str) {
             command,
             cwd: std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
             parsed_cmd,
-            is_user_shell_command: false,
+            is_user_shell_command: true,
         }),
     });
 }

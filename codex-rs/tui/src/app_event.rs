@@ -1,4 +1,5 @@
 use std::path::PathBuf;
+use std::sync::Arc;
 
 use codex_common::approval_presets::ApprovalPreset;
 use codex_common::model_presets::ModelPreset;
@@ -9,6 +10,8 @@ use codex_navigator::proto::IndexStatus;
 
 use crate::bottom_pane::ApprovalRequest;
 use crate::history_cell::HistoryCell;
+use crate::history_cell::ShellCardData;
+use parking_lot::Mutex;
 
 use codex_core::protocol::AskForApproval;
 use codex_core::protocol::SandboxPolicy;
@@ -184,6 +187,12 @@ pub(crate) enum AppEvent {
 
     /// Background Navigator failure/warning message.
     NavigatorWarning(String),
+
+    /// Open the full-screen shell panel overlay with the latest card data.
+    OpenShellPanel {
+        cards: Vec<Arc<Mutex<ShellCardData>>>,
+        focused_shell: Option<String>,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

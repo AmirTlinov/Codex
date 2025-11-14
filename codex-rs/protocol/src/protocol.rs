@@ -186,7 +186,11 @@ pub enum Op {
     /// Request to shut down codex instance.
     Shutdown,
 
-    /// Execute a user-initiated one-off shell command (triggered by "!cmd").
+    /// Execute a user-initiated one-off shell command (legacy `!cmd` shortcut).
+    ///
+    /// The interactive TUI no longer surfaces this path now that the agent
+    /// owns all shell execution, but the protocol remains for backwards
+    /// compatibility with headless clients.
     ///
     /// The command string is executed using the user's default shell and may
     /// include shell syntax (pipes, redirects, etc.). Output is streamed via
@@ -195,6 +199,20 @@ pub enum Op {
         /// The raw command string after '!'
         command: String,
     },
+
+    /// User requested control over a background shell process (e.g. Ctrl+R or panel kill).
+    BackgroundShellControl {
+        shell_id: String,
+        action: BackgroundShellControlAction,
+    },
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq, JsonSchema, TS)]
+#[serde(rename_all = "snake_case")]
+pub enum BackgroundShellControlAction {
+    Kill,
+    Resume,
+    BackgroundRequest,
 }
 
 /// Determines the conditions under which the user is consulted to approve
@@ -487,6 +505,9 @@ pub enum EventMsg {
 
     /// Notification that the server is about to execute a command.
     ExecCommandBegin(ExecCommandBeginEvent),
+
+    /// Notification carrying the OS pid for a running exec command.
+    ExecCommandPid(ExecCommandPidEvent),
 
     /// Incremental chunk of output from a running command.
     ExecCommandOutputDelta(ExecCommandOutputDeltaEvent),
@@ -1219,6 +1240,12 @@ pub struct ExecCommandBeginEvent {
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, JsonSchema, TS)]
+pub struct ExecCommandPidEvent {
+    pub call_id: String,
+    pub pid: i32,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema, TS)]
 pub struct ExecCommandEndEvent {
     /// Identifier for the ExecCommandBegin that finished.
     pub call_id: String,
@@ -1270,7 +1297,12 @@ pub struct ExecCommandOutputDeltaEvent {
 #[derive(Debug, Clone, Deserialize, Serialize, JsonSchema, TS)]
 pub struct BackgroundEventEvent {
     pub message: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub shell_event: Option<BackgroundShellEvent>,
 }
+
+pub use codex_shell_model::BackgroundShellEvent;
+pub use codex_shell_model::BackgroundShellEventKind;
 
 #[derive(Debug, Clone, Deserialize, Serialize, JsonSchema, TS)]
 pub struct DeprecationNoticeEvent {

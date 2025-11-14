@@ -210,16 +210,20 @@ impl FrameRequester {
     pub fn schedule_frame_in(&self, dur: Duration) {
         let _ = self.frame_schedule_tx.send(Instant::now() + dur);
     }
+
+    pub fn noop() -> Self {
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        FrameRequester {
+            frame_schedule_tx: tx,
+        }
+    }
 }
 
 #[cfg(test)]
 impl FrameRequester {
     /// Create a no-op frame requester for tests.
     pub(crate) fn test_dummy() -> Self {
-        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
-        FrameRequester {
-            frame_schedule_tx: tx,
-        }
+        Self::noop()
     }
 }
 

@@ -356,6 +356,21 @@ impl App {
             AppEvent::NavigatorWarning(message) => {
                 self.chat_widget.handle_navigator_warning(message);
             }
+            AppEvent::OpenShellPanel {
+                cards,
+                focused_shell,
+            } => {
+                if cards.is_empty() {
+                    return Ok(true);
+                }
+                let _ = tui.enter_alt_screen();
+                self.overlay = Some(Overlay::new_shell_panel(
+                    cards,
+                    focused_shell,
+                    self.app_event_tx.clone(),
+                ));
+                tui.frame_requester().schedule_frame();
+            }
             AppEvent::ConversationHistory(ev) => {
                 self.on_conversation_history_for_backtrack(tui, ev).await?;
             }

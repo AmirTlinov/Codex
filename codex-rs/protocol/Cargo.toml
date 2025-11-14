@@ -12,6 +12,7 @@ workspace = true
 
 [dependencies]
 codex-git = { workspace = true }
+codex-shell-model = { workspace = true }
 
 base64 = { workspace = true }
 codex-utils-image = { workspace = true }

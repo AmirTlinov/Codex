@@ -6,6 +6,39 @@ If you already lean on Codex every day and just need a little more control, this
 
 Most day-to-day tuning lives in `config.toml`: set approval + sandbox presets, pin model defaults, and add MCP server launchers. The [Config guide](./config.md) walks through every option and provides copy-paste examples for common setups.
 
+## Background shell controls {#background-shell}
+
+Codex now runs _every_ shell command through the background shell manager instead of invoking a one-off `shell` tool. The implications:
+
+- The CLI no longer supports `!cmd` shortcuts. Ask Codex to run commands; it will decide when to keep them in the foreground vs. background.
+- The toolset is fixed to `shell_run`, `shell_summary`, `shell_log`, `shell_kill`, and `shell_resume`. No other shell-like tools are exposed to the model.
+- Foreground executions get a 60 s budget. When the timer expires—or when you press `Ctrl+R`—Codex moves the process to the background and posts a status message explaining why.
+- Each process renders exactly one card in the chat history. Use `Ctrl+Shift+S` (or press ↓ then Enter on the `N Shell` footer counter) to open the Shell panel for full-screen management: arrow keys to pick a process, `k` to kill, `r` to resume, `Ctrl+R` to force background, `d` for diagnostics, `Enter` for details, and `Esc` to exit.
+- Cards and the Shell panel now show a live tail (~2KiB/16 lines) of stdout/stderr so you can track progress without opening logs; truncated tails are annotated inline.
+- Each Shell card labels its run mode (foreground/background) and the chat stream posts a single-line summary ("Kill shell-7 (sleep 500)", "Completed shell-3 …") when a process finishes so you never miss the outcome.
+- Every shell summary/event carries the OS PID, so `shell_kill` accepts either the `shell_id` (e.g., `shell-7`) or a numeric `pid` argument when you need to target a process.
+- The bottom footer rotates between Navigator status (`Indexing / Index ready`) and the remaining context budget: when you type, the traditional “90% context left” indicator appears for a few seconds so you can watch the window; after you pause, it automatically returns to the Index capsule so you can monitor background indexing progress.
+
+When you need to inspect output after a command has gone background, prefer the tools:
+
+```text
+shell_summary      # list running/completed/failed processes
+shell_log         # retrieve incremental logs (tail or diagnostics)
+shell_kill        # stop a running shell
+shell_resume      # bring a completed/failed command back to the foreground
+```
+
+`shell_kill` accepts either `shell_id` or `pid` along with an optional `reason` plus an `initiator`
+hint (`"agent"`, `"user"`, or `"system"`). Calls coming from the model default to `agent`, while
+the TUI sends `user` for Ctrl+Shift+S kills so attribution in history stays accurate.
+
+Every `shell_run` invocation **must** include an explicit `timeout_ms`. Foreground commands should
+typically use something near the 60 s budget (with a little buffer) while background tasks can
+request hours or days (e.g., `timeout_ms: 172_800_000` for 48 h). This keeps long-lived jobs from
+being killed by the default 10 s exec timeout.
+
+These tools mirror what the TUI shows inside the Shell panel, so you can automate the same workflows from automation or headless clients.
+
 ## Tracing / verbose logging {#tracing-verbose-logging}
 
 Because Codex is written in Rust, it honors the `RUST_LOG` environment variable to configure its logging behavior.

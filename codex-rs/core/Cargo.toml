@@ -27,6 +27,7 @@ codex-git = { workspace = true }
 codex-keyring-store = { workspace = true }
 codex-otel = { workspace = true, features = ["otel"] }
 codex-protocol = { workspace = true }
+codex-shell-model = { workspace = true }
 codex-rmcp-client = { workspace = true }
 codex-navigator = { workspace = true }
 codex-utils-pty = { workspace = true }

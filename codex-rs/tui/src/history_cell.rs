@@ -7,6 +7,7 @@ use crate::exec_cell::output_lines;
 use crate::exec_cell::spinner;
 use crate::exec_command::relativize_to_home;
 use crate::exec_command::strip_bash_lc_and_escape;
+use crate::key_hint;
 use crate::markdown::append_markdown;
 use crate::render::line_utils::line_to_static;
 use crate::render::line_utils::prefix_lines;
@@ -31,15 +32,21 @@ use codex_core::protocol::McpAuthStatus;
 use codex_core::protocol::McpInvocation;
 use codex_core::protocol::SessionConfiguredEvent;
 use codex_core::protocol_config_types::ReasoningEffort as ReasoningEffortConfig;
+use codex_protocol::models::BackgroundShellEndedBy;
+use codex_protocol::models::BackgroundShellStartMode;
+use codex_protocol::models::BackgroundShellStatus;
 use codex_protocol::plan_tool::PlanItemArg;
 use codex_protocol::plan_tool::StepStatus;
 use codex_protocol::plan_tool::UpdatePlanArgs;
+use codex_shell_model::ShellState;
+use crossterm::event::KeyCode;
 use image::DynamicImage;
 use image::ImageReader;
 use mcp_types::EmbeddedResourceResource;
 use mcp_types::Resource;
 use mcp_types::ResourceLink;
 use mcp_types::ResourceTemplate;
+use parking_lot::Mutex;
 use ratatui::prelude::*;
 use ratatui::style::Modifier;
 use ratatui::style::Style;
@@ -52,6 +59,7 @@ use std::collections::HashMap;
 use std::io::Cursor;
 use std::path::Path;
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::time::Duration;
 use std::time::Instant;
 use tracing::error;
@@ -1237,6 +1245,222 @@ pub(crate) fn new_mcp_tools_output(
 
     PlainHistoryCell { lines }
 }
+
+#[derive(Debug)]
+pub(crate) struct ShellCardData {
+    pub state: ShellState,
+    pub show_ctrl_r_hint: bool,
+}
+
+impl ShellCardData {
+    pub fn new(shell_id: String) -> Self {
+        Self {
+            state: ShellState::placeholder(shell_id),
+            show_ctrl_r_hint: false,
+        }
+    }
+
+    pub(crate) fn label(&self) -> String {
+        shell_label_for_display(&self.state)
+    }
+}
+
+pub(crate) fn new_shell_card(data: Arc<Mutex<ShellCardData>>) -> ShellCardCell {
+    ShellCardCell { data }
+}
+
+#[derive(Debug)]
+pub(crate) struct ShellCardCell {
+    data: Arc<Mutex<ShellCardData>>,
+}
+
+impl HistoryCell for ShellCardCell {
+    fn display_lines(&self, _width: u16) -> Vec<Line<'static>> {
+        let data = self.data.lock();
+        let state = &data.state;
+        let mut lines = Vec::new();
+        let dot = match state.status {
+            BackgroundShellStatus::Pending | BackgroundShellStatus::Running => "●".green(),
+            BackgroundShellStatus::Completed => "●".gray(),
+            BackgroundShellStatus::Failed => "●".red(),
+        };
+        let header = format!(" Shell ({})", data.label());
+        lines.push(Line::from(vec![dot, header.into()]));
+
+        if let Some(summary) = summarize_shell_state(state) {
+            lines.push(Line::from(vec!["  └ ".into(), summary.into()]));
+        } else {
+            let mut status_line = Line::from(vec!["  └ ".into(), state.shell_id.clone().dim()]);
+            status_line.push_span(" · ".dim());
+            status_line.push_span(describe_start_mode(state.start_mode));
+            if let Some(code) = state.exit_code {
+                status_line.push_span(" · ".dim());
+                status_line.push_span(format!("exit {code}").dim());
+            }
+            lines.push(status_line);
+        }
+
+        let command = format_shell_command(&state.command);
+        if !command.is_empty() {
+            lines.push(Line::from(vec!["    Command: ".into(), command.into()]));
+        }
+
+        if let Some(pid) = state.pid {
+            lines.push(Line::from(vec!["    PID: ".into(), pid.to_string().into()]));
+        }
+
+        if let Some(promoted_by) = state.promoted_by {
+            lines.push(Line::from(vec![
+                "    Promoted by: ".into(),
+                describe_actor(promoted_by).into(),
+            ]));
+        }
+
+        if let Some(ended_by) = state.ended_by {
+            lines.push(Line::from(vec![
+                "    Ended by: ".into(),
+                describe_actor(ended_by).into(),
+            ]));
+        }
+
+        if let Some(reason) = &state.reason
+            && !reason.is_empty()
+        {
+            lines.push(Line::from(vec![
+                "    Reason: ".into(),
+                reason.clone().into(),
+            ]));
+        }
+
+        lines.push("    Logs:".dim().into());
+        if let Some(tail) = state.tail.as_ref() {
+            if tail.lines.is_empty() {
+                lines.push("        (no output)".dim().into());
+            } else {
+                for line in tail.lines.iter() {
+                    lines.push(Line::from(vec!["        ".into(), line.clone().dim()]));
+                }
+            }
+            if tail.truncated {
+                lines.push(Line::from(vec![
+                    "        … output truncated (~2KiB cap)".dim(),
+                ]));
+            }
+        } else if let Some(logs) = state.last_log.as_ref() {
+            if logs.is_empty() {
+                lines.push("        (no output)".dim().into());
+            } else {
+                for line in logs.iter().take(2) {
+                    lines.push(Line::from(vec!["        ".into(), line.clone().dim()]));
+                }
+            }
+        } else {
+            lines.push("        (no output)".dim().into());
+        }
+
+        if data.show_ctrl_r_hint {
+            lines.push(Line::from(vec![
+                "    Hint: ".dim(),
+                key_hint::ctrl(KeyCode::Char('r')).into(),
+                " to move to background".dim(),
+            ]));
+        }
+
+        lines
+    }
+}
+
+pub(crate) fn format_shell_command(command: &[String]) -> String {
+    if command.is_empty() {
+        return String::new();
+    }
+    let sanitized = sanitize_shell_command(command);
+    if sanitized.is_empty() {
+        String::new()
+    } else {
+        sanitized.join(" ")
+    }
+}
+
+fn sanitize_shell_command(command: &[String]) -> Vec<String> {
+    if command.len() < 3 {
+        return command.to_vec();
+    }
+    if let Some(payload_idx) = payload_start_index(command) {
+        if payload_idx < command.len() {
+            let payload = command[payload_idx..].join(" ");
+            if !payload.is_empty() {
+                return vec![payload];
+            }
+        }
+    }
+    command.to_vec()
+}
+
+fn payload_start_index(command: &[String]) -> Option<usize> {
+    for i in 0..command.len().saturating_sub(1) {
+        if is_shell_binary(&command[i]) && matches!(command[i + 1].as_str(), "-lc" | "-c") {
+            return Some(i + 2);
+        }
+    }
+    None
+}
+
+fn is_shell_binary(token: &str) -> bool {
+    token.eq_ignore_ascii_case("bash")
+        || token.eq_ignore_ascii_case("sh")
+        || token.ends_with("/bash")
+        || token.ends_with("/sh")
+}
+
+fn describe_actor(actor: BackgroundShellEndedBy) -> &'static str {
+    match actor {
+        BackgroundShellEndedBy::Agent => "agent",
+        BackgroundShellEndedBy::User => "user",
+        BackgroundShellEndedBy::System => "system",
+    }
+}
+
+fn describe_start_mode(mode: BackgroundShellStartMode) -> &'static str {
+    match mode {
+        BackgroundShellStartMode::Foreground => "foreground",
+        BackgroundShellStartMode::Background => "background",
+    }
+}
+
+pub(crate) fn shell_label_for_display(state: &ShellState) -> String {
+    if let Some(label) = state
+        .friendly_label
+        .as_deref()
+        .filter(|value| !value.is_empty())
+    {
+        return label.to_string();
+    }
+    let sanitized = format_shell_command(&state.command);
+    if sanitized.is_empty() {
+        state.shell_id.clone()
+    } else {
+        sanitized
+    }
+}
+
+pub(crate) fn summarize_shell_state(state: &ShellState) -> Option<String> {
+    let label = shell_label_for_display(state);
+    let shell_id = &state.shell_id;
+    match state.status {
+        BackgroundShellStatus::Completed => Some(format!("Completed {shell_id} ({label})")),
+        BackgroundShellStatus::Failed => match state.ended_by {
+            Some(BackgroundShellEndedBy::User) => Some(format!("Kill {shell_id} ({label})")),
+            Some(BackgroundShellEndedBy::Agent) => Some(format!("Stopped {shell_id} ({label})")),
+            Some(BackgroundShellEndedBy::System) => {
+                Some(format!("System stopped {shell_id} ({label})"))
+            }
+            None => Some(format!("Failed {shell_id} ({label})")),
+        },
+        _ => None,
+    }
+}
+
 pub(crate) fn new_info_event(message: String, hint: Option<String>) -> PlainHistoryCell {
     let mut line = vec!["• ".dim(), message.into()];
     if let Some(hint) = hint {
@@ -1482,6 +1706,22 @@ mod tests {
     use mcp_types::TextContent;
     use mcp_types::Tool;
     use mcp_types::ToolInputSchema;
+
+    #[test]
+    fn strips_bash_wrapper_prefix() {
+        let cmd = vec![
+            "/bin/bash".to_string(),
+            "-lc".to_string(),
+            "sleep 500".to_string(),
+        ];
+        assert_eq!(format_shell_command(&cmd), "sleep 500");
+    }
+
+    #[test]
+    fn leaves_regular_commands_intact() {
+        let cmd = vec!["ls".to_string(), "-la".to_string()];
+        assert_eq!(format_shell_command(&cmd), "ls -la");
+    }
 
     fn test_config() -> Config {
         Config::load_from_base_config_with_overrides(

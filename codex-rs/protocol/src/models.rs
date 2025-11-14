@@ -211,6 +211,36 @@ pub struct LocalShellExecAction {
     pub user: Option<String>,
 }
 
+pub use codex_shell_model::BackgroundShellStartMode;
+pub use codex_shell_model::BackgroundShellStatus;
+
+pub use codex_shell_model::BackgroundShellEndedBy;
+
+pub use codex_shell_model::BackgroundShellLogMode;
+
+pub use codex_shell_model::BackgroundShellSummary;
+
+pub use codex_shell_model::BackgroundShellRunToolCallParams;
+
+pub use codex_shell_model::BackgroundShellRunToolResult;
+
+pub use codex_shell_model::BackgroundShellSummaryParams;
+pub use codex_shell_model::BackgroundShellSummaryResult;
+
+pub use codex_shell_model::BackgroundShellLogParams;
+pub use codex_shell_model::BackgroundShellLogResult;
+
+pub use codex_shell_model::ShellState;
+pub use codex_shell_model::ShellTail;
+
+pub use codex_shell_model::BackgroundShellKillParams;
+
+pub use codex_shell_model::BackgroundShellResumeParams;
+
+pub use codex_shell_model::BackgroundShellActionResult;
+pub use codex_shell_model::BackgroundShellKillResult;
+pub use codex_shell_model::BackgroundShellResumeResult;
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, JsonSchema, TS)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum WebSearchAction {

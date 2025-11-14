@@ -80,6 +80,7 @@ impl ApplyPatchRuntime {
             sub_id: ctx.turn.sub_id.clone(),
             call_id: ctx.call_id.clone(),
             tx_event: ctx.session.get_tx_event(),
+            background_shell: Some(ctx.session.services.background_shell.output_sender()),
         })
     }
 }

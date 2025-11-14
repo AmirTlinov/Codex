@@ -1,0 +1,15 @@
+[package]
+edition = "2024"
+name = "codex-shell-model"
+version = { workspace = true }
+
+[lints]
+workspace = true
+
+[dependencies]
+schemars = { workspace = true }
+serde = { workspace = true, features = ["derive"] }
+ts-rs = { workspace = true, features = [
+    "serde-json-impl",
+    "no-serde-warnings",
+] }

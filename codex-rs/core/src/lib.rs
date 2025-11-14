@@ -7,6 +7,7 @@
 
 mod apply_patch;
 pub mod auth;
+pub mod background_shell;
 pub mod bash;
 mod chat_completions;
 mod client;
