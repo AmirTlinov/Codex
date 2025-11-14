@@ -19,6 +19,7 @@ use codex_navigator::AtlasFocus;
 use codex_navigator::DaemonOptions;
 use codex_navigator::HotspotMarker;
 use codex_navigator::atlas_focus;
+use codex_navigator::atlas_hint_label;
 use codex_navigator::auto_facet::AutoFacetConfig;
 use codex_navigator::auto_facet::{self};
 use codex_navigator::client::ClientOptions;
@@ -1072,6 +1073,7 @@ pub async fn run_flow(mut cmd: FlowCommand) -> Result<()> {
         "flow: {} — {}",
         definition.display_name, definition.description
     );
+    print_flow_atlas_context(&client);
     if let Some(summary) = fetch_hotspot_summary(&client).await {
         print_flow_hotspot_summary(&summary);
     }
@@ -1128,6 +1130,15 @@ async fn fetch_hotspot_summary(client: &NavigatorClient) -> Option<InsightTrendS
         .iter()
         .find(|ws| ws.project_root == root)?;
     workspace.health.as_ref()?.hotspot_summary.clone()
+}
+
+fn print_flow_atlas_context(client: &NavigatorClient) {
+    let history = QueryHistoryStore::new(client.queries_dir());
+    if let Some(item) = history.entry_at(0).ok().flatten()
+        && let Some(hint) = item.atlas_hint.as_ref()
+    {
+        println!("atlas focus: {}", atlas_hint_label(hint));
+    }
 }
 
 fn print_flow_hotspot_summary(summary: &InsightTrendSummary) {
@@ -1296,6 +1307,7 @@ fn history_entry_view(item: &HistoryItem, index: usize, now: u64) -> HistoryEntr
         clear_command,
         repeat_command,
         suggestion_commands,
+        atlas_hint: item.atlas_hint.clone(),
     }
 }
 
@@ -1452,6 +1464,9 @@ fn print_history_entry(
     println!("  [{idx}] {marker}{} ({age}){}", item.query_id, chips);
     if let Some(summary) = summarize_history_query(item) {
         println!("       query: {summary}");
+    }
+    if let Some(hint) = item.atlas_hint.as_ref() {
+        println!("       atlas: {}", atlas_hint_label(hint));
     }
     for hit in item.hits.iter().take(3) {
         println!("       ↳ {}:{} {}", hit.path, hit.line, hit.preview);
@@ -1654,10 +1669,22 @@ pub async fn run_daemon_cmd(cmd: DaemonCommand) -> Result<()> {
 pub async fn run_doctor(mut cmd: DoctorCommand) -> Result<()> {
     let client = build_client(cmd.project_root.take()).await?;
     let report = client.doctor().await?;
+    let history = QueryHistoryStore::new(client.queries_dir());
+    let default_root = client
+        .project()
+        .project_root()
+        .to_string_lossy()
+        .into_owned();
+    let atlas_context = history
+        .entry_at(0)
+        .ok()
+        .flatten()
+        .and_then(|item| item.atlas_hint)
+        .map(|hint| atlas_hint_label(&hint));
     if cmd.json {
         print_json(&report)
     } else {
-        print_doctor_summary(&report);
+        print_doctor_summary(&report, atlas_context, &default_root);
         Ok(())
     }
 }
@@ -1678,14 +1705,17 @@ pub async fn run_profile(mut cmd: ProfileCommand) -> Result<()> {
     }
 }
 
-fn print_doctor_summary(report: &DoctorReport) {
+fn print_doctor_summary(report: &DoctorReport, atlas_context: Option<String>, default_root: &str) {
     println!("navigator daemon pid {}", report.daemon_pid);
     if report.workspaces.is_empty() {
         println!("no indexed workspaces yet");
     }
     for workspace in &report.workspaces {
         println!();
-        render_workspace(workspace);
+        let atlas_hint = atlas_context
+            .as_deref()
+            .filter(|_| workspace.project_root == default_root);
+        render_workspace(workspace, atlas_hint);
     }
     if !report.actions.is_empty() {
         println!();
@@ -1743,9 +1773,12 @@ fn print_profile_summary(response: &ProfileResponse) {
     }
 }
 
-fn render_workspace(ws: &DoctorWorkspace) {
+fn render_workspace(ws: &DoctorWorkspace, atlas_hint: Option<&str>) {
     println!("{}", ws.project_root);
     println!("  index: {}", describe_index_status(&ws.index));
+    if let Some(label) = atlas_hint {
+        println!("  atlas: {label}");
+    }
     let coverage = &ws.diagnostics.coverage;
     if !coverage.pending.is_empty() || !coverage.skipped.is_empty() || !coverage.errors.is_empty() {
         println!(
@@ -3859,6 +3892,7 @@ mod tests {
                 FocusMode::Auto,
             ))),
             facet_suggestions: vec![suggestion],
+            atlas_hint: None,
         };
         let view = history_entry_view(&item, 2, 10);
         assert_eq!(
@@ -3929,6 +3963,7 @@ mod tests {
             is_pinned: false,
             recorded_query: Some(recorded_query_from_replay(&replay)),
             facet_suggestions: Vec::new(),
+            atlas_hint: None,
         };
         assert!(history_item_matches(&item, "planner"));
         assert!(!history_item_matches(&item, "missing"));
@@ -3963,6 +3998,7 @@ mod tests {
             is_pinned: false,
             recorded_query: None,
             facet_suggestions: vec![suggestion],
+            atlas_hint: None,
         };
         assert!(history_item_matches(&item, "core-team"));
         assert!(history_item_matches(&item, "lang=rust"));

@@ -147,6 +147,8 @@ pub struct HistoryEntryView {
     pub repeat_command: Option<String>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub suggestion_commands: Vec<SuggestionCommandView>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub atlas_hint: Option<codex_navigator::proto::AtlasHint>,
 }
 
 #[derive(Debug, Clone, Serialize)]

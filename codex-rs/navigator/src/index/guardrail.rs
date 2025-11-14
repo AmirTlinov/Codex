@@ -47,7 +47,7 @@ impl GuardrailEmitter {
         }
     }
 
-pub async fn observe_health(&self, summary: &HealthSummary, coverage: &CoverageDiagnostics) {
+    pub async fn observe_health(&self, summary: &HealthSummary, coverage: &CoverageDiagnostics) {
         if matches!(summary.risk, HealthRisk::Green) && summary.hotspot_summary.is_none() {
             return;
         }
@@ -74,7 +74,7 @@ pub async fn observe_health(&self, summary: &HealthSummary, coverage: &CoverageD
         if let Some(trends) = summary.hotspot_summary.as_ref() {
             let additions: usize = trends.trends.iter().map(|t| t.new_paths.len()).sum();
             if additions > 0 {
-                issues.push(format!("hotspot spikes +{}", additions));
+                issues.push(format!("hotspot spikes +{additions}"));
             }
         }
         if issues.is_empty() {

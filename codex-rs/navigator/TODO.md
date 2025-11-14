@@ -24,6 +24,7 @@ This roadmap enumerates the concrete work required to turn Navigator into the pr
      - ✅ `atlas summary` now available via CLI + freeform payloads; jump verb rewrites into a scoped search. Still need richer `jump` UX (breadcrumbs in planner, interactive chips).
   4. **UI surfacing:** show breadcrumbs + sibling modules in CLI outputs so users see where they are in the map.
      - ✅ `navigator atlas --summary` и сами search-ответы (CLI/TUI/JSON) теперь печатают Atlas-фокус + ближайшие модули, поэтому отдельный atlas-вызов нужен только для глубоких обзоров.
+     - ✅ История, Doctor и flow-команды автоматически подхватывают последний atlas hint, выводя краткий breadcrumb (`core > planner · 42 files`) прямо в тексте/JSON, так что оператору не нужно спрашивать “где мы сейчас?”.
 - **Success criteria:** navigation requests referencing domain names resolve without manual `find`/`ls`; onboarding users can orient themselves within minutes.
 
 ### 3. Contextual Ranking & Intent Signals

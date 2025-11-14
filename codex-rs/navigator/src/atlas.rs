@@ -184,6 +184,37 @@ pub fn build_search_hint(snapshot: &IndexSnapshot, hits: &[NavHit]) -> Option<At
     })
 }
 
+pub fn atlas_hint_label(hint: &AtlasHint) -> String {
+    let breadcrumb = if hint.breadcrumb.is_empty() {
+        hint.focus.name.clone()
+    } else {
+        hint.breadcrumb.join(" > ")
+    };
+    let mut extras = Vec::new();
+    if hint.focus.file_count > 0 {
+        extras.push(format!("{} files", hint.focus.file_count));
+    }
+    if hint.focus.symbol_count > 0 {
+        extras.push(format!("{} symbols", hint.focus.symbol_count));
+    }
+    let mut label = if extras.is_empty() {
+        breadcrumb
+    } else {
+        format!("{breadcrumb} ({})", extras.join(", "))
+    };
+    if !hint.top_children.is_empty() {
+        let children = hint
+            .top_children
+            .iter()
+            .take(3)
+            .map(|child| child.name.clone())
+            .collect::<Vec<_>>()
+            .join(", ");
+        label.push_str(&format!(" | next: {children}"));
+    }
+    label
+}
+
 fn build_snapshot(snapshot: &IndexSnapshot, project_root: &Path) -> AtlasSnapshot {
     let members = discover_workspace_members(project_root);
     let root_name = project_root

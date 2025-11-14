@@ -17,6 +17,7 @@ mod workspace;
 pub use atlas::AtlasFocus;
 pub use atlas::atlas_breadcrumb;
 pub use atlas::atlas_focus;
+pub use atlas::atlas_hint_label;
 pub use atlas::find_atlas_node;
 pub use client::ClientOptions;
 pub use client::DaemonSpawn;

@@ -16,6 +16,7 @@ mod search;
 mod storage;
 mod text;
 
+use crate::atlas::atlas_hint_label;
 use crate::atlas::build_search_hint;
 use crate::atlas::rebuild_atlas;
 use crate::index::builder::BuildArtifacts;
@@ -437,6 +438,9 @@ impl IndexCoordinator {
         self.record_profile_sample(&request, &stats, query_id).await;
         let context_banner = build_context_banner(&outcome.hits);
         let mut hints = outcome.hints;
+        if let Some(hint) = atlas_hint.as_ref() {
+            hints.push(format!("atlas: {}", atlas_hint_label(hint)));
+        }
         if let Some(summary) = diagnostics.health.as_ref()
             && let Some(hint) = health_hint(summary)
         {

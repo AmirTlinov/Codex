@@ -1,8 +1,10 @@
+use crate::atlas_hint_label;
 use crate::planner::NavigatorSearchArgs;
 use crate::planner::StoredSearchArgs;
 use crate::planner::category_label;
 use crate::planner::language_label;
 use crate::proto::ActiveFilters;
+use crate::proto::AtlasHint;
 use crate::proto::FacetSuggestion;
 use crate::proto::NavHit;
 use crate::proto::QueryId;
@@ -51,6 +53,7 @@ impl QueryHistoryStore {
             hits,
             recorded_query,
             facet_suggestions: response.facet_suggestions.clone(),
+            atlas_hint: response.atlas_hint.clone(),
         };
         history
             .recent
@@ -196,6 +199,8 @@ struct QueryHistoryEntry {
     recorded_query: Option<RecordedQuery>,
     #[serde(default)]
     facet_suggestions: Vec<FacetSuggestion>,
+    #[serde(default)]
+    atlas_hint: Option<AtlasHint>,
 }
 
 #[derive(Debug, Clone)]
@@ -207,6 +212,7 @@ pub struct HistoryItem {
     pub is_pinned: bool,
     pub recorded_query: Option<RecordedQuery>,
     pub facet_suggestions: Vec<FacetSuggestion>,
+    pub atlas_hint: Option<AtlasHint>,
 }
 
 impl HistoryItem {
@@ -219,6 +225,7 @@ impl HistoryItem {
             is_pinned,
             recorded_query: entry.recorded_query.clone(),
             facet_suggestions: entry.facet_suggestions.clone(),
+            atlas_hint: entry.atlas_hint.clone(),
         }
     }
 }
@@ -321,6 +328,13 @@ pub fn history_item_matches(item: &HistoryItem, needle: &str) -> bool {
     {
         return true;
     }
+    if let Some(hint) = item.atlas_hint.as_ref()
+        && atlas_hint_label(hint)
+            .to_ascii_lowercase()
+            .contains(&lowered)
+    {
+        return true;
+    }
     if item.facet_suggestions.iter().any(|suggestion| {
         suggestion.label.to_ascii_lowercase().contains(&lowered)
             || suggestion.command.to_ascii_lowercase().contains(&lowered)
@@ -403,12 +417,16 @@ fn hit_matches(hit: &HistoryHit, needle: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::proto::AtlasHint;
+    use crate::proto::AtlasHintSummary;
+    use crate::proto::AtlasNodeKind;
     use crate::proto::FacetSuggestionKind;
     use crate::proto::IndexState;
     use crate::proto::IndexStatus;
     use crate::proto::Language;
     use crate::proto::PROTOCOL_VERSION;
     use tempfile::tempdir;
+    use uuid::Uuid;
 
     fn sample_response(id: QueryId) -> SearchResponse {
         SearchResponse {
@@ -437,6 +455,36 @@ mod tests {
         }
     }
 
+    fn sample_atlas_hint() -> AtlasHint {
+        AtlasHint {
+            target: Some("core/planner".to_string()),
+            matched: true,
+            breadcrumb: vec!["core".to_string(), "planner".to_string()],
+            focus: AtlasHintSummary {
+                name: "planner".to_string(),
+                kind: AtlasNodeKind::Module,
+                file_count: 4,
+                symbol_count: 32,
+                loc: 900,
+                recent_files: 2,
+                doc_files: 1,
+                test_files: 1,
+                dep_files: 0,
+            },
+            top_children: vec![AtlasHintSummary {
+                name: "auto_facet".to_string(),
+                kind: AtlasNodeKind::Module,
+                file_count: 2,
+                symbol_count: 11,
+                loc: 400,
+                recent_files: 1,
+                doc_files: 0,
+                test_files: 0,
+                dep_files: 0,
+            }],
+        }
+    }
+
     #[test]
     fn history_round_trip() {
         let dir = tempdir().unwrap();
@@ -459,6 +507,7 @@ mod tests {
             kind: FacetSuggestionKind::Language,
             value: Some("rust".to_string()),
         }];
+        response.atlas_hint = Some(sample_atlas_hint());
         store
             .record_entry(
                 &response,
@@ -484,6 +533,7 @@ mod tests {
         assert_eq!(rows[1].hits.len(), 1);
         assert_eq!(rows[1].facet_suggestions.len(), 1);
         assert!(rows[1].recorded_query.is_some());
+        assert!(rows[1].atlas_hint.is_some());
     }
 
     #[test]
@@ -503,5 +553,22 @@ mod tests {
         assert!(pinned[0].recorded_query.is_some());
         store.unpin(0).unwrap();
         assert!(store.pinned().unwrap().is_empty());
+    }
+
+    #[test]
+    fn history_item_matches_atlas_hint_label() {
+        let item = HistoryItem {
+            query_id: Uuid::new_v4(),
+            recorded_at: 0,
+            filters: None,
+            hits: Vec::new(),
+            is_pinned: false,
+            recorded_query: None,
+            facet_suggestions: Vec::new(),
+            atlas_hint: Some(sample_atlas_hint()),
+        };
+        assert!(history_item_matches(&item, "planner"));
+        assert!(history_item_matches(&item, "auto_facet"));
+        assert!(!history_item_matches(&item, "missing-term"));
     }
 }
