@@ -47,8 +47,8 @@ impl GuardrailEmitter {
         }
     }
 
-    pub async fn observe_health(&self, summary: &HealthSummary, coverage: &CoverageDiagnostics) {
-        if matches!(summary.risk, HealthRisk::Green) {
+pub async fn observe_health(&self, summary: &HealthSummary, coverage: &CoverageDiagnostics) {
+        if matches!(summary.risk, HealthRisk::Green) && summary.hotspot_summary.is_none() {
             return;
         }
         let fingerprint = fingerprint_health(summary, coverage);
@@ -71,6 +71,12 @@ impl GuardrailEmitter {
             .iter()
             .map(|issue| format!("[{:?}] {}", issue.level, issue.message))
             .collect::<Vec<_>>();
+        if let Some(trends) = summary.hotspot_summary.as_ref() {
+            let additions: usize = trends.trends.iter().map(|t| t.new_paths.len()).sum();
+            if additions > 0 {
+                issues.push(format!("hotspot spikes +{}", additions));
+            }
+        }
         if issues.is_empty() {
             issues.push("health risk escalated".to_string());
         }
@@ -83,6 +89,7 @@ impl GuardrailEmitter {
                 "risk": summary.risk,
                 "issues": summary.issues,
                 "coverage": coverage,
+                "hotspot_summary": summary.hotspot_summary,
             }),
         )
         .await;
