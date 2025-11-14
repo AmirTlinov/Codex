@@ -1375,21 +1375,24 @@ mod handlers {
     use crate::tasks::CompactTask;
     use crate::tasks::RegularTask;
     use crate::tasks::UndoTask;
-    use crate::tasks::UserShellCommandTask;
     use codex_protocol::custom_prompts::CustomPrompt;
     use codex_protocol::models::BackgroundShellActionResult;
     use codex_protocol::models::BackgroundShellEndedBy;
     use codex_protocol::models::BackgroundShellKillParams;
     use codex_protocol::models::BackgroundShellResumeParams;
+    use codex_protocol::models::ContentItem;
+    use codex_protocol::models::ResponseItem;
     use codex_protocol::protocol::BackgroundShellControlAction;
     use codex_protocol::protocol::ErrorEvent;
     use codex_protocol::protocol::Event;
     use codex_protocol::protocol::EventMsg;
     use codex_protocol::protocol::ListCustomPromptsResponseEvent;
     use codex_protocol::protocol::Op;
+    use codex_protocol::protocol::RawResponseItemEvent;
     use codex_protocol::protocol::ReviewDecision;
     use codex_protocol::protocol::ReviewRequest;
     use codex_protocol::protocol::TurnAbortReason;
+    use codex_protocol::protocol::WarningEvent;
     use codex_protocol::user_input::UserInput;
     use std::sync::Arc;
     use tracing::info;
@@ -1456,22 +1459,37 @@ mod handlers {
         }
     }
 
+    const USER_SHELL_DISABLED_MESSAGE: &str =
+        "Local shell commands are disabled. Ask Codex to run commands for you.";
+
     pub async fn run_user_shell_command(
         sess: &Arc<Session>,
         sub_id: String,
-        command: String,
-        previous_context: &mut Option<Arc<TurnContext>>,
+        _command: String,
+        _previous_context: &mut Option<Arc<TurnContext>>,
     ) {
-        let turn_context = sess
-            .new_turn_with_sub_id(sub_id, SessionSettingsUpdate::default())
-            .await;
-        sess.spawn_task(
-            Arc::clone(&turn_context),
-            Vec::new(),
-            UserShellCommandTask::new(command),
-        )
-        .await;
-        *previous_context = Some(turn_context);
+        let warning_event = Event {
+            id: sub_id.clone(),
+            msg: EventMsg::Warning(WarningEvent {
+                message: USER_SHELL_DISABLED_MESSAGE.to_string(),
+            }),
+        };
+        sess.send_event_raw_from_background(warning_event).await;
+
+        let response_item = ResponseItem::Message {
+            id: None,
+            role: "system".to_string(),
+            content: vec![ContentItem::OutputText {
+                text: USER_SHELL_DISABLED_MESSAGE.to_string(),
+            }],
+        };
+        let info_event = Event {
+            id: sub_id,
+            msg: EventMsg::RawResponseItem(RawResponseItemEvent {
+                item: response_item,
+            }),
+        };
+        sess.send_event_raw_from_background(info_event).await;
     }
 
     pub async fn exec_approval(sess: &Arc<Session>, id: String, decision: ReviewDecision) {

@@ -21,15 +21,19 @@ use codex_protocol::models::BackgroundShellStartMode;
 use codex_protocol::models::BackgroundShellStatus;
 use codex_protocol::models::BackgroundShellSummary;
 use codex_protocol::models::BackgroundShellSummaryParams;
+use codex_protocol::models::ContentItem;
+use codex_protocol::models::ResponseItem;
 use codex_protocol::protocol::BackgroundEventEvent;
 use codex_protocol::protocol::BackgroundShellEvent;
 use codex_protocol::protocol::BackgroundShellEventKind;
+use codex_protocol::protocol::Event;
 use codex_protocol::protocol::EventMsg;
 use codex_protocol::protocol::ExecCommandBeginEvent;
 use codex_protocol::protocol::ExecCommandEndEvent;
 use codex_protocol::protocol::ExecCommandOutputDeltaEvent;
 use codex_protocol::protocol::ExecCommandPidEvent;
 use codex_protocol::protocol::ExecOutputStream;
+use codex_protocol::protocol::RawResponseItemEvent;
 use codex_shell_model::ShellState;
 use codex_shell_model::ShellTail;
 use tokio::sync::Mutex;
@@ -44,10 +48,9 @@ use uuid::Uuid;
 
 use crate::codex::Session;
 use crate::exec::ExecParams;
-use crate::protocol::Event;
 
 const LOG_CAPACITY: usize = 512;
-const DEFAULT_FOREGROUND_BUDGET_MS: u64 = 60_000;
+pub(crate) const DEFAULT_FOREGROUND_BUDGET_MS: u64 = 60_000;
 static FOREGROUND_BUDGET_MS: AtomicU64 = AtomicU64::new(DEFAULT_FOREGROUND_BUDGET_MS);
 const BACKGROUND_EXEC_TIMEOUT_MS: u64 = 24 * 60 * 60 * 1_000;
 const DEFAULT_TAIL_LIMIT: usize = 40;
@@ -230,6 +233,13 @@ struct LogLine {
 }
 
 impl BackgroundShellProcess {
+    fn label(&self) -> String {
+        self.friendly_label
+            .as_deref()
+            .unwrap_or(self.shell_id.as_str())
+            .to_string()
+    }
+
     fn update_foreground_state(&self, state: ForegroundLifecycle) {
         if let Some(handle) = &self.foreground_state {
             handle.send(state);
@@ -480,25 +490,19 @@ impl BackgroundShellManager {
         }
         process.start_mode = BackgroundShellStartMode::Background;
         let budget_secs = foreground_budget().as_secs();
+        let label = process.label();
         let (message, promoted_by) = match reason {
             PromotionReason::Timeout => (
                 format!(
-                    "{} moved to background after {:.0}s foreground budget",
-                    process
-                        .friendly_label
-                        .as_deref()
-                        .unwrap_or(process.shell_id.as_str()),
-                    budget_secs,
+                    "{} ({}) moved to background after {:.0}s foreground budget",
+                    label, process.shell_id, budget_secs,
                 ),
                 Some(BackgroundShellEndedBy::System),
             ),
             PromotionReason::UserRequest => (
                 format!(
-                    "{} moved to background by user request",
-                    process
-                        .friendly_label
-                        .as_deref()
-                        .unwrap_or(process.shell_id.as_str()),
+                    "{} ({}) moved to background by user request",
+                    label, process.shell_id,
                 ),
                 Some(BackgroundShellEndedBy::User),
             ),
@@ -871,22 +875,13 @@ impl BackgroundShellManager {
             handle.abort();
         }
         process.update_foreground_state(ForegroundLifecycle::Completed);
+        let label = process.label();
         let message = if event.exit_code == 0 {
-            format!(
-                "{} completed successfully",
-                process
-                    .friendly_label
-                    .as_deref()
-                    .unwrap_or(process.shell_id.as_str())
-            )
+            format!("{label} ({}) completed successfully", process.shell_id)
         } else {
             format!(
-                "{} exited with code {}",
-                process
-                    .friendly_label
-                    .as_deref()
-                    .unwrap_or(process.shell_id.as_str()),
-                event.exit_code
+                "{label} ({}) exited with code {}",
+                process.shell_id, event.exit_code
             )
         };
         let event_to_send =
@@ -1036,16 +1031,47 @@ fn now_ms() -> u64 {
 
 impl ShellEventToSend {
     async fn dispatch(self) {
-        if let Some(session) = self.ctx.session.upgrade() {
-            let event = Event {
-                id: self.ctx.sub_id.clone(),
+        let ShellEventToSend {
+            ctx,
+            event,
+            message,
+        } = self;
+        if let Some(session) = ctx.session.upgrade() {
+            let note = system_note_for_event(&event, &message);
+            let background_event = Event {
+                id: ctx.sub_id.clone(),
                 msg: EventMsg::BackgroundEvent(BackgroundEventEvent {
-                    message: self.message,
-                    shell_event: Some(self.event),
+                    message,
+                    shell_event: Some(event),
                 }),
             };
-            session.send_event_raw_from_background(event).await;
+            session
+                .send_event_raw_from_background(background_event)
+                .await;
+            if let Some(note) = note {
+                let response_item = ResponseItem::Message {
+                    id: None,
+                    role: "system".to_string(),
+                    content: vec![ContentItem::OutputText { text: note }],
+                };
+                let response_event = Event {
+                    id: ctx.sub_id,
+                    msg: EventMsg::RawResponseItem(RawResponseItemEvent {
+                        item: response_item,
+                    }),
+                };
+                session.send_event_raw_from_background(response_event).await;
+            }
         }
+    }
+}
+
+fn system_note_for_event(event: &BackgroundShellEvent, message: &str) -> Option<String> {
+    match event.kind {
+        BackgroundShellEventKind::Promoted | BackgroundShellEventKind::Terminated => {
+            Some(format!("[{}] {message}", event.shell_id))
+        }
+        _ => None,
     }
 }
 
@@ -1443,5 +1469,52 @@ mod tests {
         assert_eq!(process.status, BackgroundShellStatus::Pending);
         assert_eq!(process.start_mode, BackgroundShellStartMode::Background);
         assert!(state.call_to_shell.contains_key(&new_ctx.call_id));
+    }
+
+    #[test]
+    fn system_note_produced_for_promotions() {
+        let event = BackgroundShellEvent {
+            shell_id: "shell-42".to_string(),
+            call_id: Some("call".to_string()),
+            status: BackgroundShellStatus::Running,
+            kind: BackgroundShellEventKind::Promoted,
+            start_mode: BackgroundShellStartMode::Foreground,
+            friendly_label: Some("sleep 1".to_string()),
+            ended_by: None,
+            exit_code: None,
+            pid: None,
+            command: None,
+            message: None,
+            action_result: None,
+            last_log: None,
+            promoted_by: Some(BackgroundShellEndedBy::System),
+            tail: None,
+            state: None,
+        };
+        let note = system_note_for_event(&event, "sleep 1 (shell-42) moved");
+        assert_eq!(note.as_deref(), Some("[shell-42] sleep 1 (shell-42) moved"));
+    }
+
+    #[test]
+    fn system_note_ignored_for_output_events() {
+        let event = BackgroundShellEvent {
+            shell_id: "shell-7".to_string(),
+            call_id: Some("call".to_string()),
+            status: BackgroundShellStatus::Running,
+            kind: BackgroundShellEventKind::Output,
+            start_mode: BackgroundShellStartMode::Background,
+            friendly_label: None,
+            ended_by: None,
+            exit_code: None,
+            pid: None,
+            command: None,
+            message: None,
+            action_result: None,
+            last_log: None,
+            promoted_by: None,
+            tail: None,
+            state: None,
+        };
+        assert!(system_note_for_event(&event, "tail").is_none());
     }
 }

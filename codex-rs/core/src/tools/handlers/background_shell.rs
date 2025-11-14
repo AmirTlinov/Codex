@@ -16,6 +16,7 @@ use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
 use crate::background_shell::BackgroundShellManager;
+use crate::background_shell::DEFAULT_FOREGROUND_BUDGET_MS;
 use crate::background_shell::ProcessRunContext;
 use crate::background_shell::ShellProcessRequest;
 use crate::codex::Session;
@@ -61,9 +62,7 @@ impl BackgroundShellHandler {
             ));
         }
 
-        let start_mode = args
-            .start_mode
-            .unwrap_or(codex_protocol::models::BackgroundShellStartMode::Foreground);
+        let start_mode = resolve_start_mode(args.start_mode, args.timeout_ms);
         if args.timeout_ms == 0 {
             return Err(FunctionCallError::RespondToModel(
                 "shell_run timeout_ms must be greater than 0".to_string(),
@@ -218,6 +217,17 @@ impl BackgroundShellHandler {
     }
 }
 
+fn resolve_start_mode(
+    explicit: Option<BackgroundShellStartMode>,
+    timeout_ms: u64,
+) -> BackgroundShellStartMode {
+    match explicit {
+        Some(mode) => mode,
+        None if timeout_ms > DEFAULT_FOREGROUND_BUDGET_MS => BackgroundShellStartMode::Background,
+        None => BackgroundShellStartMode::Foreground,
+    }
+}
+
 pub(crate) async fn spawn_shell_task(
     manager: Arc<BackgroundShellManager>,
     run_ctx: ProcessRunContext,
@@ -264,5 +274,34 @@ fn parse_args<T: serde::de::DeserializeOwned>(
         other => Err(FunctionCallError::RespondToModel(format!(
             "unsupported payload for background shell tool: {other:?}"
         ))),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn resolve_start_mode_defaults_to_foreground() {
+        assert_eq!(
+            resolve_start_mode(None, DEFAULT_FOREGROUND_BUDGET_MS),
+            BackgroundShellStartMode::Foreground
+        );
+    }
+
+    #[test]
+    fn resolve_start_mode_switches_to_background_for_long_timeouts() {
+        assert_eq!(
+            resolve_start_mode(None, DEFAULT_FOREGROUND_BUDGET_MS + 1),
+            BackgroundShellStartMode::Background
+        );
+    }
+
+    #[test]
+    fn resolve_start_mode_respects_explicit_value() {
+        assert_eq!(
+            resolve_start_mode(Some(BackgroundShellStartMode::Background), 100),
+            BackgroundShellStartMode::Background
+        );
     }
 }

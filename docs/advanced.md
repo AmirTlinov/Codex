@@ -16,7 +16,9 @@ Codex now runs _every_ shell command through the background shell manager instea
 - Each process renders exactly one card in the chat history. Use `Ctrl+Shift+S` (or press ↓ then Enter on the `N Shell` footer counter) to open the Shell panel for full-screen management: arrow keys to pick a process, `k` to kill, `r` to resume, `Ctrl+R` to force background, `d` for diagnostics, `Enter` for details, and `Esc` to exit.
 - Cards and the Shell panel now show a live tail (~2KiB/16 lines) of stdout/stderr so you can track progress without opening logs; truncated tails are annotated inline.
 - Each Shell card labels its run mode (foreground/background) and the chat stream posts a single-line summary ("Kill shell-7 (sleep 500)", "Completed shell-3 …") when a process finishes so you never miss the outcome.
+- Every promotion or termination also produces a `[shell-id] …` system note in the transcript, so headless clients or log scrapers see who moved or killed the process without watching the panel.
 - Every shell summary/event carries the OS PID, so `shell_kill` accepts either the `shell_id` (e.g., `shell-7`) or a numeric `pid` argument when you need to target a process.
+- Legacy `!cmd` shortcuts are removed: the TUI shows an info hint instead of running them, and the backend emits a warning if a client still sends `RunUserShellCommand`.
 - The bottom footer rotates between Navigator status (`Indexing / Index ready`) and the remaining context budget: when you type, the traditional “90% context left” indicator appears for a few seconds so you can watch the window; after you pause, it automatically returns to the Index capsule so you can monitor background indexing progress.
 
 When you need to inspect output after a command has gone background, prefer the tools:
