@@ -1,8 +1,11 @@
 use std::collections::HashMap;
+use std::collections::HashSet;
 use std::collections::VecDeque;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Instant;
+
+use parking_lot::Mutex;
 
 use codex_core::config::Config;
 use codex_core::config::types::Notifications;
@@ -17,6 +20,9 @@ use codex_core::protocol::AgentReasoningRawContentDeltaEvent;
 use codex_core::protocol::AgentReasoningRawContentEvent;
 use codex_core::protocol::ApplyPatchApprovalRequestEvent;
 use codex_core::protocol::BackgroundEventEvent;
+use codex_core::protocol::BackgroundShellControlAction;
+use codex_core::protocol::BackgroundShellEvent;
+use codex_core::protocol::BackgroundShellEventKind;
 use codex_core::protocol::DeprecationNoticeEvent;
 use codex_core::protocol::ErrorEvent;
 use codex_core::protocol::Event;
@@ -48,11 +54,14 @@ use codex_core::protocol::WarningEvent;
 use codex_core::protocol::WebSearchBeginEvent;
 use codex_core::protocol::WebSearchEndEvent;
 use codex_protocol::ConversationId;
+use codex_protocol::models::BackgroundShellStartMode;
+use codex_protocol::models::BackgroundShellStatus;
 use codex_protocol::models::FunctionCallOutputContentItem;
 use codex_protocol::models::FunctionCallOutputPayload;
 use codex_protocol::models::ResponseItem;
 use codex_protocol::parse_command::ParsedCommand;
 use codex_protocol::user_input::UserInput;
+use codex_shell_model::ShellState;
 use crossterm::event::KeyCode;
 use crossterm::event::KeyEvent;
 use crossterm::event::KeyEventKind;
@@ -79,6 +88,7 @@ use crate::bottom_pane::NavigatorFooterIndicator;
 use crate::bottom_pane::SelectionAction;
 use crate::bottom_pane::SelectionItem;
 use crate::bottom_pane::SelectionViewParams;
+use crate::bottom_pane::ShellFooterIndicator;
 use crate::bottom_pane::custom_prompt_view::CustomPromptView;
 use crate::bottom_pane::popup_consts::standard_popup_hint_line;
 use crate::clipboard_paste::paste_image_to_temp_png;
@@ -91,6 +101,10 @@ use crate::history_cell;
 use crate::history_cell::AgentMessageCell;
 use crate::history_cell::HistoryCell;
 use crate::history_cell::McpToolCallCell;
+use crate::history_cell::ShellCardData;
+use crate::history_cell::format_shell_command;
+use crate::history_cell::new_shell_card;
+use crate::history_cell::summarize_shell_state;
 use crate::markdown::append_markdown;
 use crate::navigator_view::summarize_navigator_request;
 use crate::navigator_view::summarize_navigator_response;
@@ -135,8 +149,9 @@ use codex_file_search::FileMatch;
 use codex_protocol::plan_tool::UpdatePlanArgs;
 use strum::IntoEnumIterator;
 
-const USER_SHELL_COMMAND_HELP_TITLE: &str = "Prefix a command with ! to run it locally";
-const USER_SHELL_COMMAND_HELP_HINT: &str = "Example: !ls";
+const USER_SHELL_COMMAND_DISABLED_TITLE: &str = "Local !commands are no longer available";
+const USER_SHELL_COMMAND_DISABLED_HINT: &str =
+    "Let Codex run shell tasks for you with shell_run, shell_log, and shell_summary.";
 // Track information about an in-flight exec command.
 struct RunningCommand {
     command: Vec<String>,
@@ -275,6 +290,7 @@ pub(crate) struct ChatWidget {
     // Stream lifecycle controller
     stream_controller: Option<StreamController>,
     running_commands: HashMap<String, RunningCommand>,
+    suppressed_exec_calls: HashSet<String>,
     task_complete_pending: bool,
     // Queue of interruptive UI events deferred during an active write cycle
     interrupts: InterruptManager,
@@ -304,6 +320,9 @@ pub(crate) struct ChatWidget {
     navigator_last_state: Option<IndexState>,
     navigator_last_notice: Option<String>,
     navigator_calls: HashMap<String, NavigatorInFlight>,
+    shell_cards: HashMap<String, Arc<Mutex<ShellCardData>>>,
+    shell_card_order: Vec<String>,
+    foreground_shell_id: Option<String>,
 
     last_rendered_width: std::cell::Cell<Option<usize>>,
     // Feedback sink for /feedback
@@ -355,6 +374,148 @@ impl ChatWidget {
     fn set_status_header(&mut self, header: String) {
         self.current_status_header = header.clone();
         self.bottom_pane.update_status_header(header);
+    }
+
+    fn ensure_shell_card(
+        &mut self,
+        shell_id: &str,
+        command: Option<Vec<String>>,
+        friendly_label: Option<String>,
+    ) -> Arc<Mutex<ShellCardData>> {
+        if let Some(handle) = self.shell_cards.get(shell_id) {
+            if command.is_some() || friendly_label.is_some() {
+                let mut card = handle.lock();
+                if let Some(cmd) = command {
+                    card.state.command = cmd;
+                }
+                if let Some(label) = friendly_label {
+                    card.state.friendly_label = Some(label);
+                }
+            }
+            return Arc::clone(handle);
+        }
+
+        let mut data = ShellCardData::new(shell_id.to_string());
+        if let Some(cmd) = command {
+            data.state.command = cmd;
+        }
+        if let Some(label) = friendly_label {
+            data.state.friendly_label = Some(label);
+        }
+        let arc = Arc::new(Mutex::new(data));
+        self.shell_cards
+            .insert(shell_id.to_string(), Arc::clone(&arc));
+        self.shell_card_order.push(shell_id.to_string());
+        self.add_to_history(new_shell_card(Arc::clone(&arc)));
+        arc
+    }
+
+    fn apply_shell_event(&mut self, event: BackgroundShellEvent, fallback_message: String) {
+        let shell_id = event.shell_id.clone();
+        let handle = self.ensure_shell_card(
+            &shell_id,
+            event.command.clone(),
+            event.friendly_label.clone(),
+        );
+        let fallback_reason = if fallback_message.is_empty() {
+            None
+        } else {
+            Some(fallback_message.as_str())
+        };
+        let (current_status, current_start_mode, completion_summary) = {
+            let mut card = handle.lock();
+            if let Some(state) = event.state.clone() {
+                card.state = state;
+            } else {
+                card.state.apply_event(&event, fallback_reason);
+            }
+            card.show_ctrl_r_hint = should_show_ctrl_r_hint(&card.state);
+            let summary = if matches!(event.kind, BackgroundShellEventKind::Terminated) {
+                summarize_shell_state(&card.state)
+            } else {
+                None
+            };
+            (card.state.status, card.state.start_mode, summary)
+        };
+        match event.kind {
+            BackgroundShellEventKind::Started => {
+                if matches!(current_start_mode, BackgroundShellStartMode::Foreground)
+                    && matches!(
+                        current_status,
+                        BackgroundShellStatus::Pending | BackgroundShellStatus::Running
+                    )
+                {
+                    self.foreground_shell_id = Some(shell_id.clone());
+                }
+            }
+            BackgroundShellEventKind::Promoted | BackgroundShellEventKind::Terminated => {
+                if self.foreground_shell_id.as_deref() == Some(shell_id.as_str()) {
+                    self.foreground_shell_id = None;
+                }
+            }
+            BackgroundShellEventKind::Output => {}
+        }
+        if let Some(summary) = completion_summary {
+            self.add_to_history(history_cell::new_info_event(summary, None));
+        }
+        self.refresh_shell_footer_indicator();
+        self.request_redraw();
+    }
+
+    fn request_background_for_foreground_shell(&mut self) {
+        if let Some(shell_id) = self.foreground_shell_id.clone() {
+            self.submit_op(Op::BackgroundShellControl {
+                shell_id: shell_id.clone(),
+                action: BackgroundShellControlAction::BackgroundRequest,
+            });
+            if let Some(handle) = self.shell_cards.get(&shell_id) {
+                handle.lock().show_ctrl_r_hint = false;
+            }
+            self.request_redraw();
+        }
+    }
+
+    fn open_shell_panel(&mut self) {
+        let cards: Vec<_> = self
+            .shell_card_order
+            .iter()
+            .filter_map(|id| self.shell_cards.get(id))
+            .map(Arc::clone)
+            .collect();
+        if cards.is_empty() {
+            self.add_info_message(
+                "Shell panel becomes available after the first command runs.".to_string(),
+                None,
+            );
+            return;
+        }
+        self.app_event_tx.send(AppEvent::OpenShellPanel {
+            cards,
+            focused_shell: self.foreground_shell_id.clone(),
+        });
+    }
+
+    fn refresh_shell_footer_indicator(&mut self) {
+        let mut running = 0usize;
+        let mut completed = 0usize;
+        let mut failed = 0usize;
+        for handle in self.shell_cards.values() {
+            let card = handle.lock();
+            match card.state.status {
+                BackgroundShellStatus::Pending | BackgroundShellStatus::Running => running += 1,
+                BackgroundShellStatus::Completed => completed += 1,
+                BackgroundShellStatus::Failed => failed += 1,
+            }
+        }
+        if running + completed + failed == 0 {
+            self.bottom_pane.set_shell_indicator(None);
+            return;
+        }
+        let indicator = ShellFooterIndicator {
+            active: running,
+            focused: false,
+        };
+        self.bottom_pane.set_shell_indicator(Some(indicator));
     }
 
     // --- Small event handlers ---
@@ -785,8 +946,12 @@ impl ChatWidget {
         self.request_redraw();
     }
 
-    fn on_background_event(&mut self, message: String) {
-        debug!("BackgroundEvent: {message}");
+    fn on_background_event(&mut self, message: String, shell: Option<BackgroundShellEvent>) {
+        if let Some(shell_event) = shell {
+            self.apply_shell_event(shell_event, message);
+        } else {
+            self.add_to_history(history_cell::new_info_event(message, None));
+        }
     }
 
     fn on_undo_started(&mut self, event: UndoStartedEvent) {
@@ -895,6 +1060,9 @@ impl ChatWidget {
     }
 
     pub(crate) fn handle_exec_end_now(&mut self, ev: ExecCommandEndEvent) {
+        if self.suppressed_exec_calls.remove(&ev.call_id) {
+            return;
+        }
         let running = self.running_commands.remove(&ev.call_id);
         let (command, parsed, is_user_shell_command) = match running {
             Some(rc) => (rc.command, rc.parsed_cmd, rc.is_user_shell_command),
@@ -985,6 +1153,10 @@ impl ChatWidget {
     }
 
     pub(crate) fn handle_exec_begin_now(&mut self, ev: ExecCommandBeginEvent) {
+        if !ev.is_user_shell_command {
+            self.suppressed_exec_calls.insert(ev.call_id.clone());
+            return;
+        }
         // Ensure the status indicator is visible while the command runs.
         self.running_commands.insert(
             ev.call_id.clone(),
@@ -1104,6 +1276,7 @@ impl ChatWidget {
             rate_limit_switch_prompt: RateLimitSwitchPromptState::default(),
             stream_controller: None,
             running_commands: HashMap::new(),
+            suppressed_exec_calls: HashSet::new(),
             task_complete_pending: false,
             interrupts: InterruptManager::new(),
             reasoning_buffer: String::new(),
@@ -1120,6 +1293,9 @@ impl ChatWidget {
             navigator_last_state: None,
             navigator_last_notice: None,
             navigator_calls: HashMap::new(),
+            shell_cards: HashMap::new(),
+            shell_card_order: Vec::new(),
+            foreground_shell_id: None,
             last_rendered_width: std::cell::Cell::new(None),
             feedback,
             current_rollout_path: None,
@@ -1174,6 +1350,7 @@ impl ChatWidget {
             rate_limit_switch_prompt: RateLimitSwitchPromptState::default(),
             stream_controller: None,
             running_commands: HashMap::new(),
+            suppressed_exec_calls: HashSet::new(),
             task_complete_pending: false,
             interrupts: InterruptManager::new(),
             reasoning_buffer: String::new(),
@@ -1190,6 +1367,9 @@ impl ChatWidget {
             navigator_last_state: None,
             navigator_last_notice: None,
             navigator_calls: HashMap::new(),
+            shell_cards: HashMap::new(),
+            shell_card_order: Vec::new(),
+            foreground_shell_id: None,
             last_rendered_width: std::cell::Cell::new(None),
             feedback,
             current_rollout_path: None,
@@ -1218,6 +1398,58 @@ impl ChatWidget {
                 }
                 return;
             }
+            KeyEvent {
+                code: KeyCode::Char(c),
+                modifiers,
+                kind: KeyEventKind::Press,
+                ..
+            } if modifiers.contains(KeyModifiers::CONTROL) && c.eq_ignore_ascii_case(&'r') => {
+                self.request_background_for_foreground_shell();
+                return;
+            }
+            KeyEvent {
+                code: KeyCode::Char(c),
+                modifiers,
+                kind: KeyEventKind::Press,
+                ..
+            } if modifiers.contains(KeyModifiers::CONTROL)
+                && modifiers.contains(KeyModifiers::SHIFT)
+                && c.eq_ignore_ascii_case(&'s') =>
+            {
+                self.open_shell_panel();
+                return;
+            }
+            KeyEvent {
+                code: KeyCode::Down,
+                modifiers: KeyModifiers::NONE,
+                kind: KeyEventKind::Press,
+                ..
+            } => {
+                if self.bottom_pane.focus_shell_indicator()
+                    || self.bottom_pane.shell_indicator_has_focus()
+                {
+                    return;
+                }
+            }
+            KeyEvent {
+                code: KeyCode::Up,
+                modifiers: KeyModifiers::NONE,
+                kind: KeyEventKind::Press,
+                ..
+            } if self.bottom_pane.shell_indicator_has_focus() => {
+                self.bottom_pane.clear_shell_indicator_focus();
+                return;
+            }
+            KeyEvent {
+                code: KeyCode::Enter,
+                modifiers: KeyModifiers::NONE,
+                kind: KeyEventKind::Press,
+                ..
+            } if self.bottom_pane.shell_indicator_has_focus() => {
+                self.bottom_pane.clear_shell_indicator_focus();
+                self.open_shell_panel();
+                return;
+            }
             other if other.kind == KeyEventKind::Press => {
                 self.bottom_pane.clear_ctrl_c_quit_hint();
             }
@@ -1239,6 +1471,7 @@ impl ChatWidget {
                 }
             }
             _ => {
+                self.bottom_pane.blur_shell_indicator_for_key(&key_event);
                 match self.bottom_pane.handle_key_event(key_event) {
                     InputResult::Submitted(text) => {
                         // If a task is running, queue the user input to be sent after the turn completes.
@@ -1478,21 +1711,14 @@ impl ChatWidget {
 
         let mut items: Vec<UserInput> = Vec::new();
 
-        // Special-case: "!cmd" executes a local shell command instead of sending to the model.
-        if let Some(stripped) = text.strip_prefix('!') {
-            let cmd = stripped.trim();
-            if cmd.is_empty() {
-                self.app_event_tx.send(AppEvent::InsertHistoryCell(Box::new(
-                    history_cell::new_info_event(
-                        USER_SHELL_COMMAND_HELP_TITLE.to_string(),
-                        Some(USER_SHELL_COMMAND_HELP_HINT.to_string()),
-                    ),
-                )));
-                return;
-            }
-            self.submit_op(Op::RunUserShellCommand {
-                command: cmd.to_string(),
-            });
+        // Legacy "!cmd" shortcut is disabled now that the agent owns all shell execution.
+        if text.starts_with('!') {
+            self.app_event_tx.send(AppEvent::InsertHistoryCell(Box::new(
+                history_cell::new_info_event(
+                    USER_SHELL_COMMAND_DISABLED_TITLE.to_string(),
+                    Some(USER_SHELL_COMMAND_DISABLED_HINT.to_string()),
+                ),
+            )));
             return;
         }
 
@@ -1607,6 +1833,7 @@ impl ChatWidget {
                 self.on_apply_patch_approval_request(id.unwrap_or_default(), ev)
             }
             EventMsg::ExecCommandBegin(ev) => self.on_exec_command_begin(ev),
+            EventMsg::ExecCommandPid(_) => {}
             EventMsg::ExecCommandOutputDelta(delta) => self.on_exec_command_output_delta(delta),
             EventMsg::PatchApplyBegin(ev) => self.on_patch_apply_begin(ev),
             EventMsg::PatchApplyEnd(ev) => self.on_patch_apply_end(ev),
@@ -1622,9 +1849,10 @@ impl ChatWidget {
             EventMsg::ShutdownComplete => self.on_shutdown_complete(),
             EventMsg::TurnDiff(TurnDiffEvent { unified_diff }) => self.on_turn_diff(unified_diff),
             EventMsg::DeprecationNotice(ev) => self.on_deprecation_notice(ev),
-            EventMsg::BackgroundEvent(BackgroundEventEvent { message }) => {
-                self.on_background_event(message)
-            }
+            EventMsg::BackgroundEvent(BackgroundEventEvent {
+                message,
+                shell_event,
+            }) => self.on_background_event(message, shell_event),
             EventMsg::UndoStarted(ev) => self.on_undo_started(ev),
             EventMsg::UndoCompleted(ev) => self.on_undo_completed(ev),
             EventMsg::StreamError(StreamErrorEvent { message }) => self.on_stream_error(message),
@@ -3091,6 +3319,22 @@ impl ChatWidget {
         );
         RenderableItem::Owned(Box::new(flex))
     }
+}
+
+fn should_show_ctrl_r_hint(state: &ShellState) -> bool {
+    matches!(state.start_mode, BackgroundShellStartMode::Foreground)
+        && state.promoted_by.is_none()
+        && matches!(
+            state.status,
+            BackgroundShellStatus::Pending | BackgroundShellStatus::Running
+        )
+        && !looks_background_via_ampersand(state)
+}
+
+fn looks_background_via_ampersand(state: &ShellState) -> bool {
+    let command = format_shell_command(&state.command);
+    let trimmed = command.trim_end();
+    !trimmed.is_empty() && trimmed.ends_with('&')
 }
 
 fn decode_navigator_stream_event(output: &FunctionCallOutputPayload) -> Option<SearchStreamEvent> {

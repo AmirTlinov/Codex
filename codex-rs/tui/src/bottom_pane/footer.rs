@@ -24,6 +24,20 @@ pub(crate) struct FooterProps {
     pub(crate) is_task_running: bool,
     pub(crate) context_window_percent: Option<i64>,
     pub(crate) navigator_status: Option<NavigatorFooterIndicator>,
+    pub(crate) shell_indicator: Option<ShellFooterIndicator>,
+    pub(crate) context_mode: ContextLineMode,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct ShellFooterIndicator {
+    pub(crate) active: usize,
+    pub(crate) focused: bool,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum ContextLineMode {
+    PreferIndex,
+    ForceContext,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -83,11 +97,16 @@ fn footer_lines(props: &FooterProps) -> Vec<Line<'static>> {
     // the shortcut hint is hidden). Hide it only for the multi-line
     // ShortcutOverlay.
     match props.mode {
-        FooterMode::CtrlCReminder => vec![ctrl_c_reminder_line(CtrlCReminderState {
-            is_task_running: props.is_task_running,
-        })],
+        FooterMode::CtrlCReminder => {
+            let mut line = ctrl_c_reminder_line(CtrlCReminderState {
+                is_task_running: props.is_task_running,
+            });
+            append_shell_indicator(&mut line, props.shell_indicator.as_ref());
+            vec![line]
+        }
         FooterMode::ShortcutSummary => {
-            let mut line = context_window_line(
+            let mut line = context_line(
+                props.context_mode,
                 props.context_window_percent,
                 props.navigator_status.as_ref(),
             );
@@ -96,17 +115,40 @@ fn footer_lines(props: &FooterProps) -> Vec<Line<'static>> {
                 key_hint::plain(KeyCode::Char('?')).into(),
                 " for shortcuts".dim(),
             ]);
+            append_shell_indicator(&mut line, props.shell_indicator.as_ref());
             vec![line]
         }
         FooterMode::ShortcutOverlay => shortcut_overlay_lines(ShortcutsState {
             use_shift_enter_hint: props.use_shift_enter_hint,
             esc_backtrack_hint: props.esc_backtrack_hint,
         }),
-        FooterMode::EscHint => vec![esc_hint_line(props.esc_backtrack_hint)],
-        FooterMode::ContextOnly => vec![context_window_line(
-            props.context_window_percent,
-            props.navigator_status.as_ref(),
-        )],
+        FooterMode::EscHint => {
+            let mut line = esc_hint_line(props.esc_backtrack_hint);
+            append_shell_indicator(&mut line, props.shell_indicator.as_ref());
+            vec![line]
+        }
+        FooterMode::ContextOnly => {
+            let mut line = context_line(
+                ContextLineMode::ForceContext,
+                props.context_window_percent,
+                props.navigator_status.as_ref(),
+            );
+            append_shell_indicator(&mut line, props.shell_indicator.as_ref());
+            vec![line]
+        }
+    }
+}
+
+fn append_shell_indicator(line: &mut Line<'static>, indicator: Option<&ShellFooterIndicator>) {
+    let Some(ind) = indicator else {
+        return;
+    };
+    line.push_span(Span::raw("   "));
+    let label = format!("{} Shell", ind.active);
+    if ind.focused {
+        line.push_span(label.bold().cyan());
+    } else {
+        line.push_span(label.bold());
     }
 }
 
@@ -233,20 +275,26 @@ fn build_columns(entries: Vec<Line<'static>>) -> Vec<Line<'static>> {
         .collect()
 }
 
-fn context_window_line(
+fn context_line(
+    mode: ContextLineMode,
     percent: Option<i64>,
     indicator: Option<&NavigatorFooterIndicator>,
 ) -> Line<'static> {
-    let percent = percent.unwrap_or(100).clamp(0, 100);
-    let mut line = Line::from(vec![Span::from(format!("{percent}% context left")).dim()]);
-    if let Some(status) = indicator {
-        append_navigator_status(&mut line, status);
+    if matches!(mode, ContextLineMode::PreferIndex)
+        && let Some(status) = indicator
+    {
+        return index_status_line(status);
     }
-    line
+    context_percent_line(percent)
 }
 
-fn append_navigator_status(line: &mut Line<'static>, indicator: &NavigatorFooterIndicator) {
-    line.push_span(" · ".dim());
+fn context_percent_line(percent: Option<i64>) -> Line<'static> {
+    let percent = percent.unwrap_or(100).clamp(0, 100);
+    Line::from(vec![Span::from(format!("{percent}% context left")).dim()])
+}
+
+fn index_status_line(indicator: &NavigatorFooterIndicator) -> Line<'static> {
+    let mut line = Line::from("");
     let auto_indexing = indicator.auto_indexing_enabled();
     match indicator.state() {
         NavigatorIndicatorState::Building => {
@@ -255,7 +303,7 @@ fn append_navigator_status(line: &mut Line<'static>, indicator: &NavigatorFooter
         }
         NavigatorIndicatorState::Ready => {
             line.push_span("●".green());
-            line.push_span(" Index".dim());
+            line.push_span(" Index ready".dim());
         }
         NavigatorIndicatorState::Failed => {
             line.push_span("●".red());
@@ -264,7 +312,7 @@ fn append_navigator_status(line: &mut Line<'static>, indicator: &NavigatorFooter
                 line.push_span(" — ".dim());
                 line.push_span(Span::from(truncate_text(notice, 80)));
             }
-            return;
+            return line;
         }
     }
     if !auto_indexing {
@@ -291,6 +339,7 @@ fn append_navigator_status(line: &mut Line<'static>, indicator: &NavigatorFooter
             line.push_span("]".dim());
         }
     }
+    line
 }
 
 fn format_reason_badge(label: &str, counts: &[(CoverageReason, usize)]) -> String {
@@ -478,6 +527,8 @@ mod tests {
                 is_task_running: false,
                 context_window_percent: None,
                 navigator_status: None,
+                shell_indicator: None,
+                context_mode: ContextLineMode::ForceContext,
             },
         );
 
@@ -490,6 +541,8 @@ mod tests {
                 is_task_running: false,
                 context_window_percent: None,
                 navigator_status: None,
+                shell_indicator: None,
+                context_mode: ContextLineMode::ForceContext,
             },
         );
 
@@ -502,6 +555,8 @@ mod tests {
                 is_task_running: false,
                 context_window_percent: None,
                 navigator_status: None,
+                shell_indicator: None,
+                context_mode: ContextLineMode::ForceContext,
             },
         );
 
@@ -514,6 +569,8 @@ mod tests {
                 is_task_running: true,
                 context_window_percent: None,
                 navigator_status: None,
+                shell_indicator: None,
+                context_mode: ContextLineMode::ForceContext,
             },
         );
 
@@ -526,6 +583,8 @@ mod tests {
                 is_task_running: false,
                 context_window_percent: None,
                 navigator_status: None,
+                shell_indicator: None,
+                context_mode: ContextLineMode::ForceContext,
             },
         );
 
@@ -538,6 +597,8 @@ mod tests {
                 is_task_running: false,
                 context_window_percent: None,
                 navigator_status: None,
+                shell_indicator: None,
+                context_mode: ContextLineMode::ForceContext,
             },
         );
 
@@ -550,6 +611,8 @@ mod tests {
                 is_task_running: true,
                 context_window_percent: Some(72),
                 navigator_status: None,
+                shell_indicator: None,
+                context_mode: ContextLineMode::ForceContext,
             },
         );
     }

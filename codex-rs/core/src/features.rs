@@ -43,6 +43,8 @@ pub enum Feature {
     GhostCommit,
     /// Enable Windows sandbox (restricted token) on Windows.
     WindowsSandbox,
+    /// Enable the background shell v2 registry and toolset.
+    BackgroundShellV2,
 }
 
 impl Feature {
@@ -291,5 +293,11 @@ pub const FEATURES: &[FeatureSpec] = &[
         key: "enable_experimental_windows_sandbox",
         stage: Stage::Experimental,
         default_enabled: false,
+    },
+    FeatureSpec {
+        id: Feature::BackgroundShellV2,
+        key: "background_shell_v2",
+        stage: Stage::Experimental,
+        default_enabled: true,
     },
 ];

@@ -40,6 +40,12 @@ impl App {
         tui: &mut tui::Tui,
         event: TuiEvent,
     ) -> Result<bool> {
+        let is_transcript_overlay = matches!(self.overlay, Some(Overlay::Transcript(_)));
+        if !is_transcript_overlay {
+            self.overlay_forward_event(tui, event)?;
+            return Ok(true);
+        }
+
         if self.backtrack.overlay_preview_active {
             match event {
                 TuiEvent::Key(KeyEvent {

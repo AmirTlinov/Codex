@@ -32,6 +32,7 @@ pub(crate) struct ToolsConfig {
     pub web_search_request: bool,
     pub include_view_image_tool: bool,
     pub experimental_supported_tools: Vec<String>,
+    pub background_shell_v2: bool,
 }
 
 pub(crate) struct ToolsConfigParams<'a> {
@@ -48,6 +49,7 @@ impl ToolsConfig {
         let include_apply_patch_tool = features.enabled(Feature::ApplyPatchFreeform);
         let include_web_search_request = features.enabled(Feature::WebSearchRequest);
         let include_view_image_tool = features.enabled(Feature::ViewImageTool);
+        let background_shell_v2 = features.enabled(Feature::BackgroundShellV2);
 
         let shell_type = if features.enabled(Feature::UnifiedExec) {
             ConfigShellToolType::UnifiedExec
@@ -73,6 +75,7 @@ impl ToolsConfig {
             web_search_request: include_web_search_request,
             include_view_image_tool,
             experimental_supported_tools: model_family.experimental_supported_tools.clone(),
+            background_shell_v2,
         }
     }
 }
@@ -286,6 +289,195 @@ fn create_shell_tool() -> ToolSpec {
         parameters: JsonSchema::Object {
             properties,
             required: Some(vec!["command".to_string()]),
+            additional_properties: Some(false.into()),
+        },
+    })
+}
+
+fn create_shell_run_v2_tool() -> ToolSpec {
+    let mut properties = BTreeMap::new();
+    properties.insert(
+        "command".to_string(),
+        JsonSchema::Array {
+            items: Box::new(JsonSchema::String { description: None }),
+            description: Some("The command to execute".to_string()),
+        },
+    );
+    properties.insert(
+        "workdir".to_string(),
+        JsonSchema::String {
+            description: Some("Working directory for the command".to_string()),
+        },
+    );
+    properties.insert(
+        "timeout_ms".to_string(),
+        JsonSchema::Number {
+            description: Some("Required runtime limit in milliseconds (must be > 0).".to_string()),
+        },
+    );
+    properties.insert(
+        "friendly_label".to_string(),
+        JsonSchema::String {
+            description: Some("Short label to show in the UI".to_string()),
+        },
+    );
+    properties.insert(
+        "start_mode".to_string(),
+        JsonSchema::String {
+            description: Some(
+                "Foreground or background. Foreground commands auto-promote after 60s.".to_string(),
+            ),
+        },
+    );
+    properties.insert(
+        "with_escalated_permissions".to_string(),
+        JsonSchema::Boolean {
+            description: Some(
+                "Whether to request escalated permissions (danger-full-access sandbox)."
+                    .to_string(),
+            ),
+        },
+    );
+    properties.insert(
+        "justification".to_string(),
+        JsonSchema::String {
+            description: Some("Required when elevated permissions are requested.".to_string()),
+        },
+    );
+
+    ToolSpec::Function(ResponsesApiTool {
+        name: "shell_run".to_string(),
+        description: "Starts a shell command asynchronously; you must supply timeout_ms to control how long it may run.".to_string(),
+        strict: false,
+        parameters: JsonSchema::Object {
+            properties,
+            required: Some(vec!["command".to_string(), "timeout_ms".to_string()]),
+            additional_properties: Some(false.into()),
+        },
+    })
+}
+
+fn create_shell_summary_tool() -> ToolSpec {
+    let mut properties = BTreeMap::new();
+    properties.insert(
+        "include_completed".to_string(),
+        JsonSchema::Boolean {
+            description: Some("Include completed processes".to_string()),
+        },
+    );
+    properties.insert(
+        "include_failed".to_string(),
+        JsonSchema::Boolean {
+            description: Some("Include failed processes".to_string()),
+        },
+    );
+    ToolSpec::Function(ResponsesApiTool {
+        name: "shell_summary".to_string(),
+        description: "Returns metadata about tracked shell processes.".to_string(),
+        strict: false,
+        parameters: JsonSchema::Object {
+            properties,
+            required: None,
+            additional_properties: Some(false.into()),
+        },
+    })
+}
+
+fn create_shell_log_tool() -> ToolSpec {
+    let mut properties = BTreeMap::new();
+    properties.insert(
+        "shell_id".to_string(),
+        JsonSchema::String {
+            description: Some("Target shell identifier".to_string()),
+        },
+    );
+    properties.insert(
+        "mode".to_string(),
+        JsonSchema::String {
+            description: Some("Log mode: tail, body, or diagnostic".to_string()),
+        },
+    );
+    properties.insert(
+        "cursor".to_string(),
+        JsonSchema::String {
+            description: Some("Pagination cursor returned by previous shell_log".to_string()),
+        },
+    );
+    properties.insert(
+        "limit".to_string(),
+        JsonSchema::Number {
+            description: Some("Maximum number of lines to return".to_string()),
+        },
+    );
+    ToolSpec::Function(ResponsesApiTool {
+        name: "shell_log".to_string(),
+        description: "Returns the requested portion of a shell process log.".to_string(),
+        strict: false,
+        parameters: JsonSchema::Object {
+            properties,
+            required: Some(vec!["shell_id".to_string()]),
+            additional_properties: Some(false.into()),
+        },
+    })
+}
+
+fn create_shell_kill_tool() -> ToolSpec {
+    let mut properties = BTreeMap::new();
+    properties.insert(
+        "shell_id".to_string(),
+        JsonSchema::String {
+            description: Some("Shell identifier to terminate".to_string()),
+        },
+    );
+    properties.insert(
+        "pid".to_string(),
+        JsonSchema::Number {
+            description: Some("Optional OS PID to terminate instead of shell_id".to_string()),
+        },
+    );
+    properties.insert(
+        "reason".to_string(),
+        JsonSchema::String {
+            description: Some("Optional reason to include in audit events".to_string()),
+        },
+    );
+    properties.insert(
+        "initiator".to_string(),
+        JsonSchema::String {
+            description: Some(
+                "Optional actor attribution: one of 'user', 'agent', or 'system'.".to_string(),
+            ),
+        },
+    );
+    ToolSpec::Function(ResponsesApiTool {
+        name: "shell_kill".to_string(),
+        description:
+            "Stops a running shell process. Provide either shell_id (e.g., shell-7) or pid."
+                .to_string(),
+        strict: false,
+        parameters: JsonSchema::Object {
+            properties,
+            required: None,
+            additional_properties: Some(false.into()),
+        },
+    })
+}
+
+fn create_shell_resume_tool() -> ToolSpec {
+    let mut properties = BTreeMap::new();
+    properties.insert(
+        "shell_id".to_string(),
+        JsonSchema::String {
+            description: Some("Shell identifier to resume in the foreground".to_string()),
+        },
+    );
+    ToolSpec::Function(ResponsesApiTool {
+        name: "shell_resume".to_string(),
+        description: "Requests that a background shell return to the foreground.".to_string(),
+        strict: false,
+        parameters: JsonSchema::Object {
+            properties,
+            required: Some(vec!["shell_id".to_string()]),
             additional_properties: Some(false.into()),
         },
     })
@@ -874,6 +1066,7 @@ pub(crate) fn build_specs(
     mcp_tools: Option<HashMap<String, mcp_types::Tool>>,
 ) -> ToolRegistryBuilder {
     use crate::tools::handlers::ApplyPatchHandler;
+    use crate::tools::handlers::BackgroundShellHandler;
     use crate::tools::handlers::GrepFilesHandler;
     use crate::tools::handlers::ListDirHandler;
     use crate::tools::handlers::McpHandler;
@@ -888,34 +1081,41 @@ pub(crate) fn build_specs(
 
     let mut builder = ToolRegistryBuilder::new();
 
-    let shell_handler = Arc::new(ShellHandler);
     let unified_exec_handler = Arc::new(UnifiedExecHandler);
     let plan_handler = Arc::new(PlanHandler);
+    let background_shell_handler = Arc::new(BackgroundShellHandler);
     let apply_patch_handler = Arc::new(ApplyPatchHandler);
     let view_image_handler = Arc::new(ViewImageHandler);
     let mcp_handler = Arc::new(McpHandler);
     let mcp_resource_handler = Arc::new(McpResourceHandler);
     let navigator_handler = Arc::new(NavigatorHandler);
 
-    match &config.shell_type {
-        ConfigShellToolType::Default => {
-            builder.push_spec(create_shell_tool());
+    if !config.background_shell_v2 {
+        let shell_handler = Arc::new(ShellHandler);
+        match &config.shell_type {
+            ConfigShellToolType::Default => {
+                builder.push_spec(create_shell_tool());
+            }
+            ConfigShellToolType::Local => {
+                builder.push_spec(ToolSpec::LocalShell {});
+            }
+            ConfigShellToolType::UnifiedExec => {
+                builder.push_spec(create_exec_command_tool());
+                builder.push_spec(create_write_stdin_tool());
+                builder.register_handler("exec_command", unified_exec_handler.clone());
+                builder.register_handler("write_stdin", unified_exec_handler);
+            }
         }
-        ConfigShellToolType::Local => {
-            builder.push_spec(ToolSpec::LocalShell {});
-        }
-        ConfigShellToolType::UnifiedExec => {
-            builder.push_spec(create_exec_command_tool());
-            builder.push_spec(create_write_stdin_tool());
-            builder.register_handler("exec_command", unified_exec_handler.clone());
-            builder.register_handler("write_stdin", unified_exec_handler);
-        }
-    }
 
-    // Always register shell aliases so older prompts remain compatible.
-    builder.register_handler("shell", shell_handler.clone());
-    builder.register_handler("container.exec", shell_handler.clone());
-    builder.register_handler("local_shell", shell_handler);
+        // Always register shell aliases so older prompts remain compatible.
+        builder.register_handler("shell", shell_handler.clone());
+        builder.register_handler("container.exec", shell_handler.clone());
+        builder.register_handler("local_shell", shell_handler);
+    } else {
+        // Unified exec tooling is unused when the background shell is enabled because
+        // the model issues shell_run/shell_log/etc. instead of direct shell calls.
+        // Avoid registering legacy shell tools to keep the toolset minimal.
+    }
 
     builder.push_spec_with_parallel_support(create_list_mcp_resources_tool(), true);
     builder.push_spec_with_parallel_support(create_list_mcp_resource_templates_tool(), true);
@@ -937,6 +1137,19 @@ pub(crate) fn build_specs(
             }
         }
         builder.register_handler("apply_patch", apply_patch_handler);
+    }
+
+    if config.background_shell_v2 {
+        builder.push_spec(create_shell_run_v2_tool());
+        builder.push_spec(create_shell_summary_tool());
+        builder.push_spec(create_shell_log_tool());
+        builder.push_spec(create_shell_kill_tool());
+        builder.push_spec(create_shell_resume_tool());
+        builder.register_handler("shell_run", background_shell_handler.clone());
+        builder.register_handler("shell_summary", background_shell_handler.clone());
+        builder.register_handler("shell_log", background_shell_handler.clone());
+        builder.register_handler("shell_kill", background_shell_handler.clone());
+        builder.register_handler("shell_resume", background_shell_handler);
     }
 
     if config
@@ -1054,14 +1267,6 @@ mod tests {
         }
     }
 
-    fn shell_tool_name(config: &ToolsConfig) -> Option<&'static str> {
-        match config.shell_type {
-            ConfigShellToolType::Default => Some("shell"),
-            ConfigShellToolType::Local => Some("local_shell"),
-            ConfigShellToolType::UnifiedExec => None,
-        }
-    }
-
     fn find_tool<'a>(
         tools: &'a [ConfiguredToolSpec],
         expected_name: &str,
@@ -1140,8 +1345,6 @@ mod tests {
         // Build expected from the same helpers used by the builder.
         let mut expected: BTreeMap<String, ToolSpec> = BTreeMap::new();
         for spec in [
-            create_exec_command_tool(),
-            create_write_stdin_tool(),
             create_list_mcp_resources_tool(),
             create_list_mcp_resource_templates_tool(),
             create_read_mcp_resource_tool(),
@@ -1150,6 +1353,11 @@ mod tests {
             create_navigator_tool(),
             ToolSpec::WebSearch {},
             create_view_image_tool(),
+            create_shell_run_v2_tool(),
+            create_shell_summary_tool(),
+            create_shell_log_tool(),
+            create_shell_kill_tool(),
+            create_shell_resume_tool(),
         ] {
             expected.insert(tool_name(&spec).to_string(), spec);
         }
@@ -1177,8 +1385,17 @@ mod tests {
             features,
         });
         let (tools, _) = build_specs(&config, Some(HashMap::new())).build();
-        let tool_names = tools.iter().map(|t| t.spec.name()).collect::<Vec<_>>();
-        assert_eq!(&tool_names, &expected_tools,);
+        let mut tool_names = tools
+            .iter()
+            .map(|t| t.spec.name().to_string())
+            .collect::<Vec<_>>();
+        tool_names.sort();
+        let mut expected = expected_tools
+            .iter()
+            .map(std::string::ToString::to_string)
+            .collect::<Vec<_>>();
+        expected.sort();
+        assert_eq!(tool_names, expected);
     }
 
     #[test]
@@ -1187,13 +1404,17 @@ mod tests {
             "gpt-5-codex",
             &Features::with_defaults(),
             &[
-                "shell",
+                "apply_patch",
                 "list_mcp_resources",
                 "list_mcp_resource_templates",
-                "read_mcp_resource",
-                "update_plan",
-                "apply_patch",
                 "navigator",
+                "read_mcp_resource",
+                "shell_kill",
+                "shell_log",
+                "shell_resume",
+                "shell_run",
+                "shell_summary",
+                "update_plan",
                 "view_image",
             ],
         );
@@ -1207,14 +1428,17 @@ mod tests {
                 .enable(Feature::UnifiedExec)
                 .enable(Feature::WebSearchRequest),
             &[
-                "exec_command",
-                "write_stdin",
+                "apply_patch",
                 "list_mcp_resources",
                 "list_mcp_resource_templates",
-                "read_mcp_resource",
-                "update_plan",
-                "apply_patch",
                 "navigator",
+                "read_mcp_resource",
+                "shell_kill",
+                "shell_log",
+                "shell_resume",
+                "shell_run",
+                "shell_summary",
+                "update_plan",
                 "web_search",
                 "view_image",
             ],
@@ -1227,10 +1451,14 @@ mod tests {
             "codex-mini-latest",
             &Features::with_defaults(),
             &[
-                "local_shell",
                 "list_mcp_resources",
                 "list_mcp_resource_templates",
                 "read_mcp_resource",
+                "shell_kill",
+                "shell_log",
+                "shell_resume",
+                "shell_run",
+                "shell_summary",
                 "update_plan",
                 "view_image",
             ],
@@ -1243,11 +1471,14 @@ mod tests {
             "porcupine",
             &Features::with_defaults(),
             &[
-                "exec_command",
-                "write_stdin",
                 "list_mcp_resources",
                 "list_mcp_resource_templates",
                 "read_mcp_resource",
+                "shell_kill",
+                "shell_log",
+                "shell_resume",
+                "shell_run",
+                "shell_summary",
                 "update_plan",
                 "view_image",
             ],
@@ -1262,11 +1493,14 @@ mod tests {
                 .enable(Feature::UnifiedExec)
                 .enable(Feature::WebSearchRequest),
             &[
-                "exec_command",
-                "write_stdin",
                 "list_mcp_resources",
                 "list_mcp_resource_templates",
                 "read_mcp_resource",
+                "shell_kill",
+                "shell_log",
+                "shell_resume",
+                "shell_run",
+                "shell_summary",
                 "update_plan",
                 "web_search",
                 "view_image",
@@ -1287,10 +1521,15 @@ mod tests {
         let (tools, _) = build_specs(&config, Some(HashMap::new())).build();
 
         // Only check the shell variant and a couple of core tools.
-        let mut subset = vec!["exec_command", "write_stdin", "update_plan"];
-        if let Some(shell_tool) = shell_tool_name(&config) {
-            subset.push(shell_tool);
-        }
+        let subset = vec![
+            "shell_run",
+            "shell_summary",
+            "shell_log",
+            "shell_kill",
+            "shell_resume",
+            "update_plan",
+            "web_search",
+        ];
         assert_contains_tool_names(&tools, &subset);
     }
 

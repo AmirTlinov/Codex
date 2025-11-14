@@ -274,6 +274,7 @@ async fn run_codex_tool_session_inner(
                     | EventMsg::ExecCommandBegin(_)
                     | EventMsg::ExecCommandOutputDelta(_)
                     | EventMsg::ExecCommandEnd(_)
+                    | EventMsg::ExecCommandPid(_)
                     | EventMsg::BackgroundEvent(_)
                     | EventMsg::StreamError(_)
                     | EventMsg::PatchApplyBegin(_)

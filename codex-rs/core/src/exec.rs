@@ -15,12 +15,14 @@ use tokio::io::AsyncReadExt;
 use tokio::io::BufReader;
 use tokio::process::Child;
 
+use crate::background_shell::ShellOutputSender;
 use crate::error::CodexErr;
 use crate::error::Result;
 use crate::error::SandboxErr;
 use crate::protocol::Event;
 use crate::protocol::EventMsg;
 use crate::protocol::ExecCommandOutputDeltaEvent;
+use crate::protocol::ExecCommandPidEvent;
 use crate::protocol::ExecOutputStream;
 use crate::protocol::SandboxPolicy;
 use crate::sandboxing::CommandSpec;
@@ -82,6 +84,7 @@ pub struct StdoutStream {
     pub sub_id: String,
     pub call_id: String,
     pub tx_event: Sender<Event>,
+    pub(crate) background_shell: Option<ShellOutputSender>,
 }
 
 pub async fn process_exec_tool_call(
@@ -483,6 +486,19 @@ async fn consume_truncated_output(
     // above, therefore `take()` should normally return `Some`.  If it doesn't
     // we treat it as an exceptional I/O error
 
+    if let Some(stream) = &stdout_stream {
+        if let Some(pid) = child.id() {
+            let event = Event {
+                id: stream.sub_id.clone(),
+                msg: EventMsg::ExecCommandPid(ExecCommandPidEvent {
+                    call_id: stream.call_id.clone(),
+                    pid: pid as i32,
+                }),
+            };
+            let _ = stream.tx_event.send(event).await;
+        }
+    }
+
     let stdout_reader = child.stdout.take().ok_or_else(|| {
         CodexErr::Io(io::Error::other(
             "stdout pipe was unexpectedly not available",
@@ -577,7 +593,7 @@ async fn read_capped<R: AsyncRead + Unpin + Send + 'static>(
             && emitted_deltas < MAX_EXEC_OUTPUT_DELTAS_PER_CALL
         {
             let chunk = tmp[..n].to_vec();
-            let msg = EventMsg::ExecCommandOutputDelta(ExecCommandOutputDeltaEvent {
+            let delta = ExecCommandOutputDeltaEvent {
                 call_id: stream.call_id.clone(),
                 stream: if is_stderr {
                     ExecOutputStream::Stderr
@@ -585,10 +601,13 @@ async fn read_capped<R: AsyncRead + Unpin + Send + 'static>(
                     ExecOutputStream::Stdout
                 },
                 chunk,
-            });
+            };
+            if let Some(sender) = &stream.background_shell {
+                sender.send(delta.clone());
+            }
             let event = Event {
                 id: stream.sub_id.clone(),
-                msg,
+                msg: EventMsg::ExecCommandOutputDelta(delta),
             };
             #[allow(clippy::let_unit_value)]
             let _ = stream.tx_event.send(event).await;

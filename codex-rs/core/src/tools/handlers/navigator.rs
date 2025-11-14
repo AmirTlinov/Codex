@@ -436,6 +436,8 @@ mod tests {
             error: None,
             diagnostics: Some(diagnostics.clone()),
             fallback_hits: Vec::new(),
+            atlas_hint: None,
+            active_filters: None,
         };
         let payload = SearchToolOutput {
             diagnostics: Some(diagnostics),

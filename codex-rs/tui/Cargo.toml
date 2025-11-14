@@ -39,6 +39,7 @@ codex-navigator = { workspace = true }
 codex-feedback = { workspace = true }
 codex-file-search = { workspace = true }
 codex-login = { workspace = true }
+codex-shell-model = { workspace = true }
 codex-ollama = { workspace = true }
 codex-protocol = { workspace = true }
 once_cell = { workspace = true }
@@ -54,6 +55,7 @@ lazy_static = { workspace = true }
 mcp-types = { workspace = true }
 opentelemetry-appender-tracing = { workspace = true }
 pathdiff = { workspace = true }
+parking_lot = { workspace = true }
 pulldown-cmark = { workspace = true }
 rand = { workspace = true }
 ratatui = { workspace = true, features = [

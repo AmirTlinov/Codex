@@ -26,7 +26,10 @@ use crate::tools::sandboxing::ToolCtx;
 pub struct ShellHandler;
 
 impl ShellHandler {
-    fn to_exec_params(params: ShellToolCallParams, turn_context: &TurnContext) -> ExecParams {
+    pub(crate) fn to_exec_params(
+        params: ShellToolCallParams,
+        turn_context: &TurnContext,
+    ) -> ExecParams {
         ExecParams {
             command: params.command,
             cwd: turn_context.resolve_path(params.workdir.clone()),
@@ -103,7 +106,7 @@ impl ToolHandler for ShellHandler {
 }
 
 impl ShellHandler {
-    async fn run_exec_like(
+    pub(crate) async fn run_exec_like(
         tool_name: &str,
         exec_params: ExecParams,
         session: Arc<crate::codex::Session>,

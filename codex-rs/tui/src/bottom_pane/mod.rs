@@ -30,6 +30,7 @@ mod command_popup;
 pub mod custom_prompt_view;
 mod file_search_popup;
 mod footer;
+pub(crate) use footer::ShellFooterIndicator;
 mod list_selection_view;
 mod prompt_args;
 pub(crate) use list_selection_view::SelectionViewParams;
@@ -201,17 +202,19 @@ pub(crate) struct BottomPaneParams {
 impl BottomPane {
     pub fn new(params: BottomPaneParams) -> Self {
         let enhanced_keys_supported = params.enhanced_keys_supported;
+        let frame_requester = params.frame_requester;
         Self {
-            composer: ChatComposer::new(
+            composer: ChatComposer::with_frame_requester(
                 params.has_input_focus,
                 params.app_event_tx.clone(),
                 enhanced_keys_supported,
                 params.placeholder_text,
                 params.disable_paste_burst,
+                frame_requester.clone(),
             ),
             view_stack: Vec::new(),
             app_event_tx: params.app_event_tx,
-            frame_requester: params.frame_requester,
+            frame_requester,
             has_input_focus: params.has_input_focus,
             is_task_running: false,
             ctrl_c_quit_hint: false,
@@ -450,6 +453,39 @@ impl BottomPane {
         self.navigator_indicator = indicator.clone();
         self.composer.set_navigator_status(indicator);
         self.request_redraw();
+    }
+
+    pub(crate) fn set_shell_indicator(&mut self, indicator: Option<ShellFooterIndicator>) {
+        self.composer.set_shell_indicator(indicator);
+        self.request_redraw();
+    }
+
+    pub(crate) fn focus_shell_indicator(&mut self) -> bool {
+        if self.composer.focus_shell_indicator() {
+            self.request_redraw();
+            true
+        } else {
+            false
+        }
+    }
+
+    pub(crate) fn shell_indicator_has_focus(&self) -> bool {
+        self.composer.shell_indicator_has_focus()
+    }
+
+    pub(crate) fn clear_shell_indicator_focus(&mut self) -> bool {
+        if self.composer.clear_shell_indicator_focus() {
+            self.request_redraw();
+            true
+        } else {
+            false
+        }
+    }
+
+    pub(crate) fn blur_shell_indicator_for_key(&mut self, key_event: &KeyEvent) {
+        if self.composer.blur_shell_indicator_for_key(key_event) {
+            self.request_redraw();
+        }
     }
 
     /// Show a generic list selection view with the provided items.

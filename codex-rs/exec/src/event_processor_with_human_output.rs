@@ -4,12 +4,14 @@ use codex_core::config::Config;
 use codex_core::protocol::AgentMessageEvent;
 use codex_core::protocol::AgentReasoningRawContentEvent;
 use codex_core::protocol::BackgroundEventEvent;
+use codex_core::protocol::BackgroundShellEvent;
 use codex_core::protocol::DeprecationNoticeEvent;
 use codex_core::protocol::ErrorEvent;
 use codex_core::protocol::Event;
 use codex_core::protocol::EventMsg;
 use codex_core::protocol::ExecCommandBeginEvent;
 use codex_core::protocol::ExecCommandEndEvent;
+use codex_core::protocol::ExecCommandPidEvent;
 use codex_core::protocol::FileChange;
 use codex_core::protocol::McpInvocation;
 use codex_core::protocol::McpToolCallBeginEvent;
@@ -23,6 +25,8 @@ use codex_core::protocol::TurnAbortReason;
 use codex_core::protocol::TurnDiffEvent;
 use codex_core::protocol::WarningEvent;
 use codex_core::protocol::WebSearchEndEvent;
+use codex_protocol::models::BackgroundShellEndedBy;
+use codex_protocol::models::BackgroundShellStatus;
 use codex_protocol::num_format::format_with_separators;
 use owo_colors::OwoColorize;
 use owo_colors::Style;
@@ -123,6 +127,88 @@ macro_rules! ts_msg {
     }};
 }
 
+impl EventProcessorWithHumanOutput {
+    fn handle_background_event(&mut self, event: BackgroundEventEvent) {
+        if let Some(shell_event) = event.shell_event {
+            self.render_shell_event(&shell_event, &event.message);
+        } else {
+            ts_msg!(self, "{}", event.message.style(self.dimmed));
+        }
+    }
+
+    fn render_shell_event(&mut self, event: &BackgroundShellEvent, message: &str) {
+        let label = self.shell_label(event);
+        let status_text = format!("{:?}", event.status)
+            .to_lowercase()
+            .replace('_', " ");
+        let status_style = match event.status {
+            BackgroundShellStatus::Completed => self.green,
+            BackgroundShellStatus::Failed => self.red,
+            BackgroundShellStatus::Running => self.yellow,
+            _ => self.cyan,
+        };
+        let prefix = format!("[shell {}]", event.shell_id);
+        ts_msg!(
+            self,
+            "{} {} {}",
+            prefix.style(self.magenta),
+            label.style(self.bold),
+            status_text.style(status_style)
+        );
+        if !message.trim().is_empty() {
+            ts_msg!(self, "  {}", message.style(self.dimmed));
+        }
+        if let Some(meta) = self.describe_shell_metadata(event) {
+            ts_msg!(self, "  {}", meta.style(self.dimmed));
+        }
+        if let Some(lines) = event.last_log.as_ref() {
+            if !lines.is_empty() {
+                for line in lines {
+                    ts_msg!(self, "    {}", line.style(self.dimmed));
+                }
+            }
+        }
+    }
+
+    fn shell_label(&self, event: &BackgroundShellEvent) -> String {
+        if let Some(label) = event.friendly_label.as_ref() {
+            return label.clone();
+        }
+        if let Some(command) = event.command.as_ref() {
+            if let Ok(joined) = try_join(command.iter().map(|s| s.as_str())) {
+                return joined;
+            }
+            if !command.is_empty() {
+                return command.join(" ");
+            }
+        }
+        event.shell_id.clone()
+    }
+
+    fn describe_shell_metadata(&self, event: &BackgroundShellEvent) -> Option<String> {
+        let mut parts = Vec::new();
+        if let Some(ended_by) = event.ended_by {
+            parts.push(format!("ended by {}", Self::ended_by_label(ended_by)));
+        }
+        if let Some(code) = event.exit_code {
+            parts.push(format!("exit {code}"));
+        }
+        if parts.is_empty() {
+            None
+        } else {
+            Some(parts.join(" · "))
+        }
+    }
+
+    fn ended_by_label(ended_by: BackgroundShellEndedBy) -> &'static str {
+        match ended_by {
+            BackgroundShellEndedBy::Agent => "agent",
+            BackgroundShellEndedBy::User => "user",
+            BackgroundShellEndedBy::System => "system",
+        }
+    }
+}
+
 impl EventProcessor for EventProcessorWithHumanOutput {
     /// Print a concise summary of the effective configuration that will be used
     /// for the session. This mirrors the information shown in the TUI welcome
@@ -182,9 +268,7 @@ impl EventProcessor for EventProcessorWithHumanOutput {
                     ts_msg!(self, "  {}", details.style(self.dimmed));
                 }
             }
-            EventMsg::BackgroundEvent(BackgroundEventEvent { message }) => {
-                ts_msg!(self, "{}", message.style(self.dimmed));
-            }
+            EventMsg::BackgroundEvent(event) => self.handle_background_event(event),
             EventMsg::StreamError(StreamErrorEvent { message }) => {
                 ts_msg!(self, "{}", message.style(self.dimmed));
             }
@@ -235,6 +319,13 @@ impl EventProcessor for EventProcessorWithHumanOutput {
                     "exec".style(self.italic).style(self.magenta),
                     escape_command(&command).style(self.bold),
                     cwd.to_string_lossy(),
+                );
+            }
+            EventMsg::ExecCommandPid(ExecCommandPidEvent { pid, .. }) => {
+                ts_msg!(
+                    self,
+                    "{} pid {pid}",
+                    "exec".style(self.italic).style(self.magenta)
                 );
             }
             EventMsg::ExecCommandEnd(ExecCommandEndEvent {

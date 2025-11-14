@@ -1,5 +1,6 @@
 ---
 source: core/src/tools/handlers/navigator.rs
+assertion_line: 453
 expression: value
 ---
 {
@@ -10,9 +11,12 @@ expression: value
       "skipped": []
     },
     "freshness_secs": 5,
-    "index_state": "ready"
+    "index_state": "ready",
+    "pending_literals": []
   },
   "response": {
+    "active_filters": null,
+    "atlas_hint": null,
     "diagnostics": {
       "coverage": {
         "errors": [],
@@ -20,7 +24,8 @@ expression: value
         "skipped": []
       },
       "freshness_secs": 5,
-      "index_state": "ready"
+      "index_state": "ready",
+      "pending_literals": []
     },
     "error": null,
     "fallback_hits": [],
@@ -30,6 +35,7 @@ expression: value
         "categories": [
           "source"
         ],
+        "context_snippet": null,
         "help": null,
         "id": "hit-1",
         "kind": "function",
@@ -63,6 +69,7 @@ expression: value
       "categories": [
         "source"
       ],
+      "context_snippet": null,
       "help": null,
       "id": "hit-1",
       "kind": "function",
