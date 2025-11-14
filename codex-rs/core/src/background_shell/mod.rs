@@ -36,8 +36,6 @@ use codex_protocol::protocol::ExecOutputStream;
 use codex_protocol::protocol::RawResponseItemEvent;
 use codex_shell_model::ShellState;
 use codex_shell_model::ShellTail;
-use serde::Serialize;
-use serde_json::to_string;
 use tokio::sync::Mutex;
 use tokio::sync::mpsc;
 use tokio::sync::mpsc::error::TrySendError;
@@ -218,20 +216,6 @@ struct ShellEventToSend {
     ctx: ProcessContext,
     event: BackgroundShellEvent,
     message: String,
-}
-
-#[derive(Serialize)]
-struct ShellSystemNote<'a> {
-    event: &'a str,
-    shell_id: &'a str,
-    status: BackgroundShellStatus,
-    start_mode: BackgroundShellStartMode,
-    pid: Option<i32>,
-    exit_code: Option<i32>,
-    ended_by: Option<BackgroundShellEndedBy>,
-    promoted_by: Option<BackgroundShellEndedBy>,
-    label: Option<&'a str>,
-    reason: Option<&'a str>,
 }
 
 #[derive(Default)]
@@ -1082,33 +1066,13 @@ impl ShellEventToSend {
     }
 }
 
-fn system_note_for_event(event: &BackgroundShellEvent, fallback_reason: &str) -> Option<String> {
-    let (event_name, note_reason) = match event.kind {
-        BackgroundShellEventKind::Promoted => (
-            "promoted",
-            event.message.as_deref().unwrap_or(fallback_reason),
-        ),
-        BackgroundShellEventKind::Terminated => (
-            "terminated",
-            event.message.as_deref().unwrap_or(fallback_reason),
-        ),
-        _ => return None,
-    };
-    let note = ShellSystemNote {
-        event: event_name,
-        shell_id: &event.shell_id,
-        status: event.status,
-        start_mode: event.start_mode,
-        pid: event.pid,
-        exit_code: event.exit_code,
-        ended_by: event.ended_by,
-        promoted_by: event.promoted_by,
-        label: event.friendly_label.as_deref(),
-        reason: Some(note_reason),
-    };
-    to_string(&note)
-        .ok()
-        .or_else(|| Some(format!("[{}] {note_reason}", event.shell_id)))
+fn system_note_for_event(event: &BackgroundShellEvent, message: &str) -> Option<String> {
+    match event.kind {
+        BackgroundShellEventKind::Promoted | BackgroundShellEventKind::Terminated => {
+            Some(format!("[{}] {message}", event.shell_id))
+        }
+        _ => None,
+    }
 }
 
 #[cfg(test)]
@@ -1516,9 +1480,9 @@ mod tests {
             kind: BackgroundShellEventKind::Promoted,
             start_mode: BackgroundShellStartMode::Foreground,
             friendly_label: Some("sleep 1".to_string()),
-            ended_by: Some(BackgroundShellEndedBy::System),
+            ended_by: None,
             exit_code: None,
-            pid: Some(1234),
+            pid: None,
             command: None,
             message: None,
             action_result: None,
@@ -1527,12 +1491,8 @@ mod tests {
             tail: None,
             state: None,
         };
-        let note = system_note_for_event(&event, "sleep 1 (shell-42) moved").expect("note");
-        let json: serde_json::Value = serde_json::from_str(&note).expect("json");
-        assert_eq!(json["event"], "promoted");
-        assert_eq!(json["shell_id"], "shell-42");
-        assert_eq!(json["pid"], 1234);
-        assert_eq!(json["reason"], "sleep 1 (shell-42) moved");
+        let note = system_note_for_event(&event, "sleep 1 (shell-42) moved");
+        assert_eq!(note.as_deref(), Some("[shell-42] sleep 1 (shell-42) moved"));
     }
 
     #[test]
