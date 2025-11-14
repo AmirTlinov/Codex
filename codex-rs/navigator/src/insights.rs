@@ -30,6 +30,7 @@ pub fn build_insights(snapshot: &IndexSnapshot, request: &InsightsRequest) -> In
     InsightsResponse {
         generated_at: OffsetDateTime::now_utc(),
         sections,
+        trend_summary: None,
     }
 }
 

@@ -92,6 +92,9 @@ limit: 25
   a follow-up `search` payload with `path_globs: ["<path>"]` and profile `files`.
 - Planner automatically seeds a `hotspot: …` hint when a fresh search arrives without query/filters, so
   every navigation flow starts with a clear next action.
+- `InsightsResponse` теперь содержит `trend_summary`: timestamp + массив `trends` (`kind`, `new_paths`,
+  `resolved_paths`). Доктор и streamed diagnostics подмешивают тот же summary в health panel, так что
+  регрессии видны без отдельного `insights` вызова.
 
 ## Protocol & Daemon Facts
 

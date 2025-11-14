@@ -182,6 +182,7 @@ impl HealthStore {
         HealthSummary {
             risk: panel.risk,
             issues: panel.issues,
+            hotspot_summary: None,
         }
     }
 
@@ -291,6 +292,7 @@ fn build_panel(snapshot: HealthSnapshot, coverage: &CoverageDiagnostics) -> Heal
         issues,
         ingest,
         literal,
+        hotspot_summary: None,
     }
 }
 

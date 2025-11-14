@@ -178,6 +178,7 @@ mod tests {
                 message: "pending".to_string(),
                 remediation: None,
             }],
+            hotspot_summary: None,
         };
         let mut coverage = CoverageDiagnostics::default();
         coverage.pending.push(CoverageGap {

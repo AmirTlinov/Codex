@@ -14,6 +14,7 @@ const METADATA_FILENAME: &str = "daemon.json";
 const LOCK_FILENAME: &str = "daemon.lock";
 const INDEX_FILENAME: &str = "index.bin";
 const HEALTH_FILENAME: &str = "health.bin";
+const INSIGHTS_FILENAME: &str = "insights.bin";
 const QUERIES_DIR: &str = "queries";
 const LOGS_DIR: &str = "logs";
 const TMP_SUFFIX: &str = ".tmp";
@@ -73,6 +74,15 @@ impl ProjectProfile {
     pub fn temp_health_path(&self) -> PathBuf {
         self.data_dir()
             .join(format!("{HEALTH_FILENAME}{TMP_SUFFIX}"))
+    }
+
+    pub fn insights_path(&self) -> PathBuf {
+        self.data_dir().join(INSIGHTS_FILENAME)
+    }
+
+    pub fn temp_insights_path(&self) -> PathBuf {
+        self.data_dir()
+            .join(format!("{INSIGHTS_FILENAME}{TMP_SUFFIX}"))
     }
 
     pub fn queries_dir(&self) -> PathBuf {

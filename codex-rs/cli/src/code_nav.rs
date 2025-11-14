@@ -53,6 +53,7 @@ use codex_navigator::proto::HealthSummary;
 use codex_navigator::proto::IngestKind;
 use codex_navigator::proto::IngestRunSummary;
 use codex_navigator::proto::InsightSectionKind;
+use codex_navigator::proto::InsightTrendSummary;
 use codex_navigator::proto::InsightsRequest;
 use codex_navigator::proto::InsightsResponse;
 use codex_navigator::proto::NavHit;
@@ -1479,6 +1480,9 @@ fn print_insights_text(response: &InsightsResponse) {
             }
         }
     }
+    if let Some(summary) = &response.trend_summary {
+        print_insight_trends(summary);
+    }
 }
 
 fn collect_insight_markers(response: &InsightsResponse) -> Vec<HotspotMarker> {
@@ -1492,6 +1496,39 @@ fn collect_insight_markers(response: &InsightsResponse) -> Vec<HotspotMarker> {
         }
     }
     markers
+}
+
+fn print_insight_trends(summary: &InsightTrendSummary) {
+    if summary.trends.is_empty() {
+        println!("\ntrend snapshot at {}: no changes", summary.recorded_at);
+        return;
+    }
+    println!("\ntrend snapshot at {}:", summary.recorded_at);
+    for trend in &summary.trends {
+        let label = insight_kind_label(trend.kind);
+        if !trend.new_paths.is_empty() {
+            println!(
+                "  {label}: +{} new ({})",
+                trend.new_paths.len(),
+                trend.new_paths.join(", ")
+            );
+        }
+        if !trend.resolved_paths.is_empty() {
+            println!(
+                "  {label}: -{} resolved ({})",
+                trend.resolved_paths.len(),
+                trend.resolved_paths.join(", ")
+            );
+        }
+    }
+}
+
+fn insight_kind_label(kind: InsightSectionKind) -> &'static str {
+    match kind {
+        InsightSectionKind::AttentionHotspots => "attention",
+        InsightSectionKind::LintRisks => "lint",
+        InsightSectionKind::OwnershipGaps => "ownership",
+    }
 }
 
 async fn run_insight_jump(client: &NavigatorClient, marker: HotspotMarker) -> Result<()> {
@@ -1722,6 +1759,9 @@ fn render_health_panel(panel: &HealthPanel) {
             println!("    - {}", format_ingest_run(run));
         }
     }
+    if let Some(summary) = &panel.hotspot_summary {
+        print_hotspot_summary("  ", summary);
+    }
 }
 
 fn literal_summary_line(panel: &HealthPanel) -> Option<String> {
@@ -1751,6 +1791,35 @@ fn literal_summary_line(panel: &HealthPanel) -> Option<String> {
         segments.push(format!("{} scanned", human_bytes(stats.scanned_bytes)));
     }
     Some(segments.join(" • "))
+}
+
+fn print_hotspot_summary(indent: &str, summary: &InsightTrendSummary) {
+    if summary.trends.is_empty() {
+        println!("{}hotspots @ {}: no changes", indent, summary.recorded_at);
+        return;
+    }
+    println!("{}hotspots @ {}:", indent, summary.recorded_at);
+    for trend in summary.trends.iter().take(3) {
+        let label = insight_kind_label(trend.kind);
+        if !trend.new_paths.is_empty() {
+            println!(
+                "{}  {} +{} ({})",
+                indent,
+                label,
+                trend.new_paths.len(),
+                trend.new_paths.join(", ")
+            );
+        }
+        if !trend.resolved_paths.is_empty() {
+            println!(
+                "{}  {} -{} ({})",
+                indent,
+                label,
+                trend.resolved_paths.len(),
+                trend.resolved_paths.join(", ")
+            );
+        }
+    }
 }
 
 fn format_ingest_run(run: &IngestRunSummary) -> String {
@@ -1931,9 +2000,10 @@ async fn run_atlas_jump(client: &NavigatorClient, root: &AtlasNode, target: &str
 
 async fn seed_hotspot_hint_if_needed(client: &NavigatorClient, args: &mut NavigatorSearchArgs) {
     if let Err(err) = maybe_seed_hotspot_hint(client, args).await
-        && std::env::var_os("NAVIGATOR_DEBUG_INSIGHTS").is_some() {
-            eprintln!("[navigator] hotspot hint unavailable: {err:#}");
-        }
+        && std::env::var_os("NAVIGATOR_DEBUG_INSIGHTS").is_some()
+    {
+        eprintln!("[navigator] hotspot hint unavailable: {err:#}");
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -3570,6 +3640,30 @@ fn format_health_summary_lines(summary: &HealthSummary) -> Vec<String> {
     if summary.issues.len() > 3 {
         lines.push(format!("    … (+{} more issues)", summary.issues.len() - 3));
     }
+    if let Some(hotspot) = &summary.hotspot_summary {
+        let new_total: usize = hotspot.trends.iter().map(|t| t.new_paths.len()).sum();
+        let resolved_total: usize = hotspot.trends.iter().map(|t| t.resolved_paths.len()).sum();
+        lines.push(format!(
+            "[navigator] hotspots @ {}: +{} / -{}",
+            hotspot.recorded_at, new_total, resolved_total
+        ));
+        for trend in hotspot.trends.iter().take(2) {
+            if !trend.new_paths.is_empty() {
+                lines.push(format!(
+                    "    +{} {}",
+                    trend.new_paths.len(),
+                    insight_kind_label(trend.kind)
+                ));
+            }
+            if !trend.resolved_paths.is_empty() {
+                lines.push(format!(
+                    "    -{} {}",
+                    trend.resolved_paths.len(),
+                    insight_kind_label(trend.kind)
+                ));
+            }
+        }
+    }
     lines
 }
 
@@ -3847,6 +3941,7 @@ mod tests {
                     remediation: None,
                 },
             ],
+            hotspot_summary: None,
         };
         let lines = format_health_summary_lines(&summary);
         assert_eq!(lines[0], "[navigator] health: risk=yellow issues=2");

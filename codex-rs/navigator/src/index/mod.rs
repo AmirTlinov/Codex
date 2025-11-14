@@ -7,6 +7,7 @@ mod filter;
 mod git;
 mod guardrail;
 mod health;
+mod insight_history;
 mod language;
 pub(crate) mod model;
 mod personal;
@@ -33,6 +34,7 @@ use crate::index::git::recency_days;
 use crate::index::git::recent_paths;
 use crate::index::guardrail::GuardrailEmitter;
 use crate::index::health::HealthStore;
+use crate::index::insight_history::InsightHistoryStore;
 use crate::index::model::FileEntry;
 use crate::index::model::IndexSnapshot;
 use crate::index::model::SymbolRecord;
@@ -135,6 +137,7 @@ struct Inner {
     auto_indexing: Arc<AtomicBool>,
     coverage: Arc<CoverageTracker>,
     health: Arc<HealthStore>,
+    insights: Arc<InsightHistoryStore>,
     guardrails: Arc<GuardrailEmitter>,
     text_ingest: TextIngestor,
     self_heal: SelfHealPolicy,
@@ -210,6 +213,7 @@ impl IndexCoordinator {
         profile.ensure_dirs()?;
         let load_outcome = load_snapshot(&profile.index_path())?;
         let health = Arc::new(HealthStore::new(&profile)?);
+        let insight_history = Arc::new(InsightHistoryStore::new(&profile)?);
         let (loaded_snapshot, status) = match load_outcome {
             SnapshotLoad::Loaded(snapshot) => {
                 let snapshot = *snapshot;
@@ -320,6 +324,7 @@ impl IndexCoordinator {
             auto_indexing: auto_indexing_flag,
             coverage: Arc::new(CoverageTracker::new(Some(COVERAGE_LIMIT))),
             health,
+            insights: insight_history,
             guardrails,
             text_ingest,
             self_heal,
@@ -566,12 +571,16 @@ impl IndexCoordinator {
 
     pub async fn health_panel(&self) -> HealthPanel {
         let coverage = self.inner.coverage.diagnostics().await;
-        self.inner.health.panel(&coverage).await
+        let mut panel = self.inner.health.panel(&coverage).await;
+        panel.hotspot_summary = self.inner.insights.latest_summary().await;
+        panel
     }
 
     pub async fn health_summary(&self) -> HealthSummary {
         let coverage = self.inner.coverage.diagnostics().await;
-        self.inner.health.summary(&coverage).await
+        let mut summary = self.inner.health.summary(&coverage).await;
+        summary.hotspot_summary = self.inner.insights.latest_summary().await;
+        summary
     }
 
     pub async fn profile_snapshot(&self, limit: Option<usize>) -> Vec<SearchProfileSample> {
@@ -851,8 +860,24 @@ impl IndexCoordinator {
         if request.limit == 0 {
             request.limit = 5;
         }
-        let snapshot = self.inner.snapshot.read().await;
-        build_insights(&snapshot, &request)
+        let response = {
+            let snapshot = self.inner.snapshot.read().await;
+            build_insights(&snapshot, &request)
+        };
+        self.attach_insight_trends(response).await
+    }
+
+    async fn attach_insight_trends(&self, mut response: InsightsResponse) -> InsightsResponse {
+        match self.inner.insights.record(&response).await {
+            Ok(Some(summary)) => {
+                response.trend_summary = Some(summary);
+            }
+            Ok(None) => {}
+            Err(err) => {
+                warn!("failed to persist insight history: {err:?}");
+            }
+        }
+        response
     }
 
     async fn update_status(&self, state: IndexState, counts: Option<(usize, usize)>) {

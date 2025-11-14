@@ -276,6 +276,9 @@ agents.
 - Planner и инструментальный handler автоматически добавляют hint `hotspot: …`, когда поиск запускается
   “с нуля” (без query/filters). Это позволяет агенту мгновенно увидеть самый шумный файл и при желании
   перейти в него через `history suggestion` или `insights --apply` без ручного поиска.
+- Каждая выдача `insights` формирует `trend_summary`: сравнение с предыдущим снимком (новые/исчезнувшие
+  hotspots). Этот же summary прикладывается к `navigator doctor`/streamed diagnostics, поэтому секция
+  health panel теперь показывает «hotspots @ <timestamp>» с количеством новых/закрытых участков.
 
 ## Streaming Diagnostics
 

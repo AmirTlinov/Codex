@@ -460,6 +460,23 @@ pub struct AtlasSnapshot {
     pub root: Option<AtlasNode>,
 }
 
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+#[skip_serializing_none]
+pub struct InsightTrendSummary {
+    pub recorded_at: OffsetDateTime,
+    #[serde(default)]
+    pub trends: Vec<InsightTrend>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, Hash)]
+pub struct InsightTrend {
+    pub kind: InsightSectionKind,
+    #[serde(default)]
+    pub new_paths: Vec<String>,
+    #[serde(default)]
+    pub resolved_paths: Vec<String>,
+}
+
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, Hash)]
 #[serde(rename_all = "snake_case")]
 pub enum InsightSectionKind {
@@ -505,6 +522,8 @@ pub struct InsightsResponse {
     pub generated_at: OffsetDateTime,
     #[serde(default)]
     pub sections: Vec<InsightSection>,
+    #[serde(default)]
+    pub trend_summary: Option<InsightTrendSummary>,
 }
 
 pub const DEFAULT_INSIGHTS_LIMIT: usize = 5;
@@ -659,6 +678,8 @@ pub struct HealthPanel {
     #[serde(default)]
     pub ingest: Vec<IngestRunSummary>,
     pub literal: LiteralStatsSummary,
+    #[serde(default)]
+    pub hotspot_summary: Option<InsightTrendSummary>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Default)]
@@ -667,6 +688,8 @@ pub struct HealthSummary {
     pub risk: HealthRisk,
     #[serde(default)]
     pub issues: Vec<HealthIssue>,
+    #[serde(default)]
+    pub hotspot_summary: Option<InsightTrendSummary>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
