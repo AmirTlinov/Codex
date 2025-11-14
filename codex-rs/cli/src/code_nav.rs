@@ -45,6 +45,7 @@ use codex_navigator::proto::DoctorWorkspace;
 use codex_navigator::proto::FileCategory;
 use codex_navigator::proto::HealthPanel;
 use codex_navigator::proto::HealthRisk;
+use codex_navigator::proto::HealthSummary;
 use codex_navigator::proto::IngestKind;
 use codex_navigator::proto::IngestRunSummary;
 use codex_navigator::proto::NavHit;
@@ -2172,6 +2173,11 @@ fn print_diagnostics(diag: &SearchDiagnostics) {
             eprintln!("    literal pending: {preview}");
         }
     }
+    if let Some(health) = diag.health.as_ref() {
+        for line in format_health_summary_lines(health) {
+            eprintln!("{line}");
+        }
+    }
 }
 
 fn print_literal_stats(stats: &SearchStats) {
@@ -3369,6 +3375,29 @@ fn format_reason_summary(gaps: &[proto::CoverageGap], label: &str) -> Option<Str
     Some(format!("{label}: {rendered}"))
 }
 
+fn format_health_summary_lines(summary: &HealthSummary) -> Vec<String> {
+    let mut lines = Vec::new();
+    lines.push(format!(
+        "[navigator] health: risk={} issues={}",
+        fmt_health_risk(summary.risk),
+        summary.issues.len()
+    ));
+    for issue in summary.issues.iter().take(3) {
+        lines.push(format!(
+            "    - [{}] {}",
+            fmt_health_risk(issue.level),
+            issue.message
+        ));
+        if let Some(remediation) = &issue.remediation {
+            lines.push(format!("      hint: {remediation}"));
+        }
+    }
+    if summary.issues.len() > 3 {
+        lines.push(format!("    … (+{} more issues)", summary.issues.len() - 3));
+    }
+    lines
+}
+
 fn build_spawn_command(project_root: &Path) -> Result<DaemonSpawn> {
     let exe = resolve_daemon_launcher().context("resolve navigator launcher")?;
     let mut args = vec!["navigator-daemon".to_string()];
@@ -3394,6 +3423,7 @@ fn print_json<T: serde::Serialize>(value: &T) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use codex_navigator::proto::HealthIssue;
     use codex_navigator::proto::FacetSuggestionKind;
 
     fn sample_nav_command() -> NavCommand {
@@ -3624,6 +3654,33 @@ mod tests {
         };
         assert!(history_item_matches(&item, "core-team"));
         assert!(history_item_matches(&item, "lang=rust"));
+    }
+
+    #[test]
+    fn health_summary_lines_render_issues() {
+        let summary = HealthSummary {
+            risk: HealthRisk::Yellow,
+            issues: vec![
+                HealthIssue {
+                    level: HealthRisk::Red,
+                    message: "coverage stalled".to_string(),
+                    remediation: Some("rerun codex navigator doctor".to_string()),
+                },
+                HealthIssue {
+                    level: HealthRisk::Yellow,
+                    message: "literal fallback high".to_string(),
+                    remediation: None,
+                },
+            ],
+        };
+        let lines = format_health_summary_lines(&summary);
+        assert_eq!(lines[0], "[navigator] health: risk=yellow issues=2");
+        assert!(lines[1].contains("[red] coverage stalled"));
+        assert!(
+            lines
+                .iter()
+                .any(|line| line.contains("hint: rerun codex navigator doctor"))
+        );
     }
 
     #[test]
