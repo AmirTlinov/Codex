@@ -97,7 +97,7 @@ This roadmap enumerates the concrete work required to turn Navigator into the pr
 - **Goal:** furnish instant situational awareness (TODO clusters, lint risks, unowned churn) so the agent never has to run ad-hoc repo scans.
 - **Milestones:**
   1. ✅ **Baseline sections + tooling:** `/v1/nav/insights` aggregates attention/lint/ownership hotspots, CLI `codex navigator insights` prints them, and freeform payload `{"action":"insights"}` lets the handler fetch the same JSON.
-  2. ☐ **Planner integration:** embed the top hotspot in planner hints/auto-flows so new navigation sessions start with “here’s the noisiest file, press enter to inspect”.
+  2. ✅ **Planner integration:** empty searches now receive a `hotspot: …` hint before planning (CLI + handler), and `codex navigator insights --apply N` spins up a focused search on the selected hotspot without retyping filters.
   3. ☐ **Trend tracking:** persist the last _N_ insight snapshots per workspace, compute deltas (new TODO spikes, ownership regressions), and surface them in health panel / text stats so regressions are visible without running extra commands.
 - **Success criteria:** agents kick off work by reading insights instead of running blind searches; onboarding to a new repo takes <30 seconds because hotspots + atlas jumps cover the heavy lifting.
 

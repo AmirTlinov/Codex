@@ -263,6 +263,9 @@ agents.
   что отдаёт `/v1/nav/insights`.
 - Флаги `--limit` и `--kind attention|lint|ownership` управляют объёмом и секциями. Фильтры можно
   комбинировать; CLI автоматически удаляет дубликаты и приводит limit к ≥1.
+- `--apply N` (N — индекс в печатаемом списке, 1‑based) запускает поиск, сфокусированный на выбранном
+  hotspot’е. CLI выставляет `path_globs` на выбранный путь, включает профиль `files` и добавляет hint
+  `insights jump: …`, чтобы история могла воспроизвести действие.
 - Инструментальный вызов: `{"action":"insights","limit":5,"kinds":["lint_risks"]}`.
   Ответ содержит `generated_at`, массив секций (`kind`, `title`, `summary`) и хиты с метаданными
   (`owners`, `categories`, `line_count`, `score`, `reasons`). Handler возвращает JSON напрямую, так
@@ -270,6 +273,9 @@ agents.
 - Комбинируйте insights с `atlas summary` или `facet` для drill-down: например, берём первые lint
   риски и сразу выполняем `codex navigator facet --path <path>` либо `nav <query>` с активным
   owner/категорией на основании выданных сигналов.
+- Planner и инструментальный handler автоматически добавляют hint `hotspot: …`, когда поиск запускается
+  “с нуля” (без query/filters). Это позволяет агенту мгновенно увидеть самый шумный файл и при желании
+  перейти в него через `history suggestion` или `insights --apply` без ручного поиска.
 
 ## Streaming Diagnostics
 

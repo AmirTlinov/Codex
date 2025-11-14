@@ -17,6 +17,7 @@ use clap::builder::PossibleValue;
 use codex_common::CliConfigOverrides;
 use codex_navigator::AtlasFocus;
 use codex_navigator::DaemonOptions;
+use codex_navigator::HotspotMarker;
 use codex_navigator::atlas_focus;
 use codex_navigator::auto_facet::AutoFacetConfig;
 use codex_navigator::auto_facet::{self};
@@ -25,9 +26,11 @@ use codex_navigator::client::DaemonSpawn;
 use codex_navigator::client::NavigatorClient;
 use codex_navigator::client::SearchStreamOutcome;
 use codex_navigator::find_atlas_node;
+use codex_navigator::format_hotspot_hint;
 use codex_navigator::history::history_item_matches;
 use codex_navigator::history::now_secs;
 use codex_navigator::history::summarize_history_query;
+use codex_navigator::maybe_seed_hotspot_hint;
 use codex_navigator::plan_search_request;
 use codex_navigator::planner::NavigatorSearchArgs;
 use codex_navigator::planner::apply_active_filters_to_args;
@@ -53,7 +56,6 @@ use codex_navigator::proto::InsightSectionKind;
 use codex_navigator::proto::InsightsRequest;
 use codex_navigator::proto::InsightsResponse;
 use codex_navigator::proto::NavHit;
-use codex_navigator::proto::NavigatorInsight;
 use codex_navigator::proto::ProfileRequest;
 use codex_navigator::proto::ProfileResponse;
 use codex_navigator::proto::SearchDiagnostics;
@@ -231,6 +233,10 @@ pub struct InsightsCommand {
     /// Print the raw JSON response instead of the text view.
     #[arg(long = "json", default_value_t = false)]
     pub json: bool,
+
+    /// Run a search focused on the Nth hotspot (1-based index) instead of printing.
+    #[arg(long = "apply")]
+    pub apply: Option<usize>,
 }
 
 #[derive(Debug, Parser)]
@@ -662,7 +668,8 @@ pub enum NavigatorSubcommand {
 
 pub async fn run_nav(cmd: NavCommand) -> Result<()> {
     let client = build_client(cmd.project_root.clone()).await?;
-    let args = nav_command_to_search_args(&cmd);
+    let mut args = nav_command_to_search_args(&cmd);
+    seed_hotspot_hint_if_needed(&client, &mut args).await;
     let show_refs = cmd.with_refs || cmd.refs_mode != RefsMode::All;
     let recording = HistoryReplay::new(
         args.clone(),
@@ -919,6 +926,9 @@ pub async fn run_history(mut cmd: HistoryCommand) -> Result<()> {
 
 pub async fn run_insights(mut cmd: InsightsCommand) -> Result<()> {
     let client = build_client(cmd.project_root.take()).await?;
+    if cmd.apply.is_some() && cmd.json {
+        return Err(anyhow!("--apply cannot be combined with --json"));
+    }
     let mut kinds: Vec<InsightSectionKind> = Vec::new();
     for arg in &cmd.kinds {
         let kind = arg.to_proto();
@@ -937,6 +947,18 @@ pub async fn run_insights(mut cmd: InsightsCommand) -> Result<()> {
         kinds,
     };
     let response = client.insights(request).await?;
+    if let Some(index) = cmd.apply {
+        let markers = collect_insight_markers(&response);
+        let Some(marker) = markers.get(index.saturating_sub(1)).cloned() else {
+            return Err(anyhow!("insights index {index} not available"));
+        };
+        println!(
+            "launching hotspot #{index}: {}",
+            format_hotspot_hint(&marker)
+        );
+        run_insight_jump(&client, marker).await?;
+        return Ok(());
+    }
     if cmd.json {
         println!("{}", serde_json::to_string_pretty(&response)?);
     } else {
@@ -1442,11 +1464,16 @@ fn print_insights_text(response: &InsightsResponse) {
             continue;
         }
         for (idx, item) in section.items.iter().enumerate() {
-            println!("  {}. {} (score {:.1})", idx + 1, item.path, item.score);
-            let meta = insight_metadata(item);
-            if !meta.is_empty() {
-                println!("     {}", meta.join(" · "));
-            }
+            let marker = HotspotMarker {
+                section: section.kind,
+                insight: item.clone(),
+            };
+            println!(
+                "  {}. {} (score {:.1})",
+                idx + 1,
+                format_hotspot_hint(&marker),
+                item.score
+            );
             if !item.reasons.is_empty() {
                 println!("     reasons: {}", item.reasons.join(" · "));
             }
@@ -1454,40 +1481,43 @@ fn print_insights_text(response: &InsightsResponse) {
     }
 }
 
-fn insight_metadata(item: &NavigatorInsight) -> Vec<String> {
-    let mut parts = Vec::new();
-    if !item.owners.is_empty() {
-        parts.push(format!("owners {}", item.owners.join("/")));
-    } else {
-        parts.push("owners –".to_string());
+fn collect_insight_markers(response: &InsightsResponse) -> Vec<HotspotMarker> {
+    let mut markers = Vec::new();
+    for section in &response.sections {
+        for item in &section.items {
+            markers.push(HotspotMarker {
+                section: section.kind,
+                insight: item.clone(),
+            });
+        }
     }
-    if !item.categories.is_empty() {
-        let cats = item
-            .categories
-            .iter()
-            .map(|cat| category_label(cat))
-            .collect::<Vec<_>>()
-            .join("/");
-        parts.push(format!("categories {cats}"));
-    }
-    if item.line_count > 0 {
-        parts.push(format!("{} lines", item.line_count));
-    }
-    parts.push(if item.recent {
-        "recent".to_string()
-    } else {
-        format!("{}d old", item.freshness_days)
-    });
-    if item.attention_density > 0 {
-        parts.push(format!("attention {}", item.attention_density));
-    }
-    if item.lint_density > 0 {
-        parts.push(format!("lint {}", item.lint_density));
-    }
-    if item.churn > 0 {
-        parts.push(format!("churn {}", item.churn));
-    }
-    parts
+    markers
+}
+
+async fn run_insight_jump(client: &NavigatorClient, marker: HotspotMarker) -> Result<()> {
+    let request = plan_search_request(insight_jump_args(&marker))?;
+    let _ = execute_search(
+        client,
+        request,
+        OutputFormat::Json,
+        RefsMode::All,
+        false,
+        false,
+        None,
+        FocusMode::Auto,
+    )
+    .await?;
+    Ok(())
+}
+
+fn insight_jump_args(marker: &HotspotMarker) -> NavigatorSearchArgs {
+    let mut args = NavigatorSearchArgs::default();
+    args.path_globs.push(marker.insight.path.clone());
+    args.limit = Some(80);
+    args.profiles = vec![SearchProfile::Files];
+    args.hints
+        .push(format!("insights jump: {}", format_hotspot_hint(marker)));
+    args
 }
 
 fn capture_history_hits(hits: &[NavHit]) -> Vec<HistoryHit> {
@@ -1897,6 +1927,13 @@ async fn run_atlas_jump(client: &NavigatorClient, root: &AtlasNode, target: &str
     )
     .await?;
     Ok(())
+}
+
+async fn seed_hotspot_hint_if_needed(client: &NavigatorClient, args: &mut NavigatorSearchArgs) {
+    if let Err(err) = maybe_seed_hotspot_hint(client, args).await
+        && std::env::var_os("NAVIGATOR_DEBUG_INSIGHTS").is_some() {
+            eprintln!("[navigator] hotspot hint unavailable: {err:#}");
+        }
 }
 
 #[allow(clippy::too_many_arguments)]

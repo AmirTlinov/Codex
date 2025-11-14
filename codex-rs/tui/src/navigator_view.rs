@@ -58,9 +58,7 @@ pub(crate) fn summarize_navigator_request(raw_input: &str) -> NavigatorExecReque
         Ok(NavigatorPayload::HistoryList { .. }) => {
             fallback_request("history list unavailable in TUI")
         }
-        Ok(NavigatorPayload::Insights { .. }) => {
-            fallback_request("insights request (CLI only)")
-        }
+        Ok(NavigatorPayload::Insights { .. }) => fallback_request("insights request (CLI only)"),
         Err(_) => fallback_request(trimmed),
     }
 }

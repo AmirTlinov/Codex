@@ -87,6 +87,11 @@ limit: 25
     drill into the noisiest files.
 - Use insights to bootstrap navigation sessions (“show me the hottest TODO clusters, then run
   nav/facet on one of them”) without running extra `rg`/IDE commands.
+- `--apply N` (CLI only) runs a focused `nav` search on hotspot #N (1-based). The handler achieves the
+  same by sending `{ "action":"insights", "limit":5 }` first and then feeding the chosen path into
+  a follow-up `search` payload with `path_globs: ["<path>"]` and profile `files`.
+- Planner automatically seeds a `hotspot: …` hint when a fresh search arrives without query/filters, so
+  every navigation flow starts with a clear next action.
 
 ## Protocol & Daemon Facts
 

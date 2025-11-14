@@ -29,6 +29,7 @@ use codex_navigator::history::capture_history_hits;
 use codex_navigator::history::history_item_matches;
 use codex_navigator::history::now_secs;
 use codex_navigator::history::summarize_history_query;
+use codex_navigator::maybe_seed_hotspot_hint;
 use codex_navigator::plan_search_request;
 use codex_navigator::planner::NavigatorSearchArgs;
 use codex_navigator::planner::SearchPlannerError;
@@ -57,6 +58,7 @@ use codex_protocol::models::ResponseItem;
 use once_cell::sync::OnceCell;
 use serde::Serialize;
 use tokio::task;
+use tracing::debug;
 use tracing::info;
 use tracing::warn;
 
@@ -413,8 +415,11 @@ async fn run_search_flow(
     turn: Arc<crate::codex::TurnContext>,
     call_id: &str,
     project_root: &str,
-    args: NavigatorSearchArgs,
+    mut args: NavigatorSearchArgs,
 ) -> Result<SearchRunResult, FunctionCallError> {
+    if let Err(err) = maybe_seed_hotspot_hint(client, &mut args).await {
+        debug!("failed to seed hotspot hint: {err:?}");
+    }
     let recorded_args = args.clone();
     let mut req = plan_search_request(args).map_err(map_planner_error)?;
     let request_snapshot = req.clone();

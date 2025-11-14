@@ -1,3 +1,4 @@
+pub mod advisor;
 mod atlas;
 pub mod auto_facet;
 pub mod client;
@@ -33,3 +34,6 @@ pub use summary::profile_badges;
 pub use summary::summarize_args;
 
 pub const NAVIGATOR_TOOL_INSTRUCTIONS: &str = include_str!("../navigator_tool_instructions.md");
+pub use advisor::HotspotMarker;
+pub use advisor::format_hotspot_hint;
+pub use advisor::maybe_seed_hotspot_hint;

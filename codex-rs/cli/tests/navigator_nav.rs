@@ -199,6 +199,33 @@ fn run_insights_command(
     Ok(response)
 }
 
+fn run_insights_apply(codex_home: &Path, project_root: &Path, extra_args: &[&str]) -> Result<()> {
+    let mut cmd = codex_command(codex_home, project_root)?;
+    let mut args = vec![
+        "navigator".to_string(),
+        "insights".to_string(),
+        "--project-root".to_string(),
+        project_root
+            .to_str()
+            .ok_or_else(|| anyhow!("project_root must be valid UTF-8"))?
+            .to_string(),
+        "--apply".to_string(),
+        "1".to_string(),
+    ];
+    for arg in extra_args {
+        args.push(arg.to_string());
+    }
+    cmd.args(args);
+    let output = cmd.output()?;
+    if !output.status.success() {
+        anyhow::bail!(
+            "navigator insights apply failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+    Ok(())
+}
+
 #[test]
 fn navigator_nav_round_trip_via_daemon() -> Result<()> {
     let codex_home = TempDir::new()?;
@@ -248,6 +275,21 @@ fn navigator_insights_command_outputs_sections() -> Result<()> {
 
     let response = run_insights_command(codex_home.path(), project_root, &["--limit", "2"])?;
     assert!(!response.sections.is_empty());
+    Ok(())
+}
+
+#[test]
+fn navigator_insights_apply_runs_search() -> Result<()> {
+    let codex_home = TempDir::new()?;
+    let project_dir = TempDir::new()?;
+    let project_root = project_dir.path();
+    std::fs::create_dir_all(project_root.join("src"))?;
+    std::fs::write(
+        project_root.join("src/lib.rs"),
+        "// TODO: apply flow\npub fn hotspot() {}\n",
+    )?;
+
+    run_insights_apply(codex_home.path(), project_root, &["--limit", "1"])?;
     Ok(())
 }
 
