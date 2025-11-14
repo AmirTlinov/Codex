@@ -21,6 +21,7 @@ use codex_cli::code_nav::run_eval;
 use codex_cli::code_nav::run_facet;
 use codex_cli::code_nav::run_flow;
 use codex_cli::code_nav::run_history;
+use codex_cli::code_nav::run_insights;
 use codex_cli::code_nav::run_nav;
 use codex_cli::code_nav::run_open;
 use codex_cli::code_nav::run_pin;
@@ -453,6 +454,13 @@ async fn cli_main(codex_linux_sandbox_exe: Option<PathBuf>) -> anyhow::Result<()
                         navigator_cli.config_overrides.clone(),
                     );
                     run_history(history_cli).await?;
+                }
+                NavigatorSubcommand::Insights(mut insights_cli) => {
+                    prepend_config_flags(
+                        &mut insights_cli.config_overrides,
+                        navigator_cli.config_overrides.clone(),
+                    );
+                    run_insights(insights_cli).await?;
                 }
                 NavigatorSubcommand::Repeat(mut repeat_cli) => {
                     prepend_config_flags(

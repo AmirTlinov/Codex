@@ -74,6 +74,20 @@ limit: 25
 - Use `codex nav --format ndjson` when you need the raw daemon events (diagnostics/top_hits/final) without additional formatting. Combine with `--refs-mode` to focus on definitions or usages.
 - Use `codex nav --format text` for a compact human-readable summary (query id, stats, top hits) without the final JSON payload. Combine with `--refs-mode` to focus on definitions or usages.
 
+## Insights (Hotspots)
+
+- `insights [--limit N] [attention|lint|ownership]` runs without requiring a previous `search`.
+  Each bare token selects a section; omit them to return all sections.
+- JSON payload: `{"action":"insights","limit":5,"kinds":["lint_risks","ownership_gaps"],"schema_version":3}`.
+- Response structure:
+  - `generated_at`: timestamp when the snapshot was produced.
+  - `sections[]`: `{ "kind": "attention_hotspots" | "lint_risks" | "ownership_gaps", "title": "…", "summary": "top 5 …", "items": [...] }`.
+  - Each `item` includes `path`, `score`, `reasons[]`, `owners[]`, `categories[]`, `line_count`,
+    `attention(_density)`, `lint(_density)`, `churn`, and `freshness_days` so you can immediately
+    drill into the noisiest files.
+- Use insights to bootstrap navigation sessions (“show me the hottest TODO clusters, then run
+  nav/facet on one of them”) without running extra `rg`/IDE commands.
+
 ## Protocol & Daemon Facts
 
 - The daemon auto-spawns (via `codex navigator-daemon`) and self-heals. No manual cache deletion or env tweaking is required.

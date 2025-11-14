@@ -5,6 +5,7 @@ pub mod daemon;
 pub mod freeform;
 pub mod history;
 pub mod index;
+mod insights;
 mod metadata;
 pub mod planner;
 mod project;

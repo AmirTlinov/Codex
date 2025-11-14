@@ -41,6 +41,7 @@ use codex_navigator::proto::AtlasRequest;
 use codex_navigator::proto::AtlasResponse;
 use codex_navigator::proto::DoctorReport;
 use codex_navigator::proto::FacetSuggestion;
+use codex_navigator::proto::InsightsRequest;
 use codex_navigator::proto::NavHit;
 use codex_navigator::proto::OpenRequest;
 use codex_navigator::proto::PROTOCOL_VERSION;
@@ -295,6 +296,19 @@ impl ToolHandler for NavigatorHandler {
                     entries: rendered,
                 };
                 Ok(make_json_output(payload)?)
+            }
+            NavigatorPayload::Insights { limit, kinds } => {
+                let request = InsightsRequest {
+                    schema_version: PROTOCOL_VERSION,
+                    project_root: Some(project_root_string.clone()),
+                    limit,
+                    kinds,
+                };
+                let resp = match client.insights(request).await {
+                    Ok(resp) => resp,
+                    Err(err) => return Err(with_doctor_context(err, &client).await),
+                };
+                Ok(make_json_output(resp)?)
             }
             NavigatorPayload::Open { id } => {
                 let req = OpenRequest {

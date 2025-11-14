@@ -4,6 +4,8 @@ use crate::proto::AtlasRequest;
 use crate::proto::AtlasResponse;
 use crate::proto::DoctorReport;
 use crate::proto::IndexStatus;
+use crate::proto::InsightsRequest;
+use crate::proto::InsightsResponse;
 use crate::proto::NavHit;
 use crate::proto::OpenRequest;
 use crate::proto::OpenResponse;
@@ -250,6 +252,27 @@ impl NavigatorClient {
             let status = resp.status();
             let body = resp.text().await.unwrap_or_default();
             return Err(anyhow!("atlas request failed: {status} - {body}"));
+        }
+        Ok(resp.json().await?)
+    }
+
+    pub async fn insights(&self, mut request: InsightsRequest) -> Result<InsightsResponse> {
+        self.fill_project_root(&mut request.project_root);
+        if request.limit == 0 {
+            request.limit = 5;
+        }
+        let url = format!("{}/v1/nav/insights", self.base_url);
+        let resp = self
+            .http
+            .post(url)
+            .headers(self.auth_headers()?)
+            .json(&request)
+            .send()
+            .await?;
+        if !resp.status().is_success() {
+            let status = resp.status();
+            let body = resp.text().await.unwrap_or_default();
+            return Err(anyhow!("insights request failed: {status} - {body}"));
         }
         Ok(resp.json().await?)
     }

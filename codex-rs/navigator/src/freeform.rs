@@ -1,7 +1,9 @@
 use crate::planner::NavigatorSearchArgs;
 use crate::planner::resolve_profile_token;
 use crate::planner::suggest_from_options;
+use crate::proto::DEFAULT_INSIGHTS_LIMIT;
 use crate::proto::InputFormat;
+use crate::proto::InsightSectionKind;
 use crate::proto::SearchProfile;
 use serde::Deserialize;
 use serde_json::Value;
@@ -39,6 +41,12 @@ pub enum NavigatorPayload {
         limit: usize,
         #[serde(default)]
         contains: Option<String>,
+    },
+    Insights {
+        #[serde(default = "crate::proto::default_insights_limit")]
+        limit: usize,
+        #[serde(default)]
+        kinds: Vec<InsightSectionKind>,
     },
 }
 
@@ -124,6 +132,11 @@ const FREEFORM_KEY_SUGGESTIONS: &[&str] = &[
     "presets",
     "focus",
     "focuses",
+    "insight",
+    "insights",
+    "kind",
+    "kinds",
+    "sections",
 ];
 
 const JSON_SEARCH_KEYS: &[&str] = &[
@@ -216,6 +229,7 @@ fn try_quick_command(input: &str) -> Option<Result<NavigatorPayload, PayloadPars
         "atlas" => Some(parse_quick_atlas(rest)),
         "facet" => Some(parse_quick_facet(rest)),
         "history" => Some(parse_quick_history(rest)),
+        "insight" | "insights" => Some(parse_quick_insights(rest)),
         _ => None,
     }
 }
@@ -538,6 +552,97 @@ fn parse_quick_history_list(tokens: &[String]) -> Result<NavigatorPayload, Paylo
         limit,
         contains,
     })
+}
+
+fn parse_quick_insights(rest: &str) -> Result<NavigatorPayload, PayloadParseError> {
+    let tokens = split_shellwords(rest)?;
+    let mut limit = DEFAULT_INSIGHTS_LIMIT;
+    let mut kinds: Vec<InsightSectionKind> = Vec::new();
+    let mut iter = tokens.iter();
+    while let Some(token) = iter.next() {
+        if token.trim().is_empty() {
+            continue;
+        }
+        let lowered = token.to_ascii_lowercase();
+        if lowered == "--limit" {
+            let Some(value) = iter.next() else {
+                return Err(PayloadParseError::new("--limit requires a value"));
+            };
+            limit = parse_insights_limit(value)?;
+            continue;
+        }
+        if let Some(value) = lowered.strip_prefix("--limit=") {
+            limit = parse_insights_limit(value)?;
+            continue;
+        }
+        if lowered == "--kind" || lowered == "--section" {
+            let Some(value) = iter.next() else {
+                return Err(PayloadParseError::new(format!("{token} requires a value")));
+            };
+            kinds.push(parse_insight_kind(value)?);
+            continue;
+        }
+        if let Some(value) = lowered.strip_prefix("--kind=") {
+            kinds.push(parse_insight_kind(value)?);
+            continue;
+        }
+        if lowered == "--kinds" || lowered == "--sections" {
+            let Some(value) = iter.next() else {
+                return Err(PayloadParseError::new(format!("{token} requires a value")));
+            };
+            kinds.extend(parse_insight_kind_list(value)?);
+            continue;
+        }
+        if let Some(value) = lowered.strip_prefix("--kinds=") {
+            kinds.extend(parse_insight_kind_list(value)?);
+            continue;
+        }
+        kinds.push(parse_insight_kind(token)?);
+    }
+    Ok(NavigatorPayload::Insights { limit, kinds })
+}
+
+fn parse_insights_limit(value: &str) -> Result<usize, PayloadParseError> {
+    let limit = value
+        .parse::<usize>()
+        .map_err(|_| PayloadParseError::new(format!("invalid insights limit `{value}`")))?;
+    if limit == 0 {
+        return Err(PayloadParseError::new(
+            "insights limit must be greater than zero",
+        ));
+    }
+    Ok(limit)
+}
+
+fn parse_insight_kind(token: &str) -> Result<InsightSectionKind, PayloadParseError> {
+    let normalized = token.trim().trim_matches(',').to_ascii_lowercase();
+    if normalized.is_empty() {
+        return Err(PayloadParseError::new("insight kind must not be empty"));
+    }
+    let kind = match normalized.as_str() {
+        "attention" | "hotspots" | "attention_hotspots" | "attention-hotspots" | "focus" => {
+            InsightSectionKind::AttentionHotspots
+        }
+        "lint" | "lint_risks" | "lint-risks" | "lint-risk" | "lint_risk" => {
+            InsightSectionKind::LintRisks
+        }
+        "ownerless" | "owners" | "ownership" | "ownership_gaps" | "ownership-gaps" | "unowned" => {
+            InsightSectionKind::OwnershipGaps
+        }
+        other => {
+            return Err(PayloadParseError::new(format!(
+                "unsupported insight kind `{other}`"
+            )));
+        }
+    };
+    Ok(kind)
+}
+
+fn parse_insight_kind_list(value: &str) -> Result<Vec<InsightSectionKind>, PayloadParseError> {
+    split_list(value)
+        .into_iter()
+        .map(|item| parse_insight_kind(&item))
+        .collect()
 }
 
 fn parse_history_index(value: &str) -> Result<usize, PayloadParseError> {
@@ -1526,6 +1631,42 @@ mod tests {
         match parse_payload("atlas summary core").expect("summary parsed") {
             NavigatorPayload::AtlasSummary { target } => {
                 assert_eq!(target.as_deref(), Some("core"));
+            }
+            other => panic!("unexpected payload: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_quick_insights_defaults() {
+        match parse_payload("insights").expect("parsed") {
+            NavigatorPayload::Insights { limit, kinds } => {
+                assert_eq!(limit, DEFAULT_INSIGHTS_LIMIT);
+                assert!(kinds.is_empty());
+            }
+            other => panic!("unexpected payload: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_quick_insights_with_limit_and_kind() {
+        match parse_payload("insights --limit 7 lint").expect("parsed") {
+            NavigatorPayload::Insights { limit, kinds } => {
+                assert_eq!(limit, 7);
+                assert_eq!(kinds.len(), 1);
+                assert!(matches!(kinds[0], InsightSectionKind::LintRisks));
+            }
+            other => panic!("unexpected payload: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_json_insights_payload() {
+        let payload = r#"{"action":"insights","limit":4,"kinds":["ownership_gaps"]}"#;
+        match parse_payload(payload).expect("parsed") {
+            NavigatorPayload::Insights { limit, kinds } => {
+                assert_eq!(limit, 4);
+                assert_eq!(kinds.len(), 1);
+                assert!(matches!(kinds[0], InsightSectionKind::OwnershipGaps));
             }
             other => panic!("unexpected payload: {other:?}"),
         }

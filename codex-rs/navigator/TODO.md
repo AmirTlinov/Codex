@@ -92,6 +92,15 @@ This roadmap enumerates the concrete work required to turn Navigator into the pr
   4. ✅ **Focus mode:** CLI `--focus` (auto/code/docs/tests/deps/all) фильтрует вывод, показывает suppressed-счётчики и сохраняется в history/repeat, так что шум от нецелевых категорий исчез.
 - **Success criteria:** average navigation flow shrinks to ≤2 commands; subjective “cognitive load” score drops in dogfooding surveys.
 
+### 8. Workspace Insights & Hotspot Briefings
+
+- **Goal:** furnish instant situational awareness (TODO clusters, lint risks, unowned churn) so the agent never has to run ad-hoc repo scans.
+- **Milestones:**
+  1. ✅ **Baseline sections + tooling:** `/v1/nav/insights` aggregates attention/lint/ownership hotspots, CLI `codex navigator insights` prints them, and freeform payload `{"action":"insights"}` lets the handler fetch the same JSON.
+  2. ☐ **Planner integration:** embed the top hotspot in planner hints/auto-flows so new navigation sessions start with “here’s the noisiest file, press enter to inspect”.
+  3. ☐ **Trend tracking:** persist the last _N_ insight snapshots per workspace, compute deltas (new TODO spikes, ownership regressions), and surface them in health panel / text stats so regressions are visible without running extra commands.
+- **Success criteria:** agents kick off work by reading insights instead of running blind searches; onboarding to a new repo takes <30 seconds because hotspots + atlas jumps cover the heavy lifting.
+
 ### Execution Guidance
 
 - **Iteration cadence:** treat each epic as a 1–2 week slice with demoable value; keep this TODO updated after each milestone.

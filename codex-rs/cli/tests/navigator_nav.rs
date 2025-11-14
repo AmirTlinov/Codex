@@ -18,6 +18,7 @@ use codex_navigator::freeform::parse_payload as parse_navigator_payload;
 use codex_navigator::plan_search_request;
 use codex_navigator::proto::FileCategory;
 use codex_navigator::proto::IndexState;
+use codex_navigator::proto::InsightsResponse;
 use codex_navigator::proto::SearchDiagnostics;
 use codex_navigator::proto::SearchResponse;
 use serde_json::Value;
@@ -166,6 +167,38 @@ fn run_history_raw(
     Ok((stdout, stderr))
 }
 
+fn run_insights_command(
+    codex_home: &Path,
+    project_root: &Path,
+    extra_args: &[&str],
+) -> Result<InsightsResponse> {
+    let mut cmd = codex_command(codex_home, project_root)?;
+    let mut args = vec![
+        "navigator".to_string(),
+        "insights".to_string(),
+        "--project-root".to_string(),
+        project_root
+            .to_str()
+            .ok_or_else(|| anyhow!("project_root must be valid UTF-8"))?
+            .to_string(),
+        "--json".to_string(),
+    ];
+    for arg in extra_args {
+        args.push(arg.to_string());
+    }
+    cmd.args(args);
+    let output = cmd.output()?;
+    if !output.status.success() {
+        anyhow::bail!(
+            "navigator insights command failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+    let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+    let response: InsightsResponse = serde_json::from_str(stdout.trim())?;
+    Ok(response)
+}
+
 #[test]
 fn navigator_nav_round_trip_via_daemon() -> Result<()> {
     let codex_home = TempDir::new()?;
@@ -199,6 +232,22 @@ fn navigator_nav_round_trip_via_daemon() -> Result<()> {
             .any(|hit| hit.path.ends_with("src/lib.rs"))
     );
 
+    Ok(())
+}
+
+#[test]
+fn navigator_insights_command_outputs_sections() -> Result<()> {
+    let codex_home = TempDir::new()?;
+    let project_dir = TempDir::new()?;
+    let project_root = project_dir.path();
+    std::fs::create_dir_all(project_root.join("src"))?;
+    std::fs::write(
+        project_root.join("src/lib.rs"),
+        "// TODO: hot spot\npub fn hot_spot() {}\n",
+    )?;
+
+    let response = run_insights_command(codex_home.path(), project_root, &["--limit", "2"])?;
+    assert!(!response.sections.is_empty());
     Ok(())
 }
 

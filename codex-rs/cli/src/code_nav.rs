@@ -40,6 +40,7 @@ use codex_navigator::proto::AtlasRequest;
 use codex_navigator::proto::ContextBanner;
 use codex_navigator::proto::ContextBucket;
 use codex_navigator::proto::CoverageReason;
+use codex_navigator::proto::DEFAULT_INSIGHTS_LIMIT;
 use codex_navigator::proto::DoctorReport;
 use codex_navigator::proto::DoctorWorkspace;
 use codex_navigator::proto::FileCategory;
@@ -48,7 +49,11 @@ use codex_navigator::proto::HealthRisk;
 use codex_navigator::proto::HealthSummary;
 use codex_navigator::proto::IngestKind;
 use codex_navigator::proto::IngestRunSummary;
+use codex_navigator::proto::InsightSectionKind;
+use codex_navigator::proto::InsightsRequest;
+use codex_navigator::proto::InsightsResponse;
 use codex_navigator::proto::NavHit;
+use codex_navigator::proto::NavigatorInsight;
 use codex_navigator::proto::ProfileRequest;
 use codex_navigator::proto::ProfileResponse;
 use codex_navigator::proto::SearchDiagnostics;
@@ -207,6 +212,28 @@ pub struct HistoryCommand {
 }
 
 #[derive(Debug, Parser)]
+pub struct InsightsCommand {
+    #[clap(skip)]
+    pub config_overrides: CliConfigOverrides,
+
+    /// Optional project root override.
+    #[arg(long = "project-root")]
+    pub project_root: Option<PathBuf>,
+
+    /// Limit the number of items per section.
+    #[arg(long = "limit", default_value_t = DEFAULT_INSIGHTS_LIMIT)]
+    pub limit: usize,
+
+    /// Restrict the output to one or more insight sections.
+    #[arg(long = "kind", value_enum, action = ArgAction::Append)]
+    pub kinds: Vec<InsightKindArg>,
+
+    /// Print the raw JSON response instead of the text view.
+    #[arg(long = "json", default_value_t = false)]
+    pub json: bool,
+}
+
+#[derive(Debug, Parser)]
 pub struct RepeatCommand {
     #[clap(skip)]
     pub config_overrides: CliConfigOverrides,
@@ -334,6 +361,23 @@ pub enum FocusMode {
 pub enum FlowName {
     AuditToolchain,
     TraceFeatureFlag,
+}
+
+#[derive(Clone, Debug, ValueEnum)]
+pub enum InsightKindArg {
+    Attention,
+    Lint,
+    Ownership,
+}
+
+impl InsightKindArg {
+    fn to_proto(&self) -> InsightSectionKind {
+        match self {
+            InsightKindArg::Attention => InsightSectionKind::AttentionHotspots,
+            InsightKindArg::Lint => InsightSectionKind::LintRisks,
+            InsightKindArg::Ownership => InsightSectionKind::OwnershipGaps,
+        }
+    }
 }
 
 pub(crate) fn focus_label(mode: FocusMode) -> &'static str {
@@ -608,6 +652,7 @@ pub enum NavigatorSubcommand {
     Atlas(AtlasCommand),
     Facet(FacetCommand),
     History(HistoryCommand),
+    Insights(InsightsCommand),
     Repeat(RepeatCommand),
     Pin(PinCommand),
     Flow(FlowCommand),
@@ -868,6 +913,34 @@ pub async fn run_history(mut cmd: HistoryCommand) -> Result<()> {
     }
     for (idx, item) in rows.into_iter().enumerate() {
         print_history_entry(idx, &item, now, !cmd.pinned, true);
+    }
+    Ok(())
+}
+
+pub async fn run_insights(mut cmd: InsightsCommand) -> Result<()> {
+    let client = build_client(cmd.project_root.take()).await?;
+    let mut kinds: Vec<InsightSectionKind> = Vec::new();
+    for arg in &cmd.kinds {
+        let kind = arg.to_proto();
+        if !kinds.contains(&kind) {
+            kinds.push(kind);
+        }
+    }
+    let mut limit = cmd.limit;
+    if limit == 0 {
+        limit = DEFAULT_INSIGHTS_LIMIT;
+    }
+    let request = InsightsRequest {
+        schema_version: proto::PROTOCOL_VERSION,
+        project_root: None,
+        limit,
+        kinds,
+    };
+    let response = client.insights(request).await?;
+    if cmd.json {
+        println!("{}", serde_json::to_string_pretty(&response)?);
+    } else {
+        print_insights_text(&response);
     }
     Ok(())
 }
@@ -1350,6 +1423,71 @@ fn print_history_actions(idx: usize, item: &HistoryItem) {
             );
         }
     }
+}
+
+fn print_insights_text(response: &InsightsResponse) {
+    println!("insights generated at {}", response.generated_at);
+    if response.sections.is_empty() {
+        println!("no navigator insights available yet");
+        return;
+    }
+    for section in &response.sections {
+        println!();
+        println!("{}", section.title);
+        if let Some(summary) = &section.summary {
+            println!("  {summary}");
+        }
+        if section.items.is_empty() {
+            println!("  (no candidates)");
+            continue;
+        }
+        for (idx, item) in section.items.iter().enumerate() {
+            println!("  {}. {} (score {:.1})", idx + 1, item.path, item.score);
+            let meta = insight_metadata(item);
+            if !meta.is_empty() {
+                println!("     {}", meta.join(" · "));
+            }
+            if !item.reasons.is_empty() {
+                println!("     reasons: {}", item.reasons.join(" · "));
+            }
+        }
+    }
+}
+
+fn insight_metadata(item: &NavigatorInsight) -> Vec<String> {
+    let mut parts = Vec::new();
+    if !item.owners.is_empty() {
+        parts.push(format!("owners {}", item.owners.join("/")));
+    } else {
+        parts.push("owners –".to_string());
+    }
+    if !item.categories.is_empty() {
+        let cats = item
+            .categories
+            .iter()
+            .map(|cat| category_label(cat))
+            .collect::<Vec<_>>()
+            .join("/");
+        parts.push(format!("categories {cats}"));
+    }
+    if item.line_count > 0 {
+        parts.push(format!("{} lines", item.line_count));
+    }
+    parts.push(if item.recent {
+        "recent".to_string()
+    } else {
+        format!("{}d old", item.freshness_days)
+    });
+    if item.attention_density > 0 {
+        parts.push(format!("attention {}", item.attention_density));
+    }
+    if item.lint_density > 0 {
+        parts.push(format!("lint {}", item.lint_density));
+    }
+    if item.churn > 0 {
+        parts.push(format!("churn {}", item.churn));
+    }
+    parts
 }
 
 fn capture_history_hits(hits: &[NavHit]) -> Vec<HistoryHit> {
@@ -3423,8 +3561,8 @@ fn print_json<T: serde::Serialize>(value: &T) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use codex_navigator::proto::HealthIssue;
     use codex_navigator::proto::FacetSuggestionKind;
+    use codex_navigator::proto::HealthIssue;
 
     fn sample_nav_command() -> NavCommand {
         NavCommand {

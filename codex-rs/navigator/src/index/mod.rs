@@ -37,6 +37,7 @@ use crate::index::model::FileEntry;
 use crate::index::model::IndexSnapshot;
 use crate::index::model::SymbolRecord;
 use crate::index::text::TextIngestor;
+use crate::insights::build_insights;
 use crate::project::ProjectProfile;
 use crate::proto::ActiveFilters;
 use crate::proto::AtlasSnapshot;
@@ -59,6 +60,8 @@ use crate::proto::HealthSummary;
 use crate::proto::IndexState;
 use crate::proto::IndexStatus;
 use crate::proto::IngestKind;
+use crate::proto::InsightsRequest;
+use crate::proto::InsightsResponse;
 use crate::proto::NavHit;
 use crate::proto::OpenRequest;
 use crate::proto::OpenResponse;
@@ -842,6 +845,14 @@ impl IndexCoordinator {
     pub async fn atlas_snapshot(&self) -> AtlasSnapshot {
         let snapshot = self.inner.snapshot.read().await;
         snapshot.atlas.clone()
+    }
+
+    pub async fn insights(&self, mut request: InsightsRequest) -> InsightsResponse {
+        if request.limit == 0 {
+            request.limit = 5;
+        }
+        let snapshot = self.inner.snapshot.read().await;
+        build_insights(&snapshot, &request)
     }
 
     async fn update_status(&self, state: IndexState, counts: Option<(usize, usize)>) {

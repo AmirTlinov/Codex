@@ -255,6 +255,22 @@ agents.
   старых запросов используйте `--history-index N` или простое `--undo` (эквивалент записи `[1]`).
   Просмотреть последние идентификаторы и активные фильтры можно через `codex navigator history`.
 
+### Workspace Insights
+
+- `codex navigator insights` печатает горячие зоны по трём секциям: TODO/attention hotspots,
+  lint-риски и ownership gaps (файлы без CODEOWNERS с высоким churn/TODO). По умолчанию команда
+  выводит компактный текст (секция → топ N путей с причинами), `--json` возвращает тот же payload,
+  что отдаёт `/v1/nav/insights`.
+- Флаги `--limit` и `--kind attention|lint|ownership` управляют объёмом и секциями. Фильтры можно
+  комбинировать; CLI автоматически удаляет дубликаты и приводит limit к ≥1.
+- Инструментальный вызов: `{"action":"insights","limit":5,"kinds":["lint_risks"]}`.
+  Ответ содержит `generated_at`, массив секций (`kind`, `title`, `summary`) и хиты с метаданными
+  (`owners`, `categories`, `line_count`, `score`, `reasons`). Handler возвращает JSON напрямую, так
+  что ИИ-агент может читать/транслировать эти данные без участия CLI.
+- Комбинируйте insights с `atlas summary` или `facet` для drill-down: например, берём первые lint
+  риски и сразу выполняем `codex navigator facet --path <path>` либо `nav <query>` с активным
+  owner/категорией на основании выданных сигналов.
+
 ## Streaming Diagnostics
 
 - `/v1/nav/search` now streams NDJSON events. Clients should expect this sequence:

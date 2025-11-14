@@ -5,6 +5,8 @@ use crate::proto::AtlasRequest;
 use crate::proto::AtlasResponse;
 use crate::proto::DoctorReport;
 use crate::proto::IndexStatus;
+use crate::proto::InsightsRequest;
+use crate::proto::InsightsResponse;
 use crate::proto::OpenRequest;
 use crate::proto::OpenResponse;
 use crate::proto::PROTOCOL_VERSION;
@@ -133,6 +135,7 @@ pub async fn run_daemon(opts: DaemonOptions) -> Result<()> {
         .route("/v1/nav/open", post(open_handler))
         .route("/v1/nav/snippet", post(snippet_handler))
         .route("/v1/nav/atlas", post(atlas_handler))
+        .route("/v1/nav/insights", post(insights_handler))
         .route("/v1/nav/profile", post(profile_handler))
         .route("/v1/nav/reindex", post(reindex_handler))
         .route("/v1/nav/settings", post(settings_handler))
@@ -239,6 +242,18 @@ async fn atlas_handler(
     let workspace = state.workspace(request.project_root.clone()).await?;
     let snapshot = workspace.coordinator().atlas_snapshot().await;
     Ok(Json(AtlasResponse { snapshot }))
+}
+
+async fn insights_handler(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(request): Json<InsightsRequest>,
+) -> Result<Json<InsightsResponse>, AppError> {
+    ensure_authorized(&state, &headers)?;
+    ensure_protocol_version(request.schema_version)?;
+    let workspace = state.workspace(request.project_root.clone()).await?;
+    let response = workspace.coordinator().insights(request).await;
+    Ok(Json(response))
 }
 
 async fn reindex_handler(

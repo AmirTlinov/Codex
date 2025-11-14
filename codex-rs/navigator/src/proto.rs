@@ -460,6 +460,71 @@ pub struct AtlasSnapshot {
     pub root: Option<AtlasNode>,
 }
 
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, Hash)]
+#[serde(rename_all = "snake_case")]
+pub enum InsightSectionKind {
+    AttentionHotspots,
+    LintRisks,
+    OwnershipGaps,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+#[skip_serializing_none]
+pub struct NavigatorInsight {
+    pub path: String,
+    pub score: f32,
+    #[serde(default)]
+    pub reasons: Vec<String>,
+    #[serde(default)]
+    pub owners: Vec<String>,
+    #[serde(default)]
+    pub categories: Vec<FileCategory>,
+    pub line_count: u32,
+    pub attention: u32,
+    pub attention_density: u32,
+    pub lint_suppressions: u32,
+    pub lint_density: u32,
+    pub churn: u32,
+    pub freshness_days: u32,
+    pub recent: bool,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+#[skip_serializing_none]
+pub struct InsightSection {
+    pub kind: InsightSectionKind,
+    pub title: String,
+    #[serde(default)]
+    pub summary: Option<String>,
+    pub items: Vec<NavigatorInsight>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+#[skip_serializing_none]
+pub struct InsightsResponse {
+    pub generated_at: OffsetDateTime,
+    #[serde(default)]
+    pub sections: Vec<InsightSection>,
+}
+
+pub const DEFAULT_INSIGHTS_LIMIT: usize = 5;
+
+pub const fn default_insights_limit() -> usize {
+    DEFAULT_INSIGHTS_LIMIT
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+#[skip_serializing_none]
+pub struct InsightsRequest {
+    pub schema_version: u32,
+    #[serde(default)]
+    pub project_root: Option<String>,
+    #[serde(default = "default_insights_limit")]
+    pub limit: usize,
+    #[serde(default)]
+    pub kinds: Vec<InsightSectionKind>,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 #[skip_serializing_none]
 pub struct IndexStatus {
