@@ -491,18 +491,22 @@ impl BackgroundShellManager {
         process.start_mode = BackgroundShellStartMode::Background;
         let budget_secs = foreground_budget().as_secs();
         let label = process.label();
+        let pid_suffix = process
+            .pid
+            .map(|pid| format!(" (pid {pid})"))
+            .unwrap_or_default();
         let (message, promoted_by) = match reason {
             PromotionReason::Timeout => (
                 format!(
-                    "{} ({}) moved to background after {:.0}s foreground budget",
-                    label, process.shell_id, budget_secs,
+                    "{} ({}) moved to background after {:.0}s foreground budget{}",
+                    label, process.shell_id, budget_secs, pid_suffix,
                 ),
                 Some(BackgroundShellEndedBy::System),
             ),
             PromotionReason::UserRequest => (
                 format!(
-                    "{} ({}) moved to background by user request",
-                    label, process.shell_id,
+                    "{} ({}) moved to background by user request{}",
+                    label, process.shell_id, pid_suffix,
                 ),
                 Some(BackgroundShellEndedBy::User),
             ),
@@ -876,12 +880,19 @@ impl BackgroundShellManager {
         }
         process.update_foreground_state(ForegroundLifecycle::Completed);
         let label = process.label();
+        let pid_suffix = process
+            .pid
+            .map(|pid| format!(" (pid {pid})"))
+            .unwrap_or_default();
         let message = if event.exit_code == 0 {
-            format!("{label} ({}) completed successfully", process.shell_id)
+            format!(
+                "{label} ({}) completed successfully{}",
+                process.shell_id, pid_suffix
+            )
         } else {
             format!(
-                "{label} ({}) exited with code {}",
-                process.shell_id, event.exit_code
+                "{label} ({}) exited with code {}{}",
+                process.shell_id, event.exit_code, pid_suffix
             )
         };
         let event_to_send =
@@ -1482,17 +1493,21 @@ mod tests {
             friendly_label: Some("sleep 1".to_string()),
             ended_by: None,
             exit_code: None,
-            pid: None,
+            pid: Some(1234),
             command: None,
-            message: None,
+            message: Some("sleep 1 (shell-42) moved (pid 1234)".to_string()),
             action_result: None,
             last_log: None,
             promoted_by: Some(BackgroundShellEndedBy::System),
             tail: None,
             state: None,
         };
-        let note = system_note_for_event(&event, "sleep 1 (shell-42) moved");
-        assert_eq!(note.as_deref(), Some("[shell-42] sleep 1 (shell-42) moved"));
+        let reason = "sleep 1 (shell-42) moved (pid 1234)";
+        let note = system_note_for_event(&event, reason);
+        assert_eq!(
+            note.as_deref(),
+            Some("[shell-42] sleep 1 (shell-42) moved (pid 1234)")
+        );
     }
 
     #[test]
