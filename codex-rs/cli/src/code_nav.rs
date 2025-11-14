@@ -1072,6 +1072,9 @@ pub async fn run_flow(mut cmd: FlowCommand) -> Result<()> {
         "flow: {} — {}",
         definition.display_name, definition.description
     );
+    if let Some(summary) = fetch_hotspot_summary(&client).await {
+        print_flow_hotspot_summary(&summary);
+    }
     if cmd.dry_run {
         for (idx, step) in definition.steps.iter().enumerate() {
             println!("  [{:>2}] {}", idx + 1, step.title);
@@ -1111,6 +1114,46 @@ pub async fn run_flow(mut cmd: FlowCommand) -> Result<()> {
         .await?;
     }
     Ok(())
+}
+
+async fn fetch_hotspot_summary(client: &NavigatorClient) -> Option<InsightTrendSummary> {
+    let report = client.doctor().await.ok()?;
+    let root = client
+        .project()
+        .project_root()
+        .to_string_lossy()
+        .to_string();
+    let workspace = report
+        .workspaces
+        .iter()
+        .find(|ws| ws.project_root == root)?;
+    workspace.health.as_ref()?.hotspot_summary.clone()
+}
+
+fn print_flow_hotspot_summary(summary: &InsightTrendSummary) {
+    println!("hotspot trends before flow ({}):", summary.recorded_at);
+    if summary.trends.is_empty() {
+        println!("  none recorded yet");
+        return;
+    }
+    for trend in summary.trends.iter().take(3) {
+        if !trend.new_paths.is_empty() {
+            println!(
+                "  +{} {} (e.g. {})",
+                trend.new_paths.len(),
+                insight_kind_label(trend.kind),
+                trend.new_paths[0]
+            );
+        }
+        if !trend.resolved_paths.is_empty() {
+            println!(
+                "  -{} {} (e.g. {})",
+                trend.resolved_paths.len(),
+                insight_kind_label(trend.kind),
+                trend.resolved_paths[0]
+            );
+        }
+    }
 }
 
 pub async fn run_eval(mut cmd: EvalCommand) -> Result<()> {

@@ -3,6 +3,7 @@ use anyhow::Result;
 use crate::client::NavigatorClient;
 use crate::planner::NavigatorSearchArgs;
 use crate::proto::InsightSectionKind;
+use crate::proto::InsightTrendSummary;
 use crate::proto::InsightsRequest;
 use crate::proto::NavigatorInsight;
 use crate::proto::PROTOCOL_VERSION;
@@ -28,6 +29,11 @@ pub async fn maybe_seed_hotspot_hint(
         kinds: Vec::new(),
     };
     let response = client.insights(request).await?;
+    if let Some(summary) = response.trend_summary.as_ref()
+        && let Some(text) = format_trend_hint(summary)
+    {
+        args.hints.push(text);
+    }
     let marker = response.sections.iter().find_map(|section| {
         section.items.first().map(|item| HotspotMarker {
             section: section.kind,
@@ -61,6 +67,26 @@ pub fn format_hotspot_hint(marker: &HotspotMarker) -> String {
         parts.join(" · ")
     };
     format!("{} ({summary})", marker.insight.path)
+}
+
+pub fn format_trend_hint(summary: &InsightTrendSummary) -> Option<String> {
+    let new_total: usize = summary
+        .trends
+        .iter()
+        .map(|trend| trend.new_paths.len())
+        .sum();
+    let resolved_total: usize = summary
+        .trends
+        .iter()
+        .map(|trend| trend.resolved_paths.len())
+        .sum();
+    if new_total == 0 && resolved_total == 0 {
+        return None;
+    }
+    Some(format!(
+        "hotspot trend @ {}: +{} / -{}",
+        summary.recorded_at, new_total, resolved_total
+    ))
 }
 
 fn should_seed_hotspot_hint(args: &NavigatorSearchArgs) -> bool {

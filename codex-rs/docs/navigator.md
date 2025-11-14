@@ -279,6 +279,8 @@ agents.
 - Каждая выдача `insights` формирует `trend_summary`: сравнение с предыдущим снимком (новые/исчезнувшие
   hotspots). Этот же summary прикладывается к `navigator doctor`/streamed diagnostics, поэтому секция
   health panel теперь показывает «hotspots @ <timestamp>» с количеством новых/закрытых участков.
+- Команды `codex navigator flow ...` теперь перед запуском шагов показывают итоги trend_summary, чтобы
+  сразу подсветить, где выросли TODO/lint/ownership пики и сто́ит ли менять план до выполнения flow.
 
 ## Streaming Diagnostics
 
