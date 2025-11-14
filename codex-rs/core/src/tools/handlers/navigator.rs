@@ -33,6 +33,7 @@ use codex_navigator::plan_search_request;
 use codex_navigator::planner::NavigatorSearchArgs;
 use codex_navigator::planner::SearchPlannerError;
 use codex_navigator::planner::apply_active_filters_to_args;
+use codex_navigator::planner::apply_facet_suggestion;
 use codex_navigator::planner::remove_active_filters_from_args;
 use codex_navigator::proto::ActiveFilters;
 use codex_navigator::proto::AtlasNode;
@@ -202,6 +203,7 @@ impl ToolHandler for NavigatorHandler {
                 mode,
                 index,
                 pinned,
+                suggestion,
             } => {
                 let history = QueryHistoryStore::new(client.queries_dir());
                 let args = match mode {
@@ -219,6 +221,14 @@ impl ToolHandler for NavigatorHandler {
                     )?,
                     HistoryActionKind::Repeat => {
                         build_history_repeat_args(&history, index, pinned)?
+                    }
+                    HistoryActionKind::Suggestion => {
+                        let Some(sugg_index) = suggestion else {
+                            return Err(FunctionCallError::RespondToModel(
+                                "history suggestion requires suggestion index".to_string(),
+                            ));
+                        };
+                        build_history_suggestion_args(&history, index, pinned, sugg_index)?
                     }
                 };
                 let result = run_search_flow(
@@ -509,6 +519,37 @@ fn build_history_repeat_args(
     let mut args = recorded.into_args();
     args.hints
         .push(format!("replayed {}", history_label(index, pinned)));
+    Ok(args)
+}
+
+fn build_history_suggestion_args(
+    history: &QueryHistoryStore,
+    index: usize,
+    pinned: bool,
+    suggestion_index: usize,
+) -> Result<NavigatorSearchArgs, FunctionCallError> {
+    let item = load_history_item(history, index, pinned)?;
+    let suggestion = item
+        .facet_suggestions
+        .get(suggestion_index)
+        .ok_or_else(|| {
+            FunctionCallError::RespondToModel(format!(
+                "{} suggestion[{suggestion_index}] not available",
+                history_label(index, pinned)
+            ))
+        })?;
+    let mut args = NavigatorSearchArgs::default();
+    args.refine = Some(item.query_id.to_string());
+    args.inherit_filters = true;
+    if let Some(filters) = item.filters.as_ref() {
+        apply_active_filters_to_args(&mut args, filters);
+    }
+    apply_facet_suggestion(&mut args, suggestion).map_err(map_planner_error)?;
+    args.hints.push(format!(
+        "applied {} suggestion[{suggestion_index}] {}",
+        history_label(index, pinned),
+        suggestion.label
+    ));
     Ok(args)
 }
 

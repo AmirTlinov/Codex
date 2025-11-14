@@ -112,7 +112,10 @@ agents.
     посмотреть, что именно лежит в истории, используйте `{"action":"history_list","limit":5,"contains":"planner"}`
     (или короткое `history list --limit 5 --contains planner`). Ответ вернёт массив записей (query_id, возраст,
     фильтры, хиты, suggestions, флаг repeat), так что можно программно выбрать нужный индекс и тут же вызвать
-    `history stack`/`history repeat`.
+    `history stack`/`history repeat`. Чтобы применить сохранённую facet suggestion без CLI, вызывайте
+    `{"action":"history","mode":"suggestion","index":0,"suggestion":1}` или короткое
+    `history suggestion --index 0 --suggestion 1`: Navigator наследует фильтры предыдущего поиска, добавляет
+    выбранную подсказку и сразу запускает refined запрос.
 16. `--focus` управляет уровнем шума в текстовом выводе: `auto` (по умолчанию) подсвечивает
     docs/tests/deps, когда они доминируют; режимы `code/docs/tests/deps/all` можно задавать
     явно. Отфильтрованные хиты не теряются — CLI показывает счётчик suppressed и напоминает

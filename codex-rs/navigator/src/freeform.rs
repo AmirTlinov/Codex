@@ -29,6 +29,8 @@ pub enum NavigatorPayload {
         index: usize,
         #[serde(default)]
         pinned: bool,
+        #[serde(default)]
+        suggestion: Option<usize>,
     },
     HistoryList {
         #[serde(default)]
@@ -46,6 +48,7 @@ pub enum HistoryActionKind {
     Stack,
     ClearStack,
     Repeat,
+    Suggestion,
 }
 
 const DEFAULT_HISTORY_LIST_LIMIT: usize = 10;
@@ -394,38 +397,94 @@ fn parse_quick_history(rest: &str) -> Result<NavigatorPayload, PayloadParseError
     let mut mode = HistoryActionKind::Repeat;
     let mut index: usize = 0;
     let mut pinned = false;
-    for token in tokens {
+    let mut suggestion_index: Option<usize> = None;
+    let mut i = 0;
+    while i < tokens.len() {
+        let token = &tokens[i];
         if token.eq_ignore_ascii_case("--pinned") || token.eq_ignore_ascii_case("-p") {
             pinned = true;
+            i += 1;
             continue;
         }
         if let Some(value) = token.strip_prefix("--index=") {
-            index = value
-                .parse::<usize>()
-                .map_err(|_| PayloadParseError::new(format!("invalid history index `{value}`")))?;
+            index = parse_history_index(value)?;
+            i += 1;
+            continue;
+        }
+        if token.eq_ignore_ascii_case("--index") {
+            i += 1;
+            let Some(value) = tokens.get(i) else {
+                return Err(PayloadParseError::new("--index requires a value"));
+            };
+            index = parse_history_index(value)?;
+            i += 1;
+            continue;
+        }
+        if let Some(value) = token.strip_prefix("suggestion=") {
+            suggestion_index = Some(parse_suggestion_index(value)?);
+            mode = HistoryActionKind::Suggestion;
+            i += 1;
+            continue;
+        }
+        if token.eq_ignore_ascii_case("--suggestion") {
+            i += 1;
+            let Some(value) = tokens.get(i) else {
+                return Err(PayloadParseError::new("--suggestion requires a value"));
+            };
+            suggestion_index = Some(parse_suggestion_index(value)?);
+            mode = HistoryActionKind::Suggestion;
+            i += 1;
+            continue;
+        }
+        if token.eq_ignore_ascii_case("suggestion") || token.eq_ignore_ascii_case("suggest") {
+            i += 1;
+            let Some(value) = tokens.get(i) else {
+                return Err(PayloadParseError::new(
+                    "history suggestion requires an index",
+                ));
+            };
+            if value.starts_with('-') {
+                return Err(PayloadParseError::new(
+                    "history suggestion requires an index",
+                ));
+            }
+            suggestion_index = Some(parse_suggestion_index(value)?);
+            mode = HistoryActionKind::Suggestion;
+            i += 1;
             continue;
         }
         let lowered = token.to_ascii_lowercase();
         if lowered.chars().all(|ch| ch.is_ascii_digit()) {
             index = lowered.parse::<usize>().unwrap_or(0);
+            i += 1;
             continue;
         }
         match lowered.as_str() {
             "stack" => mode = HistoryActionKind::Stack,
             "clear" | "clear-stack" | "remove" => mode = HistoryActionKind::ClearStack,
             "repeat" | "redo" => mode = HistoryActionKind::Repeat,
-            "" => {}
+            "" => {
+                i += 1;
+                continue;
+            }
             _ => {
                 return Err(PayloadParseError::new(format!(
                     "unsupported history token `{token}`"
                 )));
             }
         }
+        i += 1;
+    }
+    if matches!(mode, HistoryActionKind::Suggestion) && suggestion_index.is_none() {
+        return Err(PayloadParseError::new(
+            "history suggestion requires --suggestion <index>",
+        ));
     }
     Ok(NavigatorPayload::History {
         mode,
         index,
         pinned,
+        suggestion: suggestion_index,
     })
 }
 
@@ -479,6 +538,18 @@ fn parse_quick_history_list(tokens: &[String]) -> Result<NavigatorPayload, Paylo
         limit,
         contains,
     })
+}
+
+fn parse_history_index(value: &str) -> Result<usize, PayloadParseError> {
+    value
+        .parse::<usize>()
+        .map_err(|_| PayloadParseError::new(format!("invalid history index `{value}`")))
+}
+
+fn parse_suggestion_index(value: &str) -> Result<usize, PayloadParseError> {
+    value
+        .parse::<usize>()
+        .map_err(|_| PayloadParseError::new(format!("invalid suggestion index `{value}`")))
 }
 
 fn parse_snippet_context_token(token: &str) -> Result<usize, PayloadParseError> {
@@ -1516,10 +1587,12 @@ mod tests {
                 mode,
                 index,
                 pinned,
+                suggestion,
             } => {
                 assert!(matches!(mode, HistoryActionKind::Repeat));
                 assert_eq!(index, 0);
                 assert!(!pinned);
+                assert!(suggestion.is_none());
             }
             other => panic!("unexpected payload: {other:?}"),
         }
@@ -1532,10 +1605,12 @@ mod tests {
                 mode,
                 index,
                 pinned,
+                suggestion,
             } => {
                 assert!(matches!(mode, HistoryActionKind::Stack));
                 assert_eq!(index, 4);
                 assert!(pinned);
+                assert!(suggestion.is_none());
             }
             other => panic!("unexpected payload: {other:?}"),
         }
@@ -1573,6 +1648,33 @@ mod tests {
             }
             other => panic!("unexpected payload: {other:?}"),
         }
+    }
+
+    #[test]
+    fn parse_quick_history_suggestion_parses_indices() {
+        match parse_quick_history("suggestion 1 --index 2 --pinned").expect("history suggestion") {
+            NavigatorPayload::History {
+                mode,
+                index,
+                pinned,
+                suggestion,
+            } => {
+                assert!(matches!(mode, HistoryActionKind::Suggestion));
+                assert_eq!(index, 2);
+                assert!(pinned);
+                assert_eq!(suggestion, Some(1));
+            }
+            other => panic!("unexpected payload: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_quick_history_suggestion_requires_value() {
+        let err = parse_quick_history("suggestion --index 1").unwrap_err();
+        assert!(
+            err.message()
+                .contains("history suggestion requires an index")
+        );
     }
 
     #[test]
