@@ -1,0 +1,21 @@
+[package]
+edition = "2024"
+name = "codex-code-chunker"
+version = { workspace = true }
+
+[lib]
+name = "codex_code_chunker"
+path = "src/lib.rs"
+
+[dependencies]
+anyhow = { workspace = true }
+log = { workspace = true }
+serde = { workspace = true, features = ["derive"] }
+thiserror = { workspace = true }
+tree-sitter = { workspace = true }
+tree-sitter-bash = { workspace = true }
+
+[dev-dependencies]
+pretty_assertions = { workspace = true }
+tempfile = { workspace = true }
+test-log = { workspace = true }

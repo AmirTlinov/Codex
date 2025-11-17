@@ -1,0 +1,28 @@
+[package]
+name = "codex-codebase-retrieval"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+# Internal
+codex-codebase-indexer = { workspace = true }
+codex-vector-store = { workspace = true }
+codex-embeddings = { workspace = true }
+
+# External
+anyhow = { workspace = true }
+log = { workspace = true }
+lru = { workspace = true }
+nucleo-matcher = { workspace = true }
+serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true, features = ["full"] }
+
+[dev-dependencies]
+pretty_assertions = { workspace = true }
+tempfile = { workspace = true }
+test-log = { workspace = true }
+
+[lints]
+workspace = true

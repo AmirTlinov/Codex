@@ -1,0 +1,26 @@
+[package]
+edition = "2024"
+name = "codex-vector-store"
+version = { workspace = true }
+
+[lib]
+name = "codex_vector_store"
+path = "src/lib.rs"
+
+[dependencies]
+anyhow = { workspace = true }
+arrow = "54"
+codex-embeddings = { workspace = true }
+futures = { workspace = true }
+lancedb = "0.22"
+log = { workspace = true }
+serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true, features = ["full"] }
+
+[dev-dependencies]
+pretty_assertions = { workspace = true }
+tempfile = { workspace = true }
+test-log = { workspace = true }
+tokio-test = { workspace = true }

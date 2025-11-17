@@ -13,9 +13,15 @@ members = [
     "cloud-tasks",
     "cloud-tasks-client",
     "cli",
+    "code-chunker",
+    "codebase-indexer",
+    "codebase-retrieval",
+    "codebase-context",
     "common",
     "core",
+    "embeddings",
     "exec",
+    "vector-store",
     "execpolicy",
     "execpolicy2",
     "keyring-store",
@@ -63,8 +69,13 @@ codex-arg0 = { path = "arg0" }
 codex-async-utils = { path = "async-utils" }
 codex-backend-client = { path = "backend-client" }
 codex-chatgpt = { path = "chatgpt" }
+codex-code-chunker = { path = "code-chunker" }
+codex-codebase-indexer = { path = "codebase-indexer" }
+codex-codebase-retrieval = { path = "codebase-retrieval" }
+codex-codebase-context = { path = "codebase-context" }
 codex-common = { path = "common" }
 codex-core = { path = "core" }
+codex-embeddings = { path = "embeddings" }
 codex-exec = { path = "exec" }
 codex-feedback = { path = "feedback" }
 codex-file-search = { path = "file-search" }
@@ -89,6 +100,7 @@ codex-utils-pty = { path = "utils/pty" }
 codex-utils-readiness = { path = "utils/readiness" }
 codex-utils-string = { path = "utils/string" }
 codex-utils-tokenizer = { path = "utils/tokenizer" }
+codex-vector-store = { path = "vector-store" }
 codex-windows-sandbox = { path = "windows-sandbox-rs" }
 core_test_support = { path = "core/tests/common" }
 mcp-types = { path = "mcp-types" }
@@ -143,6 +155,7 @@ maplit = "1.0.2"
 mime_guess = "2.0.5"
 multimap = "0.10.0"
 notify = "8.2.0"
+num_cpus = "1.16"
 nucleo-matcher = "0.3.1"
 once_cell = "1"
 openssl-sys = "*"

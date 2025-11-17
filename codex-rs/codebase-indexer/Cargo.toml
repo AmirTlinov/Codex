@@ -1,0 +1,32 @@
+[package]
+name = "codex-codebase-indexer"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+# Internal
+codex-code-chunker = { workspace = true }
+codex-embeddings = { workspace = true }
+codex-vector-store = { workspace = true }
+codex-git = { workspace = true }
+
+# External
+anyhow = { workspace = true }
+ignore = { workspace = true }
+log = { workspace = true }
+notify = { workspace = true }
+num_cpus = { workspace = true }
+serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true }
+sha2 = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true, features = ["full"] }
+walkdir = { workspace = true }
+
+[dev-dependencies]
+pretty_assertions = { workspace = true }
+tempfile = { workspace = true }
+test-log = { workspace = true }
+
+[lints]
+workspace = true
