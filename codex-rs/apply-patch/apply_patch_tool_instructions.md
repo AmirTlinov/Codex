@@ -1,75 +1,86 @@
-## `apply_patch`
+## apply_patch: deterministic patch format
 
-Use the `apply_patch` shell command to edit files.
-Your patch language is a stripped‑down, file‑oriented diff format designed to be easy to parse and safe to apply. You can think of it as a high‑level envelope:
-
-*** Begin Patch
-[ one or more file sections ]
-*** End Patch
-
-Within that envelope, you get a sequence of file operations.
-You MUST include a header to specify the action you are taking.
-Each operation starts with one of three headers:
-
-*** Add File: <path> - create a new file. Every following line is a + line (the initial contents).
-*** Delete File: <path> - remove an existing file. Nothing follows.
-*** Update File: <path> - patch an existing file in place (optionally with a rename).
-
-May be immediately followed by *** Move to: <new path> if you want to rename the file.
-Then one or more “hunks”, each introduced by @@ (optionally followed by a hunk header).
-Within a hunk each line starts with:
-
-For instructions on [context_before] and [context_after]:
-- By default, show 3 lines of code immediately above and 3 lines immediately below each change. If a change is within 3 lines of a previous change, do NOT duplicate the first change’s [context_after] lines in the second change’s [context_before] lines.
-- If 3 lines of context is insufficient to uniquely identify the snippet of code within the file, use the @@ operator to indicate the class or function to which the snippet belongs. For instance, we might have:
-@@ class BaseClass
-[3 lines of pre-context]
-- [old_code]
-+ [new_code]
-[3 lines of post-context]
-
-- If a code block is repeated so many times in a class or function such that even a single `@@` statement and 3 lines of context cannot uniquely identify the snippet of code, you can use multiple `@@` statements to jump to the right context. For instance:
-
-@@ class BaseClass
-@@ 	 def method():
-[3 lines of pre-context]
-- [old_code]
-+ [new_code]
-[3 lines of post-context]
-
-The full grammar definition is below:
-Patch := Begin { FileOp } End
-Begin := "*** Begin Patch" NEWLINE
-End := "*** End Patch" NEWLINE
-FileOp := AddFile | DeleteFile | UpdateFile
-AddFile := "*** Add File: " path NEWLINE { "+" line NEWLINE }
-DeleteFile := "*** Delete File: " path NEWLINE
-UpdateFile := "*** Update File: " path NEWLINE [ MoveTo ] { Hunk }
-MoveTo := "*** Move to: " newPath NEWLINE
-Hunk := "@@" [ header ] NEWLINE { HunkLine } [ "*** End of File" NEWLINE ]
-HunkLine := (" " | "-" | "+") text NEWLINE
-
-A full patch can combine several operations:
-
-*** Begin Patch
-*** Add File: hello.txt
-+Hello world
-*** Update File: src/app.py
-*** Move to: src/main.py
-@@ def greet():
--print("Hi")
-+print("Hello, world!")
-*** Delete File: obsolete.txt
-*** End Patch
-
-It is important to remember:
-
-- You must include a header with your intended action (Add/Delete/Update)
-- You must prefix new lines with `+` even when creating a new file
-- File references can only be relative, NEVER ABSOLUTE.
-
-You can invoke apply_patch like:
-
+### Envelope
 ```
-shell {"command":["apply_patch","*** Begin Patch\n*** Add File: hello.txt\n+Hello, world!\n*** End Patch\n"]}
+*** Begin Patch
+...operations...
+*** End Patch
 ```
+- Paths are workspace-relative. One header = one file.
+- `+` required for every body line in Add/Symbol/Ast sections.
+
+### Operations (pick per block)
+| Header | Purpose | Notes |
+| --- | --- | --- |
+| `*** Add File: path` | Create/replace file | Body = `+` lines only |
+| `*** Delete File: path` | Remove file | No body |
+| `*** Update File: path` | Text diff | Hunks start with `@@`; optional `*** Move to: new_path` immediately after header |
+| `*** Insert Before/After Symbol: file::Type::item` | Insert lines near symbol | Body = `+` lines; symbol path uses `::` |
+| `*** Replace Symbol Body: file::Type::item` | Replace function/class body | Body = `+` lines |
+| `*** Ast Operation: path key=value...` | Tree-sitter aware edits | See table below |
+| `*** Ast Script: refactors/foo.toml [format=toml|json|starlark] [root=…]` | Execute reusable script | Script must appear in `refactors/catalog.json` (path, version, name, sha256) |
+
+### AST Operation (`op=…`)
+- `rename-symbol symbol=a::b new_name=Foo [propagate=definition|file]`
+- `update-signature symbol=...` → payload = new header/signature.
+- `move-block symbol=... target=... position=before|after|replace|into-body|delete`
+- `update-imports` → payload lines `+add …` / `+remove …`.
+- `insert-attributes symbol=... placement=before|after|body-start` → payload = attributes.
+- `template mode=file-start|file-end|before-symbol|after-symbol|body-start|body-end [symbol=...]` → payload = template (`{{language}}`, `{{symbol}}`, `{{timestamp}}`).
+Platform auto-detects language; use `lang=` to override ambiguous extensions.
+
+### AST Script schema (TOML)
+```toml
+name = "AddInstrumentation"
+version = "0.3.0"
+
+[[steps]]
+path = "src/lib.rs"
+op = "rename"
+symbol = "worker::run"
+new_name = "run_with_metrics"
+
+[[steps]]
+path = "src/lib.rs"
+lang = "rust"
+query = "(function_item name: (identifier) @name (#match? @name \"^handle_\"))"
+capture = "name"
+op = "template"
+mode = "body-start"
+payload = ["tracing::info!(\"worker\", \"entering %s\");"]
+```
+- JSON scripts mirror the same keys. Starlark scripts must evaluate to the above dictionary.
+- Header `key=value` pairs (e.g., `feature=async`) become `{{feature}}` vars inside the script.
+
+### CLI shortcuts
+| Command | Effect |
+| --- | --- |
+| `apply_patch` | Dry-run (default) |
+| `apply_patch apply` | Write changes + auto-stage |
+| `… dry-run` / `… explain` | Explicit dry-run |
+| `… amend` | Reapply failed hunks from last report |
+| `… preview` | Dry-run + interactive unified diff previews per AST op |
+| `… scripts list [--json]` | Show `refactors/catalog.json` entries (path, version, hash, labels) |
+
+### Output contract
+- Human summary groups operations with `(+added, -removed)` counts.
+- JSON line: `{ "schema": "apply_patch/v2", "report": { … } }` containing operations, diagnostics, formatting/post-check results, `amendment_template` when relevant.
+- Failures leave workspace untouched; amendment template holds only the blocks that failed.
+
+### Examples
+**Rename + template
+```
+*** Begin Patch
+*** Ast Operation: src/lib.rs op=rename-symbol symbol=greet new_name=salute propagate=file
+*** Ast Operation: src/lib.rs op=template mode=body-start symbol=salute
++tracing::info!("salute called");
+*** End Patch
+```
+
+**Script invocation
+```
+*** Begin Patch
+*** Ast Script: refactors/add_metrics.toml feature=batch format=toml
+*** End Patch
+```
+- `refactors/catalog.json` must contain `{ path: "refactors/add_metrics.toml", version: "…", hash: "sha256:…" }`.
