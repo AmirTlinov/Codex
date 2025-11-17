@@ -16,6 +16,11 @@ tree-sitter = { workspace = true }
 tree-sitter-bash = { workspace = true }
 
 [dev-dependencies]
+criterion = { version = "0.5", features = ["html_reports"] }
 pretty_assertions = { workspace = true }
 tempfile = { workspace = true }
 test-log = { workspace = true }
+
+[[bench]]
+name = "chunker_bench"
+harness = false
