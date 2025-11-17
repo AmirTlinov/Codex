@@ -2,6 +2,7 @@ use anyhow::Result;
 use app_test_support::McpProcess;
 use app_test_support::create_final_assistant_message_sse_response;
 use app_test_support::create_mock_chat_completions_server;
+use app_test_support::create_mock_chat_completions_server_unchecked;
 use app_test_support::to_response;
 use codex_app_server_protocol::AddConversationListenerParams;
 use codex_app_server_protocol::AddConversationSubscriptionResponse;
@@ -75,6 +76,143 @@ async fn test_send_message_success() -> Result<()> {
     // Now exercise sendUserMessage twice.
     send_message("Hello", conversation_id, &mut mcp).await?;
     send_message("Hello again", conversation_id, &mut mcp).await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_raw_response_toggle_respected() -> Result<()> {
+    // Two responses: one per conversation.
+    // Using unchecked server because the test may complete before both conversations
+    // have finished sending their API requests.
+    let responses = vec![
+        create_final_assistant_message_sse_response("Done")?,
+        create_final_assistant_message_sse_response("Done")?,
+    ];
+    let server = create_mock_chat_completions_server_unchecked(responses).await;
+
+    let codex_home = TempDir::new()?;
+    create_config_toml(codex_home.path(), &server.uri())?;
+    let mut mcp = McpProcess::new(codex_home.path()).await?;
+    timeout(DEFAULT_READ_TIMEOUT, mcp.initialize()).await??;
+
+    // Conversation A: experimental_raw_events = false -> raw_response_item should be filtered out.
+    let conv_a_id = mcp
+        .send_new_conversation_request(NewConversationParams::default())
+        .await?;
+    let conv_a_resp: JSONRPCResponse = timeout(
+        DEFAULT_READ_TIMEOUT,
+        mcp.read_stream_until_response_message(RequestId::Integer(conv_a_id)),
+    )
+    .await??;
+    let NewConversationResponse {
+        conversation_id: conv_a,
+        ..
+    } = to_response::<_>(conv_a_resp)?;
+
+    let listener_a = mcp
+        .send_add_conversation_listener_request(AddConversationListenerParams {
+            conversation_id: conv_a,
+            experimental_raw_events: false,
+        })
+        .await?;
+    let _: AddConversationSubscriptionResponse = to_response(
+        timeout(
+            DEFAULT_READ_TIMEOUT,
+            mcp.read_stream_until_response_message(RequestId::Integer(listener_a)),
+        )
+        .await??,
+    )?;
+
+    let send_a = mcp
+        .send_send_user_message_request(SendUserMessageParams {
+            conversation_id: conv_a,
+            items: vec![InputItem::Text {
+                text: "no-raw".to_string(),
+            }],
+        })
+        .await?;
+    let _: SendUserMessageResponse = to_response(
+        timeout(
+            DEFAULT_READ_TIMEOUT,
+            mcp.read_stream_until_response_message(RequestId::Integer(send_a)),
+        )
+        .await??,
+    )?;
+
+    // Brief check that no raw_response_item arrived for conv_a.
+    // Use a short timeout to minimize the chance that conv_b (created below) starts
+    // emitting raw events during this check.
+    let raw_attempt = tokio::time::timeout(
+        std::time::Duration::from_millis(100),
+        mcp.read_stream_until_notification_message("codex/event/raw_response_item"),
+    )
+    .await;
+    assert!(
+        raw_attempt.is_err(),
+        "raw_response_item should be filtered when experimental_raw_events=false"
+    );
+
+    // Conversation B: experimental_raw_events = true -> raw_response_item should arrive.
+    let conv_b_id = mcp
+        .send_new_conversation_request(NewConversationParams::default())
+        .await?;
+    let conv_b_resp: JSONRPCResponse = timeout(
+        DEFAULT_READ_TIMEOUT,
+        mcp.read_stream_until_response_message(RequestId::Integer(conv_b_id)),
+    )
+    .await??;
+    let NewConversationResponse {
+        conversation_id: conv_b,
+        ..
+    } = to_response::<_>(conv_b_resp)?;
+
+    let listener_b = mcp
+        .send_add_conversation_listener_request(AddConversationListenerParams {
+            conversation_id: conv_b,
+            experimental_raw_events: true,
+        })
+        .await?;
+    let _: AddConversationSubscriptionResponse = to_response(
+        timeout(
+            DEFAULT_READ_TIMEOUT,
+            mcp.read_stream_until_response_message(RequestId::Integer(listener_b)),
+        )
+        .await??,
+    )?;
+
+    let send_b = mcp
+        .send_send_user_message_request(SendUserMessageParams {
+            conversation_id: conv_b,
+            items: vec![InputItem::Text {
+                text: "with-raw".to_string(),
+            }],
+        })
+        .await?;
+    let _: SendUserMessageResponse = to_response(
+        timeout(
+            DEFAULT_READ_TIMEOUT,
+            mcp.read_stream_until_response_message(RequestId::Integer(send_b)),
+        )
+        .await??,
+    )?;
+
+    let raw_notification: JSONRPCNotification = timeout(
+        DEFAULT_READ_TIMEOUT,
+        mcp.read_stream_until_notification_message("codex/event/raw_response_item"),
+    )
+    .await??;
+    let serde_json::Value::Object(params) = raw_notification
+        .params
+        .expect("raw_response_item should contain params")
+    else {
+        panic!("raw_response_item should contain params object");
+    };
+    let got_conv = params
+        .get("conversationId")
+        .and_then(|v| v.as_str())
+        .expect("raw_response_item should carry conversationId");
+    assert_eq!(got_conv, conv_b.to_string());
+
     Ok(())
 }
 
