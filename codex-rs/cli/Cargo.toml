@@ -23,8 +23,12 @@ codex-app-server-protocol = { workspace = true }
 codex-arg0 = { workspace = true }
 codex-chatgpt = { workspace = true }
 codex-cloud-tasks = { path = "../cloud-tasks" }
+codex-codebase-context = { workspace = true }
+codex-codebase-indexer = { workspace = true }
+codex-codebase-retrieval = { workspace = true }
 codex-common = { workspace = true, features = ["cli"] }
 codex-core = { workspace = true }
+codex-vector-store = { workspace = true }
 codex-exec = { workspace = true }
 codex-login = { workspace = true }
 codex-mcp-server = { workspace = true }
