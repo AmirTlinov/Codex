@@ -297,6 +297,58 @@ pub enum OtelExporterKind {
         headers: HashMap<String, String>,
     },
 }
+/// Codebase search settings loaded from config.toml.
+#[derive(Deserialize, Serialize, Debug, Clone, PartialEq)]
+pub struct CodebaseSearchConfigToml {
+    /// Enable automatic codebase search for AI context injection
+    pub enabled: Option<bool>,
+
+    /// Path to index directory (relative to cwd or absolute)
+    pub index_dir: Option<PathBuf>,
+
+    /// Token budget for context chunks
+    pub token_budget: Option<usize>,
+
+    /// Minimum confidence to trigger search (0.0-1.0)
+    pub min_confidence: Option<f32>,
+
+    /// Ranking strategy: "relevance", "diversity", or "balanced"
+    pub ranking_strategy: Option<String>,
+}
+
+impl Default for CodebaseSearchConfigToml {
+    fn default() -> Self {
+        Self {
+            enabled: None,
+            index_dir: None,
+            token_budget: None,
+            min_confidence: None,
+            ranking_strategy: None,
+        }
+    }
+}
+
+/// Effective codebase search settings after defaults are applied.
+#[derive(Serialize, Debug, Clone, PartialEq)]
+pub struct CodebaseSearchConfig {
+    pub enabled: bool,
+    pub index_dir: PathBuf,
+    pub token_budget: usize,
+    pub min_confidence: f32,
+    pub ranking_strategy: String,
+}
+
+impl Default for CodebaseSearchConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true, // Enabled by default for zero-config context injection
+            index_dir: PathBuf::from(".codex/index"),
+            token_budget: 2000,
+            min_confidence: 0.5,
+            ranking_strategy: "balanced".to_string(),
+        }
+    }
+}
 
 /// OTEL settings loaded from config.toml. Fields are optional so we can apply defaults.
 #[derive(Deserialize, Debug, Clone, PartialEq, Default)]

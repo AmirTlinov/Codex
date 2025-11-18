@@ -478,6 +478,9 @@ pub enum EventMsg {
     /// Ack the client's configure message.
     SessionConfigured(SessionConfiguredEvent),
 
+    /// Status updates about automatic codebase context injection.
+    CodebaseContextStatus(CodebaseContextStatusEvent),
+
     /// Incremental MCP startup progress updates.
     McpStartupUpdate(McpStartupUpdateEvent),
 
@@ -1472,6 +1475,23 @@ pub struct SessionConfiguredEvent {
     pub initial_messages: Option<Vec<EventMsg>>,
 
     pub rollout_path: PathBuf,
+}
+
+/// Operational state of automatic codebase context injection.
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq, JsonSchema, TS)]
+#[serde(rename_all = "camelCase")]
+pub enum CodebaseContextStatusKind {
+    Disabled,
+    Ready,
+    Unavailable,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema, TS)]
+#[serde(rename_all = "camelCase")]
+pub struct CodebaseContextStatusEvent {
+    pub status: CodebaseContextStatusKind,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub message: Option<String>,
 }
 
 /// User's decision in response to an ExecApprovalRequest.

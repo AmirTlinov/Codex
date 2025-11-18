@@ -1,6 +1,10 @@
-use codex_codebase_context::{ContextConfig, ContextProvider, RankingStrategy};
-use codex_codebase_indexer::{CodebaseIndexer, IndexerConfig};
-use codex_codebase_retrieval::{HybridRetrieval, RetrievalConfig};
+use codex_codebase_context::ContextConfig;
+use codex_codebase_context::ContextProvider;
+use codex_codebase_context::RankingStrategy;
+use codex_codebase_indexer::CodebaseIndexer;
+use codex_codebase_indexer::IndexerConfig;
+use codex_codebase_retrieval::HybridRetrieval;
+use codex_codebase_retrieval::RetrievalConfig;
 use codex_vector_store::VectorStore;
 use std::fs;
 use std::path::PathBuf;
@@ -129,7 +133,10 @@ async fn test_full_pipeline_indexing_and_search() {
     let index_stats = indexer.index(None).await.unwrap();
 
     // Verify indexing stats
-    assert!(index_stats.files_processed >= 3, "Should process at least 3 files");
+    assert!(
+        index_stats.files_processed >= 3,
+        "Should process at least 3 files"
+    );
     assert!(index_stats.chunks_created > 0, "Should create chunks");
 
     // Step 2: Load retrieval system
@@ -142,7 +149,10 @@ async fn test_full_pipeline_indexing_and_search() {
     // Step 3: Search for "calculate sum"
     let search_results = retrieval.search("calculate sum").await.unwrap();
 
-    assert!(!search_results.results.is_empty(), "Should find results for 'calculate sum'");
+    assert!(
+        !search_results.results.is_empty(),
+        "Should find results for 'calculate sum'"
+    );
 
     // Verify that main.rs is in results (contains calculate_sum function)
     let has_main_rs = search_results
@@ -154,7 +164,10 @@ async fn test_full_pipeline_indexing_and_search() {
     // Step 4: Search for "error handling"
     let error_results = retrieval.search("error handling").await.unwrap();
 
-    assert!(!error_results.results.is_empty(), "Should find results for 'error handling'");
+    assert!(
+        !error_results.results.is_empty(),
+        "Should find results for 'error handling'"
+    );
 
     // Verify that lib.rs is in results (contains error module)
     let has_lib_rs = error_results
@@ -184,12 +197,18 @@ async fn test_full_pipeline_indexing_and_search() {
         .await
         .unwrap();
 
-    assert!(context.is_some(), "Should provide context for error handling query");
+    assert!(
+        context.is_some(),
+        "Should provide context for error handling query"
+    );
 
     let context = context.unwrap();
     assert!(!context.chunks.is_empty(), "Should include relevant chunks");
     assert!(context.intent.should_search, "Should trigger search");
-    assert!(context.intent.confidence >= 0.5, "Should have sufficient confidence");
+    assert!(
+        context.intent.confidence >= 0.5,
+        "Should have sufficient confidence"
+    );
 }
 
 #[tokio::test]
@@ -219,7 +238,10 @@ async fn test_incremental_indexing() {
     let indexer2 = CodebaseIndexer::new(indexer_config.clone()).await.unwrap();
     let stats2 = indexer2.index(None).await.unwrap();
 
-    assert_eq!(stats2.files_skipped, stats1.files_processed, "Should skip all unchanged files");
+    assert_eq!(
+        stats2.files_skipped, stats1.files_processed,
+        "Should skip all unchanged files"
+    );
 
     // Add a new file
     fs::write(
@@ -237,7 +259,10 @@ pub fn new_function() -> i32 {
     let stats3 = indexer3.index(None).await.unwrap();
 
     assert!(stats3.files_processed > 0, "Should process new file");
-    assert!(stats3.files_skipped >= stats1.files_processed, "Should skip old files");
+    assert!(
+        stats3.files_skipped >= stats1.files_processed,
+        "Should skip old files"
+    );
 }
 
 #[tokio::test]
@@ -281,13 +306,10 @@ async fn test_ranking_strategies() {
         .unwrap();
 
         let vector_store_inst = VectorStore::new(&index_dir).await.unwrap();
-        let retrieval_inst = HybridRetrieval::new(
-            RetrievalConfig::default(),
-            vector_store_inst,
-            vec![],
-        )
-        .await
-        .unwrap();
+        let retrieval_inst =
+            HybridRetrieval::new(RetrievalConfig::default(), vector_store_inst, vec![])
+                .await
+                .unwrap();
 
         let context_config = ContextConfig {
             token_budget: 2000,
@@ -309,7 +331,11 @@ async fn test_ranking_strategies() {
             .unwrap();
 
         if let Some(ctx) = context {
-            assert!(!ctx.chunks.is_empty(), "Strategy {:?} should find chunks", strategy);
+            assert!(
+                !ctx.chunks.is_empty(),
+                "Strategy {:?} should find chunks",
+                strategy
+            );
             assert!(ctx.tokens_used <= 1000, "Should respect token budget");
         }
     }
@@ -322,31 +348,36 @@ async fn test_query_analysis_intent_detection() {
     let analyzer = QueryAnalyzer::new();
 
     // Test file detection
-    let intent1 = analyzer.analyze("Look at src/main.rs").unwrap();
+    let intent1 = analyzer.analyze("Look at src/main.rs", None).unwrap();
     assert!(intent1.should_search);
     assert!(intent1.files.contains(&"src/main.rs".to_string()));
 
     // Test concept detection
-    let intent2 = analyzer.analyze("How do I implement async error handling?").unwrap();
+    let intent2 = analyzer
+        .analyze("How do I implement async error handling?", None)
+        .unwrap();
     assert!(intent2.should_search);
     assert!(intent2.concepts.contains(&"async".to_string()));
     assert!(intent2.concepts.contains(&"error".to_string()));
 
     // Test no search trigger
-    let intent3 = analyzer.analyze("Thanks for the help!").unwrap();
+    let intent3 = analyzer.analyze("Thanks for the help!", None).unwrap();
     assert!(!intent3.should_search);
 
     // Test explicit search
-    let intent4 = analyzer.analyze("Find all test functions").unwrap();
+    let intent4 = analyzer.analyze("Find all test functions", None).unwrap();
     assert!(intent4.should_search);
     assert!(intent4.concepts.contains(&"test".to_string()));
 }
 
 #[test]
 fn test_token_budget_management() {
-    use codex_codebase_context::{ChunkRanker, RankingStrategy};
-    use codex_codebase_retrieval::{SearchResult, SearchSource};
-    use codex_vector_store::{ChunkMetadata, CodeChunk};
+    use codex_codebase_context::ChunkRanker;
+    use codex_codebase_context::RankingStrategy;
+    use codex_codebase_retrieval::SearchResult;
+    use codex_codebase_retrieval::SearchSource;
+    use codex_vector_store::ChunkMetadata;
+    use codex_vector_store::CodeChunk;
 
     let ranker = ChunkRanker::new(RankingStrategy::Balanced);
 
@@ -393,5 +424,8 @@ fn test_token_budget_management() {
     let selected = ranker.rank_and_select(results, 250);
 
     assert_eq!(selected.len(), 2, "Should select 2 chunks within budget");
-    assert_eq!(selected[0].chunk.path, "a.rs", "Should prioritize higher scores");
+    assert_eq!(
+        selected[0].chunk.path, "a.rs",
+        "Should prioritize higher scores"
+    );
 }

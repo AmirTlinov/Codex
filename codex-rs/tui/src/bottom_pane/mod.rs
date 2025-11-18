@@ -25,6 +25,7 @@ mod command_popup;
 pub mod custom_prompt_view;
 mod file_search_popup;
 mod footer;
+pub(crate) use footer::ContextInjectionIndicator;
 mod list_selection_view;
 mod prompt_args;
 pub(crate) use list_selection_view::SelectionViewParams;
@@ -208,6 +209,15 @@ impl BottomPane {
     pub(crate) fn insert_str(&mut self, text: &str) {
         self.composer.insert_str(text);
         self.request_redraw();
+    }
+
+    pub(crate) fn set_codebase_context_status(
+        &mut self,
+        indicator: ContextInjectionIndicator,
+    ) {
+        if self.composer.set_context_indicator(indicator) {
+            self.request_redraw();
+        }
     }
 
     /// Replace the composer text with `text`.

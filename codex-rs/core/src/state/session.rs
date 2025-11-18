@@ -3,10 +3,14 @@
 use codex_protocol::models::ResponseItem;
 
 use crate::codex::SessionConfiguration;
+use crate::codex::TurnContext;
+use crate::context_manager::CodebaseSearchProvider;
 use crate::context_manager::ContextManager;
 use crate::protocol::RateLimitSnapshot;
 use crate::protocol::TokenUsage;
 use crate::protocol::TokenUsageInfo;
+use std::sync::Arc;
+use tokio::sync::Mutex;
 
 /// Persistent, session-scoped state previously stored directly on `Session`.
 pub(crate) struct SessionState {
@@ -25,6 +29,19 @@ impl SessionState {
         }
     }
 
+    /// Create session state with codebase search provider
+    pub(crate) fn new_with_codebase(
+        session_configuration: SessionConfiguration,
+        codebase_provider: Option<Arc<Mutex<Box<dyn CodebaseSearchProvider>>>>,
+        codebase_config: crate::config::types::CodebaseSearchConfig,
+    ) -> Self {
+        Self {
+            session_configuration,
+            history: ContextManager::new_with_config(codebase_provider, codebase_config),
+            latest_rate_limits: None,
+        }
+    }
+
     // History helpers
     pub(crate) fn record_items<I>(&mut self, items: I)
     where
@@ -32,6 +49,24 @@ impl SessionState {
         I::Item: std::ops::Deref<Target = ResponseItem>,
     {
         self.history.record_items(items)
+    }
+
+    /// Record items with automatic codebase context injection. When
+    /// `capture_recorded_items` is true, returns the exact sequence (including
+    /// injected context) that was appended to history.
+    pub(crate) async fn record_items_with_context<I>(
+        &mut self,
+        turn_context: &TurnContext,
+        items: I,
+        capture_recorded_items: bool,
+    ) -> anyhow::Result<Option<Vec<ResponseItem>>>
+    where
+        I: IntoIterator,
+        I::Item: std::ops::Deref<Target = ResponseItem>,
+    {
+        self.history
+            .record_items_with_context(items, capture_recorded_items, Some(&turn_context.cwd))
+            .await
     }
 
     pub(crate) fn clone_history(&self) -> ContextManager {
@@ -57,6 +92,13 @@ impl SessionState {
 
     pub(crate) fn token_info(&self) -> Option<TokenUsageInfo> {
         self.history.token_info()
+    }
+
+    pub(crate) fn set_codebase_provider(
+        &mut self,
+        provider: Arc<Mutex<Box<dyn CodebaseSearchProvider>>>,
+    ) {
+        self.history.set_codebase_provider(provider);
     }
 
     pub(crate) fn set_rate_limits(&mut self, snapshot: RateLimitSnapshot) {

@@ -22,6 +22,10 @@ chrono = { workspace = true, features = ["serde"] }
 codex-app-server-protocol = { workspace = true }
 codex-apply-patch = { workspace = true }
 codex-async-utils = { workspace = true }
+codex-codebase-context = { path = "../codebase-context" }
+codex-codebase-indexer = { path = "../codebase-indexer" }
+codex-codebase-retrieval = { path = "../codebase-retrieval" }
+codex-vector-store = { path = "../vector-store" }
 codex-file-search = { workspace = true }
 codex-git = { workspace = true }
 codex-keyring-store = { workspace = true }
@@ -44,6 +48,7 @@ keyring = { workspace = true, features = ["crypto-rust"] }
 libc = { workspace = true }
 mcp-types = { workspace = true }
 os_info = { workspace = true }
+once_cell = { workspace = true }
 rand = { workspace = true }
 regex-lite = { workspace = true }
 reqwest = { workspace = true, features = ["json", "stream"] }

@@ -5,6 +5,7 @@ use codex_app_server_protocol::AccountRateLimitsUpdatedNotification;
 use codex_app_server_protocol::AgentMessageDeltaNotification;
 use codex_app_server_protocol::ApplyPatchApprovalParams;
 use codex_app_server_protocol::ApplyPatchApprovalResponse;
+use codex_app_server_protocol::CodebaseContextStatusNotification;
 use codex_app_server_protocol::ExecCommandApprovalParams;
 use codex_app_server_protocol::ExecCommandApprovalResponse;
 use codex_app_server_protocol::InterruptConversationResponse;
@@ -157,6 +158,16 @@ pub(crate) async fn apply_bespoke_event_handling(
                     ))
                     .await;
             }
+        }
+        EventMsg::CodebaseContextStatus(status_event) => {
+            outgoing
+                .send_server_notification(ServerNotification::CodebaseContextStatus(
+                    CodebaseContextStatusNotification {
+                        status: status_event.status,
+                        message: status_event.message,
+                    },
+                ))
+                .await;
         }
         EventMsg::ItemStarted(item_started_event) => {
             let item: ThreadItem = item_started_event.item.clone().into();

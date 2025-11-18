@@ -1,0 +1,40 @@
+---
+assignee: ai
+component: null
+created: '2025-11-18'
+folder: null
+id: TASK-003
+parent: TASK-001
+phase: null
+priority: MEDIUM
+progress: 100
+status: WARN
+tags:
+- context
+title: Fix context injection regression
+updated: '2025-11-18'
+---
+
+# Fix context injection regression
+
+## Описание
+Investigate why assistant responses no longer receive automatic <context> blocks and implement the necessary code/config fixes.
+
+## Подзадачи
+- [x] Map current context-delivery pipeline
+  - Критерии: Diagram actual data flow from server trigger to assistant transport, highlighting where payloads drop.
+  - Тесты: Shared diagram in repo/docs (CODEBASE_SEARCH_README.md → Context Delivery Pipeline)
+- [x] Identify and patch failing stage
+  - Критерии: Root cause isolated (code/config) and fix applied with reproducible proof; no regressions introduced.
+  - Тесты: cargo test -p codex-core context_manager::context_injection_test
+- [x] Validate end-to-end auto-context
+  - Критерии: Demonstrate <context> blocks delivered in local harness CLI including edge cases
+  - Тесты: manual CLI session log (verification_logs/context_cli.log)
+
+## Критерии успеха
+- integration:context_flow
+- manual CLI verification
+
+## Риски
+- Potential protocol mismatch
+- May require prod-only credentials

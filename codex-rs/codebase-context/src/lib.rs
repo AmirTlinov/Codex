@@ -26,17 +26,39 @@ User Message
 ## Example
 
 ```rust,no_run
-use codex_codebase_context::{ContextProvider, ContextConfig};
+use codex_codebase_context::{ContextConfig, ContextProvider};
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    let config = ContextConfig::default();
-    let provider = ContextProvider::new(config, indexer, retrieval).await?;
+    # use std::sync::Arc;
+    # use tokio::sync::Mutex;
+    # use codex_codebase_indexer::{CodebaseIndexer, IndexerConfig};
+    # use codex_codebase_retrieval::{HybridRetrieval, RetrievalConfig};
+    # use codex_vector_store::VectorStore;
+    # let temp = tempfile::tempdir()?;
+    # let index_dir = temp.path().join("index");
+    # let indexer = Arc::new(Mutex::new(CodebaseIndexer::new(IndexerConfig {
+    #     root_dir: temp.path().to_path_buf(),
+    #     index_dir: index_dir.clone(),
+    #     ..Default::default()
+    # })
+    # .await?));
+    # let vector_store = VectorStore::new(&index_dir).await?;
+    # let retrieval = Arc::new(Mutex::new(HybridRetrieval::new(
+    #     RetrievalConfig::default(),
+    #     vector_store,
+    #     vec![],
+    # )
+    # .await?));
+    let provider = ContextProvider::new(ContextConfig::default(), indexer, retrieval).await?;
 
-    let message = "How do I handle async errors?";
-    let context = provider.provide_context(message, 2000).await?;
+    let maybe_context = provider
+        .provide_context("How do I handle async errors?", 2_000)
+        .await?;
 
-    println!("Added {} code snippets to context", context.chunks.len());
+    if let Some(context) = maybe_context {
+        println!("Added {} code snippets to context", context.chunks.len());
+    }
     Ok(())
 }
 ```
@@ -47,7 +69,16 @@ mod error;
 mod query_analyzer;
 mod ranking;
 
-pub use context_provider::{CacheStats, ContextConfig, ContextProvider, ProvidedContext};
-pub use error::{ContextError, Result};
-pub use query_analyzer::{QueryAnalyzer, SearchIntent};
-pub use ranking::{ChunkRanker, RankingStrategy, RelevanceScore};
+pub use context_provider::CacheStats;
+pub use context_provider::ContextConfig;
+pub use context_provider::ContextProvider;
+pub use context_provider::ContextSearchMetadata;
+pub use context_provider::ProvidedContext;
+pub use error::ContextError;
+pub use error::Result;
+pub use query_analyzer::IntentSignals;
+pub use query_analyzer::QueryAnalyzer;
+pub use query_analyzer::SearchIntent;
+pub use ranking::ChunkRanker;
+pub use ranking::RankingStrategy;
+pub use ranking::RelevanceScore;

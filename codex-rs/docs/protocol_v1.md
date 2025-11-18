@@ -129,6 +129,11 @@ sequenceDiagram
     task->>-user: Event::TaskComplete
 ```
 
+The daemon now follows `Event::SessionConfigured` with a lightweight
+`Event::CodebaseContextStatus`. This event (and any subsequent updates)
+reports whether automatic codebase-context injection is ready, disabled, or
+temporarily unavailable so clients can surface an appropriate status indicator.
+
 ### Task Interrupt
 
 Interrupting a task and continuing with additional user input.

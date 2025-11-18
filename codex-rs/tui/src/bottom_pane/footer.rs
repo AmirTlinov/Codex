@@ -18,6 +18,7 @@ pub(crate) struct FooterProps {
     pub(crate) use_shift_enter_hint: bool,
     pub(crate) is_task_running: bool,
     pub(crate) context_window_percent: Option<i64>,
+    pub(crate) context_indicator: ContextInjectionIndicator,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -27,6 +28,13 @@ pub(crate) enum FooterMode {
     ShortcutOverlay,
     EscHint,
     ContextOnly,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum ContextInjectionIndicator {
+    Ready,
+    Disabled,
+    Unavailable,
 }
 
 pub(crate) fn toggle_shortcut_mode(current: FooterMode, ctrl_c_hint: bool) -> FooterMode {
@@ -63,12 +71,46 @@ pub(crate) fn footer_height(props: FooterProps) -> u16 {
 }
 
 pub(crate) fn render_footer(area: Rect, buf: &mut Buffer, props: FooterProps) {
+    let mut lines = footer_lines(props);
+    if props.mode != FooterMode::ShortcutOverlay
+        && !lines.is_empty()
+        && area.width > FOOTER_INDENT_COLS as u16
+    {
+        let content_width = area.width - FOOTER_INDENT_COLS as u16;
+        let indicator = indicator_line(props.context_indicator);
+        let first = lines.remove(0);
+        lines.insert(0, attach_indicator(first, &indicator, content_width));
+    }
+
     Paragraph::new(prefix_lines(
-        footer_lines(props),
+        lines,
         " ".repeat(FOOTER_INDENT_COLS).into(),
         " ".repeat(FOOTER_INDENT_COLS).into(),
     ))
     .render(area, buf);
+}
+
+fn attach_indicator(
+    mut line: Line<'static>,
+    indicator: &Line<'static>,
+    content_width: u16,
+) -> Line<'static> {
+    let line_width = line.width() as u16;
+    let indicator_width = indicator.width() as u16;
+    let padding = content_width
+        .saturating_sub(line_width.saturating_add(indicator_width))
+        .max(1);
+    line.push_span(Span::from(" ".repeat(padding as usize)));
+    line.extend(indicator.spans.clone());
+    line
+}
+
+fn indicator_line(status: ContextInjectionIndicator) -> Line<'static> {
+    match status {
+        ContextInjectionIndicator::Ready => Line::from("CTX READY".green().bold()),
+        ContextInjectionIndicator::Disabled => Line::from("CTX OFF".dim()),
+        ContextInjectionIndicator::Unavailable => Line::from("CTX ERR".red().bold()),
+    }
 }
 
 fn footer_lines(props: FooterProps) -> Vec<Line<'static>> {
@@ -400,6 +442,7 @@ mod tests {
                 use_shift_enter_hint: false,
                 is_task_running: false,
                 context_window_percent: None,
+                context_indicator: ContextInjectionIndicator::Disabled,
             },
         );
 
@@ -411,6 +454,7 @@ mod tests {
                 use_shift_enter_hint: true,
                 is_task_running: false,
                 context_window_percent: None,
+                context_indicator: ContextInjectionIndicator::Disabled,
             },
         );
 
@@ -422,6 +466,7 @@ mod tests {
                 use_shift_enter_hint: false,
                 is_task_running: false,
                 context_window_percent: None,
+                context_indicator: ContextInjectionIndicator::Disabled,
             },
         );
 
@@ -433,6 +478,7 @@ mod tests {
                 use_shift_enter_hint: false,
                 is_task_running: true,
                 context_window_percent: None,
+                context_indicator: ContextInjectionIndicator::Disabled,
             },
         );
 
@@ -444,6 +490,7 @@ mod tests {
                 use_shift_enter_hint: false,
                 is_task_running: false,
                 context_window_percent: None,
+                context_indicator: ContextInjectionIndicator::Disabled,
             },
         );
 
@@ -455,6 +502,7 @@ mod tests {
                 use_shift_enter_hint: false,
                 is_task_running: false,
                 context_window_percent: None,
+                context_indicator: ContextInjectionIndicator::Disabled,
             },
         );
 
@@ -466,6 +514,7 @@ mod tests {
                 use_shift_enter_hint: false,
                 is_task_running: true,
                 context_window_percent: Some(72),
+                context_indicator: ContextInjectionIndicator::Disabled,
             },
         );
     }

@@ -2,10 +2,13 @@ use std::collections::HashMap;
 use std::fmt::Debug;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::sync::atomic::AtomicBool;
 use std::sync::atomic::AtomicU64;
+use std::sync::atomic::Ordering;
 
 use crate::AuthManager;
 use crate::client_common::REVIEW_PROMPT;
+use crate::codebase_init::CodebaseSearchBootstrap;
 use crate::compact;
 use crate::features::Feature;
 use crate::function_tool::FunctionCallError;
@@ -57,6 +60,7 @@ use crate::client_common::Prompt;
 use crate::client_common::ResponseEvent;
 use crate::config::Config;
 use crate::config::types::ShellEnvironmentPolicy;
+use crate::context_manager::CodebaseSearchProvider;
 use crate::context_manager::ContextManager;
 use crate::environment_context::EnvironmentContext;
 use crate::error::CodexErr;
@@ -127,6 +131,8 @@ use codex_protocol::models::ContentItem;
 use codex_protocol::models::FunctionCallOutputPayload;
 use codex_protocol::models::ResponseInputItem;
 use codex_protocol::models::ResponseItem;
+use codex_protocol::protocol::CodebaseContextStatusEvent;
+use codex_protocol::protocol::CodebaseContextStatusKind;
 use codex_protocol::protocol::InitialHistory;
 use codex_protocol::user_input::UserInput;
 use codex_utils_readiness::Readiness;
@@ -256,6 +262,8 @@ pub(crate) struct Session {
     pub(crate) active_turn: Mutex<Option<ActiveTurn>>,
     pub(crate) services: SessionServices,
     next_internal_sub_id: AtomicU64,
+    codebase_context_status: Mutex<Option<CodebaseContextStatusKind>>,
+    codebase_context_enabled: AtomicBool,
 }
 
 /// The context needed for a single turn of the conversation.
@@ -544,8 +552,19 @@ impl Session {
             config.active_profile.clone(),
         );
 
+        // Initialize codebase search if enabled
+        let codebase_bootstrap = crate::codebase_init::initialize_codebase_search(
+            &config.codebase_search,
+            &session_configuration.cwd,
+        )
+        .await;
+
         // Create the mutable state for the Session.
-        let state = SessionState::new(session_configuration.clone());
+        let state = SessionState::new_with_codebase(
+            session_configuration.clone(),
+            None,
+            config.codebase_search.clone(),
+        );
 
         // Warm the tokenizer cache for the session model without blocking startup.
         warm_model_cache(&session_configuration.model);
@@ -570,6 +589,8 @@ impl Session {
             active_turn: Mutex::new(None),
             services,
             next_internal_sub_id: AtomicU64::new(0),
+            codebase_context_status: Mutex::new(None),
+            codebase_context_enabled: AtomicBool::new(false),
         });
 
         // Dispatch the SessionConfiguredEvent first and then report any errors.
@@ -592,6 +613,7 @@ impl Session {
         for event in events {
             sess.send_event_raw(event).await;
         }
+        sess.attach_codebase_bootstrap(codebase_bootstrap);
         sess.services
             .mcp_connection_manager
             .write()
@@ -681,7 +703,8 @@ impl Session {
                 let reconstructed_history =
                     self.reconstruct_history_from_rollout(&turn_context, &rollout_items);
                 if !reconstructed_history.is_empty() {
-                    self.record_into_history(&reconstructed_history).await;
+                    self.record_into_history(&turn_context, &reconstructed_history, false)
+                        .await;
                 }
 
                 // If persisting, persist all rollout items as-is (recorder filters)
@@ -775,6 +798,51 @@ impl Session {
         if let Err(e) = self.tx_event.send(event).await {
             error!("failed to send tool call event: {e}");
         }
+    }
+
+    fn attach_codebase_bootstrap(self: &Arc<Self>, bootstrap: CodebaseSearchBootstrap) {
+        let CodebaseSearchBootstrap {
+            mut status_rx,
+            provider_rx,
+        } = bootstrap;
+        let session = Arc::clone(self);
+        tokio::spawn(async move {
+            while let Some(status) = status_rx.recv().await {
+                session.emit_codebase_context_status(status).await;
+            }
+        });
+        if let Some(mut rx) = provider_rx {
+            let session = Arc::clone(self);
+            tokio::spawn(async move {
+                if let Some(provider) = rx.recv().await {
+                    session.install_codebase_provider(provider).await;
+                }
+            });
+        }
+    }
+
+    async fn install_codebase_provider(
+        &self,
+        provider: Arc<Mutex<Box<dyn CodebaseSearchProvider>>>,
+    ) {
+        {
+            let mut state = self.state.lock().await;
+            state.set_codebase_provider(provider);
+        }
+        self.codebase_context_enabled.store(true, Ordering::Release);
+    }
+
+    async fn emit_codebase_context_status(&self, status: CodebaseContextStatusEvent) {
+        let mut guard = self.codebase_context_status.lock().await;
+        if guard.as_ref() == Some(&status.status) {
+            return;
+        }
+        *guard = Some(status.status);
+        self.send_event_raw(Event {
+            id: INITIAL_SUBMIT_ID.to_owned(),
+            msg: EventMsg::CodebaseContextStatus(status),
+        })
+        .await;
     }
 
     async fn emit_turn_item_started(&self, turn_context: &TurnContext, item: &TurnItem) {
@@ -937,9 +1005,10 @@ impl Session {
         turn_context: &TurnContext,
         items: &[ResponseItem],
     ) {
-        self.record_into_history(items).await;
-        self.persist_rollout_response_items(items).await;
-        self.send_raw_response_items(turn_context, items).await;
+        let recorded_items = self.record_into_history(turn_context, items, true).await;
+        self.persist_rollout_response_items(&recorded_items).await;
+        self.send_raw_response_items(turn_context, &recorded_items)
+            .await;
     }
 
     fn reconstruct_history_from_rollout(
@@ -970,9 +1039,54 @@ impl Session {
     }
 
     /// Append ResponseItems to the in-memory conversation history only.
-    pub(crate) async fn record_into_history(&self, items: &[ResponseItem]) {
-        let mut state = self.state.lock().await;
-        state.record_items(items.iter());
+    /// When `capture_recorded_items` is true, returns the exact sequence (with
+    /// injected context) that was recorded; otherwise returns an empty vector.
+    pub(crate) async fn record_into_history(
+        &self,
+        turn_context: &TurnContext,
+        items: &[ResponseItem],
+        capture_recorded_items: bool,
+    ) -> Vec<ResponseItem> {
+        let (recorded_items, err) = {
+            let mut state = self.state.lock().await;
+            match state
+                .record_items_with_context(turn_context, items.iter(), capture_recorded_items)
+                .await
+            {
+                Ok(recorded) => (recorded.unwrap_or_default(), None),
+                Err(e) => {
+                    tracing::warn!("Failed to inject codebase context: {}", e);
+                    state.record_items(items.iter());
+                    let clones = if capture_recorded_items {
+                        items.to_vec()
+                    } else {
+                        Vec::new()
+                    };
+                    (clones, Some(e))
+                }
+            }
+        };
+
+        if self.codebase_context_enabled.load(Ordering::Acquire) {
+            match err {
+                Some(e) => {
+                    self.emit_codebase_context_status(CodebaseContextStatusEvent {
+                        status: CodebaseContextStatusKind::Unavailable,
+                        message: Some(format!("context injection error: {e}")),
+                    })
+                    .await;
+                }
+                None => {
+                    self.emit_codebase_context_status(CodebaseContextStatusEvent {
+                        status: CodebaseContextStatusKind::Ready,
+                        message: None,
+                    })
+                    .await;
+                }
+            }
+        }
+
+        recorded_items
     }
 
     pub(crate) async fn replace_history(&self, items: Vec<ResponseItem>) {
@@ -2579,6 +2693,8 @@ mod tests {
             active_turn: Mutex::new(None),
             services,
             next_internal_sub_id: AtomicU64::new(0),
+            codebase_context_status: Mutex::new(None),
+            codebase_context_enabled: AtomicBool::new(false),
         };
 
         (session, turn_context)
@@ -2656,6 +2772,8 @@ mod tests {
             active_turn: Mutex::new(None),
             services,
             next_internal_sub_id: AtomicU64::new(0),
+            codebase_context_status: Mutex::new(None),
+            codebase_context_enabled: AtomicBool::new(false),
         });
 
         (session, turn_context, rx_event)

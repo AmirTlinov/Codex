@@ -19,6 +19,7 @@ use super::chat_composer_history::ChatComposerHistory;
 use super::command_popup::CommandItem;
 use super::command_popup::CommandPopup;
 use super::file_search_popup::FileSearchPopup;
+use super::footer::ContextInjectionIndicator;
 use super::footer::FooterMode;
 use super::footer::FooterProps;
 use super::footer::esc_hint_mode;
@@ -112,6 +113,7 @@ pub(crate) struct ChatComposer {
     footer_mode: FooterMode,
     footer_hint_override: Option<Vec<(String, String)>>,
     context_window_percent: Option<i64>,
+    context_indicator: ContextInjectionIndicator,
 }
 
 /// Popup state – at most one can be visible at any time.
@@ -155,6 +157,7 @@ impl ChatComposer {
             footer_mode: FooterMode::ShortcutSummary,
             footer_hint_override: None,
             context_window_percent: None,
+            context_indicator: ContextInjectionIndicator::Disabled,
         };
         // Apply configuration via the setter to keep side-effects centralized.
         this.set_disable_paste_burst(disable_paste_burst);
@@ -1392,6 +1395,7 @@ impl ChatComposer {
             use_shift_enter_hint: self.use_shift_enter_hint,
             is_task_running: self.is_task_running,
             context_window_percent: self.context_window_percent,
+            context_indicator: self.context_indicator,
         }
     }
 
@@ -1526,6 +1530,17 @@ impl ChatComposer {
         if self.context_window_percent != percent {
             self.context_window_percent = percent;
         }
+    }
+
+    pub(crate) fn set_context_indicator(
+        &mut self,
+        indicator: ContextInjectionIndicator,
+    ) -> bool {
+        if self.context_indicator == indicator {
+            return false;
+        }
+        self.context_indicator = indicator;
+        true
     }
 
     pub(crate) fn set_esc_backtrack_hint(&mut self, show: bool) {

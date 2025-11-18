@@ -16,6 +16,8 @@ use codex_core::protocol::AgentReasoningRawContentDeltaEvent;
 use codex_core::protocol::AgentReasoningRawContentEvent;
 use codex_core::protocol::ApplyPatchApprovalRequestEvent;
 use codex_core::protocol::BackgroundEventEvent;
+use codex_core::protocol::CodebaseContextStatusEvent;
+use codex_core::protocol::CodebaseContextStatusKind;
 use codex_core::protocol::DeprecationNoticeEvent;
 use codex_core::protocol::ErrorEvent;
 use codex_core::protocol::Event;
@@ -73,6 +75,7 @@ use crate::bottom_pane::ApprovalRequest;
 use crate::bottom_pane::BottomPane;
 use crate::bottom_pane::BottomPaneParams;
 use crate::bottom_pane::CancellationEvent;
+use crate::bottom_pane::ContextInjectionIndicator;
 use crate::bottom_pane::InputResult;
 use crate::bottom_pane::SelectionAction;
 use crate::bottom_pane::SelectionItem;
@@ -496,6 +499,15 @@ impl ChatWidget {
             self.bottom_pane.set_context_window_percent(percent);
             self.token_info = Some(info);
         }
+    }
+
+    fn on_codebase_context_status(&mut self, event: CodebaseContextStatusEvent) {
+        let indicator = match event.status {
+            CodebaseContextStatusKind::Ready => ContextInjectionIndicator::Ready,
+            CodebaseContextStatusKind::Disabled => ContextInjectionIndicator::Disabled,
+            CodebaseContextStatusKind::Unavailable => ContextInjectionIndicator::Unavailable,
+        };
+        self.bottom_pane.set_codebase_context_status(indicator);
     }
 
     fn on_rate_limit_snapshot(&mut self, snapshot: Option<RateLimitSnapshot>) {
@@ -1608,6 +1620,7 @@ impl ChatWidget {
             EventMsg::TaskComplete(TaskCompleteEvent { last_agent_message }) => {
                 self.on_task_complete(last_agent_message)
             }
+            EventMsg::CodebaseContextStatus(ev) => self.on_codebase_context_status(ev),
             EventMsg::TokenCount(ev) => {
                 self.set_token_info(ev.info);
                 self.on_rate_limit_snapshot(ev.rate_limits);

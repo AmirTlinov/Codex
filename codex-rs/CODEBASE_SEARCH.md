@@ -210,10 +210,11 @@ for result in results.top(5) {
 **Components**:
 
 **QueryAnalyzer**:
-- Extracts files: `src/main.rs`, `lib.rs`
-- Detects concepts: `async`, `error`, `function`, `class`
-- Confidence scoring: 0.0-1.0 (based on files + concepts + structure)
-- Search triggers: files mentioned, concepts + question words, explicit keywords
+- Extracts files: `src/main.rs`, `lib.rs` (включая apply_patch diff'ы и shell команды)
+- Детектирует концепты: `async`, `error`, `function`, `class`
+- Логистический классификатор (sigmoid) по 10 сигналам: файлы, стектрейсы, ошибки, code blocks, патчи, i18n, длина сообщения
+- Использует `ContextSearchMetadata` (cwd + recent files/terms), поэтому может запускать поиск даже на короткие реплики пользователя
+- Search triggers: либо уверенность модели ≥ threshold, либо наличие safety-сигналов (files/stack/errors/patch markers)
 
 **ChunkRanker**:
 - **Relevance**: Sort by score (descending)
@@ -229,7 +230,12 @@ for result in results.top(5) {
 
 **Usage**:
 ```rust
-use codex_codebase_context::{ContextProvider, ContextConfig, RankingStrategy};
+use codex_codebase_context::{
+    ContextProvider,
+    ContextConfig,
+    ContextSearchMetadata,
+    RankingStrategy,
+};
 
 let config = ContextConfig {
     token_budget: 2000,
@@ -240,9 +246,16 @@ let config = ContextConfig {
 };
 
 let provider = ContextProvider::new(config, indexer, retrieval).await?;
-let context = provider.provide_context("How do I handle async errors?", 2000).await?;
+let metadata = ContextSearchMetadata {
+    cwd: Some(repo_root.clone()),
+    recent_file_paths: vec!["src/lib.rs".into(), "tui/src/app.rs".into()],
+    recent_terms: vec!["tool:apply_patch".into()],
+};
 
-if let Some(ctx) = context {
+if let Some(ctx) = provider
+    .provide_context_with_metadata("How do I handle async errors?", 2000, Some(&metadata))
+    .await?
+{
     println!("Found {} chunks using {} tokens", ctx.chunks.len(), ctx.tokens_used);
     println!("{}", ctx.formatted_context); // Markdown with code blocks
 }

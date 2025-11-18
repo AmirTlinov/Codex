@@ -1,11 +1,17 @@
 use crate::error::Result;
-use crate::query_analyzer::{QueryAnalyzer, SearchIntent};
-use crate::ranking::{ChunkRanker, RankingStrategy};
+use crate::query_analyzer::QueryAnalyzer;
+use crate::query_analyzer::SearchIntent;
+use crate::ranking::ChunkRanker;
+use crate::ranking::RankingStrategy;
 use codex_codebase_indexer::CodebaseIndexer;
-use codex_codebase_retrieval::{HybridRetrieval, SearchResult};
-use log::{debug, info};
-use serde::{Deserialize, Serialize};
+use codex_codebase_retrieval::HybridRetrieval;
+use codex_codebase_retrieval::SearchResult;
+use log::debug;
+use log::info;
+use serde::Deserialize;
+use serde::Serialize;
 use std::collections::HashMap;
+use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::sync::Mutex;
 
@@ -84,6 +90,23 @@ struct CacheEntry {
     intent: SearchIntent,
 }
 
+/// Additional metadata derived from the surrounding conversation to guide
+/// query analysis.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct ContextSearchMetadata {
+    /// Current working directory for the Codex session.
+    #[serde(default)]
+    pub cwd: Option<PathBuf>,
+
+    /// Recently referenced file paths (relative or absolute).
+    #[serde(default)]
+    pub recent_file_paths: Vec<String>,
+
+    /// Additional semantic hints (e.g., tool names, commands).
+    #[serde(default)]
+    pub recent_terms: Vec<String>,
+}
+
 /// Provider for intelligent code context
 pub struct ContextProvider {
     config: ContextConfig,
@@ -118,10 +141,22 @@ impl ContextProvider {
         message: &str,
         token_budget: usize,
     ) -> Result<Option<ProvidedContext>> {
+        self.provide_context_with_metadata(message, token_budget, None)
+            .await
+    }
+
+    /// Same as [`provide_context`] but includes optional metadata derived from
+    /// the surrounding dialog (cwd, recently touched files, etc.).
+    pub async fn provide_context_with_metadata(
+        &self,
+        message: &str,
+        token_budget: usize,
+        metadata: Option<&ContextSearchMetadata>,
+    ) -> Result<Option<ProvidedContext>> {
         debug!("Analyzing message for context: '{}'", message);
 
         // Analyze query
-        let intent = self.query_analyzer.analyze(message)?;
+        let intent = self.query_analyzer.analyze(message, metadata)?;
 
         // Check if search should be triggered
         if !intent.should_search {
@@ -148,7 +183,9 @@ impl ContextProvider {
             let cache = self.cache.lock().await;
             if let Some(entry) = cache.get(&intent.query) {
                 debug!("Cache hit for query: {}", intent.query);
-                let chunks = self.ranker.rank_and_select(entry.chunks.clone(), token_budget);
+                let chunks = self
+                    .ranker
+                    .rank_and_select(entry.chunks.clone(), token_budget);
                 let (tokens_used, formatted) = self.format_context(&chunks);
 
                 return Ok(Some(ProvidedContext {
@@ -173,9 +210,9 @@ impl ContextProvider {
         );
 
         // Rank and select within budget
-        let selected_chunks =
-            self.ranker
-                .rank_and_select(search_results.results.clone(), token_budget);
+        let selected_chunks = self
+            .ranker
+            .rank_and_select(search_results.results.clone(), token_budget);
 
         // Update cache
         if self.config.enable_cache {
@@ -346,7 +383,8 @@ mod tests {
     #[tokio::test]
     async fn test_format_context() {
         use codex_codebase_retrieval::SearchSource;
-        use codex_vector_store::{ChunkMetadata, CodeChunk};
+        use codex_vector_store::ChunkMetadata;
+        use codex_vector_store::CodeChunk;
 
         let (provider, _temp) = create_test_provider().await;
 

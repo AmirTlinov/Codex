@@ -274,6 +274,9 @@ pub struct Config {
 
     /// OTEL configuration (exporter type, endpoint, headers, etc.).
     pub otel: crate::config::types::OtelConfig,
+
+    /// Codebase search configuration for automatic context injection.
+    pub codebase_search: crate::config::types::CodebaseSearchConfig,
 }
 
 impl Config {
@@ -709,6 +712,10 @@ pub struct ConfigToml {
     pub experimental_sandbox_command_assessment: Option<bool>,
     /// Preferred OSS provider for local models, e.g. "lmstudio" or "ollama".
     pub oss_provider: Option<String>,
+
+    /// Codebase search configuration.
+    #[serde(default)]
+    pub codebase_search: Option<crate::config::types::CodebaseSearchConfigToml>,
 }
 
 impl From<ConfigToml> for UserSavedConfig {
@@ -1260,6 +1267,22 @@ impl Config {
                     log_user_prompt,
                     environment,
                     exporter,
+                }
+            },
+            codebase_search: {
+                use crate::config::types::{CodebaseSearchConfig, CodebaseSearchConfigToml};
+                let t: CodebaseSearchConfigToml = cfg.codebase_search.unwrap_or_default();
+                let enabled = t.enabled.unwrap_or(true);
+                let index_dir = t.index_dir.unwrap_or_else(|| PathBuf::from(".codex/index"));
+                let token_budget = t.token_budget.unwrap_or(2000);
+                let min_confidence = t.min_confidence.unwrap_or(0.5);
+                let ranking_strategy = t.ranking_strategy.unwrap_or_else(|| "balanced".to_string());
+                CodebaseSearchConfig {
+                    enabled,
+                    index_dir,
+                    token_budget,
+                    min_confidence,
+                    ranking_strategy,
                 }
             },
         };
@@ -2989,6 +3012,7 @@ model_verbosity = "high"
                 disable_paste_burst: false,
                 tui_notifications: Default::default(),
                 otel: OtelConfig::default(),
+                codebase_search: Default::default(),
             },
             o3_profile_config
         );
@@ -3060,6 +3084,7 @@ model_verbosity = "high"
             disable_paste_burst: false,
             tui_notifications: Default::default(),
             otel: OtelConfig::default(),
+            codebase_search: Default::default(),
         };
 
         assert_eq!(expected_gpt3_profile_config, gpt3_profile_config);
@@ -3146,6 +3171,7 @@ model_verbosity = "high"
             disable_paste_burst: false,
             tui_notifications: Default::default(),
             otel: OtelConfig::default(),
+            codebase_search: Default::default(),
         };
 
         assert_eq!(expected_zdr_profile_config, zdr_profile_config);
@@ -3218,6 +3244,7 @@ model_verbosity = "high"
             disable_paste_burst: false,
             tui_notifications: Default::default(),
             otel: OtelConfig::default(),
+            codebase_search: Default::default(),
         };
 
         assert_eq!(expected_gpt5_profile_config, gpt5_profile_config);
