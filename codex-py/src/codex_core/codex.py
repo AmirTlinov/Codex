@@ -36,6 +36,10 @@ from codex_protocol.items import (
     CommandExecutionItem,
     CommandExecutionStatus,
     ErrorItem,
+    FileChangeItem,
+    FileUpdateChange,
+    PatchApplyStatus,
+    PatchChangeKind,
     ThreadItem,
 )
 
@@ -81,13 +85,34 @@ SHELL_TOOL = ToolDefinition(
 
 APPLY_PATCH_TOOL = ToolDefinition(
     name="apply_patch",
-    description="Apply a unified diff patch to modify files.",
+    description="""Apply a deterministic patch to modify files.
+
+Format:
+*** Begin Patch
+<operations>
+*** End Patch
+
+Operations:
+- *** Add File: path         Create/replace file (+ prefixed lines)
+- *** Delete File: path      Remove file
+- *** Update File: path      Apply diff hunks (@@ context, +/- changes)
+- *** Insert Before Symbol: file::Symbol::path  Insert before symbol
+- *** Insert After Symbol: file::Symbol::path   Insert after symbol
+- *** Replace Symbol Body: file::Symbol::path   Replace symbol body
+
+Example:
+*** Begin Patch
+*** Update File: src/main.py
+@@ def hello():
+-    print("hello")
++    print("Hello, World!")
+*** End Patch""",
     parameters={
         "type": "object",
         "properties": {
             "patch": {
                 "type": "string",
-                "description": "The unified diff patch to apply",
+                "description": "The patch content in the deterministic format",
             },
         },
         "required": ["patch"],
@@ -381,10 +406,62 @@ class Codex:
         turn: Turn,
     ) -> AsyncIterator[ThreadEvent]:
         """Handle file patch application."""
-        # Simplified implementation - just log the patch
-        patch = tool_call.arguments.get("patch", "")
-        item = ThreadItem(
-            id=str(uuid.uuid4()),
-            details=ErrorItem(message=f"Patch application not yet implemented: {patch[:100]}..."),
-        )
-        yield ItemCompletedEvent(item=item)
+        from codex_patch import PatchApplier, ApplyStatus
+
+        patch_text = tool_call.arguments.get("patch", "")
+
+        # Create item for tracking
+        item_id = str(uuid.uuid4())
+
+        try:
+            # Apply the patch
+            applier = PatchApplier(cwd=self.config.cwd)
+
+            # Respect approval policy - dry_run first if needed
+            needs_approval = self.config.approval_policy != "never"
+
+            if needs_approval:
+                # Dry run to validate
+                dry_result = applier.apply(patch_text, dry_run=True)
+                if not dry_result.success:
+                    item = ThreadItem(
+                        id=item_id,
+                        details=ErrorItem(message=f"Patch validation failed: {dry_result.summary()}"),
+                    )
+                    yield ItemCompletedEvent(item=item)
+                    return
+
+            # Apply for real
+            result = applier.apply(patch_text, dry_run=False)
+
+            # Convert to FileChangeItem format
+            changes: list[FileUpdateChange] = []
+            for change in result.changes:
+                if change.error:
+                    continue
+                kind_map = {
+                    "add": PatchChangeKind.ADD,
+                    "replace": PatchChangeKind.UPDATE,
+                    "delete": PatchChangeKind.DELETE,
+                    "modify": PatchChangeKind.UPDATE,
+                    "rename": PatchChangeKind.UPDATE,
+                }
+                kind = kind_map.get(change.operation, PatchChangeKind.UPDATE)
+                changes.append(FileUpdateChange(path=str(change.path), kind=kind))
+
+            status = PatchApplyStatus.COMPLETED if result.success else PatchApplyStatus.FAILED
+
+            item = ThreadItem(
+                id=item_id,
+                details=FileChangeItem(changes=changes, status=status),
+            )
+            turn.response_items.append(item)
+            yield ItemCompletedEvent(item=item)
+
+        except Exception as e:
+            item = ThreadItem(
+                id=item_id,
+                details=ErrorItem(message=f"Patch error: {e}"),
+            )
+            turn.response_items.append(item)
+            yield ItemCompletedEvent(item=item)
