@@ -194,12 +194,13 @@ class ModelClient:
                     tool_specs.append(ToolSpec.web_search())
 
         # Build request using ResponsesApiRequest model (matches codex-rs exactly)
+        # codex-rs always uses tool_choice="auto" regardless of whether tools are present
         request = ResponsesApiRequest(
             model=self.config.model,
             instructions=instructions,
             input=input_items,
             tools=tool_specs,
-            tool_choice="auto" if tool_specs else "none",
+            tool_choice="auto",  # Always "auto" like codex-rs
             parallel_tool_calls=True,
             store=False,
             stream=stream,

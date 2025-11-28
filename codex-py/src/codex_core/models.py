@@ -300,7 +300,11 @@ class ResponsesApiRequest:
     prompt_cache_key: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
-        """Serialize to dict for JSON request body (matches codex-rs exactly)."""
+        """Serialize to dict for JSON request body (matches codex-rs exactly).
+
+        In codex-rs, fields use #[serde(skip_serializing_if = "Option::is_none")]
+        so None fields are omitted entirely, not serialized as null.
+        """
         result: dict[str, Any] = {
             "model": self.model,
             "instructions": self.instructions,
@@ -308,13 +312,13 @@ class ResponsesApiRequest:
             "tools": [tool.to_dict() for tool in self.tools],
             "tool_choice": self.tool_choice,
             "parallel_tool_calls": self.parallel_tool_calls,
-            # reasoning serializes as null if None (codex-rs doesn't skip it)
-            "reasoning": self.reasoning.to_dict() if self.reasoning else None,
             "store": self.store,
             "stream": self.stream,
             "include": self.include,
         }
-        # prompt_cache_key is optional (skipped if None in codex-rs)
+        # Optional fields - only include if set (matches codex-rs skip_serializing_if)
+        if self.reasoning:
+            result["reasoning"] = self.reasoning.to_dict()
         if self.prompt_cache_key:
             result["prompt_cache_key"] = self.prompt_cache_key
         return result

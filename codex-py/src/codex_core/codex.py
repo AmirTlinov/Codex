@@ -330,8 +330,9 @@ class Codex:
         if self.config.developer_instructions:
             parts.append(f"\n\nDeveloper Instructions:\n{self.config.developer_instructions}")
 
-        # Working directory context
-        parts.append(f"\n\nWorking directory: {self.config.cwd}")
+        # NOTE: Working directory is NOT added to instructions.
+        # ChatGPT API requires prompt.md EXACTLY as-is without modifications.
+        # codex-rs also does not modify the official instructions.
 
         return "\n".join(parts)
 
