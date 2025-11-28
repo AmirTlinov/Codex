@@ -1,5 +1,5 @@
-"""Codex TUI - Terminal interface using Textual."""
+"""Codex CLI - inline terminal interface."""
 
-from codex_tui.app import CodexApp, main
+from codex_tui.app import main
 
-__all__ = ["CodexApp", "main"]
+__all__ = ["main"]
