@@ -1,13 +1,16 @@
 """Configuration management for Codex.
 
-Loads configuration from ~/.codex/config.toml and merges with overrides.
+Loads configuration from ~/.codex/config.toml and ~/.codex/auth.json.
+Shares authentication with codex-rs.
 """
 
 from __future__ import annotations
 
+import json
 import os
 import tomllib
 from dataclasses import dataclass, field
+from datetime import datetime
 from enum import Enum
 from pathlib import Path
 from typing import Any
@@ -43,6 +46,75 @@ class ReasoningSummary(str, Enum):
     NONE = "none"
     AUTO = "auto"
     DETAILED = "detailed"
+
+
+@dataclass(slots=True)
+class AuthTokens:
+    """OAuth tokens from auth.json (shared with codex-rs)."""
+
+    id_token: str | None = None
+    access_token: str | None = None
+    refresh_token: str | None = None
+    account_id: str | None = None
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> AuthTokens:
+        return cls(
+            id_token=data.get("id_token"),
+            access_token=data.get("access_token"),
+            refresh_token=data.get("refresh_token"),
+            account_id=data.get("account_id"),
+        )
+
+
+@dataclass(slots=True)
+class AuthConfig:
+    """Authentication configuration from ~/.codex/auth.json."""
+
+    openai_api_key: str | None = None
+    tokens: AuthTokens | None = None
+    last_refresh: datetime | None = None
+
+    @classmethod
+    def load(cls, codex_home: Path) -> AuthConfig | None:
+        """Load auth.json from codex home directory."""
+        auth_path = codex_home / "auth.json"
+        if not auth_path.exists():
+            return None
+
+        try:
+            with open(auth_path, encoding="utf-8") as f:
+                data = json.load(f)
+
+            tokens = None
+            if "tokens" in data and data["tokens"]:
+                tokens = AuthTokens.from_dict(data["tokens"])
+
+            last_refresh = None
+            if "last_refresh" in data and data["last_refresh"]:
+                try:
+                    last_refresh = datetime.fromisoformat(
+                        data["last_refresh"].replace("Z", "+00:00")
+                    )
+                except (ValueError, AttributeError):
+                    pass
+
+            return cls(
+                openai_api_key=data.get("OPENAI_API_KEY"),
+                tokens=tokens,
+                last_refresh=last_refresh,
+            )
+        except (json.JSONDecodeError, OSError):
+            return None
+
+    def get_bearer_token(self) -> str | None:
+        """Get the bearer token for API requests.
+
+        Uses access_token from OAuth flow (shared with codex-rs).
+        """
+        if self.tokens and self.tokens.access_token:
+            return self.tokens.access_token
+        return self.openai_api_key
 
 
 @dataclass(slots=True)
@@ -141,6 +213,9 @@ class Config:
     # History
     history: HistoryConfig = field(default_factory=HistoryConfig)
 
+    # Authentication (loaded from auth.json, shared with codex-rs)
+    auth: AuthConfig | None = None
+
     # Feature flags
     tools_web_search_request: bool = False
     include_apply_patch_tool: bool = True
@@ -161,6 +236,9 @@ class Config:
             with open(config_path, "rb") as f:
                 data = tomllib.load(f)
             config._apply_toml(data)
+
+        # Load auth.json (shared with codex-rs)
+        config.auth = AuthConfig.load(config.codex_home)
 
         # Apply CLI overrides
         if overrides:
@@ -218,11 +296,29 @@ class Config:
                 setattr(self, key, value)
 
     def get_api_key(self) -> str | None:
-        """Get the API key for the current model provider."""
+        """Get the API key/token for the current model provider.
+
+        Priority:
+        1. Environment variable (OPENAI_API_KEY, ANTHROPIC_API_KEY, etc.)
+        2. OAuth access_token from auth.json (shared with codex-rs)
+        3. API key from auth.json
+        """
+        # First check environment variable
         provider = self.model_providers.get(self.model_provider_id)
         if provider:
-            return os.environ.get(provider.api_key_env_var)
-        return os.environ.get("OPENAI_API_KEY")
+            env_key = os.environ.get(provider.api_key_env_var)
+            if env_key:
+                return env_key
+
+        env_key = os.environ.get("OPENAI_API_KEY")
+        if env_key:
+            return env_key
+
+        # Then check auth.json (shared with codex-rs)
+        if self.auth:
+            return self.auth.get_bearer_token()
+
+        return None
 
     def get_base_url(self) -> str:
         """Get the base URL for the current model provider."""

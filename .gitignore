@@ -82,3 +82,7 @@ CHANGELOG.ignore.md
 # nix related
 .direnv
 .envrc
+
+# Tool caches
+.context-finder/
+.serena/
