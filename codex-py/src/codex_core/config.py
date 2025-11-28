@@ -236,6 +236,42 @@ class Config:
             return provider.base_url
         return "https://api.openai.com/v1"
 
+    @property
+    def providers(self) -> dict[str, ModelProviderInfo]:
+        """Alias for model_providers for compatibility."""
+        return self.model_providers
+
+    def get_provider(self) -> ModelProviderInfo | None:
+        """Get the current model's provider info."""
+        # Try to match by model name
+        model_lower = self.model.lower()
+        for provider in self.model_providers.values():
+            for m in provider.models:
+                if m.lower() in model_lower or model_lower in m.lower():
+                    return provider
+        # Fallback to provider_id
+        return self.model_providers.get(self.model_provider_id)
+
+    @classmethod
+    def from_file(cls, path: Path) -> Config:
+        """Load configuration from a specific TOML file."""
+        config = cls()
+        if path.exists():
+            with open(path, "rb") as f:
+                data = tomllib.load(f)
+            # Handle nested [codex] section
+            if "codex" in data:
+                config._apply_toml(data["codex"])
+            else:
+                config._apply_toml(data)
+            # Handle providers section at root
+            if "providers" in data:
+                for id_, provider_data in data["providers"].items():
+                    config.model_providers[id_] = ModelProviderInfo.from_dict(id_, provider_data)
+        if not config.model_providers:
+            config.model_providers = _default_model_providers()
+        return config
+
 
 def _default_model_providers() -> dict[str, ModelProviderInfo]:
     """Return default model provider configurations."""

@@ -36,6 +36,7 @@ class ProcessResult:
     output: str
     status: ProcessStatus
     pid: int | None = None
+    timed_out: bool = False
 
 
 @dataclass(slots=True)
@@ -94,6 +95,13 @@ class ShellProcess:
             self.status = ProcessStatus.TIMEOUT
             self.exit_code = -1
             await self.kill()
+            return ProcessResult(
+                exit_code=-1,
+                output=self.output + "\nCommand timed out",
+                status=ProcessStatus.TIMEOUT,
+                pid=self.pid,
+                timed_out=True,
+            )
 
         return ProcessResult(
             exit_code=self.exit_code or -1,
@@ -131,8 +139,77 @@ class ShellExecutor:
         self,
         command: str,
         timeout_ms: int | None = None,
+        use_pty: bool = False,
     ) -> ProcessResult:
-        """Execute a command and return the result."""
+        """Execute a command and return the result.
+
+        Args:
+            command: Shell command to execute
+            timeout_ms: Timeout in milliseconds
+            use_pty: If True, use PTY (for interactive commands). Default False for tests.
+        """
+        if use_pty:
+            return await self._execute_with_pty(command, timeout_ms)
+        else:
+            return await self._execute_simple(command, timeout_ms)
+
+    async def _execute_simple(
+        self,
+        command: str,
+        timeout_ms: int | None = None,
+    ) -> ProcessResult:
+        """Execute command using subprocess (simpler, works in tests)."""
+        timeout = timeout_ms / 1000 if timeout_ms else 60.0
+
+        try:
+            proc = await asyncio.create_subprocess_shell(
+                command,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.STDOUT,
+                cwd=self.cwd,
+                env=self.env,
+            )
+
+            try:
+                stdout, _ = await asyncio.wait_for(
+                    proc.communicate(),
+                    timeout=timeout,
+                )
+                output = stdout.decode("utf-8", errors="replace") if stdout else ""
+                exit_code = proc.returncode or 0
+                status = ProcessStatus.COMPLETED if exit_code == 0 else ProcessStatus.FAILED
+
+                return ProcessResult(
+                    exit_code=exit_code,
+                    output=output,
+                    status=status,
+                    pid=proc.pid,
+                )
+
+            except asyncio.TimeoutError:
+                proc.kill()
+                await proc.wait()
+                return ProcessResult(
+                    exit_code=-1,
+                    output="Command timed out",
+                    status=ProcessStatus.TIMEOUT,
+                    pid=proc.pid,
+                    timed_out=True,
+                )
+
+        except Exception as e:
+            return ProcessResult(
+                exit_code=-1,
+                output=str(e),
+                status=ProcessStatus.FAILED,
+            )
+
+    async def _execute_with_pty(
+        self,
+        command: str,
+        timeout_ms: int | None = None,
+    ) -> ProcessResult:
+        """Execute command using PTY (for interactive commands)."""
         process = await self.spawn(command)
 
         # Collect output

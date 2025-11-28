@@ -29,6 +29,15 @@ class Turn:
     completed_at: datetime | None = None
     error: str | None = None
 
+    @property
+    def status(self) -> str:
+        """Get turn status."""
+        if self.error:
+            return "failed"
+        if self.completed_at:
+            return "completed"
+        return "in_progress"
+
     def to_dict(self) -> dict[str, Any]:
         return {
             "id": self.id,
@@ -162,13 +171,18 @@ class Session:
         turn.completed_at = datetime.now(timezone.utc)
         turn.error = error
 
-    def save(self) -> Path:
-        """Save session to disk."""
-        sessions_dir = get_sessions_dir()
+    def save(self, sessions_dir: Path | None = None) -> Path:
+        """Save session to disk.
+
+        Args:
+            sessions_dir: Directory to save to. Defaults to ~/.codex/sessions
+        """
+        if sessions_dir is None:
+            sessions_dir = get_sessions_dir()
         sessions_dir.mkdir(parents=True, exist_ok=True)
 
-        timestamp = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
-        file_path = sessions_dir / f"rollout-{timestamp}-{self.thread_id[:8]}.jsonl"
+        # Use simple filename for easy loading
+        file_path = sessions_dir / f"{self.thread_id}.json"
 
         meta = SessionMeta(
             thread_id=self.thread_id,
@@ -185,6 +199,59 @@ class Session:
                 f.write(json.dumps(turn.to_dict()) + "\n")
 
         return file_path
+
+    @classmethod
+    def load_from_file(cls, file_path: Path) -> Session | None:
+        """Load session from a specific file."""
+        if not file_path.exists():
+            return None
+
+        try:
+            with open(file_path) as f:
+                lines = f.readlines()
+
+            if not lines:
+                return None
+
+            # First line is session meta
+            meta_data = json.loads(lines[0])
+            meta = SessionMeta.from_dict(meta_data)
+
+            session = cls(
+                thread_id=meta.thread_id,
+                model=meta.model,
+                cwd=Path(meta.cwd),
+                created_at=meta.created_at,
+                title=meta.title,
+            )
+
+            # Parse turn data from remaining lines
+            for line in lines[1:]:
+                if not line.strip():
+                    continue
+                turn_data = json.loads(line)
+                if "user_input" in turn_data:
+                    turn = Turn(
+                        id=turn_data.get("id", str(uuid.uuid4())),
+                        user_input=turn_data["user_input"],
+                        started_at=datetime.fromisoformat(turn_data["started_at"])
+                        if "started_at" in turn_data
+                        else datetime.now(timezone.utc),
+                        completed_at=datetime.fromisoformat(turn_data["completed_at"])
+                        if turn_data.get("completed_at")
+                        else None,
+                        error=turn_data.get("error"),
+                    )
+                    if "usage" in turn_data:
+                        turn.usage = Usage(
+                            input_tokens=turn_data["usage"].get("input_tokens", 0),
+                            output_tokens=turn_data["usage"].get("output_tokens", 0),
+                        )
+                    session.turns.append(turn)
+
+            return session
+        except (json.JSONDecodeError, KeyError):
+            return None
 
     def get_conversation_history(self) -> list[dict[str, Any]]:
         """Get conversation history for API context."""

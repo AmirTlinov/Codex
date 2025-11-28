@@ -191,15 +191,15 @@ class Codex:
             async for chunk in self._client.stream_completion(messages, tools):
                 # Handle content
                 if chunk.content:
+                    response_text += chunk.content
                     if current_item_id is None:
                         current_item_id = str(uuid.uuid4())
                         item = ThreadItem(
                             id=current_item_id,
-                            details=AgentMessageItem(text=chunk.content),
+                            details=AgentMessageItem(text=response_text),
                         )
                         yield ItemStartedEvent(item=item)
                     else:
-                        response_text += chunk.content
                         item = ThreadItem(
                             id=current_item_id,
                             details=AgentMessageItem(text=response_text),
