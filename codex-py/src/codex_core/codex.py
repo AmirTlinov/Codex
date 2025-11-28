@@ -18,6 +18,7 @@ from typing import Any
 
 from codex_core.client import Message, ModelClient, StreamChunk, ToolCall
 from codex_core.config import Config
+from codex_core.mcp_client import McpClient, McpToolResult
 from codex_core.session import Session, Turn
 from codex_protocol.events import (
     ItemCompletedEvent,
@@ -127,6 +128,7 @@ class Codex:
     config: Config
     session: Session
     _client: ModelClient | None = None
+    _mcp_client: McpClient | None = None
     _event_queue: asyncio.Queue[ThreadEvent] = field(default_factory=asyncio.Queue)
     _tools: list[ToolDefinition] = field(default_factory=list)
     _tool_handlers: dict[str, Any] = field(default_factory=dict)
@@ -167,9 +169,17 @@ class Codex:
     async def __aenter__(self) -> Codex:
         self._client = ModelClient(self.config)
         await self._client.__aenter__()
+
+        # Connect to MCP servers if configured
+        if self.config.mcp_servers:
+            self._mcp_client = McpClient()
+            await self._mcp_client.connect_all(self.config.mcp_servers)
+
         return self
 
     async def __aexit__(self, *args: Any) -> None:
+        if self._mcp_client:
+            await self._mcp_client.disconnect_all()
         if self._client:
             await self._client.__aexit__(*args)
 
@@ -204,8 +214,8 @@ class Codex:
             # Build messages
             messages = self._build_messages(user_input)
 
-            # Get tools in OpenAI format
-            tools = [t.to_openai_format() for t in self._tools] if self._tools else None
+            # Get tools in OpenAI format (built-in + MCP)
+            tools = self._get_all_tools()
 
             # Track response
             response_text = ""
@@ -307,12 +317,33 @@ class Codex:
 
         return "\n".join(parts)
 
+    def _get_all_tools(self) -> list[dict[str, Any]] | None:
+        """Get all tools in OpenAI format: built-in + MCP."""
+        tools: list[dict[str, Any]] = []
+
+        # Built-in tools
+        for tool in self._tools:
+            tools.append(tool.to_openai_format())
+
+        # MCP tools
+        if self._mcp_client:
+            tools.extend(self._mcp_client.get_tools_openai_format())
+
+        return tools if tools else None
+
     async def _handle_tool_call(
         self,
         tool_call: ToolCall,
         turn: Turn,
     ) -> AsyncIterator[ThreadEvent]:
         """Handle a tool call from the model."""
+        # Check if this is an MCP tool call
+        if self._mcp_client and tool_call.name.startswith("mcp__"):
+            async for event in self._handle_mcp_tool_call(tool_call, turn):
+                yield event
+            return
+
+        # Built-in tool handler
         handler = self._tool_handlers.get(tool_call.name)
         if not handler:
             item = ThreadItem(
@@ -324,6 +355,74 @@ class Codex:
 
         async for event in handler(tool_call, turn):
             yield event
+
+    async def _handle_mcp_tool_call(
+        self,
+        tool_call: ToolCall,
+        turn: Turn,
+    ) -> AsyncIterator[ThreadEvent]:
+        """Handle an MCP tool call."""
+        from codex_protocol.items import (
+            McpToolCallItem,
+            McpToolCallItemError,
+            McpToolCallItemResult,
+            McpToolCallStatus,
+        )
+
+        if not self._mcp_client:
+            return
+
+        # Parse tool name: mcp__server__tool
+        parsed = self._mcp_client.parse_tool_name(tool_call.name)
+        if not parsed:
+            item = ThreadItem(
+                id=str(uuid.uuid4()),
+                details=ErrorItem(message=f"Invalid MCP tool name: {tool_call.name}"),
+            )
+            yield ItemCompletedEvent(item=item)
+            return
+
+        server_name, tool_name = parsed
+        item_id = str(uuid.uuid4())
+
+        # Emit started event
+        item = ThreadItem(
+            id=item_id,
+            details=McpToolCallItem(
+                server=server_name,
+                tool=tool_name,
+                arguments=tool_call.arguments,
+                status=McpToolCallStatus.IN_PROGRESS,
+            ),
+        )
+        yield ItemStartedEvent(item=item)
+
+        # Execute the tool
+        result = await self._mcp_client.call_tool(server_name, tool_name, tool_call.arguments)
+
+        # Emit completed event
+        if result.is_error:
+            status = McpToolCallStatus.FAILED
+            mcp_result = None
+            mcp_error = McpToolCallItemError(message=result.text())
+        else:
+            status = McpToolCallStatus.COMPLETED
+            mcp_result = McpToolCallItemResult(content=result.content)
+            mcp_error = None
+
+        item = ThreadItem(
+            id=item_id,
+            details=McpToolCallItem(
+                server=server_name,
+                tool=tool_name,
+                arguments=tool_call.arguments,
+                status=status,
+                result=mcp_result,
+                error=mcp_error,
+            ),
+        )
+        turn.response_items.append(item)
+        yield ItemCompletedEvent(item=item)
 
     async def _handle_shell(
         self,

@@ -4,7 +4,7 @@ version = "0.1.0"
 description = "Codex CLI/TUI - Python implementation"
 readme = "README.md"
 license = "Apache-2.0"
-requires-python = ">=3.14"
+requires-python = ">=3.12"
 authors = [
     { name = "OpenAI" }
 ]
@@ -16,7 +16,8 @@ classifiers = [
     "License :: OSI Approved :: Apache Software License",
     "Operating System :: POSIX :: Linux",
     "Operating System :: MacOS",
-    "Programming Language :: Python :: 3.14",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
     "Topic :: Software Development :: User Interfaces",
     "Typing :: Typed",
 ]
@@ -46,7 +47,7 @@ requires = ["hatchling>=1.25.0"]
 build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
-packages = ["src/codex_protocol", "src/codex_core", "src/codex_shell", "src/codex_tui"]
+packages = ["src/codex_protocol", "src/codex_core", "src/codex_shell", "src/codex_tui", "src/codex_patch"]
 
 [tool.hatch.build.targets.sdist]
 include = ["src/"]
@@ -55,7 +56,7 @@ include = ["src/"]
 path = ".venv"
 
 [tool.ruff]
-target-version = "py314"
+target-version = "py312"
 line-length = 100
 
 [tool.ruff.lint]
@@ -63,7 +64,7 @@ select = ["E", "F", "W", "I", "UP", "B", "C4", "SIM"]
 ignore = ["E501"]
 
 [tool.mypy]
-python_version = "3.14"
+python_version = "3.12"
 strict = true
 warn_return_any = true
 warn_unused_configs = true
