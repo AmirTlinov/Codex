@@ -15,6 +15,7 @@ import httpx
 from httpx_sse import aconnect_sse
 
 from codex_core.config import Config, ModelFamily
+from codex_core.models import ContentItem, ResponseItem, ResponsesApiRequest, ToolSpec
 
 
 class WireApi(str, Enum):
@@ -98,6 +99,11 @@ class ModelClient:
         else:
             headers["Authorization"] = f"Bearer {api_key}"
 
+        # Required for ChatGPT backend API (matches codex-rs)
+        if self.config.auth and self.config.auth.is_chatgpt_auth():
+            headers["originator"] = "codex_cli_rs"
+            headers["User-Agent"] = "codex_cli_rs/1.0"
+
         return headers
 
     def _build_request(
@@ -150,48 +156,58 @@ class ModelClient:
         Responses API uses a different format than Chat Completions:
         - `instructions` instead of system message
         - `input` array of ResponseItem objects instead of `messages`
+
+        This matches codex-rs ResponsesApiRequest format exactly.
         """
         # Extract system/instructions and build input items
         instructions = ""
-        input_items: list[dict[str, Any]] = []
+        input_items: list[ResponseItem] = []
 
         for m in messages:
             if m.role == "system":
                 instructions = m.content
-            else:
-                # Convert to ResponseItem Message format
-                input_items.append({
-                    "type": "message",
-                    "role": m.role,
-                    "content": [{"type": "input_text", "text": m.content}],
-                })
+            elif m.role == "user":
+                input_items.append(ResponseItem.user_message(m.content))
+            elif m.role == "assistant":
+                input_items.append(ResponseItem.assistant_message(m.content))
 
-        request: dict[str, Any] = {
-            "model": self.config.model,
-            "instructions": instructions,
-            "input": input_items,
-            "stream": stream,
-            "store": False,
-        }
-
+        # Convert tools to ToolSpec format
+        tool_specs: list[ToolSpec] = []
         if tools:
-            # Convert OpenAI function tools to Responses API format
-            responses_tools = []
             for tool in tools:
-                if tool.get("type") == "function":
+                tool_type = tool.get("type")
+                if tool_type == "function":
                     func = tool["function"]
-                    responses_tools.append({
-                        "type": "function",
-                        "name": func["name"],
-                        "description": func.get("description", ""),
-                        "parameters": func.get("parameters", {"type": "object"}),
-                    })
-            if responses_tools:
-                request["tools"] = responses_tools
-                request["tool_choice"] = "auto"
-                request["parallel_tool_calls"] = True
+                    # Special handling: convert "shell" function to local_shell built-in
+                    if func["name"] == "shell":
+                        tool_specs.append(ToolSpec.local_shell())
+                    else:
+                        tool_specs.append(ToolSpec.function(
+                            name=func["name"],
+                            description=func.get("description", ""),
+                            parameters=func.get("parameters", {"type": "object", "properties": {}}),
+                            strict=func.get("strict", False),
+                        ))
+                elif tool_type == "local_shell":
+                    tool_specs.append(ToolSpec.local_shell())
+                elif tool_type == "web_search":
+                    tool_specs.append(ToolSpec.web_search())
 
-        return request
+        # Build request using ResponsesApiRequest model (matches codex-rs exactly)
+        request = ResponsesApiRequest(
+            model=self.config.model,
+            instructions=instructions,
+            input=input_items,
+            tools=tool_specs,
+            tool_choice="auto" if tool_specs else "none",
+            parallel_tool_calls=True,
+            store=False,
+            stream=stream,
+            include=[],
+            prompt_cache_key=None,
+        )
+
+        return request.to_dict()
 
     def _build_anthropic_request(
         self,
@@ -257,21 +273,73 @@ class ModelClient:
         else:
             url = f"{base_url}/chat/completions"
 
-        async with aconnect_sse(
-            self._client, "POST", url, headers=headers, json=request_data
-        ) as event_source:
-            async for event in event_source.aiter_sse():
-                if event.data == "[DONE]":
-                    break
+        # ChatGPT backend API doesn't set Content-Type: text/event-stream
+        # so we parse SSE manually instead of using httpx_sse
+        if wire_api == WireApi.RESPONSES:
+            async for chunk in self._stream_responses_api(url, headers, request_data):
+                yield chunk
+        else:
+            async with aconnect_sse(
+                self._client, "POST", url, headers=headers, json=request_data
+            ) as event_source:
+                async for event in event_source.aiter_sse():
+                    if event.data == "[DONE]":
+                        break
 
-                try:
-                    data = json.loads(event.data)
-                except json.JSONDecodeError:
+                    try:
+                        data = json.loads(event.data)
+                    except json.JSONDecodeError:
+                        continue
+
+                    chunk = self._parse_stream_chunk(data, wire_api, event.event)
+                    if chunk:
+                        yield chunk
+
+    async def _stream_responses_api(
+        self,
+        url: str,
+        headers: dict[str, str],
+        request_data: dict[str, Any],
+    ) -> AsyncIterator[StreamChunk]:
+        """Stream from Responses API with manual SSE parsing.
+
+        ChatGPT backend API doesn't return Content-Type: text/event-stream,
+        so httpx_sse fails. We parse SSE manually here.
+        """
+        async with self._client.stream(
+            "POST", url, headers=headers, json=request_data
+        ) as response:
+            response.raise_for_status()
+
+            event_name: str | None = None
+            data_lines: list[str] = []
+
+            async for line in response.aiter_lines():
+                line = line.strip()
+
+                if not line:
+                    # Empty line = end of event
+                    if data_lines:
+                        data_str = "\n".join(data_lines)
+                        if data_str == "[DONE]":
+                            break
+
+                        try:
+                            data = json.loads(data_str)
+                            chunk = self._parse_responses_chunk(data, event_name)
+                            if chunk:
+                                yield chunk
+                        except json.JSONDecodeError:
+                            pass
+
+                        event_name = None
+                        data_lines = []
                     continue
 
-                chunk = self._parse_stream_chunk(data, wire_api, event.event)
-                if chunk:
-                    yield chunk
+                if line.startswith("event:"):
+                    event_name = line[6:].strip()
+                elif line.startswith("data:"):
+                    data_lines.append(line[5:].strip())
 
     def _parse_stream_chunk(
         self,
@@ -358,10 +426,12 @@ class ModelClient:
     ) -> StreamChunk | None:
         """Parse OpenAI Responses API stream chunk.
 
-        Responses API uses SSE event names like:
+        Responses API uses SSE event names (matches codex-rs):
+        - response.created - turn started
         - response.output_text.delta - text content streaming
+        - response.output_item.added - new item started
         - response.output_item.done - completed output item
-        - response.completed - full response completed
+        - response.completed - turn done with usage
         - response.failed - error occurred
         """
         # Handle by event name (preferred)
@@ -371,7 +441,7 @@ class ModelClient:
                 return StreamChunk(content=delta)
 
         elif event_name == "response.output_item.done":
-            # Parse completed output item
+            # Parse completed output item (matches codex-rs ResponseItem parsing)
             item = data.get("item", {})
             item_type = item.get("type")
 
@@ -385,13 +455,44 @@ class ModelClient:
                     return StreamChunk(content="".join(content_parts))
 
             elif item_type == "function_call":
-                # Tool call completed
+                # Function tool call completed
+                args_str = item.get("arguments", "{}")
+                try:
+                    arguments = json.loads(args_str) if args_str else {}
+                except json.JSONDecodeError:
+                    arguments = {"raw": args_str}
                 return StreamChunk(
                     tool_calls=[
                         ToolCall(
                             id=item.get("call_id", ""),
                             name=item.get("name", ""),
-                            arguments=json.loads(item.get("arguments", "{}")),
+                            arguments=arguments,
+                        )
+                    ]
+                )
+
+            elif item_type == "local_shell_call":
+                # Local shell call from Responses API (codex-rs built-in tool)
+                action = item.get("action", {})
+                command = action.get("command", [])
+                return StreamChunk(
+                    tool_calls=[
+                        ToolCall(
+                            id=item.get("call_id", ""),
+                            name="local_shell",
+                            arguments={"command": command},
+                        )
+                    ]
+                )
+
+            elif item_type == "custom_tool_call":
+                # Custom tool call (MCP tools, etc.)
+                return StreamChunk(
+                    tool_calls=[
+                        ToolCall(
+                            id=item.get("call_id", ""),
+                            name=item.get("name", ""),
+                            arguments={"input": item.get("input", "")},
                         )
                     ]
                 )
@@ -415,10 +516,9 @@ class ModelClient:
             response = data.get("response", {})
             error = response.get("error", {})
             error_msg = error.get("message", "Unknown error")
-            # Return as content so it's displayed
             return StreamChunk(content=f"[Error: {error_msg}]", finish_reason="error")
 
-        # Fallback: check data type field
+        # Fallback: check data type field (some SSE implementations put type in data)
         data_type = data.get("type", "")
         if data_type == "response.output_text.delta":
             delta = data.get("delta", "")

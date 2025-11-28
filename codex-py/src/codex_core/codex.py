@@ -310,18 +310,17 @@ class Codex:
         return messages
 
     def _build_system_prompt(self) -> str:
-        """Build the system prompt with instructions."""
+        """Build the system prompt with instructions.
+
+        Uses the official Codex CLI prompt from prompt.md (same as codex-rs).
+        """
         parts = []
 
-        # Base instructions
+        # Base instructions - load from prompt.md (same as codex-rs)
         if self.config.base_instructions:
             parts.append(self.config.base_instructions)
         else:
-            parts.append(
-                "You are Codex, an AI coding assistant. "
-                "You help users with software development tasks by executing commands "
-                "and modifying files. Be concise and helpful."
-            )
+            parts.append(self._get_base_instructions())
 
         # User instructions from AGENTS.md
         if self.config.user_instructions:
@@ -335,6 +334,22 @@ class Codex:
         parts.append(f"\n\nWorking directory: {self.config.cwd}")
 
         return "\n".join(parts)
+
+    def _get_base_instructions(self) -> str:
+        """Load base instructions from prompt.md (matches codex-rs)."""
+        import importlib.resources as resources
+
+        try:
+            # Try to load from package resources
+            prompt_file = resources.files("codex_core").joinpath("prompt.md")
+            return prompt_file.read_text(encoding="utf-8")
+        except (FileNotFoundError, TypeError):
+            # Fallback to minimal prompt
+            return (
+                "You are Codex, an AI coding assistant. "
+                "You help users with software development tasks by executing commands "
+                "and modifying files. Be concise and helpful."
+            )
 
     def _get_all_tools(self) -> list[dict[str, Any]] | None:
         """Get all tools in OpenAI format: built-in + MCP."""
@@ -359,6 +374,12 @@ class Codex:
         # Check if this is an MCP tool call
         if self._mcp_client and tool_call.name.startswith("mcp__"):
             async for event in self._handle_mcp_tool_call(tool_call, turn):
+                yield event
+            return
+
+        # Handle local_shell (Responses API built-in tool)
+        if tool_call.name == "local_shell":
+            async for event in self._handle_local_shell(tool_call, turn):
                 yield event
             return
 
@@ -442,6 +463,32 @@ class Codex:
         )
         turn.response_items.append(item)
         yield ItemCompletedEvent(item=item)
+
+    async def _handle_local_shell(
+        self,
+        tool_call: ToolCall,
+        turn: Turn,
+    ) -> AsyncIterator[ThreadEvent]:
+        """Handle local_shell calls from Responses API.
+
+        Responses API returns local_shell_call with action.command as array.
+        Format: {"command": ["/bin/echo", "hello"]}
+        """
+        # local_shell uses command array format from Responses API
+        command_parts = tool_call.arguments.get("command", [])
+        if isinstance(command_parts, list):
+            command = " ".join(command_parts)
+        else:
+            command = str(command_parts)
+
+        # Reuse shell handler logic with adapted arguments
+        adapted_call = ToolCall(
+            id=tool_call.id,
+            name="shell",
+            arguments={"command": command, "timeout_ms": 60000},
+        )
+        async for event in self._handle_shell(adapted_call, turn):
+            yield event
 
     async def _handle_shell(
         self,
