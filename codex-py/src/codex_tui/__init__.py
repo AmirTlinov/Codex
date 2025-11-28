@@ -1,8 +1,5 @@
-"""Codex TUI - Terminal User Interface.
+"""Codex TUI - Terminal interface using rich."""
 
-Provides an interactive terminal interface for Codex using Textual.
-"""
+from codex_tui.app import main
 
-from codex_tui.app import CodexApp, main
-
-__all__ = ["CodexApp", "main"]
+__all__ = ["main"]
