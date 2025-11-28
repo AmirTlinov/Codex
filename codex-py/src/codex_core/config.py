@@ -116,6 +116,10 @@ class AuthConfig:
             return self.tokens.access_token
         return self.openai_api_key
 
+    def is_chatgpt_auth(self) -> bool:
+        """Check if using ChatGPT OAuth (not direct API key)."""
+        return bool(self.tokens and self.tokens.access_token)
+
 
 @dataclass(slots=True)
 class McpServerConfig:
@@ -321,11 +325,18 @@ class Config:
         return None
 
     def get_base_url(self) -> str:
-        """Get the base URL for the current model provider."""
+        """Get the base URL for the current model provider.
+
+        Uses ChatGPT backend API when authenticated via OAuth (shared with codex-rs).
+        """
         # Check environment override first
         env_url = os.environ.get("OPENAI_BASE_URL")
         if env_url:
             return env_url
+
+        # ChatGPT OAuth uses special backend API
+        if self.auth and self.auth.is_chatgpt_auth():
+            return "https://chatgpt.com/backend-api/codex"
 
         provider = self.model_providers.get(self.model_provider_id)
         if provider:

@@ -1,6 +1,6 @@
-"""API client for chat completions with SSE streaming.
+"""API client for chat completions and Responses API with SSE streaming.
 
-Supports OpenAI and Anthropic APIs with streaming responses.
+Supports OpenAI Chat Completions, OpenAI Responses API (ChatGPT), and Anthropic.
 """
 
 from __future__ import annotations
@@ -8,12 +8,20 @@ from __future__ import annotations
 import json
 from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
+from enum import Enum
 from typing import Any
 
 import httpx
 from httpx_sse import aconnect_sse
 
 from codex_core.config import Config, ModelFamily
+
+
+class WireApi(str, Enum):
+    """API wire format to use."""
+
+    CHAT = "chat"  # OpenAI Chat Completions API
+    RESPONSES = "responses"  # OpenAI Responses API (ChatGPT backend)
 
 
 @dataclass(slots=True)
@@ -68,6 +76,13 @@ class ModelClient:
         if self._client:
             await self._client.aclose()
 
+    def _get_wire_api(self) -> WireApi:
+        """Determine which API wire format to use."""
+        # ChatGPT OAuth uses Responses API
+        if self.config.auth and self.config.auth.is_chatgpt_auth():
+            return WireApi.RESPONSES
+        return WireApi.CHAT
+
     def _get_headers(self) -> dict[str, str]:
         """Get headers for the API request."""
         api_key = self.config.get_api_key()
@@ -94,6 +109,10 @@ class ModelClient:
         """Build the request payload."""
         if self.config.model_family == ModelFamily.ANTHROPIC:
             return self._build_anthropic_request(messages, tools, stream)
+
+        wire_api = self._get_wire_api()
+        if wire_api == WireApi.RESPONSES:
+            return self._build_responses_request(messages, tools, stream)
         return self._build_openai_request(messages, tools, stream)
 
     def _build_openai_request(
@@ -117,6 +136,60 @@ class ModelClient:
 
         if self.config.model_max_output_tokens:
             request["max_tokens"] = self.config.model_max_output_tokens
+
+        return request
+
+    def _build_responses_request(
+        self,
+        messages: list[Message],
+        tools: list[dict[str, Any]] | None = None,
+        stream: bool = True,
+    ) -> dict[str, Any]:
+        """Build OpenAI Responses API request (ChatGPT backend).
+
+        Responses API uses a different format than Chat Completions:
+        - `instructions` instead of system message
+        - `input` array of ResponseItem objects instead of `messages`
+        """
+        # Extract system/instructions and build input items
+        instructions = ""
+        input_items: list[dict[str, Any]] = []
+
+        for m in messages:
+            if m.role == "system":
+                instructions = m.content
+            else:
+                # Convert to ResponseItem Message format
+                input_items.append({
+                    "type": "message",
+                    "role": m.role,
+                    "content": [{"type": "input_text", "text": m.content}],
+                })
+
+        request: dict[str, Any] = {
+            "model": self.config.model,
+            "instructions": instructions,
+            "input": input_items,
+            "stream": stream,
+            "store": False,
+        }
+
+        if tools:
+            # Convert OpenAI function tools to Responses API format
+            responses_tools = []
+            for tool in tools:
+                if tool.get("type") == "function":
+                    func = tool["function"]
+                    responses_tools.append({
+                        "type": "function",
+                        "name": func["name"],
+                        "description": func.get("description", ""),
+                        "parameters": func.get("parameters", {"type": "object"}),
+                    })
+            if responses_tools:
+                request["tools"] = responses_tools
+                request["tool_choice"] = "auto"
+                request["parallel_tool_calls"] = True
 
         return request
 
@@ -174,10 +247,13 @@ class ModelClient:
         base_url = self.config.get_base_url()
         headers = self._get_headers()
         request_data = self._build_request(messages, tools, stream=True)
+        wire_api = self._get_wire_api()
 
         # Determine endpoint
         if self.config.model_family == ModelFamily.ANTHROPIC:
             url = f"{base_url}/messages"
+        elif wire_api == WireApi.RESPONSES:
+            url = f"{base_url}/responses"
         else:
             url = f"{base_url}/chat/completions"
 
@@ -193,14 +269,21 @@ class ModelClient:
                 except json.JSONDecodeError:
                     continue
 
-                chunk = self._parse_stream_chunk(data)
+                chunk = self._parse_stream_chunk(data, wire_api, event.event)
                 if chunk:
                     yield chunk
 
-    def _parse_stream_chunk(self, data: dict[str, Any]) -> StreamChunk | None:
+    def _parse_stream_chunk(
+        self,
+        data: dict[str, Any],
+        wire_api: WireApi = WireApi.CHAT,
+        event_name: str | None = None,
+    ) -> StreamChunk | None:
         """Parse a stream chunk from the API response."""
         if self.config.model_family == ModelFamily.ANTHROPIC:
             return self._parse_anthropic_chunk(data)
+        if wire_api == WireApi.RESPONSES:
+            return self._parse_responses_chunk(data, event_name)
         return self._parse_openai_chunk(data)
 
     def _parse_openai_chunk(self, data: dict[str, Any]) -> StreamChunk | None:
@@ -267,6 +350,80 @@ class ModelClient:
                         )
                     ]
                 )
+
+        return None
+
+    def _parse_responses_chunk(
+        self, data: dict[str, Any], event_name: str | None
+    ) -> StreamChunk | None:
+        """Parse OpenAI Responses API stream chunk.
+
+        Responses API uses SSE event names like:
+        - response.output_text.delta - text content streaming
+        - response.output_item.done - completed output item
+        - response.completed - full response completed
+        - response.failed - error occurred
+        """
+        # Handle by event name (preferred)
+        if event_name == "response.output_text.delta":
+            delta = data.get("delta", "")
+            if delta:
+                return StreamChunk(content=delta)
+
+        elif event_name == "response.output_item.done":
+            # Parse completed output item
+            item = data.get("item", {})
+            item_type = item.get("type")
+
+            if item_type == "message":
+                # Extract text from message content
+                content_parts = []
+                for c in item.get("content", []):
+                    if c.get("type") == "output_text":
+                        content_parts.append(c.get("text", ""))
+                if content_parts:
+                    return StreamChunk(content="".join(content_parts))
+
+            elif item_type == "function_call":
+                # Tool call completed
+                return StreamChunk(
+                    tool_calls=[
+                        ToolCall(
+                            id=item.get("call_id", ""),
+                            name=item.get("name", ""),
+                            arguments=json.loads(item.get("arguments", "{}")),
+                        )
+                    ]
+                )
+
+        elif event_name == "response.completed":
+            # Extract usage from completed response
+            response = data.get("response", {})
+            usage = response.get("usage", {})
+            if usage:
+                return StreamChunk(
+                    finish_reason="stop",
+                    usage={
+                        "prompt_tokens": usage.get("input_tokens", 0),
+                        "completion_tokens": usage.get("output_tokens", 0),
+                        "total_tokens": usage.get("total_tokens", 0),
+                    },
+                )
+
+        elif event_name == "response.failed":
+            # Error occurred - extract message
+            response = data.get("response", {})
+            error = response.get("error", {})
+            error_msg = error.get("message", "Unknown error")
+            # Return as content so it's displayed
+            return StreamChunk(content=f"[Error: {error_msg}]", finish_reason="error")
+
+        # Fallback: check data type field
+        data_type = data.get("type", "")
+        if data_type == "response.output_text.delta":
+            delta = data.get("delta", "")
+            if delta:
+                return StreamChunk(content=delta)
 
         return None
 
