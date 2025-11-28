@@ -31,6 +31,7 @@ from codex_protocol.items import (
     TodoListItem,
     TodoItem,
     ErrorItem,
+    parse_thread_item,
 )
 
 __all__ = [
@@ -64,4 +65,5 @@ __all__ = [
     "TodoListItem",
     "TodoItem",
     "ErrorItem",
+    "parse_thread_item",
 ]

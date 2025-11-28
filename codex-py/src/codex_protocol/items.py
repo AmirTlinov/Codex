@@ -288,3 +288,8 @@ class ThreadItem:
                 raise ValueError(f"Unknown item type: {item_type}")
 
         return cls(id=item_id, details=details)
+
+
+def parse_thread_item(data: dict[str, Any]) -> ThreadItem:
+    """Parse a ThreadItem from a dictionary. Convenience function."""
+    return ThreadItem.from_dict(data)
