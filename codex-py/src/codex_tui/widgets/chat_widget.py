@@ -1,13 +1,11 @@
 """Chat widget for displaying conversation history.
 
-Shows messages, command executions, and streaming responses.
+Minimal ASCII-style interface without heavy panels.
 """
 
 from __future__ import annotations
 
 from rich.console import RenderableType
-from rich.markdown import Markdown
-from rich.panel import Panel
 from rich.text import Text
 from textual.containers import ScrollableContainer
 from textual.widgets import Static
@@ -31,31 +29,22 @@ class MessageWidget(Static):
         self.message_id = message_id
 
     def render(self) -> RenderableType:
+        text = Text()
         if self.role == "user":
-            return Panel(
-                Text(self.content),
-                title="You",
-                border_style="blue",
-            )
+            text.append("> ", style="bold cyan")
+            text.append(self.content)
         elif self.role == "assistant":
-            return Panel(
-                Markdown(self.content),
-                title="Codex",
-                border_style="green",
-            )
+            text.append(self.content, style="white")
         elif self.role == "system":
-            return Panel(
-                Text(self.content, style="dim"),
-                border_style="dim",
-            )
+            text.append("--- ", style="dim")
+            text.append(self.content, style="dim")
+            text.append(" ---", style="dim")
         elif self.role == "error":
-            return Panel(
-                Text(self.content, style="red"),
-                title="Error",
-                border_style="red",
-            )
+            text.append("! ", style="bold red")
+            text.append(self.content, style="red")
         else:
-            return Text(self.content)
+            text.append(self.content)
+        return text
 
 
 class CommandWidget(Static):
@@ -76,23 +65,25 @@ class CommandWidget(Static):
         self.command_id = command_id
 
     def render(self) -> RenderableType:
-        status = ""
-        style = "yellow"
+        text = Text()
+        # Command line
+        text.append("$ ", style="bold yellow")
+        text.append(self.command, style="yellow")
         if self.exit_code is not None:
             if self.exit_code == 0:
-                status = " [green]✓[/green]"
-                style = "green"
+                text.append(" [ok]", style="green")
             else:
-                status = f" [red]✗ ({self.exit_code})[/red]"
-                style = "red"
-
-        title = f"$ {self.command}{status}"
-
-        return Panel(
-            Text(self.output or "(running...)", style="dim" if not self.output else ""),
-            title=title,
-            border_style=style,
-        )
+                text.append(f" [exit {self.exit_code}]", style="red")
+        elif not self.output:
+            text.append(" ...", style="dim")
+        text.append("\n")
+        # Output
+        if self.output:
+            for line in self.output.split("\n")[:10]:  # Limit output lines
+                text.append("  " + line + "\n", style="dim")
+            if self.output.count("\n") > 10:
+                text.append("  ... (truncated)\n", style="dim italic")
+        return text
 
 
 class ThinkingWidget(Static):
@@ -100,15 +91,12 @@ class ThinkingWidget(Static):
 
     DEFAULT_CSS = """
     ThinkingWidget {
-        height: 3;
+        height: 1;
     }
     """
 
     def render(self) -> RenderableType:
-        return Panel(
-            Text("Thinking...", style="italic dim"),
-            border_style="dim",
-        )
+        return Text("... thinking", style="italic dim")
 
 
 class UsageWidget(Static):
@@ -120,8 +108,7 @@ class UsageWidget(Static):
 
     def render(self) -> RenderableType:
         return Text(
-            f"Tokens: {self.usage.input_tokens} in, "
-            f"{self.usage.output_tokens} out",
+            f"[{self.usage.input_tokens}+{self.usage.output_tokens} tokens]",
             style="dim",
         )
 

@@ -1,11 +1,4 @@
-/* Codex TUI Styles */
-
-/* Color variables */
-$primary: #5c6bc0;
-$accent: #7c4dff;
-$success: #4caf50;
-$warning: #ff9800;
-$error: #f44336;
+/* Codex TUI - Minimal ASCII Style */
 
 /* Main layout */
 Screen {
@@ -17,87 +10,81 @@ Screen {
     height: 1fr;
 }
 
-/* Header styling */
+/* Header - simple line */
 Header {
     dock: top;
-    height: 3;
-    background: $primary;
+    height: 1;
+    background: $surface;
+    color: $text-muted;
 }
 
-/* Footer styling */
+/* Footer - simple line */
 Footer {
     dock: bottom;
     height: 1;
+    background: $surface;
 }
 
 /* Chat area */
 ChatWidget {
     height: 1fr;
-    padding: 0 1;
-    scrollbar-gutter: stable;
+    padding: 1 2;
 }
 
-/* Composer */
+/* Composer - minimal border */
 Composer {
     dock: bottom;
     height: auto;
-    min-height: 3;
-    max-height: 10;
-    border: solid $primary;
-    margin: 0 1 1 1;
+    min-height: 1;
+    max-height: 8;
+    border-top: solid $primary-muted;
+    padding: 0 1;
+    margin: 0;
 }
 
 Composer:focus {
-    border: solid $accent;
+    border-top: solid $primary;
 }
 
-/* Message widgets */
+/* Messages - no margins, compact */
 MessageWidget {
-    margin: 1 0;
+    height: auto;
+    margin: 0 0 1 0;
 }
 
 CommandWidget {
-    margin: 1 0;
+    height: auto;
+    margin: 0 0 1 0;
 }
 
 ThinkingWidget {
-    margin: 1 0;
     height: auto;
+    margin: 0;
 }
 
 UsageWidget {
-    margin: 0 0;
     height: auto;
-    text-align: right;
+    margin: 0;
 }
 
-/* Scrollbar styling */
-ChatWidget > .scrollbar {
-    background: $surface-darken-1;
-}
-
-ChatWidget > .scrollbar-corner {
-    background: $surface-darken-1;
-}
-
-/* Approval Overlay */
+/* Approval Overlay - simple */
 ApprovalOverlay {
     align: center middle;
 }
 
 ApprovalOverlay > Container {
-    width: 80%;
-    max-width: 100;
+    width: 70%;
+    max-width: 80;
     height: auto;
-    max-height: 80%;
+    max-height: 70%;
     background: $surface;
-    border: solid $primary;
-    padding: 1 2;
+    border: ascii $primary;
+    padding: 1;
 }
 
 ApprovalOverlay #content {
     height: auto;
-    max-height: 60%;
+    max-height: 50%;
     overflow-y: auto;
 }
 
@@ -110,131 +97,76 @@ ApprovalOverlay #buttons {
 
 ApprovalOverlay Button {
     margin: 0 1;
+    min-width: 10;
 }
 
-ApprovalOverlay #approve {
-    background: $success;
-}
-
-ApprovalOverlay #reject {
-    background: $error;
-}
-
-ApprovalOverlay #always {
-    background: $warning;
-}
-
-/* Diff View */
+/* Diff View - minimal */
 DiffView {
     height: 1fr;
     padding: 1;
 }
 
-DiffView FileDiffWidget {
-    margin-bottom: 1;
-}
-
-/* Diff Overlay */
 DiffOverlay {
     align: center middle;
 }
 
 DiffOverlay > Container {
-    width: 90%;
-    height: 90%;
+    width: 85%;
+    height: 85%;
     background: $surface;
-    border: solid $primary;
+    border: ascii $primary;
 }
 
 DiffOverlay #diff-header {
     dock: top;
-    height: 3;
-    background: $primary;
-    padding: 0 2;
-    content-align: center middle;
+    height: 1;
+    padding: 0 1;
 }
 
 DiffOverlay #diff-content {
     height: 1fr;
+    padding: 1;
 }
 
 DiffOverlay #diff-footer {
     dock: bottom;
-    height: 3;
+    height: 1;
     layout: horizontal;
     align: center middle;
-    background: $surface-darken-1;
-    padding: 0 2;
+    padding: 0 1;
 }
 
-DiffOverlay .hint {
-    margin: 0 2;
-}
-
-/* Shell Panel */
+/* Shell Panel - minimal */
 ShellPanel {
     height: 100%;
-    border: solid $primary;
-}
-
-ShellPanel TabbedContent {
-    height: 100%;
-}
-
-ShellPanel TabPane {
-    padding: 1;
+    border: ascii $primary;
 }
 
 ShellPanel #shell-actions {
     dock: bottom;
-    height: 3;
+    height: 1;
     layout: horizontal;
     align: center middle;
-    background: $surface-darken-1;
     padding: 0 1;
-}
-
-ShellPanel .action-hint {
-    margin: 0 2;
 }
 
 /* Shell Log Overlay */
 ShellLogOverlay {
-    width: 80%;
-    height: 80%;
+    width: 75%;
+    height: 75%;
     background: $surface;
-    border: solid $accent;
+    border: ascii $primary;
     padding: 1;
 }
 
 ShellLogOverlay #log-content {
     height: 1fr;
     overflow-y: auto;
-    background: $surface-darken-2;
     padding: 1;
 }
 
 ShellLogOverlay #log-header {
     dock: top;
-    height: 3;
-    background: $primary;
+    height: 1;
     padding: 0 1;
-}
-
-/* Markdown View */
-StreamingMarkdown {
-    height: auto;
-}
-
-MarkdownCodeBlock {
-    height: auto;
-    margin: 1 0;
-}
-
-/* Thinking Indicator */
-ThinkingIndicator {
-    height: auto;
-    border: dashed $primary;
-    padding: 1;
-    margin: 1 0;
 }

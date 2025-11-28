@@ -18,14 +18,9 @@ class Composer(TextArea):
     DEFAULT_CSS = """
     Composer {
         height: auto;
-        min-height: 3;
-        max-height: 10;
-        border: solid $primary;
-        padding: 0 1;
-    }
-
-    Composer:focus {
-        border: solid $accent;
+        min-height: 1;
+        max-height: 8;
+        padding: 0;
     }
     """
 
