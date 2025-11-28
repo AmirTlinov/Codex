@@ -15,7 +15,6 @@ from codex_tui.widgets.chat_widget import (
     CommandWidget,
     MessageWidget,
     ThinkingWidget,
-    UsageWidget,
 )
 from codex_tui.widgets.composer import Composer
 from codex_tui.widgets.diff_view import (
@@ -49,7 +48,6 @@ __all__ = [
     "CommandWidget",
     "MessageWidget",
     "ThinkingWidget",
-    "UsageWidget",
     # Composer
     "Composer",
     # Diff
