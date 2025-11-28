@@ -18,6 +18,7 @@ class CommandExecutionStatus(str, Enum):
     IN_PROGRESS = "in_progress"
     COMPLETED = "completed"
     FAILED = "failed"
+    REJECTED = "rejected"  # User rejected execution
 
 
 class PatchApplyStatus(str, Enum):

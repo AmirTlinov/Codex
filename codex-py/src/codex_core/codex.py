@@ -16,6 +16,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from codex_core.approval import ApprovalHandler, ApprovalManager
 from codex_core.client import Message, ModelClient, StreamChunk, ToolCall
 from codex_core.config import Config
 from codex_core.mcp_client import McpClient, McpToolResult
@@ -127,6 +128,7 @@ class Codex:
 
     config: Config
     session: Session
+    approval_manager: ApprovalManager = field(default_factory=ApprovalManager)
     _client: ModelClient | None = None
     _mcp_client: McpClient | None = None
     _event_queue: asyncio.Queue[ThreadEvent] = field(default_factory=asyncio.Queue)
@@ -138,8 +140,15 @@ class Codex:
         cls,
         config: Config,
         thread_id: str | None = None,
+        approval_handler: ApprovalHandler | None = None,
     ) -> Codex:
-        """Create a new Codex instance."""
+        """Create a new Codex instance.
+
+        Args:
+            config: Configuration settings
+            thread_id: Optional thread ID to resume session
+            approval_handler: Optional custom approval handler for interactive mode
+        """
         # Load or create session
         if thread_id:
             session = Session.load(thread_id)
@@ -148,7 +157,17 @@ class Codex:
         else:
             session = Session.new(model=config.model, cwd=config.cwd)
 
-        codex = cls(config=config, session=session)
+        # Create approval manager from config
+        approval_manager = ApprovalManager.from_policy_string(
+            config.approval_policy,
+            handler=approval_handler,
+        )
+
+        codex = cls(
+            config=config,
+            session=session,
+            approval_manager=approval_manager,
+        )
 
         # Register built-in tools
         codex.register_tool(SHELL_TOOL, codex._handle_shell)
@@ -429,11 +448,27 @@ class Codex:
         tool_call: ToolCall,
         turn: Turn,
     ) -> AsyncIterator[ThreadEvent]:
-        """Handle shell command execution."""
+        """Handle shell command execution with approval."""
         command = tool_call.arguments.get("command", "")
         timeout_ms = tool_call.arguments.get("timeout_ms", 60000)
 
         item_id = str(uuid.uuid4())
+
+        # Check approval
+        approved = await self.approval_manager.approve_command(command)
+        if not approved:
+            item = ThreadItem(
+                id=item_id,
+                details=CommandExecutionItem(
+                    command=command,
+                    aggregated_output="Command rejected by user",
+                    status=CommandExecutionStatus.REJECTED,
+                    exit_code=-1,
+                ),
+            )
+            turn.response_items.append(item)
+            yield ItemCompletedEvent(item=item)
+            return
 
         # Start item
         item = ThreadItem(
@@ -447,7 +482,7 @@ class Codex:
         yield ItemStartedEvent(item=item)
 
         try:
-            # Execute command (simplified - real implementation uses PTY)
+            # Execute command
             process = await asyncio.create_subprocess_shell(
                 command,
                 stdout=asyncio.subprocess.PIPE,
@@ -504,7 +539,7 @@ class Codex:
         tool_call: ToolCall,
         turn: Turn,
     ) -> AsyncIterator[ThreadEvent]:
-        """Handle file patch application."""
+        """Handle file patch application with approval."""
         from codex_patch import PatchApplier, ApplyStatus
 
         patch_text = tool_call.arguments.get("patch", "")
@@ -513,20 +548,50 @@ class Codex:
         item_id = str(uuid.uuid4())
 
         try:
-            # Apply the patch
+            # Apply the patch in dry-run mode first to validate
             applier = PatchApplier(cwd=self.config.cwd)
+            dry_result = applier.apply(patch_text, dry_run=True)
 
-            # Respect approval policy - dry_run first if needed
-            needs_approval = self.config.approval_policy != "never"
+            if not dry_result.success:
+                item = ThreadItem(
+                    id=item_id,
+                    details=ErrorItem(message=f"Patch validation failed: {dry_result.summary()}"),
+                )
+                yield ItemCompletedEvent(item=item)
+                return
 
-            if needs_approval:
-                # Dry run to validate
-                dry_result = applier.apply(patch_text, dry_run=True)
-                if not dry_result.success:
+            # Request approval for each changed file
+            for change in dry_result.changes:
+                if change.error:
+                    continue
+
+                # Generate diff for approval display
+                diff_text = ""
+                if change.old_content and change.new_content:
+                    import difflib
+                    diff_lines = difflib.unified_diff(
+                        change.old_content.splitlines(keepends=True),
+                        change.new_content.splitlines(keepends=True),
+                        fromfile=f"a/{change.path}",
+                        tofile=f"b/{change.path}",
+                    )
+                    diff_text = "".join(diff_lines)
+                elif change.new_content:
+                    diff_text = f"+++ {change.path}\n" + "\n".join(
+                        f"+{line}" for line in change.new_content.splitlines()
+                    )
+
+                approved = await self.approval_manager.approve_patch(
+                    path=change.path,
+                    diff=diff_text,
+                    description=f"{change.operation}: {change.path}",
+                )
+                if not approved:
                     item = ThreadItem(
                         id=item_id,
-                        details=ErrorItem(message=f"Patch validation failed: {dry_result.summary()}"),
+                        details=ErrorItem(message=f"Patch rejected by user: {change.path}"),
                     )
+                    turn.response_items.append(item)
                     yield ItemCompletedEvent(item=item)
                     return
 
