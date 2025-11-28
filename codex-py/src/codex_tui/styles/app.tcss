@@ -1,6 +1,5 @@
-/* Codex TUI - Minimal ASCII Style */
+/* Codex TUI - Claude Code Style */
 
-/* Main layout */
 Screen {
     background: $surface;
 }
@@ -10,51 +9,34 @@ Screen {
     height: 1fr;
 }
 
-/* Header - simple line */
+/* Minimal header */
 Header {
     dock: top;
     height: 1;
     background: $surface;
-    color: $text-muted;
 }
 
-/* Footer - simple line */
+/* Minimal footer with hints */
 Footer {
     dock: bottom;
     height: 1;
-    background: $surface;
 }
 
-/* Chat area */
+/* Chat area - generous padding */
 ChatWidget {
     height: 1fr;
-    padding: 1 2;
-}
-
-/* Composer - minimal border */
-Composer {
-    dock: bottom;
-    height: auto;
-    min-height: 1;
-    max-height: 8;
-    border-top: solid $primary-muted;
     padding: 0 1;
-    margin: 0;
 }
 
-Composer:focus {
-    border-top: solid $primary;
-}
-
-/* Messages - no margins, compact */
+/* Compact messages */
 MessageWidget {
     height: auto;
-    margin: 0 0 1 0;
+    margin: 0;
 }
 
 CommandWidget {
     height: auto;
-    margin: 0 0 1 0;
+    margin: 0;
 }
 
 ThinkingWidget {
@@ -67,7 +49,18 @@ UsageWidget {
     margin: 0;
 }
 
-/* Approval Overlay - simple */
+/* Composer at bottom with separator */
+Composer {
+    dock: bottom;
+    height: auto;
+    min-height: 1;
+    max-height: 10;
+    border-top: solid $primary-darken-2;
+    padding: 0 1;
+    margin: 0;
+}
+
+/* Approval overlay - clean box */
 ApprovalOverlay {
     align: center middle;
 }
@@ -78,14 +71,8 @@ ApprovalOverlay > Container {
     height: auto;
     max-height: 70%;
     background: $surface;
-    border: ascii $primary;
+    border: round $primary;
     padding: 1;
-}
-
-ApprovalOverlay #content {
-    height: auto;
-    max-height: 50%;
-    overflow-y: auto;
 }
 
 ApprovalOverlay #buttons {
@@ -97,15 +84,9 @@ ApprovalOverlay #buttons {
 
 ApprovalOverlay Button {
     margin: 0 1;
-    min-width: 10;
 }
 
-/* Diff View - minimal */
-DiffView {
-    height: 1fr;
-    padding: 1;
-}
-
+/* Diff overlay */
 DiffOverlay {
     align: center middle;
 }
@@ -114,13 +95,7 @@ DiffOverlay > Container {
     width: 85%;
     height: 85%;
     background: $surface;
-    border: ascii $primary;
-}
-
-DiffOverlay #diff-header {
-    dock: top;
-    height: 1;
-    padding: 0 1;
+    border: round $primary;
 }
 
 DiffOverlay #diff-content {
@@ -128,45 +103,21 @@ DiffOverlay #diff-content {
     padding: 1;
 }
 
-DiffOverlay #diff-footer {
-    dock: bottom;
-    height: 1;
-    layout: horizontal;
-    align: center middle;
-    padding: 0 1;
-}
-
-/* Shell Panel - minimal */
+/* Shell panel */
 ShellPanel {
     height: 100%;
-    border: ascii $primary;
+    border: round $primary;
 }
 
-ShellPanel #shell-actions {
-    dock: bottom;
-    height: 1;
-    layout: horizontal;
-    align: center middle;
-    padding: 0 1;
-}
-
-/* Shell Log Overlay */
 ShellLogOverlay {
     width: 75%;
     height: 75%;
     background: $surface;
-    border: ascii $primary;
+    border: round $primary;
     padding: 1;
 }
 
 ShellLogOverlay #log-content {
     height: 1fr;
     overflow-y: auto;
-    padding: 1;
-}
-
-ShellLogOverlay #log-header {
-    dock: top;
-    height: 1;
-    padding: 0 1;
 }

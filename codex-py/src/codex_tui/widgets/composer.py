@@ -1,26 +1,29 @@
 """Composer widget for user input.
 
-Provides multiline text input with command history.
+Claude Code style: › prefix with minimal chrome.
 """
 
 from __future__ import annotations
 
-from textual import on
-from textual.app import ComposeResult
-from textual.containers import Horizontal
 from textual.message import Message
-from textual.widgets import Button, TextArea
+from textual.widgets import TextArea
 
 
 class Composer(TextArea):
-    """Text input widget for composing messages."""
+    """Text input widget for composing messages (Claude Code style)."""
 
     DEFAULT_CSS = """
     Composer {
         height: auto;
         min-height: 1;
-        max-height: 8;
+        max-height: 10;
         padding: 0;
+        border: none;
+        background: transparent;
+    }
+
+    Composer:focus {
+        border: none;
     }
     """
 

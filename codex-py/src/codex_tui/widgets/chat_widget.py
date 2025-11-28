@@ -1,6 +1,9 @@
 """Chat widget for displaying conversation history.
 
-Minimal ASCII-style interface without heavy panels.
+Claude Code style: minimal, clean, with distinctive prefixes.
+- User messages: › prefix (chevron)
+- Assistant messages: • prefix (bullet)
+- Commands: • Running/Ran with tree-style output
 """
 
 from __future__ import annotations
@@ -11,6 +14,14 @@ from textual.containers import ScrollableContainer
 from textual.widgets import Static
 
 from codex_protocol.events import Usage
+
+# Style constants matching Claude Code
+USER_PREFIX = "› "
+ASSISTANT_PREFIX = "• "
+CONTINUATION = "  "
+CMD_BRANCH = "  └ "
+CMD_CONT = "    "
+MAX_OUTPUT_LINES = 8
 
 
 class MessageWidget(Static):
@@ -30,25 +41,44 @@ class MessageWidget(Static):
 
     def render(self) -> RenderableType:
         text = Text()
+        lines = self.content.split("\n")
+
         if self.role == "user":
-            text.append("> ", style="bold cyan")
-            text.append(self.content)
+            # User: › prefix, bold dim style
+            for i, line in enumerate(lines):
+                if i == 0:
+                    text.append(USER_PREFIX, style="bold dim")
+                else:
+                    text.append(CONTINUATION)
+                text.append(line + "\n")
+
         elif self.role == "assistant":
-            text.append(self.content, style="white")
+            # Assistant: • prefix on first line
+            for i, line in enumerate(lines):
+                if i == 0:
+                    text.append(ASSISTANT_PREFIX, style="bold green")
+                else:
+                    text.append(CONTINUATION)
+                text.append(line + "\n")
+
         elif self.role == "system":
-            text.append("--- ", style="dim")
-            text.append(self.content, style="dim")
-            text.append(" ---", style="dim")
+            # System: • prefix, dim
+            text.append(ASSISTANT_PREFIX, style="dim")
+            text.append(self.content + "\n", style="dim")
+
         elif self.role == "error":
-            text.append("! ", style="bold red")
-            text.append(self.content, style="red")
+            # Error: ■ prefix, red
+            text.append("■ ", style="bold red")
+            text.append(self.content + "\n", style="red")
+
         else:
-            text.append(self.content)
+            text.append(self.content + "\n")
+
         return text
 
 
 class CommandWidget(Static):
-    """Widget for displaying command execution."""
+    """Widget for displaying command execution (Claude Code style)."""
 
     def __init__(
         self,
@@ -66,23 +96,39 @@ class CommandWidget(Static):
 
     def render(self) -> RenderableType:
         text = Text()
-        # Command line
-        text.append("$ ", style="bold yellow")
-        text.append(self.command, style="yellow")
-        if self.exit_code is not None:
-            if self.exit_code == 0:
-                text.append(" [ok]", style="green")
-            else:
-                text.append(f" [exit {self.exit_code}]", style="red")
-        elif not self.output:
-            text.append(" ...", style="dim")
-        text.append("\n")
-        # Output
+
+        # Status prefix
+        if self.exit_code is None:
+            # Running
+            text.append(ASSISTANT_PREFIX, style="bold cyan")
+            text.append("Running ", style="cyan")
+            text.append(self.command + "\n", style="bold")
+        elif self.exit_code == 0:
+            # Success
+            text.append(ASSISTANT_PREFIX, style="bold green")
+            text.append("Ran ", style="green")
+            text.append(self.command + "\n", style="bold")
+        else:
+            # Failed
+            text.append(ASSISTANT_PREFIX, style="bold red")
+            text.append("Ran ", style="red")
+            text.append(self.command, style="bold")
+            text.append(f" ({self.exit_code})\n", style="red")
+
+        # Output with tree-style prefix
         if self.output:
-            for line in self.output.split("\n")[:10]:  # Limit output lines
-                text.append("  " + line + "\n", style="dim")
-            if self.output.count("\n") > 10:
-                text.append("  ... (truncated)\n", style="dim italic")
+            lines = self.output.rstrip().split("\n")
+            shown = lines[:MAX_OUTPUT_LINES]
+            for i, line in enumerate(shown):
+                if i == 0:
+                    text.append(CMD_BRANCH, style="dim")
+                else:
+                    text.append(CMD_CONT, style="dim")
+                text.append(line + "\n", style="dim")
+            if len(lines) > MAX_OUTPUT_LINES:
+                text.append(CMD_CONT, style="dim")
+                text.append(f"… +{len(lines) - MAX_OUTPUT_LINES} lines\n", style="dim italic")
+
         return text
 
 
@@ -91,26 +137,27 @@ class ThinkingWidget(Static):
 
     DEFAULT_CSS = """
     ThinkingWidget {
-        height: 1;
+        height: auto;
     }
     """
 
     def render(self) -> RenderableType:
-        return Text("... thinking", style="italic dim")
+        text = Text()
+        text.append(ASSISTANT_PREFIX, style="bold cyan")
+        text.append("Thinking...", style="italic dim")
+        return text
 
 
 class UsageWidget(Static):
-    """Widget showing token usage."""
+    """Widget showing token usage (minimal, right-aligned feel)."""
 
     def __init__(self, usage: Usage, **kwargs: object) -> None:
         super().__init__(**kwargs)
         self.usage = usage
 
     def render(self) -> RenderableType:
-        return Text(
-            f"[{self.usage.input_tokens}+{self.usage.output_tokens} tokens]",
-            style="dim",
-        )
+        total = self.usage.input_tokens + self.usage.output_tokens
+        return Text(f"  ({total:,} tokens)", style="dim")
 
 
 class ChatWidget(ScrollableContainer):
@@ -119,7 +166,7 @@ class ChatWidget(ScrollableContainer):
     DEFAULT_CSS = """
     ChatWidget {
         height: 1fr;
-        padding: 0 1;
+        padding: 1 1;
     }
     """
 

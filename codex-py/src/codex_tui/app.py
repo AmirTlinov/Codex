@@ -92,13 +92,9 @@ class CodexApp(App[None]):
         # Focus composer
         self.query_one("#composer", Composer).focus()
 
-        # Show welcome message
+        # Show welcome (Claude Code style - minimal)
         chat = self.query_one("#chat", ChatWidget)
-        chat.add_system_message(
-            f"Welcome to Codex! Model: {self.config.model}\n"
-            f"Working directory: {self.config.cwd}\n"
-            f"Type your message and press Enter to send."
-        )
+        chat.add_system_message(f"codex-py | {self.config.model} | {self.config.cwd}")
 
     async def on_unmount(self) -> None:
         """Clean up when app is unmounted."""
