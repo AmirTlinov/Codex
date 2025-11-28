@@ -1,0 +1,240 @@
+/* Codex TUI Styles */
+
+/* Color variables */
+$primary: #5c6bc0;
+$accent: #7c4dff;
+$success: #4caf50;
+$warning: #ff9800;
+$error: #f44336;
+
+/* Main layout */
+Screen {
+    background: $surface;
+}
+
+#main {
+    layout: vertical;
+    height: 1fr;
+}
+
+/* Header styling */
+Header {
+    dock: top;
+    height: 3;
+    background: $primary;
+}
+
+/* Footer styling */
+Footer {
+    dock: bottom;
+    height: 1;
+}
+
+/* Chat area */
+ChatWidget {
+    height: 1fr;
+    padding: 0 1;
+    scrollbar-gutter: stable;
+}
+
+/* Composer */
+Composer {
+    dock: bottom;
+    height: auto;
+    min-height: 3;
+    max-height: 10;
+    border: solid $primary;
+    margin: 0 1 1 1;
+}
+
+Composer:focus {
+    border: solid $accent;
+}
+
+/* Message widgets */
+MessageWidget {
+    margin: 1 0;
+}
+
+CommandWidget {
+    margin: 1 0;
+}
+
+ThinkingWidget {
+    margin: 1 0;
+    height: auto;
+}
+
+UsageWidget {
+    margin: 0 0;
+    height: auto;
+    text-align: right;
+}
+
+/* Scrollbar styling */
+ChatWidget > .scrollbar {
+    background: $surface-darken-1;
+}
+
+ChatWidget > .scrollbar-corner {
+    background: $surface-darken-1;
+}
+
+/* Approval Overlay */
+ApprovalOverlay {
+    align: center middle;
+}
+
+ApprovalOverlay > Container {
+    width: 80%;
+    max-width: 100;
+    height: auto;
+    max-height: 80%;
+    background: $surface;
+    border: solid $primary;
+    padding: 1 2;
+}
+
+ApprovalOverlay #content {
+    height: auto;
+    max-height: 60%;
+    overflow-y: auto;
+}
+
+ApprovalOverlay #buttons {
+    layout: horizontal;
+    height: auto;
+    align: center middle;
+    margin-top: 1;
+}
+
+ApprovalOverlay Button {
+    margin: 0 1;
+}
+
+ApprovalOverlay #approve {
+    background: $success;
+}
+
+ApprovalOverlay #reject {
+    background: $error;
+}
+
+ApprovalOverlay #always {
+    background: $warning;
+}
+
+/* Diff View */
+DiffView {
+    height: 1fr;
+    padding: 1;
+}
+
+DiffView FileDiffWidget {
+    margin-bottom: 1;
+}
+
+/* Diff Overlay */
+DiffOverlay {
+    align: center middle;
+}
+
+DiffOverlay > Container {
+    width: 90%;
+    height: 90%;
+    background: $surface;
+    border: solid $primary;
+}
+
+DiffOverlay #diff-header {
+    dock: top;
+    height: 3;
+    background: $primary;
+    padding: 0 2;
+    content-align: center middle;
+}
+
+DiffOverlay #diff-content {
+    height: 1fr;
+}
+
+DiffOverlay #diff-footer {
+    dock: bottom;
+    height: 3;
+    layout: horizontal;
+    align: center middle;
+    background: $surface-darken-1;
+    padding: 0 2;
+}
+
+DiffOverlay .hint {
+    margin: 0 2;
+}
+
+/* Shell Panel */
+ShellPanel {
+    height: 100%;
+    border: solid $primary;
+}
+
+ShellPanel TabbedContent {
+    height: 100%;
+}
+
+ShellPanel TabPane {
+    padding: 1;
+}
+
+ShellPanel #shell-actions {
+    dock: bottom;
+    height: 3;
+    layout: horizontal;
+    align: center middle;
+    background: $surface-darken-1;
+    padding: 0 1;
+}
+
+ShellPanel .action-hint {
+    margin: 0 2;
+}
+
+/* Shell Log Overlay */
+ShellLogOverlay {
+    width: 80%;
+    height: 80%;
+    background: $surface;
+    border: solid $accent;
+    padding: 1;
+}
+
+ShellLogOverlay #log-content {
+    height: 1fr;
+    overflow-y: auto;
+    background: $surface-darken-2;
+    padding: 1;
+}
+
+ShellLogOverlay #log-header {
+    dock: top;
+    height: 3;
+    background: $primary;
+    padding: 0 1;
+}
+
+/* Markdown View */
+StreamingMarkdown {
+    height: auto;
+}
+
+MarkdownCodeBlock {
+    height: auto;
+    margin: 1 0;
+}
+
+/* Thinking Indicator */
+ThinkingIndicator {
+    height: auto;
+    border: dashed $primary;
+    padding: 1;
+    margin: 1 0;
+}

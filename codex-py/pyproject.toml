@@ -1,0 +1,73 @@
+[project]
+name = "codex-py"
+version = "0.1.0"
+description = "Codex CLI/TUI - Python implementation"
+readme = "README.md"
+license = "Apache-2.0"
+requires-python = ">=3.14"
+authors = [
+    { name = "OpenAI" }
+]
+keywords = ["codex", "cli", "tui", "ai", "assistant"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Environment :: Console",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: Apache Software License",
+    "Operating System :: POSIX :: Linux",
+    "Operating System :: MacOS",
+    "Programming Language :: Python :: 3.14",
+    "Topic :: Software Development :: User Interfaces",
+    "Typing :: Typed",
+]
+
+dependencies = [
+    "textual>=0.90.0",
+    "rich>=13.9.0",
+    "httpx>=0.28.0",
+    "httpx-sse>=0.4.0",
+    "mcp>=1.0.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0.0",
+    "pytest-asyncio>=0.24.0",
+    "ruff>=0.8.0",
+    "mypy>=1.13.0",
+]
+
+[project.scripts]
+codex = "codex_tui.app:main"
+codex-exec = "codex_core.cli:main"
+
+[build-system]
+requires = ["hatchling>=1.25.0"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/codex_protocol", "src/codex_core", "src/codex_shell", "src/codex_tui"]
+
+[tool.hatch.build.targets.sdist]
+include = ["src/"]
+
+[tool.hatch.envs.default]
+path = ".venv"
+
+[tool.ruff]
+target-version = "py314"
+line-length = 100
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "UP", "B", "C4", "SIM"]
+ignore = ["E501"]
+
+[tool.mypy]
+python_version = "3.14"
+strict = true
+warn_return_any = true
+warn_unused_configs = true
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
