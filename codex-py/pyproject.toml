@@ -39,8 +39,9 @@ dev = [
 ]
 
 [project.scripts]
-codex = "codex_tui.app:main"
-codex-exec = "codex_core.cli:main"
+# Use codex-py to avoid conflict with official codex-rs binary
+codex-py = "codex_tui.app:main"
+codex-py-exec = "codex_core.cli:main"
 
 [build-system]
 requires = ["hatchling>=1.25.0"]
