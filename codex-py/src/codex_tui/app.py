@@ -38,6 +38,8 @@ from codex_protocol.events import (
 from codex_protocol.items import (
     AgentMessageItem,
     CommandExecutionItem,
+    McpToolCallItem,
+    McpToolCallStatus,
 )
 
 # Console for inline output
@@ -268,6 +270,58 @@ def render_error(message: str) -> Text:
     return result
 
 
+def render_mcp_start(server: str, tool: str) -> Text:
+    """Render MCP tool call starting."""
+    result = Text()
+    result.append("• ", style="dim")
+    result.append("Calling ", style="bold")
+    result.append(f"{server}.", style="cyan dim")
+    result.append(tool, style="cyan")
+    result.append(" ...", style="dim italic")
+    return result
+
+
+def render_mcp_complete(mcp: McpToolCallItem) -> Text:
+    """Render completed MCP tool call with result."""
+    result = Text()
+
+    # Header line: • Called server.tool
+    if mcp.status == McpToolCallStatus.COMPLETED:
+        result.append("• ", style="green bold")
+    else:
+        result.append("• ", style="red bold")
+
+    result.append("Called ", style="bold")
+    result.append(f"{mcp.server}.", style="cyan dim")
+    result.append(mcp.tool, style="cyan")
+
+    if mcp.status == McpToolCallStatus.FAILED:
+        result.append(" (failed)", style="red")
+
+    result.append("\n")
+
+    # Show result or error (first line only)
+    if mcp.result and mcp.result.content:
+        # Extract text from MCP content
+        for content_item in mcp.result.content[:1]:
+            if isinstance(content_item, dict) and content_item.get("type") == "text":
+                text = content_item.get("text", "")
+                lines = text.strip().split("\n")
+                if lines:
+                    result.append("  └ ", style="dim")
+                    result.append(lines[0][:80], style="dim")
+                    if len(lines) > 1 or len(lines[0]) > 80:
+                        result.append("...", style="dim italic")
+                    result.append("\n")
+                break
+    elif mcp.error:
+        result.append("  └ ", style="dim")
+        result.append(mcp.error.message[:80], style="red dim")
+        result.append("\n")
+
+    return result
+
+
 async def run_turn(codex: Codex, user_input: str) -> None:
     """Run a single conversation turn."""
     current_msg_id: str | None = None
@@ -330,6 +384,17 @@ async def run_turn(codex: Codex, user_input: str) -> None:
                     )
                     live.start()
 
+                elif isinstance(item.details, McpToolCallItem):
+                    if live:
+                        live.stop()
+                        live = None
+                    live = Live(
+                        render_mcp_start(item.details.server, item.details.tool),
+                        console=console,
+                        refresh_per_second=4,
+                    )
+                    live.start()
+
             elif isinstance(event, ItemUpdatedEvent):
                 item = event.item
                 if isinstance(item.details, AgentMessageItem) and item.id == current_msg_id:
@@ -360,6 +425,12 @@ async def run_turn(codex: Codex, user_input: str) -> None:
                         ),
                         end="",
                     )
+
+                elif isinstance(item.details, McpToolCallItem):
+                    if live:
+                        live.stop()
+                        live = None
+                    console.print(render_mcp_complete(item.details), end="")
 
     except Exception as e:
         if live:
