@@ -40,6 +40,7 @@ from codex_protocol.items import (
 )
 from codex_tui.widgets.approval import ApprovalDialog, ApprovalResult
 from codex_tui.widgets.chat import ChatCell, ChatWidget
+from codex_tui.widgets.commands import CommandPopup, SlashCommand
 from codex_tui.widgets.input import InputWidget
 from codex_tui.widgets.spinner import ThinkingIndicator
 from codex_tui.widgets.status import StatusBar
@@ -192,6 +193,9 @@ class CodexApp(App[None]):
         self._active_command: ChatCell | None = None
         self._active_mcp: ChatCell | None = None
 
+        # Command popup
+        self._command_popup: CommandPopup | None = None
+
     def compose(self) -> ComposeResult:
         """Create the app layout."""
         yield Header()
@@ -247,21 +251,75 @@ class CodexApp(App[None]):
         if not user_input:
             return
 
+        # Hide command popup
+        self._hide_command_popup()
+
         # Handle slash commands
         if user_input.startswith("/"):
-            cmd = user_input[1:].split()[0].lower() if user_input[1:] else ""
-            if cmd in ("quit", "q", "exit"):
-                self.exit()
-                return
-            elif cmd == "clear":
-                self.action_clear()
-                return
-            elif cmd in ("help", "?"):
-                self._show_help()
+            if self._handle_slash_command(user_input):
                 return
 
         # Run conversation turn
         self._current_task = asyncio.create_task(self._run_turn(user_input))
+
+    def _handle_slash_command(self, user_input: str) -> bool:
+        """Handle slash command. Returns True if handled locally."""
+        cmd = user_input[1:].split()[0].lower() if user_input[1:] else ""
+
+        # Map command strings to enum
+        cmd_map = {c.value: c for c in SlashCommand}
+        slash_cmd = cmd_map.get(cmd)
+
+        if slash_cmd == SlashCommand.QUIT or slash_cmd == SlashCommand.EXIT:
+            self.exit()
+            return True
+        elif slash_cmd == SlashCommand.CLEAR:
+            self.action_clear()
+            return True
+        elif slash_cmd == SlashCommand.HELP:
+            self._show_help()
+            return True
+        elif slash_cmd == SlashCommand.STATUS:
+            self._show_status()
+            return True
+        elif slash_cmd == SlashCommand.DIFF:
+            self._show_diff()
+            return True
+        elif slash_cmd == SlashCommand.MCP:
+            self._show_mcp_tools()
+            return True
+        # Commands that go to the model
+        elif cmd in ("q", "?"):
+            # Aliases
+            if cmd == "q":
+                self.exit()
+                return True
+            elif cmd == "?":
+                self._show_help()
+                return True
+
+        return False
+
+    def on_input_widget_show_command_popup(
+        self, event: InputWidget.ShowCommandPopup
+    ) -> None:
+        """Show command completion popup."""
+        if not self._command_popup:
+            self._command_popup = CommandPopup()
+            self.mount(self._command_popup)
+        self._command_popup.set_filter(event.filter_text)
+        self._command_popup.display = True
+
+    def on_input_widget_hide_command_popup(
+        self, event: InputWidget.HideCommandPopup
+    ) -> None:
+        """Hide command completion popup."""
+        self._hide_command_popup()
+
+    def _hide_command_popup(self) -> None:
+        """Hide the command popup."""
+        if self._command_popup:
+            self._command_popup.display = False
 
     async def _run_turn(self, user_input: str) -> None:
         """Run a conversation turn."""
@@ -394,16 +452,64 @@ class CodexApp(App[None]):
         if self._chat:
             self._chat.add_system(
                 "Commands:\n"
-                "  /help, /?     - Show this help\n"
+                "  /help         - Show this help\n"
                 "  /clear        - Clear the screen\n"
-                "  /quit, /q     - Exit\n"
+                "  /status       - Show session info\n"
+                "  /diff         - Show git diff\n"
+                "  /mcp          - List MCP tools\n"
+                "  /quit         - Exit\n"
                 "\n"
                 "Keyboard shortcuts:\n"
                 "  Ctrl+C        - Exit\n"
                 "  Ctrl+L        - Clear screen\n"
-                "  Escape        - Cancel current operation\n"
-                "  Enter         - Submit message\n"
+                "  Ctrl+U        - Clear input\n"
+                "  Up/Down       - History / command navigation\n"
+                "  Tab           - Complete command\n"
+                "  Escape        - Cancel\n"
+                "  PageUp/Down   - Scroll chat\n"
+                "  F1            - Show help\n"
             )
+
+    def _show_status(self) -> None:
+        """Show session status."""
+        if self._chat and self._status:
+            self._chat.add_system(
+                f"Model: {self._config.model}\n"
+                f"Directory: {self._config.cwd}\n"
+                f"Tokens: {self._status._tokens_in:,} in / {self._status._tokens_out:,} out\n"
+            )
+
+    def _show_diff(self) -> None:
+        """Show git diff."""
+        import subprocess
+
+        try:
+            result = subprocess.run(
+                ["git", "diff", "--stat"],
+                capture_output=True,
+                text=True,
+                cwd=self._config.cwd,
+                timeout=5,
+            )
+            if result.returncode == 0 and result.stdout.strip():
+                if self._chat:
+                    self._chat.add_system(f"Git diff:\n{result.stdout}")
+            else:
+                if self._chat:
+                    self._chat.add_system("No changes detected")
+        except Exception as e:
+            if self._chat:
+                self._chat.add_error(f"Failed to get diff: {e}")
+
+    def _show_mcp_tools(self) -> None:
+        """Show configured MCP tools."""
+        if self._chat:
+            if self._codex and hasattr(self._codex, "_mcp_manager"):
+                # Get tools from MCP manager if available
+                tools_info = "MCP tools are available via configuration."
+            else:
+                tools_info = "No MCP servers configured."
+            self._chat.add_system(f"MCP Tools:\n{tools_info}")
 
     def action_clear(self) -> None:
         """Clear the chat history."""
