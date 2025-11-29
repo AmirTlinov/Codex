@@ -24,6 +24,7 @@ classifiers = [
 
 dependencies = [
     "rich>=13.9.0",
+    "textual>=3.0.0",
     "httpx>=0.28.0",
     "httpx-sse>=0.4.0",
     "mcp>=1.0.0",
@@ -40,7 +41,11 @@ dev = [
 
 [project.scripts]
 # Use codex-py to avoid conflict with official codex-rs binary
-codex-py = "codex_tui.app:main"
+# Main TUI uses Textual full-screen interface
+codex-py = "codex_tui.textual_app:main"
+# Legacy inline TUI (rich-based)
+codex-py-inline = "codex_tui.app:main"
+# Direct exec without TUI
 codex-py-exec = "codex_core.cli:main"
 
 [build-system]
