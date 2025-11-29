@@ -258,9 +258,12 @@ class Codex:
             messages = self._build_messages(user_input)
             tools = self._get_all_tools()
 
-            # Collect tool results for agentic loop
-            tool_results: list[ToolResult] = []
+            # Collect ALL tool results across agentic loop iterations
+            # Each iteration adds to this list (matching codex-rs history accumulation)
+            all_tool_history: list[ToolResult] = []
             total_usage = Usage()
+            # Track processed call IDs to avoid re-executing the same tool call
+            processed_call_ids: set[str] = set()
 
             # Agentic loop: continue until no tool calls
             while True:
@@ -269,14 +272,15 @@ class Codex:
                 current_item_id: str | None = None
                 iteration_tool_results: list[ToolResult] = []
 
-                # Stream completion (either initial or with tool results)
-                if tool_results:
-                    # Continue with tool results
+                # Stream completion (either initial or with accumulated tool history)
+                if all_tool_history:
+                    # Continue with ALL accumulated tool results (not just new ones)
                     async for chunk in self._client.stream_completion_with_tool_results(
-                        messages, tools, tool_results
+                        messages, tools, all_tool_history
                     ):
                         async for event in self._process_chunk(
-                            chunk, turn, response_text, current_item_id, iteration_tool_results
+                            chunk, turn, response_text, current_item_id,
+                            iteration_tool_results, processed_call_ids
                         ):
                             yield event
                             # Update tracking from yielded events
@@ -319,7 +323,7 @@ class Codex:
                         if chunk.tool_calls:
                             for tool_call in chunk.tool_calls:
                                 async for event, result in self._handle_tool_call_with_result(
-                                    tool_call, turn
+                                    tool_call, turn, processed_call_ids
                                 ):
                                     yield event
                                     if result:
@@ -347,8 +351,9 @@ class Codex:
                     # No tool calls, we're done
                     break
 
-                # Prepare for next iteration with tool results
-                tool_results = iteration_tool_results
+                # Add new results to accumulated history (not replace!)
+                # This ensures next iteration has FULL history
+                all_tool_history.extend(iteration_tool_results)
 
             # Complete the turn
             self.session.complete_turn(turn, total_usage)
@@ -366,6 +371,7 @@ class Codex:
         response_text: str,
         current_item_id: str | None,
         tool_results: list[ToolResult],
+        processed_call_ids: set[str],
     ) -> AsyncIterator[ThreadEvent]:
         """Process a stream chunk and yield events."""
         # Handle content
@@ -388,7 +394,9 @@ class Codex:
         # Handle tool calls
         if chunk.tool_calls:
             for tool_call in chunk.tool_calls:
-                async for event, result in self._handle_tool_call_with_result(tool_call, turn):
+                async for event, result in self._handle_tool_call_with_result(
+                    tool_call, turn, processed_call_ids
+                ):
                     yield event
                     if result:
                         tool_results.append(result)
@@ -397,8 +405,23 @@ class Codex:
         self,
         tool_call: ToolCall,
         turn: Turn,
+        processed_call_ids: set[str] | None = None,
     ) -> AsyncIterator[tuple[ThreadEvent, ToolResult | None]]:
-        """Handle a tool call and return result for agentic loop."""
+        """Handle a tool call and return result for agentic loop.
+
+        Args:
+            tool_call: The tool call to handle
+            turn: Current turn for tracking
+            processed_call_ids: Set of already-executed call IDs to skip duplicates
+        """
+        # Skip already-processed tool calls
+        if processed_call_ids is not None and tool_call.id in processed_call_ids:
+            return
+
+        # Mark as processed before execution
+        if processed_call_ids is not None:
+            processed_call_ids.add(tool_call.id)
+
         # Handle local_shell (Responses API built-in tool)
         if tool_call.name == "local_shell":
             async for event, result in self._handle_local_shell_with_result(tool_call, turn):
@@ -632,38 +655,132 @@ class Codex:
         """Handle local_shell calls and return result for agentic loop.
 
         Responses API returns local_shell_call with action.command as array.
-        Format: {"command": ["/bin/echo", "hello"]}
+        Format: {"command": ["bash", "-lc", "echo hello"]}
+
+        IMPORTANT: We use subprocess_exec (not shell) to properly pass command array.
+        This matches codex-rs spawn behavior where args are passed directly.
         """
         # local_shell uses command array format from Responses API
         command_parts = tool_call.arguments.get("command", [])
         if isinstance(command_parts, list):
             command_list = command_parts
-            command = " ".join(command_parts)
         else:
-            command = str(command_parts)
-            command_list = [command]
+            command_list = [str(command_parts)]
 
-        # Reuse shell handler logic with adapted arguments
-        adapted_call = ToolCall(
-            id=tool_call.id,
-            name="shell",
-            arguments={"command": command, "timeout_ms": 60000},
+        # Display command for UI (join for display purposes only)
+        display_command = " ".join(command_list)
+
+        item_id = str(uuid.uuid4())
+
+        # Check approval using display command
+        approved = await self.approval_manager.approve_command(display_command)
+        if not approved:
+            item = ThreadItem(
+                id=item_id,
+                details=CommandExecutionItem(
+                    command=display_command,
+                    aggregated_output="Command rejected by user",
+                    status=CommandExecutionStatus.REJECTED,
+                    exit_code=-1,
+                ),
+            )
+            turn.response_items.append(item)
+            yield ItemCompletedEvent(item=item), ToolResult(
+                call_id=tool_call.id,
+                output="Command rejected by user",
+                success=False,
+                tool_type="local_shell",
+                command=command_list,
+            )
+            return
+
+        # Start item
+        item = ThreadItem(
+            id=item_id,
+            details=CommandExecutionItem(
+                command=display_command,
+                aggregated_output="",
+                status=CommandExecutionStatus.IN_PROGRESS,
+            ),
         )
-        async for event in self._handle_shell(adapted_call, turn):
-            if isinstance(event, ItemCompletedEvent):
-                if isinstance(event.item.details, CommandExecutionItem):
-                    result = ToolResult(
-                        call_id=tool_call.id,
-                        output=event.item.details.aggregated_output or "",
-                        success=event.item.details.exit_code == 0,
-                        tool_type="local_shell",
-                        command=command_list,
+        yield ItemStartedEvent(item=item), None
+
+        try:
+            # Execute command using exec (not shell!) to properly pass args
+            # This matches codex-rs spawn_child_async behavior
+            if command_list:
+                program = command_list[0]
+                args = command_list[1:] if len(command_list) > 1 else []
+
+                process = await asyncio.create_subprocess_exec(
+                    program,
+                    *args,
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.STDOUT,
+                    cwd=self.config.cwd,
+                )
+
+                try:
+                    stdout, _ = await asyncio.wait_for(
+                        process.communicate(),
+                        timeout=60.0,  # 60 second timeout
                     )
-                    yield event, result
-                else:
-                    yield event, None
+                    output = stdout.decode() if stdout else ""
+                    exit_code = process.returncode or 0
+                    status = (
+                        CommandExecutionStatus.COMPLETED
+                        if exit_code == 0
+                        else CommandExecutionStatus.FAILED
+                    )
+                except TimeoutError:
+                    process.kill()
+                    output = "Command timed out"
+                    exit_code = -1
+                    status = CommandExecutionStatus.FAILED
             else:
-                yield event, None
+                output = "Empty command"
+                exit_code = -1
+                status = CommandExecutionStatus.FAILED
+
+            # Complete item
+            item = ThreadItem(
+                id=item_id,
+                details=CommandExecutionItem(
+                    command=display_command,
+                    aggregated_output=output,
+                    status=status,
+                    exit_code=exit_code,
+                ),
+            )
+            turn.response_items.append(item)
+
+            result = ToolResult(
+                call_id=tool_call.id,
+                output=output,
+                success=exit_code == 0,
+                tool_type="local_shell",
+                command=command_list,
+            )
+            yield ItemCompletedEvent(item=item), result
+
+        except Exception as e:
+            item = ThreadItem(
+                id=item_id,
+                details=CommandExecutionItem(
+                    command=display_command,
+                    aggregated_output=str(e),
+                    status=CommandExecutionStatus.FAILED,
+                    exit_code=-1,
+                ),
+            )
+            turn.response_items.append(item)
+            yield ItemCompletedEvent(item=item), ToolResult(
+                call_id=tool_call.id,
+                output=str(e),
+                success=False,
+                tool_type="local_shell",
+                command=command_list,
+            )
 
     async def _handle_shell(
         self,

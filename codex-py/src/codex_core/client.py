@@ -9,6 +9,7 @@ import json
 from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
 from enum import Enum
+from pathlib import Path
 from typing import Any
 
 import httpx
@@ -16,6 +17,10 @@ from httpx_sse import aconnect_sse
 
 from codex_core.config import Config, ModelFamily
 from codex_core.models import ResponseItem, ResponsesApiRequest, ToolSpec
+
+# Load GPT-5 Codex prompt (matches codex-rs gpt_5_codex_prompt.md)
+_PROMPT_PATH = Path(__file__).parent / "gpt_5_codex_prompt.md"
+GPT_5_CODEX_INSTRUCTIONS = _PROMPT_PATH.read_text(encoding="utf-8") if _PROMPT_PATH.exists() else ""
 
 
 class WireApi(str, Enum):
@@ -159,8 +164,9 @@ class ModelClient:
 
         This matches codex-rs ResponsesApiRequest format exactly.
         """
-        # Extract system/instructions and build input items
-        instructions = ""
+        # Use GPT-5 Codex instructions (matches codex-rs gpt_5_codex_prompt.md)
+        # ChatGPT backend requires these specific instructions
+        instructions = GPT_5_CODEX_INSTRUCTIONS
         input_items: list[ResponseItem] = []
 
         # Add environment_context as first input item (matches codex-rs)
@@ -169,8 +175,9 @@ class ModelClient:
         input_items.append(ResponseItem.user_message(env_context))
 
         for m in messages:
+            # Skip system messages - we use GPT_5_CODEX_INSTRUCTIONS instead
             if m.role == "system":
-                instructions = m.content
+                continue
             elif m.role == "user":
                 input_items.append(ResponseItem.user_message(m.content))
             elif m.role == "assistant":
@@ -362,14 +369,41 @@ class ModelClient:
 
         This matches codex-rs behavior where items_to_record_in_conversation_history
         includes both the call and its output.
+
+        IMPORTANT: Unlike initial request, we build input manually here to avoid
+        duplicating user messages. The input structure is:
+        - env_context (always first)
+        - user_message (the current turn's input)
+        - tool_call + output pairs (accumulated history)
         """
         base_url = self.config.get_base_url()
         headers = self._get_headers()
 
-        # Build base request
-        request_data = self._build_request(messages, tools, stream=True)
+        # Build input items manually to avoid duplication
+        # Only include env_context + last user message + tool results
+        input_items: list[dict[str, Any]] = []
 
-        # Add tool call + output pairs to input
+        # 1. Add environment context (always first)
+        env_context = self._build_environment_context()
+        input_items.append({
+            "type": "message",
+            "role": "user",
+            "content": [{"type": "input_text", "text": env_context}],
+        })
+
+        # 2. Add only the LAST user message (current turn's input)
+        # Messages list structure: [system, ...history..., current_user_input]
+        # We only want the current user input, not previous history
+        for msg in reversed(messages):
+            if msg.role == "user":
+                input_items.append({
+                    "type": "message",
+                    "role": "user",
+                    "content": [{"type": "input_text", "text": msg.content}],
+                })
+                break
+
+        # 3. Add tool call + output pairs (accumulated history)
         for result in tool_results:
             # First add the tool call item
             if result.tool_type == "local_shell":
@@ -383,7 +417,7 @@ class ModelClient:
                         "env": {},  # Required by API
                     },
                 }
-                request_data["input"].append(call_item)
+                input_items.append(call_item)
             elif result.tool_type == "function":
                 call_item = {
                     "type": "function_call",
@@ -391,7 +425,7 @@ class ModelClient:
                     "name": result.tool_name or "",
                     "arguments": "{}",
                 }
-                request_data["input"].append(call_item)
+                input_items.append(call_item)
 
             # Then add the output (always plain string, matching codex-rs)
             output_item = {
@@ -399,9 +433,44 @@ class ModelClient:
                 "call_id": result.call_id,
                 "output": result.output,
             }
-            request_data["input"].append(output_item)
+            input_items.append(output_item)
+
+        # Build tools list
+        tool_specs: list[ToolSpec] = []
+        if tools:
+            for tool in tools:
+                tool_type = tool.get("type")
+                if tool_type == "function":
+                    func = tool["function"]
+                    if func["name"] == "shell":
+                        tool_specs.append(ToolSpec.local_shell())
+                    else:
+                        tool_specs.append(ToolSpec.function(
+                            name=func["name"],
+                            description=func.get("description", ""),
+                            parameters=func.get("parameters", {"type": "object", "properties": {}}),
+                            strict=func.get("strict", False),
+                        ))
+                elif tool_type == "local_shell":
+                    tool_specs.append(ToolSpec.local_shell())
+                elif tool_type == "web_search":
+                    tool_specs.append(ToolSpec.web_search())
+
+        # Build request manually
+        request_data: dict[str, Any] = {
+            "model": self.config.model,
+            "instructions": GPT_5_CODEX_INSTRUCTIONS,
+            "input": input_items,
+            "tools": [t.to_dict() for t in tool_specs],
+            "tool_choice": "auto",
+            "parallel_tool_calls": True,
+            "store": False,
+            "stream": True,
+            "include": [],
+        }
 
         url = f"{base_url}/responses"
+
         async for chunk in self._stream_responses_api(url, headers, request_data):
             yield chunk
 
