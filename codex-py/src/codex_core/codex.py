@@ -47,11 +47,20 @@ from codex_protocol.items import (
 
 @dataclass(slots=True)
 class ToolResult:
-    """Result from executing a tool call."""
+    """Result from executing a tool call.
+
+    Contains both the original call info and the execution result.
+    This is needed because Responses API expects the tool call item
+    to be included in input along with the output.
+    """
 
     call_id: str
     output: str
     success: bool = True
+    # Tool call details for building API request
+    tool_type: str = "local_shell"  # "local_shell", "function", "custom"
+    tool_name: str | None = None  # For function calls
+    command: list[str] | None = None  # For local_shell calls
 
 
 @dataclass(slots=True)
@@ -629,9 +638,11 @@ class Codex:
         # local_shell uses command array format from Responses API
         command_parts = tool_call.arguments.get("command", [])
         if isinstance(command_parts, list):
+            command_list = command_parts
             command = " ".join(command_parts)
         else:
             command = str(command_parts)
+            command_list = [command]
 
         # Reuse shell handler logic with adapted arguments
         adapted_call = ToolCall(
@@ -646,6 +657,8 @@ class Codex:
                         call_id=tool_call.id,
                         output=event.item.details.aggregated_output or "",
                         success=event.item.details.exit_code == 0,
+                        tool_type="local_shell",
+                        command=command_list,
                     )
                     yield event, result
                 else:

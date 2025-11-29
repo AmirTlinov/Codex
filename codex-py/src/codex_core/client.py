@@ -331,15 +331,46 @@ class ModelClient:
         tools: list[dict[str, Any]] | None,
         tool_results: list[Any],
     ) -> AsyncIterator[StreamChunk]:
-        """Stream Responses API with tool results."""
+        """Stream Responses API with tool results.
+
+        For each tool result, we must add BOTH:
+        1. The original tool call item (local_shell_call, function_call, etc.)
+        2. The function_call_output with the result
+
+        This matches codex-rs behavior where items_to_record_in_conversation_history
+        includes both the call and its output.
+        """
         base_url = self.config.get_base_url()
         headers = self._get_headers()
 
         # Build base request
         request_data = self._build_request(messages, tools, stream=True)
 
-        # Add function_call_output items to input
+        # Add tool call + output pairs to input
         for result in tool_results:
+            # First add the tool call item
+            if result.tool_type == "local_shell":
+                call_item = {
+                    "type": "local_shell_call",
+                    "call_id": result.call_id,
+                    "status": "completed",
+                    "action": {
+                        "type": "exec",
+                        "command": result.command or [],
+                        "env": {},  # Required by API
+                    },
+                }
+                request_data["input"].append(call_item)
+            elif result.tool_type == "function":
+                call_item = {
+                    "type": "function_call",
+                    "call_id": result.call_id,
+                    "name": result.tool_name or "",
+                    "arguments": "{}",
+                }
+                request_data["input"].append(call_item)
+
+            # Then add the output
             output_item = {
                 "type": "function_call_output",
                 "call_id": result.call_id,
