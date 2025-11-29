@@ -10,6 +10,7 @@ import asyncio
 from pathlib import Path
 from typing import Any
 
+from rich.text import Text
 from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.containers import Container
@@ -93,18 +94,16 @@ class TextualApprovalHandler:
 class WelcomeWidget(Static):
     """Welcome header widget."""
 
-    def __init__(self, config: Config) -> None:
-        super().__init__()
+    def __init__(self, config: Config, id: str | None = None) -> None:
+        super().__init__(id=id)
         self._config = config
 
     def compose(self) -> ComposeResult:
         """No children."""
         return []
 
-    def render(self) -> str:
+    def render(self) -> Text:
         """Render welcome message."""
-        from rich.text import Text
-
         # Get relative path for CWD
         cwd_display = str(self._config.cwd)
         try:
@@ -128,7 +127,7 @@ class WelcomeWidget(Static):
         return text
 
 
-class CodexApp(App):
+class CodexApp(App[None]):
     """Main Textual application for Codex.
 
     Provides full-screen TUI with:
@@ -170,10 +169,10 @@ class CodexApp(App):
     def __init__(self, config: Config, thread_id: str | None = None) -> None:
         super().__init__()
         self._config = config
-        self._thread_id = thread_id
+        self._conversation_thread_id = thread_id
         self._codex: Codex | None = None
         self._approval_handler: TextualApprovalHandler | None = None
-        self._current_task: asyncio.Task | None = None
+        self._current_task: asyncio.Task[None] | None = None
 
         # Widget references
         self._chat: ChatWidget | None = None
@@ -221,7 +220,7 @@ class CodexApp(App):
         # Create Codex instance
         self._codex = await Codex.create(
             self._config,
-            self._thread_id,
+            self._conversation_thread_id,
             approval_handler=self._approval_handler,
         )
         await self._codex.__aenter__()
@@ -267,7 +266,8 @@ class CodexApp(App):
 
         # Show thinking
         self._show_thinking(True)
-        self._status.set_status("thinking")
+        if self._status:
+            self._status.set_status("thinking")
 
         try:
             async for event in self._codex.run_turn(user_input):
@@ -276,7 +276,8 @@ class CodexApp(App):
             self._chat.add_error(str(e))
         finally:
             self._show_thinking(False)
-            self._status.set_status("ready")
+            if self._status:
+                self._status.set_status("ready")
             self._active_message = None
             self._active_command = None
             self._active_mcp = None

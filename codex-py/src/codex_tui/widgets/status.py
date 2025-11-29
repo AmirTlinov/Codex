@@ -33,6 +33,7 @@ class StatusBar(Static):
         self._tokens_out = 0
         self._cwd = "~"
         self._status = "ready"
+        self._update()
 
     def set_model(self, model: str) -> None:
         """Set the current model name."""
@@ -57,9 +58,9 @@ class StatusBar(Static):
 
     def _update(self) -> None:
         """Update the status bar display."""
-        self.update(self._render())
+        self.update(self._build_text())
 
-    def _render(self) -> Text:
+    def _build_text(self) -> Text:
         """Render the status bar content."""
         text = Text()
 
@@ -89,7 +90,3 @@ class StatusBar(Static):
         text.append(self._cwd, style="dim")
 
         return text
-
-    def render(self) -> Text:
-        """Render the widget."""
-        return self._render()

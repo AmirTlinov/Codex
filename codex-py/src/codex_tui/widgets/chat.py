@@ -8,7 +8,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime
 from enum import Enum
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from rich.console import RenderableType
 from rich.markdown import Markdown
@@ -39,7 +39,7 @@ class HistoryCell:
     cell_type: CellType
     content: str
     timestamp: datetime
-    metadata: dict | None = None
+    metadata: dict[str, Any] | None = None
 
     def render(self) -> RenderableType:
         """Render the cell content."""
@@ -179,7 +179,7 @@ class ChatCell(Static):
         super().__init__()
         self.cell = cell
 
-    def compose(self):
+    def compose(self) -> list[Any]:
         """No children - we render directly."""
         return []
 
