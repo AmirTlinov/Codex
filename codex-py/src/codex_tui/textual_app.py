@@ -325,6 +325,7 @@ class CodexApp(App[None]):
                     item.details.server,
                     item.details.tool,
                     item.id,
+                    item.details.arguments,
                 )
 
         elif isinstance(event, ItemUpdatedEvent):

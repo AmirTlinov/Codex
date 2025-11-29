@@ -127,35 +127,61 @@ class HistoryCell:
         server = meta.get("server", "")
         tool = meta.get("tool", "")
         status = meta.get("status", "completed")
+        args = meta.get("arguments")
+
+        text = Text()
 
         if status == "in_progress":
-            text = Text()
             text.append("● ", style="yellow")
             text.append("Calling ", style="bold")
             text.append(f"{server}.", style="cyan dim")
             text.append(tool, style="cyan")
+            # Show arguments preview if available
+            if args:
+                args_preview = self._format_args_preview(args)
+                if args_preview:
+                    text.append(f"({args_preview})", style="dim")
             text.append(" ...", style="dim italic")
         elif status == "completed":
-            text = Text()
             text.append("● ", style="green bold")
             text.append("Called ", style="bold")
             text.append(f"{server}.", style="cyan dim")
             text.append(tool, style="cyan")
 
+            # Show result preview
             if self.content:
                 text.append("\n  └ ", style="dim")
-                preview = self.content[:80]
-                if len(self.content) > 80:
+                preview = self.content[:100].replace("\n", " ")
+                if len(self.content) > 100:
                     preview += "..."
                 text.append(preview, style="dim")
         else:
-            text = Text()
             text.append("● ", style="red bold")
             text.append("Failed ", style="bold")
             text.append(f"{server}.", style="cyan dim")
             text.append(tool, style="cyan")
+            # Show error if in content
+            if self.content:
+                text.append(f": {self.content[:50]}", style="red dim")
 
         return text
+
+    def _format_args_preview(self, args: dict[str, Any]) -> str:
+        """Format arguments as a short preview string."""
+        if not args:
+            return ""
+        # Show first 2-3 key arguments
+        parts = []
+        for key, value in list(args.items())[:3]:
+            if isinstance(value, str):
+                if len(value) > 20:
+                    value = value[:17] + "..."
+                parts.append(f'{key}="{value}"')
+            elif isinstance(value, bool):
+                parts.append(f"{key}={str(value).lower()}")
+            elif isinstance(value, (int, float)):
+                parts.append(f"{key}={value}")
+        return ", ".join(parts)
 
     def _render_error(self) -> RenderableType:
         """Render error message."""
@@ -266,7 +292,13 @@ class ChatWidget(VerticalScroll):
         widget.cell.metadata["status"] = "completed"
         widget.refresh()
 
-    def add_mcp_start(self, server: str, tool: str, call_id: str) -> ChatCell:
+    def add_mcp_start(
+        self,
+        server: str,
+        tool: str,
+        call_id: str,
+        arguments: dict[str, Any] | None = None,
+    ) -> ChatCell:
         """Add an MCP tool call starting."""
         cell = HistoryCell(
             cell_type=CellType.MCP_TOOL,
@@ -277,6 +309,7 @@ class ChatWidget(VerticalScroll):
                 "tool": tool,
                 "call_id": call_id,
                 "status": "in_progress",
+                "arguments": arguments,
             },
         )
         self._cells.append(cell)
