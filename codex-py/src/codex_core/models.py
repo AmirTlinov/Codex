@@ -66,14 +66,26 @@ class ContentItem:
 
 @dataclass(slots=True)
 class FunctionCallOutputPayload:
-    """Payload for function call output (matches codex-rs)."""
+    """Payload for function call output (matches codex-rs).
+
+    Serialization follows Responses API expectations:
+    - success → output is a plain string (no nested object)
+    - failure → output is an object { content, success: false }
+    """
 
     content: str
     success: bool = True
 
-    def to_dict(self) -> dict[str, Any]:
-        """Serialize to dict."""
-        return {"content": self.content, "success": self.success}
+    def to_json(self) -> str | dict[str, Any]:
+        """Serialize to JSON value matching codex-rs format.
+
+        The Responses API expects two different shapes:
+        - success: output is a plain string
+        - failure: output is an object { content, success: false }
+        """
+        if self.success:
+            return self.content
+        return {"content": self.content, "success": False}
 
 
 @dataclass(slots=True)
@@ -112,7 +124,7 @@ class ResponseItem:
                 "call_id": self.call_id,
             }
             if self.output:
-                result["output"] = self.output.to_dict()
+                result["output"] = self.output.to_json()
             return result
         elif self.type == ResponseItemType.CUSTOM_TOOL_CALL_OUTPUT:
             return {

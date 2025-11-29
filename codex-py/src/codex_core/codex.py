@@ -13,13 +13,12 @@ import asyncio
 import uuid
 from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
-from pathlib import Path
 from typing import Any
 
 from codex_core.approval import ApprovalHandler, ApprovalManager
 from codex_core.client import Message, ModelClient, StreamChunk, ToolCall
 from codex_core.config import Config
-from codex_core.mcp_client import McpClient, McpToolResult
+from codex_core.mcp_client import McpClient
 from codex_core.session import Session, Turn
 from codex_protocol.events import (
     ItemCompletedEvent,
@@ -44,6 +43,15 @@ from codex_protocol.items import (
     PatchChangeKind,
     ThreadItem,
 )
+
+
+@dataclass(slots=True)
+class ToolResult:
+    """Result from executing a tool call."""
+
+    call_id: str
+    output: str
+    success: bool = True
 
 
 @dataclass(slots=True)
@@ -217,7 +225,14 @@ class Codex:
         self._event_queue.put_nowait(event)
 
     async def run_turn(self, user_input: str) -> AsyncIterator[ThreadEvent]:
-        """Run a single turn with user input and yield events."""
+        """Run a conversation turn with agentic loop.
+
+        This implements the multi-step agentic pattern from codex-rs:
+        1. Send user input to model
+        2. Process response and execute any tool calls
+        3. If there are tool results, send them back to model
+        4. Repeat until model responds without tool calls
+        """
         if not self._client:
             raise RuntimeError("Codex not initialized. Use async context manager.")
 
@@ -230,67 +245,192 @@ class Codex:
         yield TurnStartedEvent()
 
         try:
-            # Build messages
+            # Build initial messages
             messages = self._build_messages(user_input)
-
-            # Get tools in OpenAI format (built-in + MCP)
             tools = self._get_all_tools()
 
-            # Track response
-            response_text = ""
-            current_item_id: str | None = None
-            usage = Usage()
+            # Collect tool results for agentic loop
+            tool_results: list[ToolResult] = []
+            total_usage = Usage()
 
-            # Stream completion
-            async for chunk in self._client.stream_completion(messages, tools):
-                # Handle content
-                if chunk.content:
-                    response_text += chunk.content
-                    if current_item_id is None:
-                        current_item_id = str(uuid.uuid4())
-                        item = ThreadItem(
-                            id=current_item_id,
-                            details=AgentMessageItem(text=response_text),
-                        )
-                        yield ItemStartedEvent(item=item)
-                    else:
-                        item = ThreadItem(
-                            id=current_item_id,
-                            details=AgentMessageItem(text=response_text),
-                        )
-                        yield ItemUpdatedEvent(item=item)
+            # Agentic loop: continue until no tool calls
+            while True:
+                # Track response for this iteration
+                response_text = ""
+                current_item_id: str | None = None
+                iteration_tool_results: list[ToolResult] = []
 
-                # Handle tool calls
-                if chunk.tool_calls:
-                    for tool_call in chunk.tool_calls:
-                        async for event in self._handle_tool_call(tool_call, turn):
+                # Stream completion (either initial or with tool results)
+                if tool_results:
+                    # Continue with tool results
+                    async for chunk in self._client.stream_completion_with_tool_results(
+                        messages, tools, tool_results
+                    ):
+                        async for event in self._process_chunk(
+                            chunk, turn, response_text, current_item_id, iteration_tool_results
+                        ):
                             yield event
+                            # Update tracking from yielded events
+                            if isinstance(event, (ItemStartedEvent, ItemUpdatedEvent)):
+                                if isinstance(event.item.details, AgentMessageItem):
+                                    response_text = event.item.details.text
+                                    current_item_id = event.item.id
 
-                # Handle usage
-                if chunk.usage:
-                    usage = Usage(
-                        input_tokens=chunk.usage.get("prompt_tokens", 0),
-                        cached_input_tokens=chunk.usage.get("cached_tokens", 0),
-                        output_tokens=chunk.usage.get("completion_tokens", 0),
+                        # Update usage
+                        if chunk.usage:
+                            total_usage = Usage(
+                                input_tokens=total_usage.input_tokens
+                                + chunk.usage.get("prompt_tokens", 0),
+                                cached_input_tokens=total_usage.cached_input_tokens
+                                + chunk.usage.get("cached_tokens", 0),
+                                output_tokens=total_usage.output_tokens
+                                + chunk.usage.get("completion_tokens", 0),
+                            )
+                else:
+                    # Initial request
+                    async for chunk in self._client.stream_completion(messages, tools):
+                        # Handle content
+                        if chunk.content:
+                            response_text += chunk.content
+                            if current_item_id is None:
+                                current_item_id = str(uuid.uuid4())
+                                item = ThreadItem(
+                                    id=current_item_id,
+                                    details=AgentMessageItem(text=response_text),
+                                )
+                                yield ItemStartedEvent(item=item)
+                            else:
+                                item = ThreadItem(
+                                    id=current_item_id,
+                                    details=AgentMessageItem(text=response_text),
+                                )
+                                yield ItemUpdatedEvent(item=item)
+
+                        # Handle tool calls
+                        if chunk.tool_calls:
+                            for tool_call in chunk.tool_calls:
+                                async for event, result in self._handle_tool_call_with_result(
+                                    tool_call, turn
+                                ):
+                                    yield event
+                                    if result:
+                                        iteration_tool_results.append(result)
+
+                        # Handle usage
+                        if chunk.usage:
+                            total_usage = Usage(
+                                input_tokens=chunk.usage.get("prompt_tokens", 0),
+                                cached_input_tokens=chunk.usage.get("cached_tokens", 0),
+                                output_tokens=chunk.usage.get("completion_tokens", 0),
+                            )
+
+                # Complete the agent message item if we have one
+                if current_item_id and response_text:
+                    item = ThreadItem(
+                        id=current_item_id,
+                        details=AgentMessageItem(text=response_text),
                     )
+                    turn.response_items.append(item)
+                    yield ItemCompletedEvent(item=item)
 
-            # Complete the agent message item
-            if current_item_id:
-                item = ThreadItem(
-                    id=current_item_id,
-                    details=AgentMessageItem(text=response_text),
-                )
-                turn.response_items.append(item)
-                yield ItemCompletedEvent(item=item)
+                # Check if we should continue the loop
+                if not iteration_tool_results:
+                    # No tool calls, we're done
+                    break
+
+                # Prepare for next iteration with tool results
+                tool_results = iteration_tool_results
 
             # Complete the turn
-            self.session.complete_turn(turn, usage)
-            yield TurnCompletedEvent(usage=usage)
+            self.session.complete_turn(turn, total_usage)
+            yield TurnCompletedEvent(usage=total_usage)
 
         except Exception as e:
             error_msg = str(e)
             self.session.fail_turn(turn, error_msg)
             yield TurnFailedEvent(error=ThreadErrorEvent(message=error_msg))
+
+    async def _process_chunk(
+        self,
+        chunk: StreamChunk,
+        turn: Turn,
+        response_text: str,
+        current_item_id: str | None,
+        tool_results: list[ToolResult],
+    ) -> AsyncIterator[ThreadEvent]:
+        """Process a stream chunk and yield events."""
+        # Handle content
+        if chunk.content:
+            response_text += chunk.content
+            if current_item_id is None:
+                current_item_id = str(uuid.uuid4())
+                item = ThreadItem(
+                    id=current_item_id,
+                    details=AgentMessageItem(text=response_text),
+                )
+                yield ItemStartedEvent(item=item)
+            else:
+                item = ThreadItem(
+                    id=current_item_id,
+                    details=AgentMessageItem(text=response_text),
+                )
+                yield ItemUpdatedEvent(item=item)
+
+        # Handle tool calls
+        if chunk.tool_calls:
+            for tool_call in chunk.tool_calls:
+                async for event, result in self._handle_tool_call_with_result(tool_call, turn):
+                    yield event
+                    if result:
+                        tool_results.append(result)
+
+    async def _handle_tool_call_with_result(
+        self,
+        tool_call: ToolCall,
+        turn: Turn,
+    ) -> AsyncIterator[tuple[ThreadEvent, ToolResult | None]]:
+        """Handle a tool call and return result for agentic loop."""
+        # Handle local_shell (Responses API built-in tool)
+        if tool_call.name == "local_shell":
+            async for event, result in self._handle_local_shell_with_result(tool_call, turn):
+                yield event, result
+            return
+
+        # Check if this is an MCP tool call
+        if self._mcp_client and tool_call.name.startswith("mcp__"):
+            async for event in self._handle_mcp_tool_call(tool_call, turn):
+                yield event, None
+            return
+
+        # Built-in tool handler (shell, apply_patch)
+        handler = self._tool_handlers.get(tool_call.name)
+        if not handler:
+            item = ThreadItem(
+                id=str(uuid.uuid4()),
+                details=ErrorItem(message=f"Unknown tool: {tool_call.name}"),
+            )
+            yield ItemCompletedEvent(item=item), ToolResult(
+                call_id=tool_call.id,
+                output=f"Unknown tool: {tool_call.name}",
+                success=False,
+            )
+            return
+
+        # Execute handler and collect result
+        async for event in handler(tool_call, turn):
+            # Extract result from completed command execution
+            if isinstance(event, ItemCompletedEvent):
+                if isinstance(event.item.details, CommandExecutionItem):
+                    result = ToolResult(
+                        call_id=tool_call.id,
+                        output=event.item.details.aggregated_output or "",
+                        success=event.item.details.exit_code == 0,
+                    )
+                    yield event, result
+                else:
+                    yield event, None
+            else:
+                yield event, None
 
     def _build_messages(self, user_input: str) -> list[Message]:
         """Build messages for the API request."""
@@ -476,12 +616,12 @@ class Codex:
         turn.response_items.append(item)
         yield ItemCompletedEvent(item=item)
 
-    async def _handle_local_shell(
+    async def _handle_local_shell_with_result(
         self,
         tool_call: ToolCall,
         turn: Turn,
-    ) -> AsyncIterator[ThreadEvent]:
-        """Handle local_shell calls from Responses API.
+    ) -> AsyncIterator[tuple[ThreadEvent, ToolResult | None]]:
+        """Handle local_shell calls and return result for agentic loop.
 
         Responses API returns local_shell_call with action.command as array.
         Format: {"command": ["/bin/echo", "hello"]}
@@ -500,7 +640,18 @@ class Codex:
             arguments={"command": command, "timeout_ms": 60000},
         )
         async for event in self._handle_shell(adapted_call, turn):
-            yield event
+            if isinstance(event, ItemCompletedEvent):
+                if isinstance(event.item.details, CommandExecutionItem):
+                    result = ToolResult(
+                        call_id=tool_call.id,
+                        output=event.item.details.aggregated_output or "",
+                        success=event.item.details.exit_code == 0,
+                    )
+                    yield event, result
+                else:
+                    yield event, None
+            else:
+                yield event, None
 
     async def _handle_shell(
         self,
@@ -561,7 +712,7 @@ class Codex:
                     if exit_code == 0
                     else CommandExecutionStatus.FAILED
                 )
-            except asyncio.TimeoutError:
+            except TimeoutError:
                 process.kill()
                 output = "Command timed out"
                 exit_code = -1
@@ -599,7 +750,7 @@ class Codex:
         turn: Turn,
     ) -> AsyncIterator[ThreadEvent]:
         """Handle file patch application with approval."""
-        from codex_patch import PatchApplier, ApplyStatus
+        from codex_patch import PatchApplier
 
         patch_text = tool_call.arguments.get("patch", "")
 

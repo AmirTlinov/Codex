@@ -15,7 +15,7 @@ import httpx
 from httpx_sse import aconnect_sse
 
 from codex_core.config import Config, ModelFamily
-from codex_core.models import ContentItem, ResponseItem, ResponsesApiRequest, ToolSpec
+from codex_core.models import ResponseItem, ResponsesApiRequest, ToolSpec
 
 
 class WireApi(str, Enum):
@@ -295,6 +295,104 @@ class ModelClient:
                     chunk = self._parse_stream_chunk(data, wire_api, event.event)
                     if chunk:
                         yield chunk
+
+    async def stream_completion_with_tool_results(
+        self,
+        messages: list[Message],
+        tools: list[dict[str, Any]] | None,
+        tool_results: list[Any],  # list[ToolResult] from codex.py
+    ) -> AsyncIterator[StreamChunk]:
+        """Stream completion with tool results for agentic loop.
+
+        This sends tool execution results back to the model for follow-up.
+        Used in the agentic loop when the model made tool calls.
+        """
+        if not self._client:
+            raise RuntimeError("Client not initialized. Use async context manager.")
+
+        wire_api = self._get_wire_api()
+
+        if wire_api == WireApi.RESPONSES:
+            # For Responses API, add function_call_output items to input
+            async for chunk in self._stream_responses_with_results(
+                messages, tools, tool_results
+            ):
+                yield chunk
+        else:
+            # For Chat Completions API, add tool results as assistant/tool messages
+            async for chunk in self._stream_chat_with_results(
+                messages, tools, tool_results
+            ):
+                yield chunk
+
+    async def _stream_responses_with_results(
+        self,
+        messages: list[Message],
+        tools: list[dict[str, Any]] | None,
+        tool_results: list[Any],
+    ) -> AsyncIterator[StreamChunk]:
+        """Stream Responses API with tool results."""
+        base_url = self.config.get_base_url()
+        headers = self._get_headers()
+
+        # Build base request
+        request_data = self._build_request(messages, tools, stream=True)
+
+        # Add function_call_output items to input
+        for result in tool_results:
+            output_item = {
+                "type": "function_call_output",
+                "call_id": result.call_id,
+                "output": result.output if result.success else {
+                    "content": result.output,
+                    "success": False,
+                },
+            }
+            request_data["input"].append(output_item)
+
+        url = f"{base_url}/responses"
+        async for chunk in self._stream_responses_api(url, headers, request_data):
+            yield chunk
+
+    async def _stream_chat_with_results(
+        self,
+        messages: list[Message],
+        tools: list[dict[str, Any]] | None,
+        tool_results: list[Any],
+    ) -> AsyncIterator[StreamChunk]:
+        """Stream Chat Completions API with tool results."""
+        base_url = self.config.get_base_url()
+        headers = self._get_headers()
+
+        # Build base request with existing messages
+        request_data = self._build_request(messages, tools, stream=True)
+
+        # Add tool results as tool role messages
+        for result in tool_results:
+            tool_message = {
+                "role": "tool",
+                "tool_call_id": result.call_id,
+                "content": result.output,
+            }
+            request_data["messages"].append(tool_message)
+
+        url = f"{base_url}/chat/completions"
+
+        async with aconnect_sse(
+            self._client, "POST", url, headers=headers, json=request_data
+        ) as event_source:
+            async for event in event_source.aiter_sse():
+                if event.data == "[DONE]":
+                    break
+
+                try:
+                    data = json.loads(event.data)
+                except json.JSONDecodeError:
+                    continue
+
+                chunk = self._parse_openai_chunk(data)
+                if chunk:
+                    yield chunk
 
     async def _stream_responses_api(
         self,
