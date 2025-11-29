@@ -1,20 +1,19 @@
 """Codex CLI - inline terminal interface like codex-rs.
 
 Uses rich for formatting but renders inline (no alternate screen).
-Matches codex-rs TUI visual style.
+Matches codex-rs TUI visual style with proper message styling.
 """
 
 from __future__ import annotations
 
 import asyncio
-import sys
+import os
 from pathlib import Path
 from typing import Any
 
 from rich.console import Console
 from rich.live import Live
-from rich.markdown import Markdown
-from rich.panel import Panel
+from rich.style import Style
 from rich.text import Text
 
 from codex_core.codex import Codex
@@ -37,66 +36,104 @@ from codex_protocol.items import (
 console = Console(highlight=False)
 
 
+def get_user_message_style() -> Style:
+    """Get user message background style adapting to terminal colors.
+
+    Matches codex-rs: 10% blend of white/black with terminal background.
+    Falls back to subtle gray for terminals that don't support color queries.
+    """
+    # Try to detect terminal background (simplified - codex-rs uses crossterm queries)
+    # Most terminals are dark, so default to dark theme behavior
+    colorfgbg = os.environ.get("COLORFGBG", "")
+    is_light = False
+    if colorfgbg:
+        # Format: "fg;bg" where bg > 8 typically means light theme
+        parts = colorfgbg.split(";")
+        if len(parts) >= 2:
+            try:
+                bg_color = int(parts[-1])
+                is_light = bg_color > 8
+            except ValueError:
+                pass
+
+    # 10% blend: dark terminal -> subtle white tint, light terminal -> subtle dark tint
+    if is_light:
+        # Light theme: blend with black (25, 25, 25 approximation of 10% black)
+        return Style(bgcolor="grey15")
+    else:
+        # Dark theme: blend with white (38, 38, 38 approximation of 10% white on black)
+        return Style(bgcolor="grey23")
+
+
 def render_user_message(text: str) -> Text:
-    """Render user message with › prefix."""
+    """Render user message with › prefix and background (matches codex-rs UserHistoryCell)."""
+    style = get_user_message_style()
     result = Text()
-    result.append("\n")
-    for i, line in enumerate(text.split("\n")):
+
+    # Empty line before (with background)
+    result.append("\n", style=style)
+
+    # Content lines with prefix
+    lines = text.split("\n")
+    for i, line in enumerate(lines):
         if i == 0:
-            result.append("› ", style="bold dim")
+            result.append("› ", style=Style(bold=True, dim=True) + style)
         else:
-            result.append("  ", style="dim")
-        result.append(line)
-        result.append("\n")
+            result.append("  ", style=style)
+        result.append(line, style=style)
+        result.append("\n", style=style)
+
+    # Empty line after (with background)
+    result.append("\n", style=style)
+
     return result
 
 
 def render_thinking() -> Text:
-    """Render thinking indicator."""
+    """Render thinking indicator with bullet prefix."""
     result = Text()
-    result.append("  ")
+    result.append("• ", style="dim")
     result.append("Thinking...", style="dim italic")
     return result
 
 
 def render_command_start(cmd: str) -> Text:
-    """Render command starting."""
+    """Render command execution starting (matches codex-rs ExecCell 'Running')."""
     result = Text()
-    result.append("  ")
-    result.append("$ ", style="dim")
-    result.append(cmd, style="bold")
-    result.append(" ", style="dim")
-    result.append("...", style="dim italic")
+    result.append("• ", style="dim")
+    result.append("Running ", style="bold")
+    result.append(cmd, style="")
+    result.append(" ...", style="dim italic")
     return result
 
 
 def render_command_complete(cmd: str, output: str | None, exit_code: int | None) -> Text:
-    """Render completed command with output."""
+    """Render completed command with output (matches codex-rs ExecCell 'Ran')."""
     result = Text()
-    result.append("  ")
 
+    # Header line: • Ran <command>
     if exit_code == 0 or exit_code is None:
-        result.append("$ ", style="dim")
+        result.append("• ", style="green bold")
     else:
-        result.append("$ ", style="red dim")
+        result.append("• ", style="red bold")
 
-    result.append(cmd, style="bold")
+    result.append("Ran ", style="bold")
+    result.append(cmd, style="")
 
     if exit_code is not None and exit_code != 0:
         result.append(f" (exit {exit_code})", style="red")
 
     result.append("\n")
 
-    # Output lines with tree prefix
+    # Output lines with tree prefix (└ for first, spaces for rest)
     if output:
         lines = output.strip().split("\n")
         max_lines = 10
         for i, line in enumerate(lines[:max_lines]):
-            result.append("  ")
             if i == 0:
-                result.append("└ ", style="dim")
+                result.append("  └ ", style="dim")
             else:
-                result.append("  ", style="dim")
+                result.append("    ", style="dim")
             result.append(line, style="dim")
             result.append("\n")
 
@@ -106,21 +143,29 @@ def render_command_complete(cmd: str, output: str | None, exit_code: int | None)
     return result
 
 
-def render_assistant_text(text: str) -> Text:
-    """Render assistant message text."""
+def render_assistant_text(text: str, is_first_chunk: bool = True) -> Text:
+    """Render assistant message text (matches codex-rs AgentMessageCell).
+
+    Uses • prefix for first line, spaces for continuation.
+    """
     result = Text()
-    for line in text.split("\n"):
-        result.append("  ")
+    lines = text.split("\n")
+
+    for i, line in enumerate(lines):
+        if i == 0 and is_first_chunk:
+            result.append("• ", style="dim")
+        else:
+            result.append("  ")
         result.append(line)
         result.append("\n")
+
     return result
 
 
 def render_error(message: str) -> Text:
-    """Render error message."""
+    """Render error message (matches codex-rs new_error_event)."""
     result = Text()
-    result.append("  ")
-    result.append("Error: ", style="bold red")
+    result.append("■ ", style="red")
     result.append(message, style="red")
     result.append("\n")
     return result
@@ -131,15 +176,15 @@ async def run_turn(codex: Codex, user_input: str) -> None:
     current_msg_id: str | None = None
     current_text = ""
     live: Live | None = None
+    is_first_message_chunk = True
 
-    # User message is already shown by console.input() prompt
-    # Just add a blank line before assistant response
-    console.print()
+    # Show user message with proper styling
+    console.print(render_user_message(user_input), end="")
 
     try:
         async for event in codex.run_turn(user_input):
             if isinstance(event, TurnStartedEvent):
-                # Show thinking
+                # Show thinking indicator
                 live = Live(render_thinking(), console=console, refresh_per_second=4)
                 live.start()
 
@@ -169,8 +214,9 @@ async def run_turn(codex: Codex, user_input: str) -> None:
                         live = None
                     current_msg_id = item.id
                     current_text = item.details.text
+                    is_first_message_chunk = True
                     live = Live(
-                        render_assistant_text(current_text),
+                        render_assistant_text(current_text, is_first_message_chunk),
                         console=console,
                         refresh_per_second=10,
                     )
@@ -192,21 +238,18 @@ async def run_turn(codex: Codex, user_input: str) -> None:
                 if isinstance(item.details, AgentMessageItem) and item.id == current_msg_id:
                     current_text = item.details.text
                     if live:
-                        live.update(render_assistant_text(current_text))
+                        live.update(render_assistant_text(current_text, is_first_message_chunk))
 
             elif isinstance(event, ItemCompletedEvent):
                 item = event.item
 
                 if isinstance(item.details, AgentMessageItem):
-                    # Update live with final text, then stop
-                    # Don't print separately - Live already shows the text
                     if live and item.id == current_msg_id:
-                        live.update(render_assistant_text(item.details.text))
+                        live.update(render_assistant_text(item.details.text, is_first_message_chunk))
                         live.stop()
                         live = None
                         current_msg_id = None
-                        # Print newline after Live output
-                        console.print()
+                        is_first_message_chunk = False
 
                 elif isinstance(item.details, CommandExecutionItem):
                     if live:
@@ -232,24 +275,61 @@ async def run_turn(codex: Codex, user_input: str) -> None:
 
 
 def print_welcome(config: Config) -> None:
-    """Print welcome/status line."""
+    """Print welcome header box (matches codex-rs SessionHeaderHistoryCell)."""
+    # Simplified version - codex-rs has full bordered box
+    version = "0.1.0"
+    cwd_display = str(config.cwd)
+
+    # Try to relativize to home
+    home = Path.home()
+    try:
+        rel = config.cwd.relative_to(home)
+        cwd_display = f"~/{rel}" if str(rel) != "." else "~"
+    except ValueError:
+        pass
+
+    # Header in bordered box style
+    console.print()
     t = Text()
-    t.append(config.model, style="bold")
-    t.append(" @ ", style="dim")
-    t.append(str(config.cwd), style="dim")
+    t.append(">_ ", style="dim")
+    t.append("OpenAI Codex", style="bold")
+    t.append(f" (v{version})", style="dim")
     console.print(t)
     console.print()
 
-
-def print_shortcuts() -> None:
-    """Print available shortcuts."""
+    # Model info
     t = Text()
-    t.append("  ", style="dim")
-    t.append("? ", style="bold dim")
-    t.append("shortcuts  ", style="dim")
-    t.append("Ctrl+C ", style="bold dim")
-    t.append("quit", style="dim")
+    t.append("model:     ", style="dim")
+    t.append(config.model)
     console.print(t)
+
+    # Directory info
+    t = Text()
+    t.append("directory: ", style="dim")
+    t.append(cwd_display)
+    console.print(t)
+
+    console.print()
+
+
+def print_help_commands() -> None:
+    """Print available commands help."""
+    console.print(Text("  To get started, describe a task or try one of these commands:", style="dim"))
+    console.print()
+
+    commands = [
+        ("/help", "show available commands"),
+        ("/status", "show current session configuration"),
+        ("/clear", "clear the screen"),
+        ("/quit", "exit the CLI"),
+    ]
+
+    for cmd, desc in commands:
+        t = Text()
+        t.append("  ")
+        t.append(cmd)
+        t.append(f" - {desc}", style="dim")
+        console.print(t)
 
 
 async def main_loop(config: Config, thread_id: str | None = None) -> None:
@@ -258,13 +338,13 @@ async def main_loop(config: Config, thread_id: str | None = None) -> None:
     await codex.__aenter__()
 
     print_welcome(config)
-    print_shortcuts()
+    print_help_commands()
     console.print()
 
     try:
         while True:
             try:
-                # Input prompt - simple › prefix
+                # Input prompt - simple › prefix matching codex-rs
                 user_input = console.input("[bold dim]› [/bold dim]").strip()
 
                 if not user_input:
@@ -279,12 +359,24 @@ async def main_loop(config: Config, thread_id: str | None = None) -> None:
                     elif cmd == "clear":
                         console.clear()
                         print_welcome(config)
-                        print_shortcuts()
+                        print_help_commands()
                         console.print()
-                    elif cmd == "help" or cmd == "?":
-                        console.print(Text("  /quit  /clear  /help", style="dim"))
+                    elif cmd in ("help", "?"):
+                        print_help_commands()
+                        console.print()
+                    elif cmd == "status":
+                        t = Text()
+                        t.append("• ", style="dim")
+                        t.append("Model: ", style="bold")
+                        t.append(config.model)
+                        console.print(t)
+                        console.print()
                     else:
-                        console.print(Text(f"  Unknown command: /{cmd}", style="dim red"))
+                        t = Text()
+                        t.append("• ", style="dim")
+                        t.append(f"Unknown command: /{cmd}", style="yellow")
+                        console.print(t)
+                        console.print()
                     continue
 
                 # Run conversation turn
