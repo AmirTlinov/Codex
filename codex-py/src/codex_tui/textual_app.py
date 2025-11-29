@@ -41,6 +41,7 @@ from codex_protocol.items import (
 from codex_tui.widgets.approval import ApprovalDialog, ApprovalResult
 from codex_tui.widgets.chat import ChatCell, ChatWidget
 from codex_tui.widgets.input import InputWidget
+from codex_tui.widgets.spinner import ThinkingIndicator
 from codex_tui.widgets.status import StatusBar
 
 
@@ -163,7 +164,13 @@ class CodexApp(App[None]):
     BINDINGS = [
         Binding("ctrl+c", "quit", "Quit", show=True),
         Binding("ctrl+l", "clear", "Clear", show=True),
+        Binding("ctrl+u", "clear_input", "Clear Input", show=False),
         Binding("escape", "cancel", "Cancel", show=False),
+        Binding("f1", "help", "Help", show=True),
+        Binding("pageup", "scroll_up", "Scroll Up", show=False),
+        Binding("pagedown", "scroll_down", "Scroll Down", show=False),
+        Binding("home", "scroll_top", "Top", show=False),
+        Binding("end", "scroll_bottom", "Bottom", show=False),
     ]
 
     def __init__(self, config: Config, thread_id: str | None = None) -> None:
@@ -178,7 +185,7 @@ class CodexApp(App[None]):
         self._chat: ChatWidget | None = None
         self._input: InputWidget | None = None
         self._status: StatusBar | None = None
-        self._thinking: Static | None = None
+        self._thinking: ThinkingIndicator | None = None
 
         # Active cells for updates
         self._active_message: ChatCell | None = None
@@ -190,7 +197,7 @@ class CodexApp(App[None]):
         yield Header()
         yield WelcomeWidget(self._config, id="welcome")
         yield Container(ChatWidget(), id="chat-container")
-        yield Static("", id="thinking")
+        yield ThinkingIndicator()
         yield InputWidget()
         yield StatusBar()
         yield Footer()
@@ -201,7 +208,7 @@ class CodexApp(App[None]):
         self._chat = self.query_one(ChatWidget)
         self._input = self.query_one(InputWidget)
         self._status = self.query_one(StatusBar)
-        self._thinking = self.query_one("#thinking", Static)
+        self._thinking = self.query_one(ThinkingIndicator)
 
         # Configure status bar
         self._status.set_model(self._config.model)
@@ -374,23 +381,28 @@ class CodexApp(App[None]):
                 self._active_mcp = None
                 self._status.set_status("thinking")
 
-    def _show_thinking(self, show: bool) -> None:
+    def _show_thinking(self, show: bool, message: str = "Thinking") -> None:
         """Show or hide thinking indicator."""
         if self._thinking:
             if show:
-                self._thinking.update("[dim italic]Thinking...[/]")
+                self._thinking.show(message)
             else:
-                self._thinking.update("")
+                self._thinking.hide()
 
     def _show_help(self) -> None:
         """Show help message."""
         if self._chat:
             self._chat.add_system(
                 "Commands:\n"
-                "  /help, /?  - Show this help\n"
-                "  /clear     - Clear the screen\n"
-                "  /quit, /q  - Exit\n"
-                "  Ctrl+C     - Exit\n"
+                "  /help, /?     - Show this help\n"
+                "  /clear        - Clear the screen\n"
+                "  /quit, /q     - Exit\n"
+                "\n"
+                "Keyboard shortcuts:\n"
+                "  Ctrl+C        - Exit\n"
+                "  Ctrl+L        - Clear screen\n"
+                "  Escape        - Cancel current operation\n"
+                "  Enter         - Submit message\n"
             )
 
     def action_clear(self) -> None:
@@ -398,10 +410,44 @@ class CodexApp(App[None]):
         if self._chat:
             self._chat.remove_children()
 
+    def action_clear_input(self) -> None:
+        """Clear the input field."""
+        if self._input:
+            self._input.value = ""
+
     def action_cancel(self) -> None:
         """Cancel the current operation."""
         if self._current_task and not self._current_task.done():
             self._current_task.cancel()
+            if self._chat:
+                self._chat.add_warning("Operation cancelled")
+            self._show_thinking(False)
+            if self._status:
+                self._status.set_status("ready")
+
+    def action_help(self) -> None:
+        """Show help."""
+        self._show_help()
+
+    def action_scroll_up(self) -> None:
+        """Scroll chat up."""
+        if self._chat:
+            self._chat.scroll_up(animate=False)
+
+    def action_scroll_down(self) -> None:
+        """Scroll chat down."""
+        if self._chat:
+            self._chat.scroll_down(animate=False)
+
+    def action_scroll_top(self) -> None:
+        """Scroll to top of chat."""
+        if self._chat:
+            self._chat.scroll_home(animate=False)
+
+    def action_scroll_bottom(self) -> None:
+        """Scroll to bottom of chat."""
+        if self._chat:
+            self._chat.scroll_end(animate=False)
 
 
 async def run_textual_app(config: Config, thread_id: str | None = None) -> None:

@@ -10,12 +10,20 @@ from datetime import datetime
 from enum import Enum
 from typing import TYPE_CHECKING, Any
 
-from rich.console import RenderableType
+from rich.console import Group, RenderableType
 from rich.markdown import Markdown
 from rich.panel import Panel
 from rich.text import Text
 from textual.containers import VerticalScroll
 from textual.widgets import Static
+
+from codex_tui.widgets.renderers import (
+    render_diff,
+    render_error_indicator,
+    render_success_indicator,
+    render_warning_indicator,
+    truncate_output,
+)
 
 if TYPE_CHECKING:
     pass
@@ -28,8 +36,12 @@ class CellType(Enum):
     AGENT_MESSAGE = "agent"
     COMMAND = "command"
     MCP_TOOL = "mcp"
+    PATCH = "patch"  # File modification with diff
     ERROR = "error"
+    WARNING = "warning"
+    SUCCESS = "success"
     SYSTEM = "system"
+    REASONING = "reasoning"  # AI thinking/reasoning display
 
 
 @dataclass
@@ -51,8 +63,18 @@ class HistoryCell:
             return self._render_command()
         elif self.cell_type == CellType.MCP_TOOL:
             return self._render_mcp()
+        elif self.cell_type == CellType.PATCH:
+            return self._render_patch()
         elif self.cell_type == CellType.ERROR:
             return self._render_error()
+        elif self.cell_type == CellType.WARNING:
+            return self._render_warning()
+        elif self.cell_type == CellType.SUCCESS:
+            return self._render_success()
+        elif self.cell_type == CellType.REASONING:
+            return self._render_reasoning()
+        elif self.cell_type == CellType.SYSTEM:
+            return self._render_system()
         return Text(self.content)
 
     def _render_user(self) -> RenderableType:
@@ -183,11 +205,72 @@ class HistoryCell:
                 parts.append(f"{key}={value}")
         return ", ".join(parts)
 
+    def _render_patch(self) -> RenderableType:
+        """Render a file patch with diff highlighting."""
+        meta = self.metadata or {}
+        file_path = meta.get("path", "")
+        status = meta.get("status", "completed")
+
+        if status == "in_progress":
+            text = Text()
+            text.append("● ", style="yellow")
+            text.append("Applying patch to ", style="bold")
+            text.append(file_path, style="cyan")
+            text.append(" ...", style="dim italic")
+            return text
+
+        # Completed - show diff
+        header = Text()
+        if status == "completed":
+            header.append("● ", style="green bold")
+            header.append("Applied patch to ", style="bold")
+        else:
+            header.append("● ", style="red bold")
+            header.append("Failed to patch ", style="bold")
+        header.append(file_path, style="cyan")
+
+        if self.content:
+            # Render actual diff
+            diff_panel = render_diff(self.content, file_path)
+            return Group(header, diff_panel)
+
+        return header
+
     def _render_error(self) -> RenderableType:
         """Render error message."""
+        return render_error_indicator(self.content)
+
+    def _render_warning(self) -> RenderableType:
+        """Render warning message."""
+        return render_warning_indicator(self.content)
+
+    def _render_success(self) -> RenderableType:
+        """Render success message."""
+        return render_success_indicator(self.content)
+
+    def _render_reasoning(self) -> RenderableType:
+        """Render AI reasoning/thinking content."""
         text = Text()
-        text.append("■ ", style="red bold")
-        text.append(self.content, style="red")
+        text.append("💭 ", style="dim")
+        text.append("Reasoning: ", style="dim italic")
+
+        # Show truncated reasoning
+        content, truncated = truncate_output(self.content, max_lines=5, max_chars=500)
+        text.append(content, style="dim")
+        if truncated:
+            text.append("\n  ...(truncated)", style="dim italic")
+
+        return Panel(
+            text,
+            border_style="dim",
+            padding=(0, 1),
+        )
+
+    def _render_system(self) -> RenderableType:
+        """Render system message."""
+        text = Text()
+        text.append("ℹ ", style="blue")
+        text.append(self.content, style="blue dim")
         return text
 
 
@@ -348,3 +431,65 @@ class ChatWidget(VerticalScroll):
         self._cells.append(cell)
         self.mount(ChatCell(cell))
         self.scroll_end(animate=False)
+
+    def add_patch_start(self, file_path: str, call_id: str) -> ChatCell:
+        """Add a patch/file modification starting."""
+        cell = HistoryCell(
+            cell_type=CellType.PATCH,
+            content="",
+            timestamp=datetime.now(),
+            metadata={
+                "path": file_path,
+                "call_id": call_id,
+                "status": "in_progress",
+            },
+        )
+        self._cells.append(cell)
+        widget = ChatCell(cell)
+        self.mount(widget)
+        self.scroll_end(animate=False)
+        return widget
+
+    def complete_patch(
+        self, widget: ChatCell, diff_content: str, success: bool = True
+    ) -> None:
+        """Complete a patch with diff content."""
+        widget.cell.content = diff_content
+        widget.cell.metadata = widget.cell.metadata or {}
+        widget.cell.metadata["status"] = "completed" if success else "failed"
+        widget.refresh()
+
+    def add_warning(self, message: str) -> None:
+        """Add a warning message."""
+        cell = HistoryCell(
+            cell_type=CellType.WARNING,
+            content=message,
+            timestamp=datetime.now(),
+        )
+        self._cells.append(cell)
+        self.mount(ChatCell(cell))
+        self.scroll_end(animate=False)
+
+    def add_success(self, message: str) -> None:
+        """Add a success message."""
+        cell = HistoryCell(
+            cell_type=CellType.SUCCESS,
+            content=message,
+            timestamp=datetime.now(),
+        )
+        self._cells.append(cell)
+        self.mount(ChatCell(cell))
+        self.scroll_end(animate=False)
+
+    def add_reasoning(self, content: str) -> ChatCell:
+        """Add AI reasoning content."""
+        cell = HistoryCell(
+            cell_type=CellType.REASONING,
+            content=content,
+            timestamp=datetime.now(),
+        )
+        self._cells.append(cell)
+        widget = ChatCell(cell)
+        self.mount(widget)
+        self.scroll_end(animate=False)
+        return widget
