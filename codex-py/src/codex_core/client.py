@@ -163,6 +163,11 @@ class ModelClient:
         instructions = ""
         input_items: list[ResponseItem] = []
 
+        # Add environment_context as first input item (matches codex-rs)
+        # This tells the model about the working directory
+        env_context = self._build_environment_context()
+        input_items.append(ResponseItem.user_message(env_context))
+
         for m in messages:
             if m.role == "system":
                 instructions = m.content
@@ -251,6 +256,24 @@ class ModelClient:
                 request["tools"] = anthropic_tools
 
         return request
+
+    def _build_environment_context(self) -> str:
+        """Build environment context XML (matches codex-rs EnvironmentContext).
+
+        This tells the model about the working directory and policies.
+        Format matches codex-rs exactly:
+        <environment_context>
+          <cwd>/path/to/working/directory</cwd>
+          <approval_policy>...</approval_policy>
+          <sandbox_mode>...</sandbox_mode>
+        </environment_context>
+        """
+        lines = ["<environment_context>"]
+        lines.append(f"  <cwd>{self.config.cwd}</cwd>")
+        lines.append(f"  <approval_policy>{self.config.approval_policy}</approval_policy>")
+        lines.append(f"  <sandbox_mode>{self.config.sandbox_policy}</sandbox_mode>")
+        lines.append("</environment_context>")
+        return "\n".join(lines)
 
     async def stream_completion(
         self,

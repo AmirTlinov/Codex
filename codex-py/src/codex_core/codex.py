@@ -479,9 +479,8 @@ class Codex:
         if self.config.developer_instructions:
             parts.append(f"\n\nDeveloper Instructions:\n{self.config.developer_instructions}")
 
-        # NOTE: Working directory is NOT added to instructions.
-        # ChatGPT API requires prompt.md EXACTLY as-is without modifications.
-        # codex-rs also does not modify the official instructions.
+        # NOTE: Working directory is communicated via environment_context XML
+        # in the input items (not in the system prompt). This matches codex-rs.
 
         return "\n".join(parts)
 
