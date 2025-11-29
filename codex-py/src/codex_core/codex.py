@@ -45,6 +45,7 @@ from codex_protocol.items import (
     PatchChangeKind,
     ThreadItem,
 )
+from codex_shell.sandbox import SandboxConfig, SandboxPolicy, SandboxValidator
 
 
 @dataclass(slots=True)
@@ -152,6 +153,7 @@ class Codex:
     _mcp_client: McpClient | None = None
     _token_counter: TokenCounter | None = None
     _history_compactor: HistoryCompactor | None = None
+    _sandbox: SandboxValidator | None = None
     _event_queue: asyncio.Queue[ThreadEvent] = field(default_factory=asyncio.Queue)
     _tools: list[ToolDefinition] = field(default_factory=list)
     _tool_handlers: dict[str, Any] = field(default_factory=dict)
@@ -217,6 +219,20 @@ class Codex:
             token_counter=self._token_counter,
             config=CompactionConfig(),
         )
+
+        # Initialize sandbox validator
+        policy_str = self.config.sandbox_policy
+        try:
+            policy = SandboxPolicy(policy_str)
+        except ValueError:
+            policy = SandboxPolicy.WORKSPACE_WRITE
+
+        sandbox_config = SandboxConfig(
+            policy=policy,
+            workspace=self.config.cwd,
+            writable_roots=[self.config.cwd],
+        )
+        self._sandbox = SandboxValidator(sandbox_config)
 
         # Connect to MCP servers if configured
         if self.config.mcp_servers:
@@ -809,7 +825,45 @@ class Codex:
 
         item_id = str(uuid.uuid4())
 
-        # Check approval
+        # Validate command against sandbox policy
+        if self._sandbox:
+            sandbox_result = self._sandbox.validate(command)
+            if not sandbox_result.allowed:
+                # If sandbox requires approval, request it
+                if sandbox_result.requires_approval:
+                    approved = await self.approval_manager.approve_command(
+                        command,
+                        description=f"Sandbox: {sandbox_result.reason}",
+                    )
+                    if not approved:
+                        item = ThreadItem(
+                            id=item_id,
+                            details=CommandExecutionItem(
+                                command=command,
+                                aggregated_output=f"Blocked by sandbox: {sandbox_result.reason}",
+                                status=CommandExecutionStatus.REJECTED,
+                                exit_code=-1,
+                            ),
+                        )
+                        turn.response_items.append(item)
+                        yield ItemCompletedEvent(item=item)
+                        return
+                else:
+                    # Hard block without approval option
+                    item = ThreadItem(
+                        id=item_id,
+                        details=CommandExecutionItem(
+                            command=command,
+                            aggregated_output=f"Blocked by sandbox: {sandbox_result.reason}",
+                            status=CommandExecutionStatus.REJECTED,
+                            exit_code=-1,
+                        ),
+                    )
+                    turn.response_items.append(item)
+                    yield ItemCompletedEvent(item=item)
+                    return
+
+        # Check approval (for non-sandboxed commands or after sandbox approval)
         approved = await self.approval_manager.approve_command(command)
         if not approved:
             item = ThreadItem(

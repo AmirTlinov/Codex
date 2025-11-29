@@ -13,9 +13,17 @@ from typing import Any
 
 from rich.console import Console
 from rich.live import Live
+from rich.panel import Panel
+from rich.prompt import Prompt
 from rich.style import Style
+from rich.syntax import Syntax
 from rich.text import Text
 
+from codex_core.approval import (
+    ApprovalDecision,
+    ApprovalRequest,
+    ApprovalType,
+)
 from codex_core.codex import Codex
 from codex_core.config import Config
 from codex_protocol.events import (
@@ -34,6 +42,95 @@ from codex_protocol.items import (
 
 # Console for inline output
 console = Console(highlight=False)
+
+
+class RichApprovalHandler:
+    """Interactive approval handler using rich prompts.
+
+    Asks user to approve commands, patches, and MCP tool calls.
+    Supports [y]es, [n]o, [a]lways options.
+    """
+
+    def __init__(self, console: Console | None = None) -> None:
+        self._console = console or Console()
+
+    async def request_approval(self, request: ApprovalRequest) -> ApprovalDecision:
+        """Display approval request and get user decision."""
+        # Render request details
+        self._render_request(request)
+
+        # Get user input
+        response = Prompt.ask(
+            "[bold]Approve?[/bold]",
+            choices=["y", "n", "a"],
+            default="y",
+            console=self._console,
+        )
+
+        if response == "y":
+            return ApprovalDecision.APPROVED
+        elif response == "a":
+            return ApprovalDecision.ALWAYS_APPROVE
+        else:
+            return ApprovalDecision.REJECTED
+
+    def _render_request(self, request: ApprovalRequest) -> None:
+        """Render approval request details."""
+        if request.approval_type == ApprovalType.COMMAND:
+            self._render_command_request(request)
+        elif request.approval_type == ApprovalType.PATCH:
+            self._render_patch_request(request)
+        elif request.approval_type == ApprovalType.MCP_TOOL:
+            self._render_mcp_request(request)
+
+    def _render_command_request(self, request: ApprovalRequest) -> None:
+        """Render command approval request."""
+        text = Text()
+        text.append("\n⚠ ", style="yellow bold")
+        text.append("Command requires approval\n", style="bold")
+        text.append("  $ ", style="dim")
+        text.append(request.command or "", style="bold cyan")
+        text.append("\n")
+        self._console.print(text)
+
+    def _render_patch_request(self, request: ApprovalRequest) -> None:
+        """Render patch approval request."""
+        text = Text()
+        text.append("\n⚠ ", style="yellow bold")
+        text.append("File modification requires approval\n", style="bold")
+        text.append("  File: ", style="dim")
+        text.append(request.patch_path or "", style="bold")
+        text.append("\n")
+        self._console.print(text)
+
+        # Show diff if available
+        if request.patch_diff:
+            syntax = Syntax(
+                request.patch_diff,
+                "diff",
+                theme="monokai",
+                line_numbers=False,
+            )
+            self._console.print(Panel(syntax, title="Changes", border_style="dim"))
+
+    def _render_mcp_request(self, request: ApprovalRequest) -> None:
+        """Render MCP tool call approval request."""
+        text = Text()
+        text.append("\n⚠ ", style="yellow bold")
+        text.append("MCP tool call requires approval\n", style="bold")
+        text.append("  Server: ", style="dim")
+        text.append(request.mcp_server or "", style="bold")
+        text.append("\n  Tool: ", style="dim")
+        text.append(request.mcp_tool or "", style="bold cyan")
+        text.append("\n")
+        self._console.print(text)
+
+        # Show arguments if available
+        if request.mcp_arguments:
+            import json
+            args_str = json.dumps(request.mcp_arguments, indent=2)
+            syntax = Syntax(args_str, "json", theme="monokai", line_numbers=False)
+            self._console.print(Panel(syntax, title="Arguments", border_style="dim"))
 
 
 def get_user_message_style() -> Style:
@@ -334,7 +431,9 @@ def print_help_commands() -> None:
 
 async def main_loop(config: Config, thread_id: str | None = None) -> None:
     """Main interactive loop."""
-    codex = await Codex.create(config, thread_id)
+    # Use interactive approval handler for TUI
+    approval_handler = RichApprovalHandler(console)
+    codex = await Codex.create(config, thread_id, approval_handler=approval_handler)
     await codex.__aenter__()
 
     print_welcome(config)
