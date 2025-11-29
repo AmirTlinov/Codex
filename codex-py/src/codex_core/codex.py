@@ -353,18 +353,29 @@ class Codex:
             )
 
     def _get_all_tools(self) -> list[dict[str, Any]] | None:
-        """Get all tools in OpenAI format: built-in + MCP."""
+        """Get all tools in OpenAI format: built-in + MCP.
+
+        NOTE: For ChatGPT OAuth API (Responses API), we only send built-in tools.
+        MCP tools are handled locally but not sent to the API to avoid
+        exceeding tool limits or format issues.
+        """
         tools: list[dict[str, Any]] = []
 
         # Built-in tools
         for tool in self._tools:
             tools.append(tool.to_openai_format())
 
-        # MCP tools
-        if self._mcp_client:
+        # MCP tools - only add for non-ChatGPT APIs
+        # ChatGPT Responses API has issues with large number of tools
+        if self._mcp_client and not self._is_chatgpt_api():
             tools.extend(self._mcp_client.get_tools_openai_format())
 
         return tools if tools else None
+
+    def _is_chatgpt_api(self) -> bool:
+        """Check if using ChatGPT OAuth API."""
+        base_url = self.config.get_base_url()
+        return "chatgpt.com" in base_url
 
     async def _handle_tool_call(
         self,
