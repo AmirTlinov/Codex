@@ -551,7 +551,7 @@ class ModelClient:
                     "type": "function_call",
                     "call_id": result.call_id,
                     "name": result.tool_name or "",
-                    "arguments": "{}",
+                    "arguments": result.arguments or "{}",
                 }
                 input_items.append(call_item)
 

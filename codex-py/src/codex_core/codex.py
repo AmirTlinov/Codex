@@ -64,6 +64,7 @@ class ToolResult:
     tool_type: str = "local_shell"  # "local_shell", "function", "custom"
     tool_name: str | None = None  # For function calls
     command: list[str] | None = None  # For local_shell calls
+    arguments: str | None = None  # JSON string of function arguments
 
 
 @dataclass(slots=True)
@@ -462,8 +463,8 @@ class Codex:
 
         # Check if this is an MCP tool call
         if self._mcp_client and tool_call.name.startswith("mcp__"):
-            async for event in self._handle_mcp_tool_call(tool_call, turn):
-                yield event, None
+            async for event, result in self._handle_mcp_tool_call_with_result(tool_call, turn):
+                yield event, result
             return
 
         # Built-in tool handler (shell, apply_patch)
@@ -616,7 +617,22 @@ class Codex:
         tool_call: ToolCall,
         turn: Turn,
     ) -> AsyncIterator[ThreadEvent]:
-        """Handle an MCP tool call."""
+        """Handle an MCP tool call (legacy, without result)."""
+        async for event, _result in self._handle_mcp_tool_call_with_result(tool_call, turn):
+            yield event
+
+    async def _handle_mcp_tool_call_with_result(
+        self,
+        tool_call: ToolCall,
+        turn: Turn,
+    ) -> AsyncIterator[tuple[ThreadEvent, ToolResult | None]]:
+        """Handle an MCP tool call and return result for agentic loop.
+
+        MCP tools are treated as function calls in the Responses API.
+        The result is passed back to the model to continue the conversation.
+        """
+        import json
+
         from codex_protocol.items import (
             McpToolCallItem,
             McpToolCallItemError,
@@ -634,7 +650,15 @@ class Codex:
                 id=str(uuid.uuid4()),
                 details=ErrorItem(message=f"Invalid MCP tool name: {tool_call.name}"),
             )
-            yield ItemCompletedEvent(item=item)
+            # Return error as ToolResult so model knows the call failed
+            yield ItemCompletedEvent(item=item), ToolResult(
+                call_id=tool_call.id,
+                output=f"Invalid MCP tool name: {tool_call.name}",
+                success=False,
+                tool_type="function",
+                tool_name=tool_call.name,
+                arguments=json.dumps(tool_call.arguments),
+            )
             return
 
         server_name, tool_name = parsed
@@ -650,7 +674,7 @@ class Codex:
                 status=McpToolCallStatus.IN_PROGRESS,
             ),
         )
-        yield ItemStartedEvent(item=item)
+        yield ItemStartedEvent(item=item), None
 
         # Execute the tool
         result = await self._mcp_client.call_tool(server_name, tool_name, tool_call.arguments)
@@ -677,7 +701,16 @@ class Codex:
             ),
         )
         turn.response_items.append(item)
-        yield ItemCompletedEvent(item=item)
+
+        # Return ToolResult for agentic loop
+        yield ItemCompletedEvent(item=item), ToolResult(
+            call_id=tool_call.id,
+            output=result.text(),
+            success=not result.is_error,
+            tool_type="function",
+            tool_name=tool_call.name,
+            arguments=json.dumps(tool_call.arguments),
+        )
 
     async def _handle_local_shell_with_result(
         self,
