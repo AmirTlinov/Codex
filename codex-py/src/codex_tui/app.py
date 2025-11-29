@@ -132,8 +132,9 @@ async def run_turn(codex: Codex, user_input: str) -> None:
     current_text = ""
     live: Live | None = None
 
-    # Print user message
-    console.print(render_user_message(user_input), end="")
+    # User message is already shown by console.input() prompt
+    # Just add a blank line before assistant response
+    console.print()
 
     try:
         async for event in codex.run_turn(user_input):
@@ -197,12 +198,15 @@ async def run_turn(codex: Codex, user_input: str) -> None:
                 item = event.item
 
                 if isinstance(item.details, AgentMessageItem):
-                    if live:
+                    # Update live with final text, then stop
+                    # Don't print separately - Live already shows the text
+                    if live and item.id == current_msg_id:
+                        live.update(render_assistant_text(item.details.text))
                         live.stop()
                         live = None
-                    console.print(render_assistant_text(item.details.text), end="")
-                    if item.id == current_msg_id:
                         current_msg_id = None
+                        # Print newline after Live output
+                        console.print()
 
                 elif isinstance(item.details, CommandExecutionItem):
                     if live:

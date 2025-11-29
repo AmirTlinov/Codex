@@ -447,13 +447,9 @@ class ModelClient:
             item_type = item.get("type")
 
             if item_type == "message":
-                # Extract text from message content
-                content_parts = []
-                for c in item.get("content", []):
-                    if c.get("type") == "output_text":
-                        content_parts.append(c.get("text", ""))
-                if content_parts:
-                    return StreamChunk(content="".join(content_parts))
+                # Message text was already streamed via response.output_text.delta
+                # Don't return content again to avoid duplication
+                pass
 
             elif item_type == "function_call":
                 # Function tool call completed
