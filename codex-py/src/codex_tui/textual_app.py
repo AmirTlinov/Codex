@@ -357,10 +357,11 @@ class CodexApp(App[None]):
 
         elif isinstance(event, TurnCompletedEvent):
             if event.usage:
-                self._status.set_tokens(
+                self._status.add_tokens(
                     event.usage.input_tokens,
                     event.usage.output_tokens,
                 )
+            self._status.increment_turns()
 
         elif isinstance(event, TurnFailedEvent):
             self._chat.add_error(event.error.message)
