@@ -6,6 +6,7 @@ Shares authentication with codex-rs.
 
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 import tomllib
@@ -92,12 +93,10 @@ class AuthConfig:
 
             last_refresh = None
             if "last_refresh" in data and data["last_refresh"]:
-                try:
+                with contextlib.suppress(ValueError, AttributeError):
                     last_refresh = datetime.fromisoformat(
                         data["last_refresh"].replace("Z", "+00:00")
                     )
-                except (ValueError, AttributeError):
-                    pass
 
             return cls(
                 openai_api_key=data.get("OPENAI_API_KEY"),

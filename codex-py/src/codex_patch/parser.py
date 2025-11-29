@@ -25,11 +25,9 @@ Grammar (Lark-style):
 
 from __future__ import annotations
 
-import re
 from dataclasses import dataclass, field
 from enum import Enum, auto
 from pathlib import Path
-from typing import Iterator
 
 
 class ParseError(Exception):
@@ -251,7 +249,7 @@ class _Parser:
                 chunks.append(chunk)
 
         if not chunks:
-            raise ParseError(f"Update File requires at least one chunk", self.pos + 1)
+            raise ParseError("Update File requires at least one chunk", self.pos + 1)
 
         self.hunks.append(Hunk(
             type=HunkType.UPDATE_FILE,

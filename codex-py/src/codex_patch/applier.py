@@ -12,13 +12,13 @@ from __future__ import annotations
 
 import difflib
 import shutil
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from enum import Enum, auto
 from pathlib import Path
-from typing import Callable
 
-from codex_patch.parser import Hunk, HunkType, UpdateChunk, parse_patch, ParseError
-from codex_patch.symbols import SymbolResolver, SymbolNotFoundError
+from codex_patch.parser import Hunk, HunkType, ParseError, UpdateChunk, parse_patch
+from codex_patch.symbols import SymbolNotFoundError, SymbolResolver
 
 
 class ApplyStatus(Enum):
@@ -368,7 +368,7 @@ class PatchApplier:
 
         window_size = len(chunk.old_lines)
         for i in range(start_from, len(lines) - window_size + 1):
-            window = "\n".join(lines[i:i + window_size])
+            "\n".join(lines[i:i + window_size])
             window_stripped = "\n".join(line.rstrip() for line in lines[i:i + window_size])
 
             ratio = difflib.SequenceMatcher(None, old_text, window_stripped).ratio()

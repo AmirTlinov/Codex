@@ -7,6 +7,7 @@ Implements JSON-RPC 2.0 protocol for tool discovery and execution.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import os
 from dataclasses import dataclass, field
@@ -108,17 +109,15 @@ class McpServer:
         """Disconnect from the MCP server."""
         if self._reader_task:
             self._reader_task.cancel()
-            try:
+            with contextlib.suppress(asyncio.CancelledError):
                 await self._reader_task
-            except asyncio.CancelledError:
-                pass
             self._reader_task = None
 
         if self._process:
             self._process.terminate()
             try:
                 await asyncio.wait_for(self._process.wait(), timeout=5.0)
-            except asyncio.TimeoutError:
+            except TimeoutError:
                 self._process.kill()
                 await self._process.wait()
             self._process = None
@@ -192,9 +191,9 @@ class McpServer:
         # Wait for response with timeout
         try:
             return await asyncio.wait_for(future, timeout=30.0)
-        except asyncio.TimeoutError:
+        except TimeoutError as err:
             self._pending.pop(request_id, None)
-            raise McpError(-1, f"Request {method} timed out")
+            raise McpError(-1, f"Request {method} timed out") from err
 
     def _send_notification(self, method: str, params: dict[str, Any] | None = None) -> None:
         """Send JSON-RPC notification (no response expected)."""

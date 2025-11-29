@@ -8,10 +8,8 @@ Implements configurable approval policies:
 
 from __future__ import annotations
 
-import asyncio
 import fnmatch
 import re
-from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from enum import Enum, auto
 from pathlib import Path
@@ -151,11 +149,7 @@ class CommandAllowList:
                 return True
 
         # Check regex patterns
-        for regex in self.regex_patterns:
-            if regex.match(cmd):
-                return True
-
-        return False
+        return any(regex.match(cmd) for regex in self.regex_patterns)
 
 
 @dataclass
@@ -171,10 +165,7 @@ class PathAllowList:
     def is_allowed(self, path: str | Path) -> bool:
         """Check if path is in allow list."""
         path_str = str(path)
-        for pattern in self.patterns:
-            if fnmatch.fnmatch(path_str, pattern):
-                return True
-        return False
+        return any(fnmatch.fnmatch(path_str, pattern) for pattern in self.patterns)
 
 
 @dataclass

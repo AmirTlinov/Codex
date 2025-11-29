@@ -6,9 +6,9 @@ Manages long-running background processes with logging and control.
 from __future__ import annotations
 
 import asyncio
-from collections.abc import AsyncIterator
+import contextlib
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -22,7 +22,7 @@ class BackgroundShell:
     shell_id: int
     command: str
     process: ShellProcess
-    started_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
+    started_at: datetime = field(default_factory=lambda: datetime.now(UTC))
     ended_at: datetime | None = None
     log_path: Path | None = None
     _output_buffer: str = ""
@@ -109,7 +109,7 @@ class BackgroundShellManager:
 
             # Wait for process to complete
             await shell.process.wait()
-            shell.ended_at = datetime.now(timezone.utc)
+            shell.ended_at = datetime.now(UTC)
 
         finally:
             if log_file:
@@ -147,12 +147,10 @@ class BackgroundShellManager:
         task = self._tasks.get(shell_id)
         if task and not task.done():
             task.cancel()
-            try:
+            with contextlib.suppress(asyncio.CancelledError):
                 await task
-            except asyncio.CancelledError:
-                pass
 
-        shell.ended_at = datetime.now(timezone.utc)
+        shell.ended_at = datetime.now(UTC)
         return True
 
     async def cleanup(self) -> None:

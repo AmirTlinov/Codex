@@ -19,10 +19,10 @@ from typing import Any
 import httpx
 from httpx_sse import aconnect_sse
 
-logger = logging.getLogger(__name__)
-
 from codex_core.config import Config, ModelFamily
 from codex_core.models import ResponseItem, ResponsesApiRequest, ToolSpec
+
+logger = logging.getLogger(__name__)
 
 # Load GPT-5 Codex prompt (matches codex-rs gpt_5_codex_prompt.md)
 _PROMPT_PATH = Path(__file__).parent / "gpt_5_codex_prompt.md"
@@ -158,9 +158,7 @@ class RateLimitSnapshot:
         """Check if we're running low on rate limit quota."""
         if self.tokens_remaining is not None and self.tokens_remaining < 1000:
             return True
-        if self.requests_remaining is not None and self.requests_remaining < 5:
-            return True
-        return False
+        return bool(self.requests_remaining is not None and self.requests_remaining < 5)
 
 
 def _parse_retry_after(response: httpx.Response) -> float | None:
@@ -195,9 +193,7 @@ def _is_retryable_error(error: Exception) -> bool:
         status = error.response.status_code
         # Retry on rate limit (429) and server errors (5xx)
         return status == 429 or 500 <= status < 600
-    if isinstance(error, (httpx.ReadTimeout, httpx.ConnectTimeout, httpx.ConnectError)):
-        return True
-    return False
+    return bool(isinstance(error, (httpx.ReadTimeout, httpx.ConnectTimeout, httpx.ConnectError)))
 
 
 class ModelClient:

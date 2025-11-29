@@ -6,16 +6,14 @@ Provides process execution with proper terminal handling.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import os
 import pty
 import signal
-import struct
-import termios
 from collections.abc import AsyncIterator
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
-from typing import Any
 
 
 class ProcessStatus(str, Enum):
@@ -91,7 +89,7 @@ class ShellProcess:
                 self.exit_code = -1
                 self.status = ProcessStatus.FAILED
 
-        except asyncio.TimeoutError:
+        except TimeoutError:
             self.status = ProcessStatus.TIMEOUT
             self.exit_code = -1
             await self.kill()
@@ -122,10 +120,8 @@ class ShellProcess:
     def close(self) -> None:
         """Close file descriptors."""
         if self._fd is not None:
-            try:
+            with contextlib.suppress(OSError):
                 os.close(self._fd)
-            except OSError:
-                pass
 
 
 class ShellExecutor:
@@ -186,7 +182,7 @@ class ShellExecutor:
                     pid=proc.pid,
                 )
 
-            except asyncio.TimeoutError:
+            except TimeoutError:
                 proc.kill()
                 await proc.wait()
                 return ProcessResult(

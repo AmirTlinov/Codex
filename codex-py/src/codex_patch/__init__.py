@@ -19,24 +19,24 @@ Operations:
     - Replace Symbol Body: file::Symbol::path   Replace symbol body
 """
 
-from codex_patch.parser import (
-    Hunk,
-    HunkType,
-    UpdateChunk,
-    parse_patch,
-    ParseError,
-)
 from codex_patch.applier import (
-    PatchApplier,
     ApplyResult,
     ApplyStatus,
     FileChange,
+    PatchApplier,
     apply_patch,
 )
+from codex_patch.parser import (
+    Hunk,
+    HunkType,
+    ParseError,
+    UpdateChunk,
+    parse_patch,
+)
 from codex_patch.symbols import (
+    SymbolNotFoundError,
     SymbolPath,
     SymbolResolver,
-    SymbolNotFoundError,
 )
 
 __all__ = [

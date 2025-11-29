@@ -10,9 +10,9 @@ import json
 import re
 import uuid
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any
 
 from codex_core.config import get_sessions_dir
 from codex_protocol.events import Usage
@@ -67,7 +67,7 @@ class Turn:
     user_input: str
     response_items: list[ThreadItem] = field(default_factory=list)
     usage: Usage = field(default_factory=Usage)
-    started_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
+    started_at: datetime = field(default_factory=lambda: datetime.now(UTC))
     completed_at: datetime | None = None
     error: str | None = None
 
@@ -121,7 +121,7 @@ class Turn:
             usage=usage,
             started_at=datetime.fromisoformat(data["started_at"])
             if "started_at" in data
-            else datetime.now(timezone.utc),
+            else datetime.now(UTC),
             completed_at=datetime.fromisoformat(data["completed_at"])
             if data.get("completed_at")
             else None,
@@ -171,7 +171,7 @@ class Session:
     model: str
     cwd: Path
     turns: list[Turn] = field(default_factory=list)
-    created_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
+    created_at: datetime = field(default_factory=lambda: datetime.now(UTC))
     title: str | None = None
     sensitive_filter: SensitiveFilter | None = None
     auto_save: bool = False
@@ -315,7 +315,7 @@ class Session:
 
     def complete_turn(self, turn: Turn, usage: Usage | None = None) -> None:
         """Mark a turn as completed and auto-save if enabled."""
-        turn.completed_at = datetime.now(timezone.utc)
+        turn.completed_at = datetime.now(UTC)
         if usage:
             turn.usage = usage
         if self.auto_save:
@@ -323,7 +323,7 @@ class Session:
 
     def fail_turn(self, turn: Turn, error: str) -> None:
         """Mark a turn as failed and auto-save if enabled."""
-        turn.completed_at = datetime.now(timezone.utc)
+        turn.completed_at = datetime.now(UTC)
         turn.error = error
         if self.auto_save:
             self.save()
@@ -344,7 +344,7 @@ class Session:
             thread_id=self.thread_id,
             model=self.model,
             created_at=self.created_at,
-            last_updated_at=datetime.now(timezone.utc),
+            last_updated_at=datetime.now(UTC),
             cwd=str(self.cwd),
             title=self.title,
         )
@@ -462,7 +462,7 @@ def cleanup_old_sessions(
         sessions_dir = get_sessions_dir()
 
     deleted = 0
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
 
     for i, meta in enumerate(sessions):
         should_delete = False

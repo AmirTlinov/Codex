@@ -727,10 +727,7 @@ class Codex:
         """
         # local_shell uses command array format from Responses API
         command_parts = tool_call.arguments.get("command", [])
-        if isinstance(command_parts, list):
-            command_list = command_parts
-        else:
-            command_list = [str(command_parts)]
+        command_list = command_parts if isinstance(command_parts, list) else [str(command_parts)]
 
         # Display command for UI (join for display purposes only)
         display_command = " ".join(command_list)

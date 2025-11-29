@@ -162,7 +162,6 @@ def _print_event_human(event: Any) -> None:
     """Print an event in human-readable format."""
     from codex_protocol.events import (
         ItemCompletedEvent,
-        ItemStartedEvent,
         ItemUpdatedEvent,
         ThreadErrorEvent,
         ThreadStartedEvent,

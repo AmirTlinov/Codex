@@ -62,7 +62,11 @@ line-length = 100
 
 [tool.ruff.lint]
 select = ["E", "F", "W", "I", "UP", "B", "C4", "SIM"]
-ignore = ["E501"]
+# E501 - line too long (handled by formatter)
+# SIM102 - nested if can be merged (often more readable separate)
+# SIM105 - contextlib.suppress (explicit try/except is clearer)
+# SIM115 - context manager for files (not always possible in async)
+ignore = ["E501", "SIM102", "SIM105", "SIM115"]
 
 [tool.mypy]
 python_version = "3.12"
