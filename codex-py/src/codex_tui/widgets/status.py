@@ -33,6 +33,9 @@ class StatusBar(Static):
         self._tokens_out = 0
         self._cwd = "~"
         self._status = "ready"
+
+    def on_mount(self) -> None:
+        """Initialize display on mount."""
         self._update()
 
     def set_model(self, model: str) -> None:
@@ -58,7 +61,11 @@ class StatusBar(Static):
 
     def _update(self) -> None:
         """Update the status bar display."""
-        self.update(self._build_text())
+        try:
+            self.update(self._build_text())
+        except Exception:
+            # Widget not yet mounted
+            pass
 
     def _build_text(self) -> Text:
         """Render the status bar content."""
