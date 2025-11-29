@@ -46,7 +46,7 @@ class InputWidget(Input):
 
     is_command_mode: reactive[bool] = reactive(False)
 
-    class Submitted(Message):
+    class UserSubmitted(Message):
         """Message sent when user submits input."""
 
         def __init__(self, value: str) -> None:
@@ -85,7 +85,7 @@ class InputWidget(Input):
             self._history.append(value)
             self._history_index = -1
             self._history_temp = ""
-            self.post_message(self.Submitted(value))
+            self.post_message(self.UserSubmitted(value))
         self.value = ""
         self._exit_command_mode()
 
@@ -181,6 +181,6 @@ class InputWidget(Input):
         """Select a command from popup."""
         self.value = f"/{command.value}"
         self.cursor_position = len(self.value)
-        self.post_message(self.Submitted(self.value))
+        self.post_message(self.UserSubmitted(self.value))
         self.value = ""
         self._exit_command_mode()

@@ -42,6 +42,13 @@ from codex_tui.widgets.approval import ApprovalDialog, ApprovalResult
 from codex_tui.widgets.chat import ChatCell, ChatWidget
 from codex_tui.widgets.commands import CommandPopup, SlashCommand
 from codex_tui.widgets.input import InputWidget
+from codex_tui.widgets.selection import (
+    ApprovalMode,
+    SelectionItem,
+    create_approval_mode_dialog,
+    create_model_selection_dialog,
+    create_settings_dialog,
+)
 from codex_tui.widgets.spinner import ThinkingIndicator
 from codex_tui.widgets.status import StatusBar
 
@@ -244,7 +251,7 @@ class CodexApp(App[None]):
         if self._codex:
             await self._codex.__aexit__(None, None, None)
 
-    def on_input_widget_submitted(self, event: InputWidget.Submitted) -> None:
+    def on_input_widget_user_submitted(self, event: InputWidget.UserSubmitted) -> None:
         """Handle user input submission."""
         user_input = event.value.strip()
 
@@ -287,6 +294,15 @@ class CodexApp(App[None]):
             return True
         elif slash_cmd == SlashCommand.MCP:
             self._show_mcp_tools()
+            return True
+        elif slash_cmd == SlashCommand.MODEL:
+            self._show_model_dialog()
+            return True
+        elif slash_cmd == SlashCommand.SETTINGS:
+            self._show_settings_dialog()
+            return True
+        elif slash_cmd == SlashCommand.APPROVALS:
+            self._show_approvals_dialog()
             return True
         # Commands that go to the model
         elif cmd in ("q", "?"):
@@ -511,6 +527,56 @@ class CodexApp(App[None]):
             else:
                 tools_info = "No MCP servers configured."
             self._chat.add_system(f"MCP Tools:\n{tools_info}")
+
+    def _show_model_dialog(self) -> None:
+        """Show model selection dialog."""
+        dialog = create_model_selection_dialog(self._config.model)
+
+        def on_dismiss(result: SelectionItem | None) -> None:
+            if result:
+                # Update config
+                self._config.model = result.id
+                if self._status:
+                    self._status.set_model(result.id)
+                if self._chat:
+                    self._chat.add_system(f"Model changed to: {result.id}")
+
+        self.push_screen(dialog, on_dismiss)
+
+    def _show_settings_dialog(self) -> None:
+        """Show settings hub dialog."""
+        current_mode = ApprovalMode.SUGGEST  # TODO: Get from config
+        dialog = create_settings_dialog(self._config.model, current_mode)
+
+        def on_dismiss(result: SelectionItem | None) -> None:
+            if result:
+                # Handle settings selection
+                if result.id == "model":
+                    self._show_model_dialog()
+                elif result.id == "approvals":
+                    self._show_approvals_dialog()
+                elif result.id == "mcp":
+                    self._show_mcp_tools()
+                elif result.id == "status":
+                    self._show_status()
+                elif result.id == "diff":
+                    self._show_diff()
+
+        self.push_screen(dialog, on_dismiss)
+
+    def _show_approvals_dialog(self) -> None:
+        """Show approval mode selection dialog."""
+        current_mode = ApprovalMode.SUGGEST  # TODO: Get from config
+        dialog = create_approval_mode_dialog(current_mode)
+
+        def on_dismiss(result: SelectionItem | None) -> None:
+            if result:
+                mode = ApprovalMode(result.id)
+                # TODO: Update config
+                if self._chat:
+                    self._chat.add_system(f"Approval mode changed to: {mode.value}")
+
+        self.push_screen(dialog, on_dismiss)
 
     def action_clear(self) -> None:
         """Clear the chat history."""
