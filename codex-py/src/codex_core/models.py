@@ -68,24 +68,20 @@ class ContentItem:
 class FunctionCallOutputPayload:
     """Payload for function call output (matches codex-rs).
 
-    Serialization follows Responses API expectations:
-    - success → output is a plain string (no nested object)
-    - failure → output is an object { content, success: false }
+    The Responses API expects output to always be a plain string.
+    codex-rs always serializes as plain string regardless of success/failure.
     """
 
     content: str
     success: bool = True
 
-    def to_json(self) -> str | dict[str, Any]:
+    def to_json(self) -> str:
         """Serialize to JSON value matching codex-rs format.
 
-        The Responses API expects two different shapes:
-        - success: output is a plain string
-        - failure: output is an object { content, success: false }
+        Always returns plain string - codex-rs ignores success field
+        during serialization.
         """
-        if self.success:
-            return self.content
-        return {"content": self.content, "success": False}
+        return self.content
 
 
 @dataclass(slots=True)

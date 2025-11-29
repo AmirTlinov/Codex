@@ -370,14 +370,11 @@ class ModelClient:
                 }
                 request_data["input"].append(call_item)
 
-            # Then add the output
+            # Then add the output (always plain string, matching codex-rs)
             output_item = {
                 "type": "function_call_output",
                 "call_id": result.call_id,
-                "output": result.output if result.success else {
-                    "content": result.output,
-                    "success": False,
-                },
+                "output": result.output,
             }
             request_data["input"].append(output_item)
 
