@@ -1,11 +1,15 @@
 """API client for chat completions and Responses API with SSE streaming.
 
 Supports OpenAI Chat Completions, OpenAI Responses API (ChatGPT), and Anthropic.
+Includes retry logic with exponential backoff for rate limits and transient errors.
 """
 
 from __future__ import annotations
 
+import asyncio
 import json
+import logging
+import re
 from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
 from enum import Enum
@@ -14,6 +18,8 @@ from typing import Any
 
 import httpx
 from httpx_sse import aconnect_sse
+
+logger = logging.getLogger(__name__)
 
 from codex_core.config import Config, ModelFamily
 from codex_core.models import ResponseItem, ResponsesApiRequest, ToolSpec
@@ -67,12 +73,145 @@ class CompletionResponse:
     usage: dict[str, int]
 
 
+@dataclass(slots=True)
+class RetryConfig:
+    """Configuration for retry logic with exponential backoff."""
+
+    max_retries: int = 3
+    base_delay: float = 0.5  # seconds
+    max_delay: float = 30.0  # seconds
+
+    def calculate_delay(self, attempt: int, retry_after: float | None = None) -> float:
+        """Calculate delay for the given attempt.
+
+        If retry_after is provided (from API response), use it.
+        Otherwise, use exponential backoff: base * 2^attempt.
+        """
+        if retry_after is not None:
+            return min(retry_after, self.max_delay)
+        delay = self.base_delay * (2**attempt)
+        return min(delay, self.max_delay)
+
+
+@dataclass(slots=True)
+class RateLimitSnapshot:
+    """Snapshot of rate limit state from API response headers."""
+
+    requests_remaining: int | None = None
+    tokens_remaining: int | None = None
+    requests_limit: int | None = None
+    tokens_limit: int | None = None
+    reset_requests_ms: int | None = None
+    reset_tokens_ms: int | None = None
+
+    @classmethod
+    def from_headers(cls, headers: httpx.Headers) -> RateLimitSnapshot:
+        """Parse rate limit info from response headers."""
+
+        def _parse_int(val: str | None) -> int | None:
+            if val is None:
+                return None
+            try:
+                return int(val)
+            except ValueError:
+                return None
+
+        def _parse_reset_ms(val: str | None) -> int | None:
+            """Parse reset time like '1m30s' or '500ms' to milliseconds."""
+            if val is None:
+                return None
+            # Try parsing as plain seconds
+            try:
+                return int(float(val) * 1000)
+            except ValueError:
+                pass
+            # Try parsing duration format like "1m30s" or "500ms"
+            total_ms = 0
+            parts = re.findall(r"(\d+(?:\.\d+)?)(ms|s|m|h)", val)
+            for num, unit in parts:
+                n = float(num)
+                if unit == "ms":
+                    total_ms += int(n)
+                elif unit == "s":
+                    total_ms += int(n * 1000)
+                elif unit == "m":
+                    total_ms += int(n * 60 * 1000)
+                elif unit == "h":
+                    total_ms += int(n * 60 * 60 * 1000)
+            return total_ms if total_ms > 0 else None
+
+        return cls(
+            requests_remaining=_parse_int(
+                headers.get("x-ratelimit-remaining-requests")
+            ),
+            tokens_remaining=_parse_int(headers.get("x-ratelimit-remaining-tokens")),
+            requests_limit=_parse_int(headers.get("x-ratelimit-limit-requests")),
+            tokens_limit=_parse_int(headers.get("x-ratelimit-limit-tokens")),
+            reset_requests_ms=_parse_reset_ms(
+                headers.get("x-ratelimit-reset-requests")
+            ),
+            reset_tokens_ms=_parse_reset_ms(headers.get("x-ratelimit-reset-tokens")),
+        )
+
+    @property
+    def is_low(self) -> bool:
+        """Check if we're running low on rate limit quota."""
+        if self.tokens_remaining is not None and self.tokens_remaining < 1000:
+            return True
+        if self.requests_remaining is not None and self.requests_remaining < 5:
+            return True
+        return False
+
+
+def _parse_retry_after(response: httpx.Response) -> float | None:
+    """Parse retry delay from response.
+
+    Checks Retry-After header and error message body for delay hints.
+    Returns delay in seconds or None.
+    """
+    # Check Retry-After header
+    retry_after = response.headers.get("retry-after")
+    if retry_after:
+        try:
+            return float(retry_after)
+        except ValueError:
+            pass
+
+    # Check error body for "try again in X.XXXs" pattern (ChatGPT API style)
+    try:
+        body = response.text
+        match = re.search(r"try again in (\d+(?:\.\d+)?)\s*s", body, re.IGNORECASE)
+        if match:
+            return float(match.group(1))
+    except Exception:
+        pass
+
+    return None
+
+
+def _is_retryable_error(error: Exception) -> bool:
+    """Check if error is retryable (transient)."""
+    if isinstance(error, httpx.HTTPStatusError):
+        status = error.response.status_code
+        # Retry on rate limit (429) and server errors (5xx)
+        return status == 429 or 500 <= status < 600
+    if isinstance(error, (httpx.ReadTimeout, httpx.ConnectTimeout, httpx.ConnectError)):
+        return True
+    return False
+
+
 class ModelClient:
     """Client for chat completion APIs."""
 
-    def __init__(self, config: Config) -> None:
+    def __init__(
+        self,
+        config: Config,
+        retry_config: RetryConfig | None = None,
+    ) -> None:
         self.config = config
+        self.retry_config = retry_config or RetryConfig()
         self._client: httpx.AsyncClient | None = None
+        self._last_rate_limit: RateLimitSnapshot | None = None
 
     async def __aenter__(self) -> ModelClient:
         self._client = httpx.AsyncClient(timeout=httpx.Timeout(60.0, connect=10.0))
@@ -310,21 +449,10 @@ class ModelClient:
             async for chunk in self._stream_responses_api(url, headers, request_data):
                 yield chunk
         else:
-            async with aconnect_sse(
-                self._client, "POST", url, headers=headers, json=request_data
-            ) as event_source:
-                async for event in event_source.aiter_sse():
-                    if event.data == "[DONE]":
-                        break
-
-                    try:
-                        data = json.loads(event.data)
-                    except json.JSONDecodeError:
-                        continue
-
-                    chunk = self._parse_stream_chunk(data, wire_api, event.event)
-                    if chunk:
-                        yield chunk
+            async for chunk in self._stream_chat_api_with_retry(
+                url, headers, request_data, wire_api
+            ):
+                yield chunk
 
     async def stream_completion_with_tool_results(
         self,
@@ -498,21 +626,77 @@ class ModelClient:
 
         url = f"{base_url}/chat/completions"
 
-        async with aconnect_sse(
-            self._client, "POST", url, headers=headers, json=request_data
-        ) as event_source:
-            async for event in event_source.aiter_sse():
-                if event.data == "[DONE]":
-                    break
+        async for chunk in self._stream_chat_api_with_retry(
+            url, headers, request_data, WireApi.CHAT
+        ):
+            yield chunk
 
-                try:
-                    data = json.loads(event.data)
-                except json.JSONDecodeError:
-                    continue
+    async def _stream_chat_api_with_retry(
+        self,
+        url: str,
+        headers: dict[str, str],
+        request_data: dict[str, Any],
+        wire_api: WireApi,
+    ) -> AsyncIterator[StreamChunk]:
+        """Stream from Chat Completions/Anthropic API with retry logic.
 
-                chunk = self._parse_openai_chunk(data)
-                if chunk:
-                    yield chunk
+        Uses httpx_sse for proper SSE parsing.
+
+        Implements retry with exponential backoff for:
+        - Rate limits (429)
+        - Server errors (5xx)
+        - Timeouts and connection errors
+        """
+        last_error: Exception | None = None
+
+        for attempt in range(self.retry_config.max_retries + 1):
+            try:
+                async with aconnect_sse(
+                    self._client, "POST", url, headers=headers, json=request_data
+                ) as event_source:
+                    async for event in event_source.aiter_sse():
+                        if event.data == "[DONE]":
+                            break
+
+                        try:
+                            data = json.loads(event.data)
+                        except json.JSONDecodeError:
+                            continue
+
+                        chunk = self._parse_stream_chunk(data, wire_api, event.event)
+                        if chunk:
+                            yield chunk
+                return  # Success
+
+            except (httpx.HTTPStatusError, httpx.ReadTimeout, httpx.ConnectTimeout, httpx.ConnectError) as e:
+                last_error = e
+
+                if not _is_retryable_error(e):
+                    raise
+
+                if attempt >= self.retry_config.max_retries:
+                    logger.error(
+                        "Max retries (%d) exceeded for API request",
+                        self.retry_config.max_retries,
+                    )
+                    raise
+
+                retry_after: float | None = None
+                if isinstance(e, httpx.HTTPStatusError):
+                    retry_after = _parse_retry_after(e.response)
+
+                delay = self.retry_config.calculate_delay(attempt, retry_after)
+                logger.warning(
+                    "API request failed (attempt %d/%d), retrying in %.1fs: %s",
+                    attempt + 1,
+                    self.retry_config.max_retries + 1,
+                    delay,
+                    str(e),
+                )
+                await asyncio.sleep(delay)
+
+        if last_error:
+            raise last_error
 
     async def _stream_responses_api(
         self,
@@ -520,14 +704,80 @@ class ModelClient:
         headers: dict[str, str],
         request_data: dict[str, Any],
     ) -> AsyncIterator[StreamChunk]:
-        """Stream from Responses API with manual SSE parsing.
+        """Stream from Responses API with retry logic and manual SSE parsing.
 
         ChatGPT backend API doesn't return Content-Type: text/event-stream,
         so httpx_sse fails. We parse SSE manually here.
+
+        Implements retry with exponential backoff for:
+        - Rate limits (429)
+        - Server errors (5xx)
+        - Timeouts and connection errors
+        """
+        last_error: Exception | None = None
+
+        for attempt in range(self.retry_config.max_retries + 1):
+            try:
+                async for chunk in self._stream_responses_api_raw(
+                    url, headers, request_data
+                ):
+                    yield chunk
+                return  # Success - exit retry loop
+
+            except (httpx.HTTPStatusError, httpx.ReadTimeout, httpx.ConnectTimeout, httpx.ConnectError) as e:
+                last_error = e
+
+                if not _is_retryable_error(e):
+                    raise
+
+                if attempt >= self.retry_config.max_retries:
+                    logger.error(
+                        "Max retries (%d) exceeded for API request",
+                        self.retry_config.max_retries,
+                    )
+                    raise
+
+                # Calculate delay
+                retry_after: float | None = None
+                if isinstance(e, httpx.HTTPStatusError):
+                    retry_after = _parse_retry_after(e.response)
+
+                delay = self.retry_config.calculate_delay(attempt, retry_after)
+                logger.warning(
+                    "API request failed (attempt %d/%d), retrying in %.1fs: %s",
+                    attempt + 1,
+                    self.retry_config.max_retries + 1,
+                    delay,
+                    str(e),
+                )
+                await asyncio.sleep(delay)
+
+        # Should not reach here, but raise last error if we do
+        if last_error:
+            raise last_error
+
+    async def _stream_responses_api_raw(
+        self,
+        url: str,
+        headers: dict[str, str],
+        request_data: dict[str, Any],
+    ) -> AsyncIterator[StreamChunk]:
+        """Raw streaming from Responses API without retry.
+
+        Parses SSE manually because ChatGPT backend doesn't set proper Content-Type.
         """
         async with self._client.stream(
             "POST", url, headers=headers, json=request_data
         ) as response:
+            # Capture rate limit info from headers
+            self._last_rate_limit = RateLimitSnapshot.from_headers(response.headers)
+            if self._last_rate_limit.is_low:
+                logger.warning(
+                    "Rate limit running low: %d tokens, %d requests remaining",
+                    self._last_rate_limit.tokens_remaining or 0,
+                    self._last_rate_limit.requests_remaining or 0,
+                )
+
             response.raise_for_status()
 
             event_name: str | None = None
@@ -559,6 +809,11 @@ class ModelClient:
                     event_name = line[6:].strip()
                 elif line.startswith("data:"):
                     data_lines.append(line[5:].strip())
+
+    @property
+    def last_rate_limit(self) -> RateLimitSnapshot | None:
+        """Get the rate limit snapshot from the last API response."""
+        return self._last_rate_limit
 
     def _parse_stream_chunk(
         self,

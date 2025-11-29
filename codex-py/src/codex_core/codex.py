@@ -18,8 +18,10 @@ from typing import Any
 from codex_core.approval import ApprovalHandler, ApprovalManager
 from codex_core.client import Message, ModelClient, StreamChunk, ToolCall
 from codex_core.config import Config
+from codex_core.history_compactor import CompactionConfig, HistoryCompactor
 from codex_core.mcp_client import McpClient
 from codex_core.session import Session, Turn
+from codex_core.token_counter import TokenCounter
 from codex_protocol.events import (
     ItemCompletedEvent,
     ItemStartedEvent,
@@ -148,6 +150,8 @@ class Codex:
     approval_manager: ApprovalManager = field(default_factory=ApprovalManager)
     _client: ModelClient | None = None
     _mcp_client: McpClient | None = None
+    _token_counter: TokenCounter | None = None
+    _history_compactor: HistoryCompactor | None = None
     _event_queue: asyncio.Queue[ThreadEvent] = field(default_factory=asyncio.Queue)
     _tools: list[ToolDefinition] = field(default_factory=list)
     _tool_handlers: dict[str, Any] = field(default_factory=dict)
@@ -206,6 +210,14 @@ class Codex:
         self._client = ModelClient(self.config)
         await self._client.__aenter__()
 
+        # Initialize token counter and history compactor
+        self._token_counter = TokenCounter(self.config.model)
+        self._history_compactor = HistoryCompactor(
+            client=self._client,
+            token_counter=self._token_counter,
+            config=CompactionConfig(),
+        )
+
         # Connect to MCP servers if configured
         if self.config.mcp_servers:
             self._mcp_client = McpClient()
@@ -257,6 +269,10 @@ class Codex:
             # Build initial messages
             messages = self._build_messages(user_input)
             tools = self._get_all_tools()
+
+            # Auto-compact history if approaching context limit
+            if self._history_compactor and self._history_compactor.should_compact(messages):
+                messages = await self._history_compactor.compact(messages)
 
             # Collect ALL tool results across agentic loop iterations
             # Each iteration adds to this list (matching codex-rs history accumulation)
