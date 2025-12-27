@@ -23,7 +23,7 @@ Control Codex’s behavior during an interactive session with slash commands.
 | `/mention`      | mention a file                                                             |
 | `/status`       | show current session configuration and token usage                         |
 | `/mcp`          | list configured MCP tools                                                  |
-| `/experimental` | open the experimental menu to enable features from our beta program        |
+| `/experimental` | open the experimental menu to enable beta and experimental features        |
 | `/skills`       | browse and insert skills (experimental; see [docs/skills.md](./skills.md)) |
 | `/logout`       | log out of Codex                                                           |
 | `/quit`         | exit Codex                                                                 |

@@ -29,6 +29,19 @@ pub enum Stage {
     Removed,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FeatureMenuStage {
+    Beta,
+    Experimental,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FeatureMenuEntry {
+    pub name: &'static str,
+    pub description: &'static str,
+    pub stage: FeatureMenuStage,
+}
+
 impl Stage {
     pub fn beta_menu_name(self) -> Option<&'static str> {
         match self {
@@ -288,6 +301,31 @@ pub struct FeatureSpec {
     pub key: &'static str,
     pub stage: Stage,
     pub default_enabled: bool,
+}
+
+impl FeatureSpec {
+    pub fn menu_entry(self) -> Option<FeatureMenuEntry> {
+        match self.stage {
+            Stage::Beta {
+                name,
+                menu_description,
+                ..
+            } => Some(FeatureMenuEntry {
+                name,
+                description: menu_description,
+                stage: FeatureMenuStage::Beta,
+            }),
+            Stage::Experimental => match self.id {
+                Feature::LegoMemory => Some(FeatureMenuEntry {
+                    name: "Lego memory",
+                    description: "Enable block-based context memory (lego memory).",
+                    stage: FeatureMenuStage::Experimental,
+                }),
+                _ => None,
+            },
+            _ => None,
+        }
+    }
 }
 
 pub const FEATURES: &[FeatureSpec] = &[

@@ -88,11 +88,11 @@ use tracing::debug;
 use crate::app_event::AppEvent;
 use crate::app_event_sender::AppEventSender;
 use crate::bottom_pane::ApprovalRequest;
-use crate::bottom_pane::BetaFeatureItem;
 use crate::bottom_pane::BottomPane;
 use crate::bottom_pane::BottomPaneParams;
 use crate::bottom_pane::CancellationEvent;
 use crate::bottom_pane::ExperimentalFeaturesView;
+use crate::bottom_pane::FeatureMenuItem;
 use crate::bottom_pane::InputResult;
 use crate::bottom_pane::SelectionAction;
 use crate::bottom_pane::SelectionItem;
@@ -2847,15 +2847,14 @@ impl ChatWidget {
     }
 
     pub(crate) fn open_experimental_popup(&mut self) {
-        let features: Vec<BetaFeatureItem> = FEATURES
+        let features: Vec<FeatureMenuItem> = FEATURES
             .iter()
             .filter_map(|spec| {
-                let name = spec.stage.beta_menu_name()?;
-                let description = spec.stage.beta_menu_description()?;
-                Some(BetaFeatureItem {
+                let entry = spec.menu_entry()?;
+                Some(FeatureMenuItem {
                     feature: spec.id,
-                    name: name.to_string(),
-                    description: description.to_string(),
+                    name: entry.name.to_string(),
+                    description: entry.description.to_string(),
                     enabled: self.config.features.enabled(spec.id),
                 })
             })
