@@ -2,6 +2,8 @@ use crate::auth::AuthCredentialsStoreMode;
 use crate::config::types::DEFAULT_OTEL_ENVIRONMENT;
 use crate::config::types::History;
 use crate::config::types::McpServerConfig;
+use crate::config::types::MemoryConfig;
+use crate::config::types::MemoryConfigToml;
 use crate::config::types::Notice;
 use crate::config::types::Notifications;
 use crate::config::types::OtelConfig;
@@ -77,6 +79,8 @@ pub use codex_git::GhostSnapshotConfig;
 /// files are *silently truncated* to this size so we do not take up too much of
 /// the context window.
 pub(crate) const PROJECT_DOC_MAX_BYTES: usize = 32 * 1024; // 32 KiB
+const DEFAULT_MEMORY_MAX_BYTES: usize = 50 * 1024 * 1024;
+const DEFAULT_MEMORY_WORKING_SET_TOKEN_BUDGET: usize = 4096;
 
 pub const CONFIG_TOML_FILE: &str = "config.toml";
 
@@ -278,6 +282,8 @@ pub struct Config {
 
     /// Settings that govern if and what will be written to `~/.codex/history.jsonl`.
     pub history: History,
+    /// Settings for block-based context memory (lego memory).
+    pub memory: MemoryConfig,
 
     /// Optional URI-based file opener. If set, citations to files in the model
     /// output will be hyperlinked using the specified URI scheme.
@@ -758,6 +764,9 @@ pub struct ConfigToml {
     /// Settings that govern if and what will be written to `~/.codex/history.jsonl`.
     #[serde(default)]
     pub history: Option<History>,
+    /// Settings for block-based context memory (lego memory).
+    #[serde(default)]
+    pub memory: Option<MemoryConfigToml>,
 
     /// Optional URI-based file opener. If set, citations to files in the model
     /// output will be hyperlinked using the specified URI scheme.
@@ -1157,6 +1166,7 @@ impl Config {
         let active_project = cfg
             .get_active_project(&resolved_cwd)
             .unwrap_or(ProjectConfig { trust_level: None });
+        let memory = resolve_memory_config(&cfg, &codex_home)?;
 
         let SandboxPolicyResolution {
             policy: mut sandbox_policy,
@@ -1212,7 +1222,6 @@ impl Config {
             .clone();
 
         let shell_environment_policy = cfg.shell_environment_policy.into();
-
         let history = cfg.history.unwrap_or_default();
 
         let ghost_snapshot = {
@@ -1356,6 +1365,7 @@ impl Config {
             codex_home,
             config_layer_stack,
             history,
+            memory,
             file_opener: cfg.file_opener.unwrap_or(UriBasedFileOpener::VsCode),
             codex_linux_sandbox_exe,
 
@@ -1492,6 +1502,23 @@ impl Config {
     }
 }
 
+fn resolve_memory_config(cfg: &ConfigToml, codex_home: &Path) -> std::io::Result<MemoryConfig> {
+    let memory_cfg = cfg.memory.clone().unwrap_or_default();
+    let root_dir = match memory_cfg.root_dir {
+        Some(path) => path,
+        None => AbsolutePathBuf::try_from(codex_home.join("memory"))?,
+    };
+
+    Ok(MemoryConfig {
+        root_dir,
+        max_bytes: memory_cfg.max_bytes.unwrap_or(DEFAULT_MEMORY_MAX_BYTES),
+        working_set_token_budget: memory_cfg
+            .working_set_token_budget
+            .unwrap_or(DEFAULT_MEMORY_WORKING_SET_TOKEN_BUDGET),
+        staleness: memory_cfg.staleness.unwrap_or_default(),
+    })
+}
+
 fn default_review_model() -> String {
     OPENAI_DEFAULT_REVIEW_MODEL.to_string()
 }
@@ -1538,6 +1565,7 @@ mod tests {
     use crate::config::edit::apply_blocking;
     use crate::config::types::HistoryPersistence;
     use crate::config::types::McpServerTransportConfig;
+    use crate::config::types::MemoryStalenessMode;
     use crate::config::types::Notifications;
     use crate::features::Feature;
 
@@ -3174,6 +3202,13 @@ model_verbosity = "high"
                 codex_home: fixture.codex_home(),
                 config_layer_stack: Default::default(),
                 history: History::default(),
+                memory: MemoryConfig {
+                    root_dir: AbsolutePathBuf::try_from(fixture.codex_home().join("memory"))
+                        .expect("memory root"),
+                    max_bytes: DEFAULT_MEMORY_MAX_BYTES,
+                    working_set_token_budget: DEFAULT_MEMORY_WORKING_SET_TOKEN_BUDGET,
+                    staleness: MemoryStalenessMode::GitOid,
+                },
                 file_opener: UriBasedFileOpener::VsCode,
                 codex_linux_sandbox_exe: None,
                 hide_agent_reasoning: false,
@@ -3257,6 +3292,13 @@ model_verbosity = "high"
             codex_home: fixture.codex_home(),
             config_layer_stack: Default::default(),
             history: History::default(),
+            memory: MemoryConfig {
+                root_dir: AbsolutePathBuf::try_from(fixture.codex_home().join("memory"))
+                    .expect("memory root"),
+                max_bytes: DEFAULT_MEMORY_MAX_BYTES,
+                working_set_token_budget: DEFAULT_MEMORY_WORKING_SET_TOKEN_BUDGET,
+                staleness: MemoryStalenessMode::GitOid,
+            },
             file_opener: UriBasedFileOpener::VsCode,
             codex_linux_sandbox_exe: None,
             hide_agent_reasoning: false,
@@ -3355,6 +3397,13 @@ model_verbosity = "high"
             codex_home: fixture.codex_home(),
             config_layer_stack: Default::default(),
             history: History::default(),
+            memory: MemoryConfig {
+                root_dir: AbsolutePathBuf::try_from(fixture.codex_home().join("memory"))
+                    .expect("memory root"),
+                max_bytes: DEFAULT_MEMORY_MAX_BYTES,
+                working_set_token_budget: DEFAULT_MEMORY_WORKING_SET_TOKEN_BUDGET,
+                staleness: MemoryStalenessMode::GitOid,
+            },
             file_opener: UriBasedFileOpener::VsCode,
             codex_linux_sandbox_exe: None,
             hide_agent_reasoning: false,
@@ -3439,6 +3488,13 @@ model_verbosity = "high"
             codex_home: fixture.codex_home(),
             config_layer_stack: Default::default(),
             history: History::default(),
+            memory: MemoryConfig {
+                root_dir: AbsolutePathBuf::try_from(fixture.codex_home().join("memory"))
+                    .expect("memory root"),
+                max_bytes: DEFAULT_MEMORY_MAX_BYTES,
+                working_set_token_budget: DEFAULT_MEMORY_WORKING_SET_TOKEN_BUDGET,
+                staleness: MemoryStalenessMode::GitOid,
+            },
             file_opener: UriBasedFileOpener::VsCode,
             codex_linux_sandbox_exe: None,
             hide_agent_reasoning: false,

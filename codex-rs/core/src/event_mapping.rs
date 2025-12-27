@@ -9,6 +9,8 @@ use codex_protocol::models::ReasoningItemContent;
 use codex_protocol::models::ReasoningItemReasoningSummary;
 use codex_protocol::models::ResponseItem;
 use codex_protocol::models::WebSearchAction;
+use codex_protocol::protocol::ENVIRONMENT_CONTEXT_OPEN_TAG;
+use codex_protocol::protocol::MEMORY_CONTEXT_OPEN_TAG;
 use codex_protocol::user_input::UserInput;
 use tracing::warn;
 use uuid::Uuid;
@@ -20,7 +22,8 @@ use crate::user_shell_command::is_user_shell_command_text;
 fn is_session_prefix(text: &str) -> bool {
     let trimmed = text.trim_start();
     let lowered = trimmed.to_ascii_lowercase();
-    lowered.starts_with("<environment_context>")
+    lowered.starts_with(ENVIRONMENT_CONTEXT_OPEN_TAG)
+        || lowered.starts_with(MEMORY_CONTEXT_OPEN_TAG)
 }
 
 fn parse_user_message(message: &[ContentItem]) -> Option<UserMessageItem> {
@@ -192,6 +195,13 @@ mod tests {
                 role: "user".to_string(),
                 content: vec![ContentItem::InputText {
                     text: "<environment_context>test_text</environment_context>".to_string(),
+                }],
+            },
+            ResponseItem::Message {
+                id: None,
+                role: "user".to_string(),
+                content: vec![ContentItem::InputText {
+                    text: "<memory_context>test_text</memory_context>".to_string(),
                 }],
             },
             ResponseItem::Message {

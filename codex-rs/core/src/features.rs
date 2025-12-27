@@ -92,6 +92,8 @@ pub enum Feature {
     Tui2,
     /// Enable discovery and injection of skills.
     Skills,
+    /// Enable block-based context memory (lego memory).
+    LegoMemory,
     /// Enforce UTF8 output in Powershell.
     PowershellUtf8,
 }
@@ -388,6 +390,12 @@ pub const FEATURES: &[FeatureSpec] = &[
         key: "skills",
         stage: Stage::Experimental,
         default_enabled: true,
+    },
+    FeatureSpec {
+        id: Feature::LegoMemory,
+        key: "lego_memory",
+        stage: Stage::Experimental,
+        default_enabled: false,
     },
     FeatureSpec {
         id: Feature::PowershellUtf8,

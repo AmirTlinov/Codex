@@ -128,6 +128,20 @@ persistence = "save-all"
 file_opener = "vscode"
 
 ################################################################################
+# Memory (Lego Context)
+################################################################################
+
+[memory]
+# Root directory for lego memory storage. Default: "$CODEX_HOME/memory"
+# root_dir = "/abs/path/to/memory"
+# Maximum bytes to keep in the memory archive. Default: 52428800
+# max_bytes = 52428800
+# Token budget reserved for the working set during compilation. Default: 4096
+# working_set_token_budget = 4096
+# Staleness mode for file-backed blocks: git-oid (default) | mtime-size
+# staleness = "git-oid"
+
+################################################################################
 # UI, Notifications, and Misc
 ################################################################################
 
@@ -216,6 +230,7 @@ view_image_tool = true
 web_search_request = false
 enable_experimental_windows_sandbox = false
 skills = false
+lego_memory = false
 
 ################################################################################
 # Experimental toggles (legacy; prefer [features])

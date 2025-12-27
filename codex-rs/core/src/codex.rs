@@ -1,5 +1,7 @@
 use std::collections::HashMap;
+use std::collections::HashSet;
 use std::fmt::Debug;
+use std::path::Path;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
@@ -16,6 +18,13 @@ use crate::compact_remote::run_inline_remote_auto_compact_task;
 use crate::exec_policy::ExecPolicyManager;
 use crate::features::Feature;
 use crate::features::Features;
+use crate::memory::Block;
+use crate::memory::BlockKind;
+use crate::memory::BlockPriority;
+use crate::memory::BlockStatus;
+use crate::memory::BlockStore;
+use crate::memory::ContextCompiler;
+use crate::memory_context::memory_injection_index;
 use crate::models_manager::manager::ModelsManager;
 use crate::models_manager::model_family::ModelFamily;
 use crate::parse_command::parse_command;
@@ -57,6 +66,7 @@ use mcp_types::ReadResourceResult;
 use mcp_types::RequestId;
 use serde_json;
 use serde_json::Value;
+use tokio::io::AsyncBufReadExt;
 use tokio::sync::Mutex;
 use tokio::sync::RwLock;
 use tokio::sync::oneshot;
@@ -370,6 +380,7 @@ pub(crate) struct TurnContext {
     pub(crate) codex_linux_sandbox_exe: Option<PathBuf>,
     pub(crate) tool_call_gate: Arc<ReadinessFlag>,
     pub(crate) truncation_policy: TruncationPolicy,
+    pub(crate) memory_config: crate::config::types::MemoryConfig,
 }
 
 impl TurnContext {
@@ -531,6 +542,7 @@ impl Session {
                 per_turn_config.as_ref(),
                 model_family.truncation_policy,
             ),
+            memory_config: per_turn_config.memory.clone(),
         }
     }
 
@@ -2147,6 +2159,7 @@ async fn spawn_review_thread(
         codex_linux_sandbox_exe: parent_turn_context.codex_linux_sandbox_exe.clone(),
         tool_call_gate: Arc::new(ReadinessFlag::new()),
         truncation_policy: TruncationPolicy::new(&per_turn_config, model_family.truncation_policy),
+        memory_config: per_turn_config.memory.clone(),
     };
 
     // Seed the child task with the review prompt as the initial user message.
@@ -2271,11 +2284,19 @@ pub(crate) async fn run_task(
             .collect::<Vec<ResponseItem>>();
 
         // Construct the input that we will send to the model.
-        let turn_input: Vec<ResponseItem> = {
+        let mut turn_input: Vec<ResponseItem> = {
             sess.record_conversation_items(&turn_context, &pending_input)
                 .await;
             sess.clone_history().await.get_history_for_prompt()
         };
+        if sess.enabled(Feature::LegoMemory) {
+            if let Some(memory_item) =
+                build_memory_context_item(sess.as_ref(), turn_context.as_ref()).await
+            {
+                let insert_at = memory_injection_index(&turn_input);
+                turn_input.insert(insert_at, memory_item);
+            }
+        }
 
         let turn_input_messages = turn_input
             .iter()
@@ -2351,6 +2372,285 @@ async fn run_auto_compact(sess: &Arc<Session>, turn_context: &Arc<TurnContext>) 
         run_inline_remote_auto_compact_task(Arc::clone(sess), Arc::clone(turn_context)).await;
     } else {
         run_inline_auto_compact_task(Arc::clone(sess), Arc::clone(turn_context)).await;
+    }
+}
+
+async fn build_memory_context_item(
+    sess: &Session,
+    turn_context: &TurnContext,
+) -> Option<ResponseItem> {
+    let memory_config = &turn_context.memory_config;
+    if memory_config.working_set_token_budget == 0 {
+        return None;
+    }
+
+    let store = match BlockStore::open(&memory_config.root_dir, &turn_context.cwd).await {
+        Ok(store) => store,
+        Err(err) => {
+            warn!("memory store open failed: {err}");
+            return None;
+        }
+    };
+    let tool_roots = tool_roots(turn_context);
+    let mut extra_blocks = Vec::new();
+    extra_blocks.push(build_workspace_block(turn_context, &store, &tool_roots));
+    if let Some(tool_block) = build_tool_catalog_block(sess, turn_context, &tool_roots).await {
+        extra_blocks.push(tool_block);
+    }
+
+    let compiler = ContextCompiler::new(
+        memory_config.working_set_token_budget,
+        memory_config.staleness,
+    );
+    let context = match compiler
+        .compile(&store, &turn_context.cwd, extra_blocks)
+        .await
+    {
+        Ok(context) => context,
+        Err(err) => {
+            warn!("memory context compile failed: {err}");
+            return None;
+        }
+    };
+    Some(context.into())
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+enum ToolSourceKind {
+    Local,
+    Skill,
+    Mcp,
+}
+
+#[derive(Debug, Clone)]
+struct ToolEntry {
+    name: String,
+    description: String,
+    source: ToolSourceKind,
+}
+
+fn tool_roots(turn_context: &TurnContext) -> Vec<PathBuf> {
+    let mut roots = HashSet::new();
+    if let Some(codex_home) = turn_context.memory_config.root_dir.as_path().parent() {
+        roots.insert(codex_home.join("tools"));
+    }
+    roots.insert(turn_context.cwd.join(".codex").join("tools"));
+
+    let mut roots: Vec<PathBuf> = roots.into_iter().filter(|path| path.is_dir()).collect();
+    roots.sort();
+    roots
+}
+
+fn build_workspace_block(
+    turn_context: &TurnContext,
+    store: &BlockStore,
+    tool_roots: &[PathBuf],
+) -> Block {
+    let tool_paths = if tool_roots.is_empty() {
+        "none".to_string()
+    } else {
+        tool_roots
+            .iter()
+            .map(|path| path.display().to_string())
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
+    let memory_dir = store.root_dir().as_path().join(store.project_id());
+    let cwd = turn_context.cwd.display();
+    let tools = tool_paths;
+    let memory = memory_dir.display();
+    let body =
+        format!("/cwd: {cwd}\n/tools: {tools}\n/context: lego working set\n/memory: {memory}");
+
+    let mut block = Block::new("workspace", BlockKind::Workspace, "Workspace");
+    block.priority = BlockPriority::Pinned;
+    block.status = BlockStatus::Active;
+    block.body_full = Some(body.clone());
+    block.body_summary = Some(body.clone());
+    block.body_label = Some("Workspace view".to_string());
+    block
+}
+
+async fn build_tool_catalog_block(
+    sess: &Session,
+    turn_context: &TurnContext,
+    tool_roots: &[PathBuf],
+) -> Option<Block> {
+    let mut entries = Vec::new();
+    entries.extend(collect_local_tools(tool_roots).await);
+    if sess.enabled(Feature::Skills) {
+        entries.extend(collect_skill_tools(sess, turn_context));
+    }
+    entries.extend(collect_mcp_tools(sess).await);
+
+    if entries.is_empty() {
+        return None;
+    }
+
+    entries.sort_by(|a, b| {
+        source_rank(a.source)
+            .cmp(&source_rank(b.source))
+            .then_with(|| a.name.cmp(&b.name))
+    });
+
+    let body = render_tool_catalog(&entries);
+    let mut block = Block::new("toolbox", BlockKind::Toolbox, "Tool Catalog");
+    block.priority = BlockPriority::Pinned;
+    block.status = BlockStatus::Active;
+    block.body_full = Some(body.clone());
+    block.body_summary = Some(body);
+    block.body_label = Some("Tool catalog".to_string());
+    Some(block)
+}
+
+async fn collect_local_tools(tool_roots: &[PathBuf]) -> Vec<ToolEntry> {
+    const MAX_TOOL_ENTRIES: usize = 200;
+    const TOOL_EXTS: [&str; 3] = ["rs", "py", "sh"];
+
+    let mut entries = Vec::new();
+    for root in tool_roots {
+        let walker = walkdir::WalkDir::new(root).max_depth(4).follow_links(true);
+        for entry in walker.into_iter().filter_map(Result::ok) {
+            if !entry.file_type().is_file() {
+                continue;
+            }
+            let path = entry.path();
+            let Some(ext) = path.extension().and_then(|ext| ext.to_str()) else {
+                continue;
+            };
+            if !TOOL_EXTS
+                .iter()
+                .any(|allowed| allowed.eq_ignore_ascii_case(ext))
+            {
+                continue;
+            }
+            let name = path
+                .strip_prefix(root)
+                .unwrap_or(path)
+                .display()
+                .to_string();
+            let description = read_tool_description(path).await.unwrap_or_default();
+            let description = if description.is_empty() {
+                "no description".to_string()
+            } else {
+                description
+            };
+            entries.push(ToolEntry {
+                name,
+                description,
+                source: ToolSourceKind::Local,
+            });
+            if entries.len() >= MAX_TOOL_ENTRIES {
+                return entries;
+            }
+        }
+    }
+    entries
+}
+
+fn collect_skill_tools(sess: &Session, turn_context: &TurnContext) -> Vec<ToolEntry> {
+    let outcome = sess
+        .services
+        .skills_manager
+        .skills_for_cwd(&turn_context.cwd);
+    outcome
+        .skills
+        .into_iter()
+        .map(|skill| ToolEntry {
+            name: skill.name,
+            description: skill.short_description.unwrap_or_else(|| skill.description),
+            source: ToolSourceKind::Skill,
+        })
+        .collect()
+}
+
+async fn collect_mcp_tools(sess: &Session) -> Vec<ToolEntry> {
+    sess.services
+        .mcp_connection_manager
+        .read()
+        .await
+        .list_all_tools()
+        .await
+        .into_iter()
+        .into_iter()
+        .map(|(name, tool)| {
+            let description = tool
+                .tool
+                .description
+                .or(tool.tool.title)
+                .unwrap_or_else(|| "no description".to_string());
+            ToolEntry {
+                name,
+                description,
+                source: ToolSourceKind::Mcp,
+            }
+        })
+        .collect()
+}
+
+async fn read_tool_description(path: &Path) -> Option<String> {
+    let file = tokio::fs::File::open(path).await.ok()?;
+    let mut reader = tokio::io::BufReader::new(file).lines();
+    let mut lines = Vec::new();
+    while let Ok(Some(line)) = reader.next_line().await {
+        if lines.len() >= 10 {
+            break;
+        }
+        lines.push(line.trim_end().to_string());
+    }
+    let description = lines.join(" ");
+    let description = description.trim();
+    if description.is_empty() {
+        None
+    } else {
+        Some(description.to_string())
+    }
+}
+
+fn render_tool_catalog(entries: &[ToolEntry]) -> String {
+    let mut local = Vec::new();
+    let mut skill = Vec::new();
+    let mut mcp = Vec::new();
+
+    for entry in entries {
+        let name = &entry.name;
+        let description = &entry.description;
+        let line = format!("- {name}: {description}");
+        match entry.source {
+            ToolSourceKind::Local => local.push(line),
+            ToolSourceKind::Skill => skill.push(line),
+            ToolSourceKind::Mcp => mcp.push(line),
+        }
+    }
+
+    let mut lines = Vec::new();
+    if !local.is_empty() {
+        lines.push("[local]".to_string());
+        lines.extend(local);
+    }
+    if !skill.is_empty() {
+        if !lines.is_empty() {
+            lines.push(String::new());
+        }
+        lines.push("[skills]".to_string());
+        lines.extend(skill);
+    }
+    if !mcp.is_empty() {
+        if !lines.is_empty() {
+            lines.push(String::new());
+        }
+        lines.push("[mcp]".to_string());
+        lines.extend(mcp);
+    }
+
+    lines.join("\n")
+}
+
+fn source_rank(source: ToolSourceKind) -> u8 {
+    match source {
+        ToolSourceKind::Local => 0,
+        ToolSourceKind::Skill => 1,
+        ToolSourceKind::Mcp => 2,
     }
 }
 

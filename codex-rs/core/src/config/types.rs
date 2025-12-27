@@ -273,6 +273,39 @@ pub enum HistoryPersistence {
     None,
 }
 
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum MemoryStalenessMode {
+    GitOid,
+    MtimeSize,
+}
+
+impl Default for MemoryStalenessMode {
+    fn default() -> Self {
+        Self::GitOid
+    }
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Default)]
+pub struct MemoryConfigToml {
+    /// Optional override for the memory root directory.
+    pub root_dir: Option<AbsolutePathBuf>,
+    /// Maximum number of bytes stored in the memory archive.
+    pub max_bytes: Option<usize>,
+    /// Token budget reserved for the working set during context compilation.
+    pub working_set_token_budget: Option<usize>,
+    /// Staleness mode used for file-backed blocks.
+    pub staleness: Option<MemoryStalenessMode>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct MemoryConfig {
+    pub root_dir: AbsolutePathBuf,
+    pub max_bytes: usize,
+    pub working_set_token_budget: usize,
+    pub staleness: MemoryStalenessMode,
+}
+
 // ===== OTEL configuration =====
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]

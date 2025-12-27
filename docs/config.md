@@ -46,6 +46,7 @@ Supported features:
 | `apply_patch_freeform`                |  false  | Beta         | Include the freeform `apply_patch` tool               |
 | `view_image_tool`                     |  true   | Stable       | Include the `view_image` tool                         |
 | `web_search_request`                  |  false  | Stable       | Allow the model to issue web searches                 |
+| `lego_memory`                         |  false  | Experimental | Enable block-based context memory (lego memory)       |
 | `enable_experimental_windows_sandbox` |  false  | Experimental | Use the Windows restricted-token sandbox              |
 | `tui2`                                |  false  | Experimental | Use the experimental TUI v2 (viewport) implementation |
 | `skills`                              |  false  | Experimental | Enable discovery and injection of skills              |
@@ -1041,6 +1042,11 @@ Valid values:
 | `profiles.<name>.*`                              | various                                                           | Profile‑scoped overrides of the same keys.                                                                                      |
 | `history.persistence`                            | `save-all` \| `none`                                              | History file persistence (default: `save-all`).                                                                                 |
 | `history.max_bytes`                              | number                                                            | Maximum size of `history.jsonl` in bytes; when exceeded, history is compacted to ~80% of this limit by dropping oldest entries. |
+| `memory.*`                                       | table                                                             | Lego memory settings (see [memory.md](./memory.md)).                                                                            |
+| `memory.root_dir`                                | string (path)                                                     | Root directory for lego memory storage (default: `$CODEX_HOME/memory`).                                                         |
+| `memory.max_bytes`                               | number                                                            | Maximum size of the lego memory archive in bytes (default: `52428800`).                                                         |
+| `memory.working_set_token_budget`                | number                                                            | Token budget reserved for the memory working set during compilation (default: `4096`).                                         |
+| `memory.staleness`                               | `git-oid` \| `mtime-size`                                         | Staleness mode for file-backed blocks (default: `git-oid`).                                                                     |
 | `file_opener`                                    | `vscode` \| `vscode-insiders` \| `windsurf` \| `cursor` \| `none` | URI scheme for clickable citations (default: `vscode`).                                                                         |
 | `tui`                                            | table                                                             | TUI‑specific options.                                                                                                           |
 | `tui.notifications`                              | boolean \| array<string>                                          | Enable desktop notifications in the tui (default: true).                                                                        |
