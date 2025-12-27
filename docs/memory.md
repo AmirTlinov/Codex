@@ -21,8 +21,9 @@ Memory is stored per project under `memory.root_dir` (default: `$CODEX_HOME/memo
 The compiler:
 
 - includes pinned/active blocks (stashed blocks are skipped unless pinned)
+- expands one hop across block links (bounded) to surface related archived blocks
 - applies block‑level degradation to fit `memory.working_set_token_budget`
-- injects memory as a system‑style overlay message (not recorded in history)
+- injects memory as an overlay message in the prompt (not recorded in history)
 
 ### Staleness
 
@@ -32,6 +33,18 @@ File‑backed blocks carry fingerprints. When the source changes, blocks are mar
 
 - `git-oid` (default): uses `git hash-object` when available, falls back to mtime+size
 - `mtime-size`: uses file mtime (ns) and size
+
+### Memory tool
+
+When `lego_memory` is enabled, the model can call the `memory` tool to manage blocks:
+
+- `upsert` creates or updates a block
+- `patch` updates selected fields
+- `get` returns a block (full/summary/label)
+- `list` returns block summaries
+- `delete` removes a block
+
+File sources without fingerprints are filled automatically (best effort) using the configured staleness mode.
 
 ### Workspace view and tool catalog
 

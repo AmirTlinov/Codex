@@ -109,3 +109,13 @@ If you don’t have the tool:
   let request = mock.single_request();
   // assert using request.function_call_output(call_id) or request.json_body() or other helpers.
   ```
+
+## Project map
+
+- `PHILOSOPHY.md` - project philosophy and invariants
+- `GOALS.md` - explicit goals and non-goals
+- `docs/config.md` - configuration and feature flags
+- `docs/sandbox.md` - sandbox and approvals model
+- `docs/memory.md` - lego memory and context compilation
+- `codex-rs/core/src` - core runtime and tooling
+- `codex-rs/protocol/src` - protocol tags and response models

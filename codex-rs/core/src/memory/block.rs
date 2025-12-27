@@ -127,6 +127,10 @@ impl Block {
         }
     }
 
+    pub fn touch(&mut self) {
+        self.updated_at = unix_timestamp();
+    }
+
     #[cfg(test)]
     pub fn with_updated_at(mut self, updated_at: u64) -> Self {
         self.updated_at = updated_at;

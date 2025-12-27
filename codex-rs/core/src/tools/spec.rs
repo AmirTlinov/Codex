@@ -23,6 +23,7 @@ pub(crate) struct ToolsConfig {
     pub web_search_request: bool,
     pub include_view_image_tool: bool,
     pub experimental_supported_tools: Vec<String>,
+    pub memory_tool: bool,
 }
 
 pub(crate) struct ToolsConfigParams<'a> {
@@ -71,6 +72,7 @@ impl ToolsConfig {
             web_search_request: include_web_search_request,
             include_view_image_tool,
             experimental_supported_tools: model_family.experimental_supported_tools.clone(),
+            memory_tool: features.enabled(Feature::LegoMemory),
         }
     }
 }
@@ -983,8 +985,10 @@ pub(crate) fn build_specs(
     use crate::tools::handlers::ApplyPatchHandler;
     use crate::tools::handlers::GrepFilesHandler;
     use crate::tools::handlers::ListDirHandler;
+    use crate::tools::handlers::MEMORY_TOOL;
     use crate::tools::handlers::McpHandler;
     use crate::tools::handlers::McpResourceHandler;
+    use crate::tools::handlers::MemoryHandler;
     use crate::tools::handlers::PlanHandler;
     use crate::tools::handlers::ReadFileHandler;
     use crate::tools::handlers::ShellCommandHandler;
@@ -1003,6 +1007,7 @@ pub(crate) fn build_specs(
     let view_image_handler = Arc::new(ViewImageHandler);
     let mcp_handler = Arc::new(McpHandler);
     let mcp_resource_handler = Arc::new(McpResourceHandler);
+    let memory_handler = Arc::new(MemoryHandler);
     let shell_command_handler = Arc::new(ShellCommandHandler);
 
     match &config.shell_type {
@@ -1043,6 +1048,11 @@ pub(crate) fn build_specs(
 
     builder.push_spec(PLAN_TOOL.clone());
     builder.register_handler("update_plan", plan_handler);
+
+    if config.memory_tool {
+        builder.push_spec(MEMORY_TOOL.clone());
+        builder.register_handler("memory", memory_handler);
+    }
 
     if let Some(apply_patch_tool_type) = &config.apply_patch_tool_type {
         match apply_patch_tool_type {
@@ -1366,6 +1376,20 @@ mod tests {
                 "view_image",
             ],
         );
+    }
+
+    #[test]
+    fn test_build_specs_adds_memory_tool_when_enabled() {
+        let config = test_config();
+        let model_family = ModelsManager::construct_model_family_offline("gpt-5-codex", &config);
+        let mut features = Features::with_defaults();
+        features.enable(Feature::LegoMemory);
+        let tools_config = ToolsConfig::new(&ToolsConfigParams {
+            model_family: &model_family,
+            features: &features,
+        });
+        let (tools, _) = build_specs(&tools_config, None).build();
+        assert_contains_tool_names(&tools, &["memory"]);
     }
 
     #[test]

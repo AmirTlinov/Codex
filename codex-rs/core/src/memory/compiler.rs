@@ -4,23 +4,34 @@ use crate::memory::block::BlockPriority;
 use crate::memory::block::BlockStatus;
 use crate::memory::block::SourceKind;
 use crate::memory::block::SourceRef;
+use crate::memory::fingerprint::fingerprint_for_source;
 use crate::memory::store::BlockStore;
 use crate::memory_context::BlockRepresentation;
 use crate::memory_context::MemoryContext;
 use crate::memory_context::MemoryContextBlock;
 use crate::truncate::approx_token_count;
 use std::cmp::Ordering;
+use std::collections::HashMap;
+use std::collections::HashSet;
 use std::io;
 use std::path::Path;
-use tokio::process::Command;
-use tokio::time::Duration;
-use tokio::time::timeout;
-
-const GIT_HASH_TIMEOUT: Duration = Duration::from_secs(5);
+const MAX_GRAPH_EXPANSION: usize = 64;
 
 pub struct ContextCompiler {
     token_budget: usize,
     staleness_mode: MemoryStalenessMode,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum BlockOrigin {
+    Direct,
+    Linked,
+}
+
+#[derive(Debug, Clone)]
+struct BlockEntry {
+    block: Block,
+    origin: BlockOrigin,
 }
 
 impl ContextCompiler {
@@ -37,15 +48,18 @@ impl ContextCompiler {
         cwd: &Path,
         extra_blocks: Vec<Block>,
     ) -> io::Result<MemoryContext> {
-        let mut blocks: Vec<Block> = store.blocks().cloned().collect();
-        blocks.extend(extra_blocks);
-        blocks.sort_by(|a, b| compare_blocks(a, b));
+        let mut entries = collect_entries(store, extra_blocks);
+        entries.sort_by(compare_entries);
 
         let mut remaining = self.token_budget;
         let mut compiled = Vec::new();
 
-        for block in blocks {
-            if block.status == BlockStatus::Stashed && block.priority != BlockPriority::Pinned {
+        for entry in entries {
+            let block = entry.block;
+            if block.status == BlockStatus::Stashed
+                && block.priority != BlockPriority::Pinned
+                && entry.origin == BlockOrigin::Direct
+            {
                 continue;
             }
 
@@ -57,11 +71,8 @@ impl ContextCompiler {
             };
 
             let candidate = BlockCandidate::from_block(&block, status);
-            let representation = if stale {
-                candidate.label(remaining)
-            } else {
-                candidate.pick(remaining)
-            };
+            let representation =
+                select_representation(&candidate, &block, status, entry.origin, remaining);
 
             let Some((representation, body, tokens)) = representation else {
                 continue;
@@ -86,11 +97,86 @@ impl ContextCompiler {
     }
 }
 
+fn collect_entries(store: &BlockStore, extra_blocks: Vec<Block>) -> Vec<BlockEntry> {
+    let mut store_blocks = HashMap::new();
+    for block in store.blocks() {
+        store_blocks.insert(block.id.clone(), block.clone());
+    }
+
+    let mut selected = HashSet::new();
+    let mut entries = Vec::new();
+    for block in store_blocks.values() {
+        if block.status == BlockStatus::Stashed && block.priority != BlockPriority::Pinned {
+            continue;
+        }
+        selected.insert(block.id.clone());
+        entries.push(BlockEntry {
+            block: block.clone(),
+            origin: BlockOrigin::Direct,
+        });
+    }
+
+    for block in extra_blocks {
+        if selected.insert(block.id.clone()) {
+            entries.push(BlockEntry {
+                block,
+                origin: BlockOrigin::Direct,
+            });
+        }
+    }
+
+    let mut ordered = entries
+        .iter()
+        .map(|entry| entry.block.clone())
+        .collect::<Vec<_>>();
+    ordered.sort_by(compare_blocks);
+
+    let mut expanded = Vec::new();
+    for block in ordered {
+        if expanded.len() >= MAX_GRAPH_EXPANSION {
+            break;
+        }
+        for link in &block.links {
+            if expanded.len() >= MAX_GRAPH_EXPANSION {
+                break;
+            }
+            if selected.contains(&link.to) {
+                continue;
+            }
+            if let Some(target) = store_blocks.get(&link.to) {
+                selected.insert(target.id.clone());
+                expanded.push(BlockEntry {
+                    block: target.clone(),
+                    origin: BlockOrigin::Linked,
+                });
+            }
+        }
+    }
+
+    entries.extend(expanded);
+    entries
+}
+
+fn compare_entries(a: &BlockEntry, b: &BlockEntry) -> Ordering {
+    priority_rank(a.block.priority)
+        .cmp(&priority_rank(b.block.priority))
+        .then_with(|| origin_rank(a.origin).cmp(&origin_rank(b.origin)))
+        .then_with(|| b.block.updated_at.cmp(&a.block.updated_at))
+        .then_with(|| a.block.id.cmp(&b.block.id))
+}
+
 fn compare_blocks(a: &Block, b: &Block) -> Ordering {
     priority_rank(a.priority)
         .cmp(&priority_rank(b.priority))
         .then_with(|| b.updated_at.cmp(&a.updated_at))
         .then_with(|| a.id.cmp(&b.id))
+}
+
+fn origin_rank(origin: BlockOrigin) -> u8 {
+    match origin {
+        BlockOrigin::Direct => 0,
+        BlockOrigin::Linked => 1,
+    }
 }
 
 fn priority_rank(priority: BlockPriority) -> u8 {
@@ -171,6 +257,28 @@ impl BlockCandidate {
             None
         }
     }
+
+    fn summary_or_label(&self, budget: usize) -> Option<(BlockRepresentation, String, usize)> {
+        self.summary(budget).or_else(|| self.label(budget))
+    }
+}
+
+fn select_representation(
+    candidate: &BlockCandidate,
+    block: &Block,
+    status: BlockStatus,
+    origin: BlockOrigin,
+    budget: usize,
+) -> Option<(BlockRepresentation, String, usize)> {
+    if status == BlockStatus::Stale
+        || (block.status == BlockStatus::Stashed && block.priority != BlockPriority::Pinned)
+    {
+        candidate.label(budget)
+    } else if origin == BlockOrigin::Linked {
+        candidate.summary_or_label(budget)
+    } else {
+        candidate.pick(budget)
+    }
 }
 
 fn estimate_tokens(title: &str, body: &str) -> usize {
@@ -204,58 +312,9 @@ async fn source_is_stale(
     let Some(expected) = &source.fingerprint else {
         return Ok(true);
     };
-    let path = resolve_source_path(source, cwd);
-    let current = match mode {
-        MemoryStalenessMode::GitOid => match fingerprint_git_oid(&path).await {
-            Ok(fingerprint) => fingerprint,
-            Err(_) => fingerprint_mtime_size(&path).await?,
-        },
-        MemoryStalenessMode::MtimeSize => fingerprint_mtime_size(&path).await?,
-    };
+    let current = fingerprint_for_source(source, cwd, mode).await?;
 
     Ok(&current != expected)
-}
-
-fn resolve_source_path(source: &SourceRef, cwd: &Path) -> std::path::PathBuf {
-    let path = Path::new(&source.locator);
-    if path.is_absolute() {
-        path.to_path_buf()
-    } else {
-        cwd.join(path)
-    }
-}
-
-async fn fingerprint_git_oid(path: &Path) -> io::Result<crate::memory::block::Fingerprint> {
-    let output = timeout(
-        GIT_HASH_TIMEOUT,
-        Command::new("git").arg("hash-object").arg(path).output(),
-    )
-    .await
-    .map_err(|_| io::Error::new(io::ErrorKind::TimedOut, "git hash-object timed out"))?
-    .map_err(|err| io::Error::new(io::ErrorKind::Other, format!("{err}")))?;
-
-    if !output.status.success() {
-        return Err(io::Error::new(
-            io::ErrorKind::Other,
-            "git hash-object failed",
-        ));
-    }
-
-    let oid = String::from_utf8_lossy(&output.stdout).trim().to_string();
-    Ok(crate::memory::block::Fingerprint::GitOid { oid })
-}
-
-async fn fingerprint_mtime_size(path: &Path) -> io::Result<crate::memory::block::Fingerprint> {
-    let metadata = tokio::fs::metadata(path).await?;
-    let modified = metadata.modified()?;
-    let duration = modified
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default();
-    let mtime_ns = u64::try_from(duration.as_nanos()).unwrap_or(u64::MAX);
-    Ok(crate::memory::block::Fingerprint::MtimeSize {
-        mtime_ns,
-        size_bytes: metadata.len(),
-    })
 }
 
 #[cfg(test)]
@@ -264,6 +323,9 @@ mod tests {
     use crate::memory::block::Block;
     use crate::memory::block::BlockKind;
     use crate::memory::block::BlockPriority;
+    use crate::memory::block::BlockStatus;
+    use crate::memory::block::Edge;
+    use crate::memory::block::EdgeKind;
     use crate::memory_context::BlockRepresentation;
     use codex_utils_absolute_path::AbsolutePathBuf;
     use tempfile::TempDir;
@@ -311,6 +373,39 @@ mod tests {
         let context = compiler.compile(&store, &cwd, Vec::new()).await?;
         let first = context.blocks.first().expect("compiled block");
         assert_eq!(first.representation, BlockRepresentation::Summary);
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn compiler_expands_linked_blocks() -> io::Result<()> {
+        let temp = TempDir::new()?;
+        let root = AbsolutePathBuf::try_from(temp.path().join("memory"))?;
+        let cwd = temp.path().join("project");
+        tokio::fs::create_dir_all(&cwd).await?;
+
+        let mut store = BlockStore::open(&root, &cwd).await?;
+        let mut seed = Block::new("seed", BlockKind::Decisions, "seed").with_updated_at(2);
+        seed.links.push(Edge {
+            from: "seed".to_string(),
+            to: "archived".to_string(),
+            rel: EdgeKind::Explains,
+        });
+        store.upsert(seed).await?;
+
+        let mut archived = Block::new("archived", BlockKind::Facts, "archived").with_updated_at(1);
+        archived.status = BlockStatus::Stashed;
+        archived.body_label = Some("archived label".to_string());
+        store.upsert(archived).await?;
+
+        let compiler = ContextCompiler::new(1024, MemoryStalenessMode::MtimeSize);
+        let context = compiler.compile(&store, &cwd, Vec::new()).await?;
+        let archived_block = context
+            .blocks
+            .iter()
+            .find(|block| block.id == "archived")
+            .expect("linked block");
+        assert_eq!(archived_block.representation, BlockRepresentation::Label);
 
         Ok(())
     }

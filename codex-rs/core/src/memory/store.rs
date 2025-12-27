@@ -173,7 +173,7 @@ fn apply_event(blocks: &mut HashMap<String, Block>, event: MemoryEvent) {
 }
 
 fn to_io_error(err: impl std::fmt::Display) -> io::Error {
-    io::Error::new(io::ErrorKind::Other, format!("{err}"))
+    io::Error::other(format!("{err}"))
 }
 
 #[cfg(test)]

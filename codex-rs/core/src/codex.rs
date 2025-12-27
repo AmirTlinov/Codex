@@ -2289,13 +2289,12 @@ pub(crate) async fn run_task(
                 .await;
             sess.clone_history().await.get_history_for_prompt()
         };
-        if sess.enabled(Feature::LegoMemory) {
-            if let Some(memory_item) =
+        if sess.enabled(Feature::LegoMemory)
+            && let Some(memory_item) =
                 build_memory_context_item(sess.as_ref(), turn_context.as_ref()).await
-            {
-                let insert_at = memory_injection_index(&turn_input);
-                turn_input.insert(insert_at, memory_item);
-            }
+        {
+            let insert_at = memory_injection_index(&turn_input);
+            turn_input.insert(insert_at, memory_item);
         }
 
         let turn_input_messages = turn_input
@@ -2466,7 +2465,7 @@ fn build_workspace_block(
     block.priority = BlockPriority::Pinned;
     block.status = BlockStatus::Active;
     block.body_full = Some(body.clone());
-    block.body_summary = Some(body.clone());
+    block.body_summary = Some(body);
     block.body_label = Some("Workspace view".to_string());
     block
 }
@@ -2558,7 +2557,7 @@ fn collect_skill_tools(sess: &Session, turn_context: &TurnContext) -> Vec<ToolEn
         .into_iter()
         .map(|skill| ToolEntry {
             name: skill.name,
-            description: skill.short_description.unwrap_or_else(|| skill.description),
+            description: skill.short_description.unwrap_or(skill.description),
             source: ToolSourceKind::Skill,
         })
         .collect()
@@ -2571,7 +2570,6 @@ async fn collect_mcp_tools(sess: &Session) -> Vec<ToolEntry> {
         .await
         .list_all_tools()
         .await
-        .into_iter()
         .into_iter()
         .map(|(name, tool)| {
             let description = tool
