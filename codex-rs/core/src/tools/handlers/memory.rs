@@ -316,9 +316,14 @@ impl ToolHandler for MemoryHandler {
                 FunctionCallError::RespondToModel(format!("failed to open memory store: {err}"))
             })?;
 
-        let response =
-            apply_memory_request(&mut store, &turn.cwd, turn.memory_config.staleness, request)
-                .await?;
+        let response = apply_memory_request(
+            &mut store,
+            &turn.cwd,
+            turn.memory_config.staleness,
+            turn.memory_config.max_bytes,
+            request,
+        )
+        .await?;
 
         let content = serde_json::to_string_pretty(&response).map_err(|err| {
             FunctionCallError::RespondToModel(format!("failed to serialize memory response: {err}"))
@@ -478,6 +483,7 @@ async fn apply_memory_request(
     store: &mut BlockStore,
     cwd: &Path,
     mode: MemoryStalenessMode,
+    max_bytes: usize,
     request: MemoryToolRequest,
 ) -> Result<MemoryToolResponse, FunctionCallError> {
     match request {
@@ -485,6 +491,12 @@ async fn apply_memory_request(
             validate_block_input(&block)?;
             let mut warnings = Vec::new();
             let stored = upsert_block(store, cwd, mode, block, &mut warnings).await?;
+            warnings.extend(
+                store
+                    .enforce_budget(max_bytes)
+                    .await
+                    .map_err(to_tool_error)?,
+            );
             Ok(MemoryToolResponse {
                 action: MemoryAction::Upsert,
                 result: MemoryToolResult::Upserted {
@@ -497,6 +509,12 @@ async fn apply_memory_request(
             validate_patch(&patch)?;
             let mut warnings = Vec::new();
             let stored = patch_block(store, cwd, mode, &id, patch, &mut warnings).await?;
+            warnings.extend(
+                store
+                    .enforce_budget(max_bytes)
+                    .await
+                    .map_err(to_tool_error)?,
+            );
             Ok(MemoryToolResponse {
                 action: MemoryAction::Patch,
                 result: MemoryToolResult::Patched {
@@ -506,11 +524,18 @@ async fn apply_memory_request(
             })
         }
         MemoryToolRequest::Delete { id } => {
+            let mut warnings = Vec::new();
             store.delete(&id).await.map_err(to_tool_error)?;
+            warnings.extend(
+                store
+                    .enforce_budget(max_bytes)
+                    .await
+                    .map_err(to_tool_error)?,
+            );
             Ok(MemoryToolResponse {
                 action: MemoryAction::Delete,
                 result: MemoryToolResult::Deleted { id },
-                warnings: Vec::new(),
+                warnings,
             })
         }
         MemoryToolRequest::Get { id, view } => {
@@ -897,16 +922,28 @@ mod tests {
             },
         };
 
-        let response =
-            apply_memory_request(&mut store, &cwd, MemoryStalenessMode::MtimeSize, request).await?;
+        let response = apply_memory_request(
+            &mut store,
+            &cwd,
+            MemoryStalenessMode::MtimeSize,
+            usize::MAX,
+            request,
+        )
+        .await?;
         assert_eq!(response.action, MemoryAction::Upsert);
 
         let list = MemoryToolRequest::List {
             filters: None,
             limit: Some(10),
         };
-        let response =
-            apply_memory_request(&mut store, &cwd, MemoryStalenessMode::MtimeSize, list).await?;
+        let response = apply_memory_request(
+            &mut store,
+            &cwd,
+            MemoryStalenessMode::MtimeSize,
+            usize::MAX,
+            list,
+        )
+        .await?;
         match response.result {
             MemoryToolResult::Blocks { blocks } => {
                 assert_eq!(blocks.len(), 1);
@@ -941,7 +978,14 @@ mod tests {
                 priority: None,
             },
         };
-        apply_memory_request(&mut store, &cwd, MemoryStalenessMode::MtimeSize, request).await?;
+        apply_memory_request(
+            &mut store,
+            &cwd,
+            MemoryStalenessMode::MtimeSize,
+            usize::MAX,
+            request,
+        )
+        .await?;
 
         let patch = MemoryToolRequest::Patch {
             id: "b2".to_string(),
@@ -957,8 +1001,14 @@ mod tests {
                 priority: None,
             },
         };
-        let response =
-            apply_memory_request(&mut store, &cwd, MemoryStalenessMode::MtimeSize, patch).await?;
+        let response = apply_memory_request(
+            &mut store,
+            &cwd,
+            MemoryStalenessMode::MtimeSize,
+            usize::MAX,
+            patch,
+        )
+        .await?;
 
         match response.result {
             MemoryToolResult::Patched { block } => {

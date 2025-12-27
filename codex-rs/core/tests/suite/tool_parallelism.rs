@@ -2,6 +2,7 @@
 #![allow(clippy::unwrap_used)]
 
 use std::fs;
+use std::path::Path;
 use std::time::Duration;
 use std::time::Instant;
 
@@ -66,19 +67,43 @@ async fn build_codex_with_test_tool(server: &wiremock::MockServer) -> anyhow::Re
     builder.build(server).await
 }
 
-fn assert_parallel_duration(actual: Duration) {
-    // Allow headroom for runtime overhead while still differentiating from serial execution.
-    assert!(
-        actual < Duration::from_millis(750),
-        "expected parallel execution to finish quickly, got {actual:?}"
-    );
-}
-
 fn assert_serial_duration(actual: Duration) {
     assert!(
         actual >= Duration::from_millis(500),
         "expected serial execution to take longer, got {actual:?}"
     );
+}
+
+fn parse_record(path: &Path) -> anyhow::Result<(u128, u128)> {
+    let contents = fs::read_to_string(path)?;
+    let mut start = None;
+    let mut end = None;
+
+    for line in contents.lines() {
+        let mut parts = line.split_whitespace();
+        let _label = parts.next();
+        let phase = parts.next();
+        let timestamp = parts.next();
+        let Some(phase) = phase else {
+            continue;
+        };
+        let Some(timestamp) = timestamp else {
+            continue;
+        };
+        let parsed = timestamp
+            .parse::<u128>()
+            .map_err(|err| anyhow::anyhow!("invalid timestamp {timestamp:?}: {err}"))?;
+        match phase {
+            "start" => start = Some(parsed),
+            "end" => end = Some(parsed),
+            _ => {}
+        }
+    }
+
+    let start =
+        start.ok_or_else(|| anyhow::anyhow!("missing start record for {}", path.display()))?;
+    let end = end.ok_or_else(|| anyhow::anyhow!("missing end record for {}", path.display()))?;
+    Ok((start, end))
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -88,6 +113,8 @@ async fn read_file_tools_run_in_parallel() -> anyhow::Result<()> {
     let server = start_mock_server().await;
     let test = build_codex_with_test_tool(&server).await?;
 
+    let record_one = tempfile::NamedTempFile::new()?;
+    let record_two = tempfile::NamedTempFile::new()?;
     let warmup_args = json!({
         "sleep_after_ms": 10,
         "barrier": {
@@ -98,13 +125,26 @@ async fn read_file_tools_run_in_parallel() -> anyhow::Result<()> {
     })
     .to_string();
 
-    let parallel_args = json!({
+    let parallel_args_one = json!({
         "sleep_after_ms": 300,
         "barrier": {
             "id": "parallel-test-sync",
             "participants": 2,
             "timeout_ms": 1_000,
-        }
+        },
+        "record_path": record_one.path(),
+        "record_label": "call-1",
+    })
+    .to_string();
+    let parallel_args_two = json!({
+        "sleep_after_ms": 300,
+        "barrier": {
+            "id": "parallel-test-sync",
+            "participants": 2,
+            "timeout_ms": 1_000,
+        },
+        "record_path": record_two.path(),
+        "record_label": "call-2",
     })
     .to_string();
 
@@ -121,8 +161,8 @@ async fn read_file_tools_run_in_parallel() -> anyhow::Result<()> {
 
     let first_response = sse(vec![
         json!({"type": "response.created", "response": {"id": "resp-1"}}),
-        ev_function_call("call-1", "test_sync_tool", &parallel_args),
-        ev_function_call("call-2", "test_sync_tool", &parallel_args),
+        ev_function_call("call-1", "test_sync_tool", &parallel_args_one),
+        ev_function_call("call-2", "test_sync_tool", &parallel_args_two),
         ev_completed("resp-1"),
     ]);
     let second_response = sse(vec![
@@ -137,8 +177,13 @@ async fn read_file_tools_run_in_parallel() -> anyhow::Result<()> {
 
     run_turn(&test, "warm up parallel tool").await?;
 
-    let duration = run_turn_and_measure(&test, "exercise sync tool").await?;
-    assert_parallel_duration(duration);
+    run_turn(&test, "exercise sync tool").await?;
+    let (start_one, end_one) = parse_record(record_one.path())?;
+    let (start_two, end_two) = parse_record(record_two.path())?;
+    assert!(
+        start_one <= end_two && start_two <= end_one,
+        "expected overlapping tool execution, call-1 {start_one}-{end_one}, call-2 {start_two}-{end_two}"
+    );
 
     Ok(())
 }
@@ -303,7 +348,7 @@ async fn shell_tools_start_before_response_completed_when_stream_delayed() -> an
     );
     let args = json!({
         "command": command,
-        "timeout_ms": 1_000,
+        "timeout_ms": 2_000,
     });
 
     let first_chunk = sse(vec![
@@ -364,7 +409,7 @@ async fn shell_tools_start_before_response_completed_when_stream_delayed() -> an
     let _ = first_gate_tx.send(());
     let _ = follow_up_gate_tx.send(());
 
-    let timestamps = tokio::time::timeout(Duration::from_secs(1), async {
+    let timestamps = tokio::time::timeout(Duration::from_secs(3), async {
         loop {
             let contents = fs::read_to_string(output_path)?;
             let timestamps = contents

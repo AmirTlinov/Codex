@@ -1,5 +1,8 @@
 use crate::git_info::get_git_repo_root;
 use crate::memory::block::Block;
+use crate::memory::block::BlockKind;
+use crate::memory::block::BlockPriority;
+use crate::memory::block::BlockStatus;
 use codex_utils_absolute_path::AbsolutePathBuf;
 use sha1::Digest;
 use sha1::Sha1;
@@ -13,6 +16,7 @@ const MEMORY_LOG_FILENAME: &str = "memory.log.jsonl";
 const MEMORY_SNAPSHOT_FILENAME: &str = "snapshot.json";
 #[allow(dead_code)]
 const SNAPSHOT_VERSION: u64 = 1;
+const MEMORY_SOFT_CAP_RATIO: f64 = 0.8;
 
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct MemorySnapshot {
@@ -107,15 +111,68 @@ impl BlockStore {
 
     #[allow(dead_code)]
     pub async fn snapshot(&self) -> io::Result<()> {
-        let snapshot = MemorySnapshot {
-            version: SNAPSHOT_VERSION,
-            blocks: self.blocks.values().cloned().collect(),
+        let blocks = sorted_blocks(self.blocks.values());
+        write_snapshot(&self.snapshot_path, &blocks).await
+    }
+
+    pub async fn enforce_budget(&mut self, max_bytes: usize) -> io::Result<Vec<String>> {
+        let Some(max_bytes) = u64::try_from(max_bytes).ok().filter(|max| *max > 0) else {
+            return Ok(Vec::new());
         };
-        let data = serde_json::to_vec_pretty(&snapshot).map_err(to_io_error)?;
-        let tmp_path = self.snapshot_path.with_extension("tmp");
-        tokio::fs::write(&tmp_path, data).await?;
-        tokio::fs::rename(&tmp_path, &self.snapshot_path).await?;
-        Ok(())
+
+        let current_bytes = archive_bytes(&self.log_path, &self.snapshot_path).await?;
+        if current_bytes <= max_bytes {
+            return Ok(Vec::new());
+        }
+
+        let target_bytes = soft_cap_bytes(max_bytes);
+        let mut retained = sorted_blocks(self.blocks.values());
+        let mut snapshot = snapshot_bytes(&retained)?;
+        let mut removed = Vec::new();
+
+        if u64::try_from(snapshot.len()).unwrap_or(u64::MAX) > target_bytes {
+            let mut candidates = retained
+                .iter()
+                .filter(|block| block.priority != BlockPriority::Pinned)
+                .cloned()
+                .collect::<Vec<_>>();
+            candidates.sort_by_key(eviction_key);
+
+            for candidate in candidates {
+                if u64::try_from(snapshot.len()).unwrap_or(u64::MAX) <= target_bytes {
+                    break;
+                }
+                retained.retain(|block| block.id != candidate.id);
+                removed.push(candidate.id);
+                snapshot = snapshot_bytes(&retained)?;
+            }
+        }
+
+        self.blocks = retained
+            .iter()
+            .cloned()
+            .map(|block| (block.id.clone(), block))
+            .collect();
+        write_snapshot(&self.snapshot_path, &retained).await?;
+        truncate_log(&self.log_path).await?;
+
+        let mut warnings = Vec::new();
+        if !removed.is_empty() {
+            warnings.push(format!(
+                "evicted {count} blocks to honor memory.max_bytes: {ids}",
+                count = removed.len(),
+                ids = removed.join(", ")
+            ));
+        }
+        if u64::try_from(snapshot.len()).unwrap_or(u64::MAX) > max_bytes {
+            warnings.push(format!(
+                "memory snapshot still exceeds max_bytes ({size} > {max}); pinned blocks retained",
+                size = snapshot.len(),
+                max = max_bytes
+            ));
+        }
+
+        Ok(warnings)
     }
 
     #[allow(dead_code)]
@@ -176,6 +233,107 @@ fn to_io_error(err: impl std::fmt::Display) -> io::Error {
     io::Error::other(format!("{err}"))
 }
 
+fn sorted_blocks<'a>(blocks: impl Iterator<Item = &'a Block>) -> Vec<Block> {
+    let mut blocks = blocks.cloned().collect::<Vec<_>>();
+    blocks.sort_by(|a, b| a.id.cmp(&b.id));
+    blocks
+}
+
+async fn write_snapshot(path: &Path, blocks: &[Block]) -> io::Result<()> {
+    let snapshot = MemorySnapshot {
+        version: SNAPSHOT_VERSION,
+        blocks: blocks.to_vec(),
+    };
+    let data = serde_json::to_vec_pretty(&snapshot).map_err(to_io_error)?;
+    let tmp_path = path.with_extension("tmp");
+    tokio::fs::write(&tmp_path, data).await?;
+    tokio::fs::rename(&tmp_path, path).await?;
+    Ok(())
+}
+
+fn snapshot_bytes(blocks: &[Block]) -> io::Result<Vec<u8>> {
+    let snapshot = MemorySnapshot {
+        version: SNAPSHOT_VERSION,
+        blocks: blocks.to_vec(),
+    };
+    serde_json::to_vec_pretty(&snapshot).map_err(to_io_error)
+}
+
+async fn archive_bytes(log_path: &Path, snapshot_path: &Path) -> io::Result<u64> {
+    let log_bytes = file_len(log_path).await?;
+    let snapshot_bytes = file_len(snapshot_path).await?;
+    Ok(log_bytes.saturating_add(snapshot_bytes))
+}
+
+async fn file_len(path: &Path) -> io::Result<u64> {
+    match tokio::fs::metadata(path).await {
+        Ok(metadata) => Ok(metadata.len()),
+        Err(err) if err.kind() == io::ErrorKind::NotFound => Ok(0),
+        Err(err) => Err(err),
+    }
+}
+
+async fn truncate_log(path: &Path) -> io::Result<()> {
+    let file = tokio::fs::OpenOptions::new()
+        .create(true)
+        .write(true)
+        .truncate(true)
+        .open(path)
+        .await?;
+    file.set_len(0).await?;
+    Ok(())
+}
+
+fn soft_cap_bytes(max_bytes: u64) -> u64 {
+    ((max_bytes as f64) * MEMORY_SOFT_CAP_RATIO)
+        .floor()
+        .clamp(1.0, max_bytes as f64) as u64
+}
+
+fn eviction_key(block: &Block) -> (u8, u8, u8, u64, String) {
+    (
+        status_rank(block.status),
+        priority_rank(block.priority),
+        kind_rank(block.kind),
+        block.updated_at,
+        block.id.clone(),
+    )
+}
+
+fn status_rank(status: BlockStatus) -> u8 {
+    match status {
+        BlockStatus::Stale => 0,
+        BlockStatus::Stashed => 1,
+        BlockStatus::Active => 2,
+    }
+}
+
+fn priority_rank(priority: BlockPriority) -> u8 {
+    match priority {
+        BlockPriority::Low => 0,
+        BlockPriority::Normal => 1,
+        BlockPriority::High => 2,
+        BlockPriority::Pinned => 3,
+    }
+}
+
+fn kind_rank(kind: BlockKind) -> u8 {
+    match kind {
+        BlockKind::ToolSlice => 0,
+        BlockKind::RepoMap => 1,
+        BlockKind::FileSummary => 2,
+        BlockKind::OpenQuestions => 3,
+        BlockKind::Facts => 4,
+        BlockKind::Decisions => 5,
+        BlockKind::Plan => 6,
+        BlockKind::Constraints => 7,
+        BlockKind::Goals => 8,
+        BlockKind::Focus => 9,
+        BlockKind::Toolbox => 10,
+        BlockKind::Workspace => 11,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -231,6 +389,38 @@ mod tests {
         drop(store);
         let store = BlockStore::open(&root, &cwd).await?;
         assert_eq!(store.get("block-2"), Some(&block));
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn block_store_enforces_budget_eviction_order() -> io::Result<()> {
+        let temp = TempDir::new()?;
+        let root = AbsolutePathBuf::try_from(temp.path().join("memory"))?;
+        let cwd = temp.path().join("project");
+        tokio::fs::create_dir_all(&cwd).await?;
+
+        let mut store = BlockStore::open(&root, &cwd).await?;
+        let mut pinned = Block::new("pinned", BlockKind::Goals, "goal");
+        pinned.priority = BlockPriority::Pinned;
+        pinned.body_full = Some("pinned".to_string());
+
+        let mut stashed = Block::new("stashed", BlockKind::ToolSlice, "slice");
+        stashed.status = BlockStatus::Stashed;
+        stashed.body_full = Some("x".repeat(4096));
+
+        let mut active = Block::new("active", BlockKind::Facts, "fact");
+        active.body_full = Some("y".repeat(4096));
+
+        store.upsert(pinned).await?;
+        store.upsert(stashed).await?;
+        store.upsert(active).await?;
+
+        let warnings = store.enforce_budget(1024).await?;
+        assert!(store.get("pinned").is_some());
+        assert!(store.get("stashed").is_none());
+        assert!(warnings.iter().any(|w| w.contains("evicted")));
+        assert_eq!(file_len(&store.log_path).await?, 0);
 
         Ok(())
     }

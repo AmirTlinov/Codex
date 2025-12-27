@@ -16,6 +16,14 @@ Memory is stored per project under `memory.root_dir` (default: `$CODEX_HOME/memo
 - `memory.log.jsonl` — append‑only event log (block upserts / deletes)
 - `snapshot.json` — periodic snapshot for fast load
 
+### Archive budget
+
+When `memory.max_bytes` is set (default 50 MiB), the archive is compacted to a soft cap
+(~80% of the limit) by writing a fresh snapshot and truncating the log. If the snapshot
+still exceeds the budget, non‑pinned blocks are evicted deterministically (stale →
+stashed → active, low priority first, oldest updated_at first). Pinned blocks are never
+evicted; a warning is emitted if they alone exceed the limit.
+
 ### Context compilation
 
 The compiler:

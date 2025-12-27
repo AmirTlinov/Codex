@@ -1,8 +1,14 @@
 use std::collections::HashMap;
 use std::collections::hash_map::Entry;
+use std::fs::OpenOptions;
+use std::io::Write;
+use std::path::Path;
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::OnceLock;
 use std::time::Duration;
+use std::time::SystemTime;
+use std::time::UNIX_EPOCH;
 
 use async_trait::async_trait;
 use serde::Deserialize;
@@ -43,6 +49,10 @@ struct TestSyncArgs {
     sleep_after_ms: Option<u64>,
     #[serde(default)]
     barrier: Option<BarrierArgs>,
+    #[serde(default)]
+    record_path: Option<String>,
+    #[serde(default)]
+    record_label: Option<String>,
 }
 
 fn default_timeout_ms() -> u64 {
@@ -60,6 +70,7 @@ impl ToolHandler for TestSyncHandler {
     }
 
     async fn handle(&self, invocation: ToolInvocation) -> Result<ToolOutput, FunctionCallError> {
+        let call_id = invocation.call_id.clone();
         let ToolInvocation { payload, .. } = invocation;
 
         let arguments = match payload {
@@ -76,6 +87,7 @@ impl ToolHandler for TestSyncHandler {
                 "failed to parse function arguments: {err:?}"
             ))
         })?;
+        let _record = RecordGuard::start(&args, &call_id)?;
 
         if let Some(delay) = args.sleep_before_ms
             && delay > 0
@@ -99,6 +111,54 @@ impl ToolHandler for TestSyncHandler {
             success: Some(true),
         })
     }
+}
+
+struct RecordGuard {
+    path: Option<PathBuf>,
+    label: String,
+}
+
+impl RecordGuard {
+    fn start(args: &TestSyncArgs, call_id: &str) -> Result<Self, FunctionCallError> {
+        let path = args.record_path.as_ref().map(PathBuf::from);
+        let label = args
+            .record_label
+            .clone()
+            .unwrap_or_else(|| call_id.to_string());
+        let guard = Self { path, label };
+        guard.record("start")?;
+        Ok(guard)
+    }
+
+    fn record(&self, phase: &str) -> Result<(), FunctionCallError> {
+        let Some(path) = self.path.as_ref() else {
+            return Ok(());
+        };
+        append_record(path, &self.label, phase).map_err(|err| {
+            FunctionCallError::RespondToModel(format!(
+                "failed to write test_sync_tool record for {}: {err}",
+                path.display()
+            ))
+        })
+    }
+}
+
+impl Drop for RecordGuard {
+    fn drop(&mut self) {
+        if let Some(path) = self.path.as_ref() {
+            let _ = append_record(path, &self.label, "end");
+        }
+    }
+}
+
+fn append_record(path: &Path, label: &str, phase: &str) -> std::io::Result<()> {
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis();
+    let mut file = OpenOptions::new().create(true).append(true).open(path)?;
+    writeln!(file, "{label} {phase} {now}")?;
+    Ok(())
 }
 
 async fn wait_on_barrier(args: BarrierArgs) -> Result<(), FunctionCallError> {
