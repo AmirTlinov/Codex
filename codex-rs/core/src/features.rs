@@ -318,7 +318,7 @@ impl FeatureSpec {
             Stage::Experimental => match self.id {
                 Feature::LegoMemory => Some(FeatureMenuEntry {
                     name: "Lego memory",
-                    description: "Enable block-based context memory (lego memory).",
+                    description: "Enable block-based context memory with the workbench selector.",
                     stage: FeatureMenuStage::Experimental,
                 }),
                 _ => None,

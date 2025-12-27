@@ -29,9 +29,21 @@ evicted; a warning is emitted if they alone exceed the limit.
 The compiler:
 
 - includes pinned/active blocks (stashed blocks are skipped unless pinned)
+- applies a deterministic workbench selection to keep only the most relevant blocks
 - expands one hop across block links (bounded) to surface related archived blocks
 - applies block‑level degradation to fit `memory.working_set_token_budget`
 - injects memory as an overlay message in the prompt (not recorded in history)
+
+### Context workbench (live selection)
+
+When lego memory is enabled, the workbench keeps a small working set per turn:
+
+- `focus` is updated from the latest user message (pinned)
+- `plan` is updated when the `update_plan` tool emits a plan update
+- selection is deterministic: pinned + focus/goals/constraints/plan + top‑K relevant blocks
+
+The workbench never rewrites the full prompt history; it only curates which blocks enter the
+memory overlay.
 
 ### Staleness
 

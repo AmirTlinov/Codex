@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 use std::collections::HashSet;
 use std::fmt::Debug;
+use std::io;
 use std::path::Path;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -24,6 +25,7 @@ use crate::memory::BlockPriority;
 use crate::memory::BlockStatus;
 use crate::memory::BlockStore;
 use crate::memory::ContextCompiler;
+use crate::memory::MemoryWorkbench;
 use crate::memory_context::memory_injection_index;
 use crate::models_manager::manager::ModelsManager;
 use crate::models_manager::model_family::ModelFamily;
@@ -41,6 +43,7 @@ use async_channel::Sender;
 use codex_protocol::ConversationId;
 use codex_protocol::approvals::ExecPolicyAmendment;
 use codex_protocol::items::TurnItem;
+use codex_protocol::plan_tool::UpdatePlanArgs;
 use codex_protocol::protocol::FileChange;
 use codex_protocol::protocol::HasLegacyEvent;
 use codex_protocol::protocol::ItemCompletedEvent;
@@ -977,6 +980,14 @@ impl Session {
             msg,
         };
         self.send_event_raw(event).await;
+
+        if self.enabled(Feature::LegoMemory) {
+            if let EventMsg::PlanUpdate(args) = &legacy_source {
+                if let Err(err) = sync_plan_to_memory(turn_context, args).await {
+                    warn!("memory workbench plan sync failed: {err}");
+                }
+            }
+        }
 
         let show_raw_agent_reasoning = self.show_raw_agent_reasoning();
         for legacy in legacy_source.as_legacy_events(show_raw_agent_reasoning) {
@@ -2383,13 +2394,29 @@ async fn build_memory_context_item(
         return None;
     }
 
-    let store = match BlockStore::open(&memory_config.root_dir, &turn_context.cwd).await {
+    let mut store = match BlockStore::open(&memory_config.root_dir, &turn_context.cwd).await {
         Ok(store) => store,
         Err(err) => {
             warn!("memory store open failed: {err}");
             return None;
         }
     };
+    let workbench = MemoryWorkbench::default();
+    let mut history = sess.clone_history().await;
+    let history_items = history.get_history();
+    let focus_updated = match workbench
+        .sync_focus(&mut store, &turn_context.sub_id, &history_items)
+        .await
+    {
+        Ok(updated) => updated,
+        Err(err) => {
+            warn!("memory workbench focus sync failed: {err}");
+            false
+        }
+    };
+    if focus_updated && let Err(err) = store.enforce_budget(memory_config.max_bytes).await {
+        warn!("memory budget enforcement failed: {err}");
+    }
     let tool_roots = tool_roots(turn_context);
     let mut extra_blocks = Vec::new();
     extra_blocks.push(build_workspace_block(turn_context, &store, &tool_roots));
@@ -2401,8 +2428,10 @@ async fn build_memory_context_item(
         memory_config.working_set_token_budget,
         memory_config.staleness,
     );
+    let query = latest_user_query(&history_items);
+    let selection = Some(workbench.select(&store, &query));
     let context = match compiler
-        .compile(&store, &turn_context.cwd, extra_blocks)
+        .compile(&store, &turn_context.cwd, extra_blocks, selection.as_ref())
         .await
     {
         Ok(context) => context,
@@ -2412,6 +2441,42 @@ async fn build_memory_context_item(
         }
     };
     Some(context.into())
+}
+
+fn latest_user_query(items: &[ResponseItem]) -> String {
+    items
+        .iter()
+        .rev()
+        .filter_map(parse_turn_item)
+        .find_map(|item| match item {
+            TurnItem::UserMessage(user_message) => {
+                let message = user_message.message();
+                let trimmed = message.trim();
+                if trimmed.is_empty() {
+                    None
+                } else {
+                    Some(trimmed.to_string())
+                }
+            }
+            _ => None,
+        })
+        .unwrap_or_default()
+}
+
+async fn sync_plan_to_memory(turn_context: &TurnContext, args: &UpdatePlanArgs) -> io::Result<()> {
+    let memory_config = &turn_context.memory_config;
+    if memory_config.working_set_token_budget == 0 {
+        return Ok(());
+    }
+    let mut store = BlockStore::open(&memory_config.root_dir, &turn_context.cwd).await?;
+    let workbench = MemoryWorkbench::default();
+    let updated = workbench
+        .apply_plan_update(&mut store, &turn_context.sub_id, args)
+        .await?;
+    if updated {
+        store.enforce_budget(memory_config.max_bytes).await?;
+    }
+    Ok(())
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]

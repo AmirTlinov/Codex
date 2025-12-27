@@ -1,4 +1,5 @@
 use crate::config::types::MemoryStalenessMode;
+use crate::memory::ContextSelection;
 use crate::memory::block::Block;
 use crate::memory::block::BlockPriority;
 use crate::memory::block::BlockStatus;
@@ -47,8 +48,9 @@ impl ContextCompiler {
         store: &BlockStore,
         cwd: &Path,
         extra_blocks: Vec<Block>,
+        selection: Option<&ContextSelection>,
     ) -> io::Result<MemoryContext> {
-        let mut entries = collect_entries(store, extra_blocks);
+        let mut entries = collect_entries(store, extra_blocks, selection);
         entries.sort_by(compare_entries);
 
         let mut remaining = self.token_budget;
@@ -97,7 +99,11 @@ impl ContextCompiler {
     }
 }
 
-fn collect_entries(store: &BlockStore, extra_blocks: Vec<Block>) -> Vec<BlockEntry> {
+fn collect_entries(
+    store: &BlockStore,
+    extra_blocks: Vec<Block>,
+    selection: Option<&ContextSelection>,
+) -> Vec<BlockEntry> {
     let mut store_blocks = HashMap::new();
     for block in store.blocks() {
         store_blocks.insert(block.id.clone(), block.clone());
@@ -106,8 +112,24 @@ fn collect_entries(store: &BlockStore, extra_blocks: Vec<Block>) -> Vec<BlockEnt
     let mut selected = HashSet::new();
     let mut entries = Vec::new();
     for block in store_blocks.values() {
-        if block.status == BlockStatus::Stashed && block.priority != BlockPriority::Pinned {
-            continue;
+        let selected_by_filter = selection.map(|selection| selection.contains(&block.id));
+        match selected_by_filter {
+            Some(selected_by_filter) => {
+                if !selected_by_filter && block.priority != BlockPriority::Pinned {
+                    continue;
+                }
+                if block.status == BlockStatus::Stashed
+                    && block.priority != BlockPriority::Pinned
+                    && !selected_by_filter
+                {
+                    continue;
+                }
+            }
+            None => {
+                if block.status == BlockStatus::Stashed && block.priority != BlockPriority::Pinned {
+                    continue;
+                }
+            }
         }
         selected.insert(block.id.clone());
         entries.push(BlockEntry {
@@ -345,7 +367,7 @@ mod tests {
         store.upsert(pinned).await?;
 
         let compiler = ContextCompiler::new(1024, MemoryStalenessMode::MtimeSize);
-        let context = compiler.compile(&store, &cwd, Vec::new()).await?;
+        let context = compiler.compile(&store, &cwd, Vec::new(), None).await?;
         assert_eq!(
             context.blocks.first().map(|b| b.id.as_str()),
             Some("pinned")
@@ -370,7 +392,7 @@ mod tests {
 
         let summary_tokens = estimate_tokens("decision", "summary");
         let compiler = ContextCompiler::new(summary_tokens, MemoryStalenessMode::MtimeSize);
-        let context = compiler.compile(&store, &cwd, Vec::new()).await?;
+        let context = compiler.compile(&store, &cwd, Vec::new(), None).await?;
         let first = context.blocks.first().expect("compiled block");
         assert_eq!(first.representation, BlockRepresentation::Summary);
 
@@ -399,7 +421,7 @@ mod tests {
         store.upsert(archived).await?;
 
         let compiler = ContextCompiler::new(1024, MemoryStalenessMode::MtimeSize);
-        let context = compiler.compile(&store, &cwd, Vec::new()).await?;
+        let context = compiler.compile(&store, &cwd, Vec::new(), None).await?;
         let archived_block = context
             .blocks
             .iter()
