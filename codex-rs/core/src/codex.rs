@@ -982,12 +982,11 @@ impl Session {
         };
         self.send_event_raw(event).await;
 
-        if self.enabled(Feature::LegoMemory) {
-            if let EventMsg::PlanUpdate(args) = &legacy_source {
-                if let Err(err) = sync_plan_to_memory(turn_context, args).await {
-                    warn!("memory workbench plan sync failed: {err}");
-                }
-            }
+        if self.enabled(Feature::LegoMemory)
+            && let EventMsg::PlanUpdate(args) = &legacy_source
+            && let Err(err) = sync_plan_to_memory(turn_context, args).await
+        {
+            warn!("memory workbench plan sync failed: {err}");
         }
 
         let show_raw_agent_reasoning = self.show_raw_agent_reasoning();
@@ -1659,6 +1658,9 @@ async fn submission_loop(sess: Arc<Session>, config: Arc<Config>, rx_sub: Receiv
             Op::ListSkills { cwds, force_reload } => {
                 handlers::list_skills(&sess, sub.id.clone(), cwds, force_reload).await;
             }
+            Op::GetWorkbenchContextSnapshot => {
+                handlers::get_workbench_context_snapshot(&sess, sub.id.clone()).await;
+            }
             Op::Undo => {
                 handlers::undo(&sess, sub.id.clone()).await;
             }
@@ -2009,6 +2011,17 @@ mod handlers {
         let event = Event {
             id: sub_id,
             msg: EventMsg::ListSkillsResponse(ListSkillsResponseEvent { skills }),
+        };
+        sess.send_event_raw(event).await;
+    }
+
+    pub async fn get_workbench_context_snapshot(sess: &Session, sub_id: String) {
+        let turn_context = sess.new_default_turn().await;
+        let snapshot: crate::protocol::WorkbenchContextSnapshotEvent =
+            super::build_workbench_context_snapshot(sess, turn_context.as_ref()).await;
+        let event = Event {
+            id: sub_id,
+            msg: EventMsg::WorkbenchContextSnapshot(snapshot),
         };
         sess.send_event_raw(event).await;
     }
@@ -2445,6 +2458,298 @@ async fn build_memory_context_item(
         }
     };
     Some(context.into())
+}
+
+async fn build_workbench_context_snapshot(
+    sess: &Session,
+    turn_context: &TurnContext,
+) -> crate::protocol::WorkbenchContextSnapshotEvent {
+    const MAX_PREVIEW_ITEMS: usize = 64;
+
+    let history_items = sess.clone_history().await.get_history_for_prompt();
+    let report = crate::context_manager::workbench_transcript_report(&history_items, 0);
+
+    let features = crate::protocol::WorkbenchContextSnapshotFeatures {
+        lego_memory: sess.enabled(Feature::LegoMemory),
+        workbench_transcript: sess.enabled(Feature::WorkbenchTranscript),
+    };
+
+    let mut effective_items = history_items.clone();
+    let mut trimmed_items = 0usize;
+    if sess.enabled(Feature::WorkbenchTranscript) {
+        effective_items = trim_history_for_workbench(effective_items, 0);
+        trimmed_items = report.total_items.saturating_sub(effective_items.len());
+    }
+
+    let (memory_snapshot, memory_item_opt) =
+        build_memory_snapshot(sess, turn_context, &history_items).await;
+
+    if let Some(memory_item) = memory_item_opt {
+        let insert_at = memory_injection_index(&effective_items);
+        effective_items.insert(insert_at, memory_item);
+    }
+
+    let kept_items_truncated = effective_items.len() > MAX_PREVIEW_ITEMS;
+    let kept_items = effective_items
+        .iter()
+        .take(MAX_PREVIEW_ITEMS)
+        .enumerate()
+        .map(|(idx, item)| workbench_item_preview(idx, item))
+        .collect();
+
+    let (tail_user_messages_limit, tail_start_index) = if sess.enabled(Feature::WorkbenchTranscript)
+    {
+        (report.tail_user_messages_limit, report.tail_start_index)
+    } else {
+        (0, 0)
+    };
+
+    crate::protocol::WorkbenchContextSnapshotEvent {
+        features,
+        transcript: crate::protocol::WorkbenchTranscriptSnapshot {
+            total_items: report.total_items,
+            total_user_messages: report.total_user_messages,
+            tail_user_messages_limit,
+            tail_start_index,
+            effective_items_total: effective_items.len(),
+            kept_items,
+            kept_items_truncated,
+            pinned: crate::protocol::WorkbenchPinnedSnapshot {
+                developer_instructions: report.pinned.developer_instructions,
+                user_instructions: report.pinned.user_instructions,
+                skill_instructions: report.pinned.skill_instructions,
+                environment_context: report.pinned.environment_context,
+            },
+            trimmed_items,
+        },
+        memory: memory_snapshot,
+    }
+}
+
+async fn build_memory_snapshot(
+    sess: &Session,
+    turn_context: &TurnContext,
+    history_items: &[ResponseItem],
+) -> (
+    crate::protocol::WorkbenchMemorySnapshot,
+    Option<ResponseItem>,
+) {
+    let memory_config = &turn_context.memory_config;
+    let staleness_mode = match memory_config.staleness {
+        crate::config::types::MemoryStalenessMode::GitOid => "git-oid",
+        crate::config::types::MemoryStalenessMode::MtimeSize => "mtime-size",
+    }
+    .to_string();
+
+    let mut snapshot = crate::protocol::WorkbenchMemorySnapshot {
+        enabled: false,
+        root_dir: memory_config.root_dir.display().to_string(),
+        project_id: String::new(),
+        working_set_token_budget: memory_config.working_set_token_budget,
+        staleness_mode,
+        blocks_total: 0,
+        blocks_included: Vec::new(),
+        error: String::new(),
+    };
+
+    if !sess.enabled(Feature::LegoMemory) || memory_config.working_set_token_budget == 0 {
+        return (snapshot, None);
+    }
+    snapshot.enabled = true;
+
+    let store = match BlockStore::open(&memory_config.root_dir, &turn_context.cwd).await {
+        Ok(store) => store,
+        Err(err) => {
+            snapshot.error = err.to_string();
+            return (snapshot, None);
+        }
+    };
+
+    snapshot.project_id = store.project_id().to_string();
+    snapshot.blocks_total = store.blocks().count();
+
+    let tool_roots = tool_roots(turn_context);
+    let mut extra_blocks = Vec::new();
+    extra_blocks.push(build_workspace_block(turn_context, &store, &tool_roots));
+    if let Some(tool_block) = build_tool_catalog_block(sess, turn_context, &tool_roots).await {
+        extra_blocks.push(tool_block);
+    }
+
+    let compiler = ContextCompiler::new(
+        memory_config.working_set_token_budget,
+        memory_config.staleness,
+    );
+    let workbench = MemoryWorkbench::default();
+    let query = latest_user_query(history_items);
+    let selection = workbench.select(&store, &query);
+
+    let ctx = match compiler
+        .compile(&store, &turn_context.cwd, extra_blocks, Some(&selection))
+        .await
+    {
+        Ok(ctx) => ctx,
+        Err(err) => {
+            snapshot.error = err.to_string();
+            return (snapshot, None);
+        }
+    };
+
+    snapshot.blocks_included = ctx
+        .blocks
+        .iter()
+        .map(|block| crate::protocol::WorkbenchMemoryBlockSnapshot {
+            id: block.id.clone(),
+            kind: memory_kind_name(block.kind).to_string(),
+            status: memory_status_name(block.status).to_string(),
+            priority: memory_priority_name(block.priority).to_string(),
+            representation: memory_representation_name(block.representation).to_string(),
+        })
+        .collect();
+
+    let item: ResponseItem = ctx.into();
+    (snapshot, Some(item))
+}
+
+fn workbench_item_preview(
+    index: usize,
+    item: &ResponseItem,
+) -> crate::protocol::WorkbenchContextItemPreview {
+    let (role, kind, preview) = match item {
+        ResponseItem::Message { role, content, .. } => {
+            let kind = match role.as_str() {
+                "user" => crate::protocol::WorkbenchContextItemKind::UserMessage,
+                "assistant" => crate::protocol::WorkbenchContextItemKind::AssistantMessage,
+                _ => crate::protocol::WorkbenchContextItemKind::Other,
+            };
+            (role.clone(), kind, content_preview(content))
+        }
+        ResponseItem::FunctionCall { name, .. } => (
+            "tool".to_string(),
+            crate::protocol::WorkbenchContextItemKind::ToolCall,
+            truncate_preview(format!("call: {name}").as_str()),
+        ),
+        ResponseItem::CustomToolCall { name, .. } => (
+            "tool".to_string(),
+            crate::protocol::WorkbenchContextItemKind::ToolCall,
+            truncate_preview(format!("call: {name}").as_str()),
+        ),
+        ResponseItem::LocalShellCall { status, .. } => (
+            "tool".to_string(),
+            crate::protocol::WorkbenchContextItemKind::ToolCall,
+            truncate_preview(format!("local_shell: {status:?}").as_str()),
+        ),
+        ResponseItem::WebSearchCall { .. } => (
+            "tool".to_string(),
+            crate::protocol::WorkbenchContextItemKind::ToolCall,
+            "web_search_call".to_string(),
+        ),
+        ResponseItem::FunctionCallOutput { call_id, .. }
+        | ResponseItem::CustomToolCallOutput { call_id, .. } => (
+            "tool".to_string(),
+            crate::protocol::WorkbenchContextItemKind::ToolOutput,
+            truncate_preview(format!("output: {call_id}").as_str()),
+        ),
+        ResponseItem::Reasoning { .. } => (
+            "assistant".to_string(),
+            crate::protocol::WorkbenchContextItemKind::Other,
+            "reasoning".to_string(),
+        ),
+        ResponseItem::GhostSnapshot { .. } => (
+            "assistant".to_string(),
+            crate::protocol::WorkbenchContextItemKind::Other,
+            "ghost_snapshot".to_string(),
+        ),
+        ResponseItem::Compaction { .. } => (
+            "assistant".to_string(),
+            crate::protocol::WorkbenchContextItemKind::Other,
+            "compaction".to_string(),
+        ),
+        ResponseItem::Other => (
+            "unknown".to_string(),
+            crate::protocol::WorkbenchContextItemKind::Other,
+            "other".to_string(),
+        ),
+    };
+
+    crate::protocol::WorkbenchContextItemPreview {
+        index,
+        role,
+        kind,
+        preview,
+    }
+}
+
+fn content_preview(content: &[ContentItem]) -> String {
+    for item in content {
+        match item {
+            ContentItem::InputText { text } | ContentItem::OutputText { text } => {
+                let trimmed = text.trim();
+                if !trimmed.is_empty() {
+                    return truncate_preview(trimmed);
+                }
+            }
+            ContentItem::InputImage { image_url } => {
+                return truncate_preview(format!("[image] {image_url}").as_str());
+            }
+        }
+    }
+    String::new()
+}
+
+fn truncate_preview(text: &str) -> String {
+    const MAX_CHARS: usize = 120;
+    let mut out = String::new();
+    for ch in text.chars().take(MAX_CHARS) {
+        out.push(ch);
+    }
+    if text.chars().count() > MAX_CHARS {
+        out.push('…');
+    }
+    out
+}
+
+fn memory_kind_name(kind: BlockKind) -> &'static str {
+    match kind {
+        BlockKind::Focus => "focus",
+        BlockKind::Goals => "goals",
+        BlockKind::Constraints => "constraints",
+        BlockKind::Decisions => "decisions",
+        BlockKind::Facts => "facts",
+        BlockKind::OpenQuestions => "open_questions",
+        BlockKind::FileSummary => "file_summary",
+        BlockKind::RepoMap => "repo_map",
+        BlockKind::Workspace => "workspace",
+        BlockKind::Toolbox => "toolbox",
+        BlockKind::ToolSlice => "tool_slice",
+        BlockKind::Plan => "plan",
+    }
+}
+
+fn memory_status_name(status: BlockStatus) -> &'static str {
+    match status {
+        BlockStatus::Active => "active",
+        BlockStatus::Stashed => "stashed",
+        BlockStatus::Stale => "stale",
+    }
+}
+
+fn memory_priority_name(priority: BlockPriority) -> &'static str {
+    match priority {
+        BlockPriority::Pinned => "pinned",
+        BlockPriority::High => "high",
+        BlockPriority::Normal => "normal",
+        BlockPriority::Low => "low",
+    }
+}
+
+fn memory_representation_name(
+    representation: crate::memory_context::BlockRepresentation,
+) -> &'static str {
+    match representation {
+        crate::memory_context::BlockRepresentation::Full => "full",
+        crate::memory_context::BlockRepresentation::Summary => "summary",
+        crate::memory_context::BlockRepresentation::Label => "label",
+    }
 }
 
 fn latest_user_query(items: &[ResponseItem]) -> String {

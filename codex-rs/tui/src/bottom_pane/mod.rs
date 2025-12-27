@@ -25,6 +25,7 @@ mod bottom_pane_view;
 mod chat_composer;
 mod chat_composer_history;
 mod command_popup;
+mod context_debug_view;
 pub mod custom_prompt_view;
 mod experimental_features_view;
 mod file_search_popup;
@@ -56,6 +57,9 @@ pub(crate) use chat_composer::InputResult;
 use codex_protocol::custom_prompts::CustomPrompt;
 
 use crate::status_indicator_widget::StatusIndicatorWidget;
+pub(crate) use context_debug_view::ContextDebugSharedState;
+pub(crate) use context_debug_view::ContextDebugState;
+pub(crate) use context_debug_view::ContextDebugView;
 pub(crate) use experimental_features_view::ExperimentalFeaturesView;
 pub(crate) use experimental_features_view::FeatureMenuItem;
 pub(crate) use list_selection_view::SelectionAction;

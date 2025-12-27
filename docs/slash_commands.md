@@ -22,6 +22,7 @@ Control Codex’s behavior during an interactive session with slash commands.
 | `/diff`         | show git diff (including untracked files)                                  |
 | `/mention`      | mention a file                                                             |
 | `/status`       | show current session configuration and token usage                         |
+| `/context-debug` | show what context is sent to the model (workbench diagnostics)            |
 | `/mcp`          | list configured MCP tools                                                  |
 | `/experimental` | open the experimental menu to enable beta and experimental features        |
 | `/skills`       | browse and insert skills (experimental; see [docs/skills.md](./skills.md)) |

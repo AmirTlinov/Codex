@@ -182,10 +182,10 @@ fn latest_user_text(items: &[ResponseItem]) -> Option<String> {
 fn user_message_text(message: &codex_protocol::items::UserMessageItem) -> Option<String> {
     let mut chunks = Vec::new();
     for entry in &message.content {
-        if let UserInput::Text { text } = entry {
-            if !text.trim().is_empty() {
-                chunks.push(text.trim().to_string());
-            }
+        if let UserInput::Text { text } = entry
+            && !text.trim().is_empty()
+        {
+            chunks.push(text.trim().to_string());
         }
     }
     if chunks.is_empty() {
@@ -215,15 +215,11 @@ fn extract_terms(query: &str) -> Vec<String> {
 
 fn score_block(block: &Block, terms: &[String]) -> i64 {
     let base_score = priority_weight(block.priority) + kind_weight(block.kind);
-    if block.status == BlockStatus::Stashed {
-        if terms.is_empty() {
-            return base_score.saturating_sub(20);
-        }
+    if block.status == BlockStatus::Stashed && terms.is_empty() {
+        return base_score.saturating_sub(20);
     }
-    if block.status == BlockStatus::Stale {
-        if terms.is_empty() {
-            return base_score.saturating_sub(10);
-        }
+    if block.status == BlockStatus::Stale && terms.is_empty() {
+        return base_score.saturating_sub(10);
     }
     if terms.is_empty() {
         return base_score;

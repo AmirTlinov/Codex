@@ -63,6 +63,14 @@ When enabled, Codex compiles a focused prompt transcript for each model call:
 
 This does not delete the local history; it only changes what is sent to the model.
 
+### Diagnostics
+
+Use `/context-debug` in the TUI to inspect what is sent to the model:
+
+- enabled feature flags (lego memory / workbench transcript)
+- compiled transcript preview (pinned prefix + tail)
+- compiled memory overlay (selected blocks + budgets + staleness)
+
 ### Staleness
 
 File‑backed blocks carry fingerprints. When the source changes, blocks are marked stale and only emitted as labels until refreshed.

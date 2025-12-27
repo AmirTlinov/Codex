@@ -30,6 +30,8 @@ result
 # cli tools
 CLAUDE.md
 .claude/
+.branchmind/
+.last
 AGENTS.override.md
 .apply_task_projects.yaml
 

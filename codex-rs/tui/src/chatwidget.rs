@@ -369,6 +369,7 @@ pub(crate) struct ChatWidget {
     // Current session rollout path (if known)
     current_rollout_path: Option<PathBuf>,
     external_editor_state: ExternalEditorState,
+    context_debug_state: Option<crate::bottom_pane::ContextDebugSharedState>,
 }
 
 struct UserMessage {
@@ -1483,6 +1484,7 @@ impl ChatWidget {
             feedback,
             current_rollout_path: None,
             external_editor_state: ExternalEditorState::Closed,
+            context_debug_state: None,
         };
 
         widget.prefetch_rate_limits();
@@ -1570,6 +1572,7 @@ impl ChatWidget {
             feedback,
             current_rollout_path: None,
             external_editor_state: ExternalEditorState::Closed,
+            context_debug_state: None,
         };
 
         widget.prefetch_rate_limits();
@@ -1785,6 +1788,9 @@ impl ChatWidget {
             }
             SlashCommand::Status => {
                 self.add_status_output();
+            }
+            SlashCommand::ContextDebug => {
+                self.open_context_debug_popup();
             }
             SlashCommand::Ps => {
                 self.add_ps_output();
@@ -2088,6 +2094,7 @@ impl ChatWidget {
             EventMsg::McpListToolsResponse(ev) => self.on_list_mcp_tools(ev),
             EventMsg::ListCustomPromptsResponse(ev) => self.on_list_custom_prompts(ev),
             EventMsg::ListSkillsResponse(ev) => self.on_list_skills(ev),
+            EventMsg::WorkbenchContextSnapshot(ev) => self.on_workbench_context_snapshot(ev),
             EventMsg::SkillsUpdateAvailable => {
                 self.submit_op(Op::ListSkills {
                     cwds: Vec::new(),
@@ -2864,6 +2871,18 @@ impl ChatWidget {
         self.bottom_pane.show_view(Box::new(view));
     }
 
+    fn open_context_debug_popup(&mut self) {
+        let state = std::sync::Arc::new(std::sync::Mutex::new(
+            crate::bottom_pane::ContextDebugState::default(),
+        ));
+        self.context_debug_state = Some(state.clone());
+        let view = crate::bottom_pane::ContextDebugView::new(state);
+        self.bottom_pane.show_view(Box::new(view));
+
+        // Request a fresh snapshot from core.
+        self.submit_op(Op::GetWorkbenchContextSnapshot);
+    }
+
     fn approval_preset_actions(
         approval: AskForApproval,
         sandbox: SandboxPolicy,
@@ -3344,6 +3363,24 @@ impl ChatWidget {
         debug!("received {len} custom prompts");
         // Forward to bottom pane so the slash popup can show them now.
         self.bottom_pane.set_custom_prompts(ev.custom_prompts);
+    }
+
+    fn on_workbench_context_snapshot(
+        &mut self,
+        ev: codex_core::protocol::WorkbenchContextSnapshotEvent,
+    ) {
+        let updated = self
+            .context_debug_state
+            .as_ref()
+            .and_then(|state| state.lock().ok())
+            .map(|mut guard| {
+                guard.snapshot = Some(ev);
+            })
+            .is_some();
+
+        if updated {
+            self.request_redraw();
+        }
     }
 
     fn on_list_skills(&mut self, ev: ListSkillsResponseEvent) {

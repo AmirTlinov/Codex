@@ -227,6 +227,13 @@ pub enum Op {
 
     /// Request the list of available models.
     ListModels,
+
+    /// Request a snapshot of the effective context that would be sent to the
+    /// model (workbench diagnostics).
+    ///
+    /// This is intended for UI diagnostics and debugging only and must not
+    /// modify any persisted state.
+    GetWorkbenchContextSnapshot,
 }
 
 /// Determines the conditions under which the user is consulted to approve
@@ -645,6 +652,10 @@ pub enum EventMsg {
     /// List of skills available to the agent.
     ListSkillsResponse(ListSkillsResponseEvent),
 
+    /// Snapshot of the effective context that would be sent to the model when
+    /// workbench features are enabled. Intended for diagnostics only.
+    WorkbenchContextSnapshot(WorkbenchContextSnapshotEvent),
+
     /// Notification that skill data may have been updated and clients may want to reload.
     SkillsUpdateAvailable,
 
@@ -669,6 +680,80 @@ pub enum EventMsg {
     AgentMessageContentDelta(AgentMessageContentDeltaEvent),
     ReasoningContentDelta(ReasoningContentDeltaEvent),
     ReasoningRawContentDelta(ReasoningRawContentDeltaEvent),
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema, TS)]
+pub struct WorkbenchContextSnapshotEvent {
+    pub features: WorkbenchContextSnapshotFeatures,
+    pub transcript: WorkbenchTranscriptSnapshot,
+    pub memory: WorkbenchMemorySnapshot,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema, TS)]
+pub struct WorkbenchContextSnapshotFeatures {
+    pub lego_memory: bool,
+    pub workbench_transcript: bool,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema, TS)]
+pub struct WorkbenchTranscriptSnapshot {
+    pub total_items: usize,
+    pub total_user_messages: usize,
+    pub tail_user_messages_limit: usize,
+    pub tail_start_index: usize,
+    pub effective_items_total: usize,
+    pub kept_items: Vec<WorkbenchContextItemPreview>,
+    pub kept_items_truncated: bool,
+    pub pinned: WorkbenchPinnedSnapshot,
+    pub trimmed_items: usize,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema, TS)]
+pub struct WorkbenchPinnedSnapshot {
+    pub developer_instructions: bool,
+    pub user_instructions: bool,
+    pub skill_instructions: usize,
+    pub environment_context: bool,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema, TS)]
+pub struct WorkbenchContextItemPreview {
+    pub index: usize,
+    pub role: String,
+    pub kind: WorkbenchContextItemKind,
+    pub preview: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize, JsonSchema, TS)]
+#[serde(rename_all = "snake_case")]
+#[ts(rename_all = "snake_case")]
+pub enum WorkbenchContextItemKind {
+    UserMessage,
+    AssistantMessage,
+    ToolCall,
+    ToolOutput,
+    Other,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema, TS)]
+pub struct WorkbenchMemorySnapshot {
+    pub enabled: bool,
+    pub root_dir: String,
+    pub project_id: String,
+    pub working_set_token_budget: usize,
+    pub staleness_mode: String,
+    pub blocks_total: usize,
+    pub blocks_included: Vec<WorkbenchMemoryBlockSnapshot>,
+    pub error: String,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema, TS)]
+pub struct WorkbenchMemoryBlockSnapshot {
+    pub id: String,
+    pub kind: String,
+    pub status: String,
+    pub priority: String,
+    pub representation: String,
 }
 
 /// Codex errors that we expose to clients.
@@ -2033,6 +2118,63 @@ mod tests {
         assert_eq!(value["msg"]["failed"][0]["server"], "b");
         assert_eq!(value["msg"]["failed"][0]["error"], "bad");
         assert_eq!(value["msg"]["cancelled"][0], "c");
+        Ok(())
+    }
+
+    #[test]
+    fn serialize_workbench_context_snapshot_event() -> Result<()> {
+        let event = Event {
+            id: "diag".to_string(),
+            msg: EventMsg::WorkbenchContextSnapshot(WorkbenchContextSnapshotEvent {
+                features: WorkbenchContextSnapshotFeatures {
+                    lego_memory: true,
+                    workbench_transcript: false,
+                },
+                transcript: WorkbenchTranscriptSnapshot {
+                    total_items: 10,
+                    total_user_messages: 3,
+                    tail_user_messages_limit: 6,
+                    tail_start_index: 4,
+                    effective_items_total: 5,
+                    kept_items: vec![WorkbenchContextItemPreview {
+                        index: 4,
+                        role: "user".to_string(),
+                        kind: WorkbenchContextItemKind::UserMessage,
+                        preview: "hello".to_string(),
+                    }],
+                    kept_items_truncated: false,
+                    pinned: WorkbenchPinnedSnapshot {
+                        developer_instructions: true,
+                        user_instructions: true,
+                        skill_instructions: 1,
+                        environment_context: true,
+                    },
+                    trimmed_items: 5,
+                },
+                memory: WorkbenchMemorySnapshot {
+                    enabled: true,
+                    root_dir: "/tmp".to_string(),
+                    project_id: "proj".to_string(),
+                    working_set_token_budget: 1000,
+                    staleness_mode: "off".to_string(),
+                    blocks_total: 2,
+                    blocks_included: vec![WorkbenchMemoryBlockSnapshot {
+                        id: "focus".to_string(),
+                        kind: "focus".to_string(),
+                        status: "active".to_string(),
+                        priority: "pinned".to_string(),
+                        representation: "summary".to_string(),
+                    }],
+                    error: String::new(),
+                },
+            }),
+        };
+
+        let value = serde_json::to_value(&event)?;
+        assert_eq!(value["msg"]["type"], "workbench_context_snapshot");
+        assert_eq!(value["msg"]["features"]["lego_memory"], true);
+        assert_eq!(value["msg"]["transcript"]["tail_start_index"], 4);
+        assert_eq!(value["msg"]["memory"]["project_id"], "proj");
         Ok(())
     }
 }

@@ -6,7 +6,55 @@ use codex_protocol::models::ContentItem;
 use codex_protocol::models::ResponseItem;
 use codex_protocol::protocol::ENVIRONMENT_CONTEXT_OPEN_TAG;
 
-const DEFAULT_MAX_USER_MESSAGES: usize = 6;
+pub(crate) const DEFAULT_MAX_USER_MESSAGES: usize = 6;
+
+#[derive(Debug, Clone)]
+pub(crate) struct WorkbenchTranscriptReport {
+    pub total_items: usize,
+    pub total_user_messages: usize,
+    pub tail_user_messages_limit: usize,
+    pub tail_start_index: usize,
+    pub pinned: WorkbenchPinnedReport,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct WorkbenchPinnedReport {
+    pub developer_instructions: bool,
+    pub user_instructions: bool,
+    pub skill_instructions: usize,
+    pub environment_context: bool,
+}
+
+pub(crate) fn workbench_transcript_report(
+    items: &[ResponseItem],
+    max_user_messages: usize,
+) -> WorkbenchTranscriptReport {
+    let tail_user_messages_limit = match max_user_messages {
+        0 => DEFAULT_MAX_USER_MESSAGES,
+        other => other,
+    }
+    .max(1);
+
+    let total_user_messages = items
+        .iter()
+        .filter(|item| matches!(parse_turn_item(item), Some(TurnItem::UserMessage(_))))
+        .count();
+
+    let tail_start_index = find_tail_start_index(items, tail_user_messages_limit).unwrap_or(0);
+
+    WorkbenchTranscriptReport {
+        total_items: items.len(),
+        total_user_messages,
+        tail_user_messages_limit,
+        tail_start_index,
+        pinned: WorkbenchPinnedReport {
+            developer_instructions: last_developer_instructions(items).is_some(),
+            user_instructions: last_user_instructions(items).is_some(),
+            skill_instructions: skill_instruction_items(items).len(),
+            environment_context: last_environment_context(items).is_some(),
+        },
+    }
+}
 
 pub(crate) fn trim_history_for_workbench(
     items: Vec<ResponseItem>,
@@ -112,6 +160,7 @@ fn is_environment_context_item(content: &[ContentItem]) -> bool {
 #[cfg(test)]
 mod tests {
     use super::trim_history_for_workbench;
+    use super::workbench_transcript_report;
     use codex_protocol::models::ContentItem;
     use codex_protocol::models::ResponseItem;
     use codex_protocol::protocol::ENVIRONMENT_CONTEXT_OPEN_TAG;
@@ -156,5 +205,31 @@ mod tests {
         ];
 
         assert_eq!(trimmed, expected);
+    }
+
+    #[test]
+    fn report_tracks_pinned_items_and_tail_start() {
+        let items = vec![
+            msg("developer", "dev rules"),
+            msg(
+                "user",
+                "# AGENTS.md instructions for /repo\n\n<INSTRUCTIONS>\nX\n</INSTRUCTIONS>",
+            ),
+            msg("user", ENVIRONMENT_CONTEXT_OPEN_TAG),
+            msg("user", "first question"),
+            msg("assistant", "first answer"),
+            msg("user", "second question"),
+            msg("assistant", "second answer"),
+        ];
+
+        let report = workbench_transcript_report(&items, 1);
+
+        assert_eq!(report.total_items, 7);
+        assert_eq!(report.tail_user_messages_limit, 1);
+        assert_eq!(report.tail_start_index, 5);
+        assert!(report.pinned.developer_instructions);
+        assert!(report.pinned.user_instructions);
+        assert_eq!(report.pinned.skill_instructions, 0);
+        assert!(report.pinned.environment_context);
     }
 }
