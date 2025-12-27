@@ -95,6 +95,7 @@ use crate::config::ConstraintResult;
 use crate::config::GhostSnapshotConfig;
 use crate::config::types::ShellEnvironmentPolicy;
 use crate::context_manager::ContextManager;
+use crate::context_manager::trim_history_for_workbench;
 use crate::environment_context::EnvironmentContext;
 use crate::error::CodexErr;
 use crate::error::Result as CodexResult;
@@ -2300,6 +2301,9 @@ pub(crate) async fn run_task(
                 .await;
             sess.clone_history().await.get_history_for_prompt()
         };
+        if sess.enabled(Feature::WorkbenchTranscript) {
+            turn_input = trim_history_for_workbench(turn_input, 0);
+        }
         if sess.enabled(Feature::LegoMemory)
             && let Some(memory_item) =
                 build_memory_context_item(sess.as_ref(), turn_context.as_ref()).await

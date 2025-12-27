@@ -45,6 +45,24 @@ When lego memory is enabled, the workbench keeps a small working set per turn:
 The workbench never rewrites the full prompt history; it only curates which blocks enter the
 memory overlay.
 
+### Workbench transcript (virtual context window)
+
+If you want the agent to actively manage what enters the model’s context window (as “attention”),
+enable the workbench transcript feature:
+
+```toml
+[features]
+workbench_transcript = true
+```
+
+When enabled, Codex compiles a focused prompt transcript for each model call:
+
+- keeps the latest pinned prefix (developer instructions, AGENTS.md instructions, explicit skill injections, environment context)
+- keeps only a short tail of the conversation (currently last N user messages + their following items)
+- still injects the lego memory overlay (compiled working set) into the prompt
+
+This does not delete the local history; it only changes what is sent to the model.
+
 ### Staleness
 
 File‑backed blocks carry fingerprints. When the source changes, blocks are marked stale and only emitted as labels until refreshed.

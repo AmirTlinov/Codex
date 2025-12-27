@@ -107,6 +107,8 @@ pub enum Feature {
     Skills,
     /// Enable block-based context memory (lego memory).
     LegoMemory,
+    /// Compile a virtual transcript so the model only sees a focused tail + pinned context.
+    WorkbenchTranscript,
     /// Enforce UTF8 output in Powershell.
     PowershellUtf8,
 }
@@ -321,6 +323,11 @@ impl FeatureSpec {
                     description: "Enable block-based context memory with the workbench selector.",
                     stage: FeatureMenuStage::Experimental,
                 }),
+                Feature::WorkbenchTranscript => Some(FeatureMenuEntry {
+                    name: "Workbench transcript",
+                    description: "Let the workbench compile a focused transcript (pinned + tail).",
+                    stage: FeatureMenuStage::Experimental,
+                }),
                 _ => None,
             },
             _ => None,
@@ -432,6 +439,12 @@ pub const FEATURES: &[FeatureSpec] = &[
     FeatureSpec {
         id: Feature::LegoMemory,
         key: "lego_memory",
+        stage: Stage::Experimental,
+        default_enabled: false,
+    },
+    FeatureSpec {
+        id: Feature::WorkbenchTranscript,
+        key: "workbench_transcript",
         stage: Stage::Experimental,
         default_enabled: false,
     },
