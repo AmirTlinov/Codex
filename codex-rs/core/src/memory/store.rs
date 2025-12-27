@@ -192,7 +192,7 @@ impl BlockStore {
     }
 }
 
-fn project_id_for_path(cwd: &Path) -> String {
+pub(crate) fn project_id_for_path(cwd: &Path) -> String {
     let root = get_git_repo_root(cwd).unwrap_or_else(|| cwd.to_path_buf());
     let canonical = dunce::canonicalize(&root).unwrap_or(root);
     let mut hasher = Sha1::new();
@@ -319,6 +319,7 @@ fn priority_rank(priority: BlockPriority) -> u8 {
 
 fn kind_rank(kind: BlockKind) -> u8 {
     match kind {
+        BlockKind::BranchMind => 0,
         BlockKind::ToolSlice => 0,
         BlockKind::RepoMap => 1,
         BlockKind::FileSummary => 2,

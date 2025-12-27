@@ -687,12 +687,14 @@ pub struct WorkbenchContextSnapshotEvent {
     pub features: WorkbenchContextSnapshotFeatures,
     pub transcript: WorkbenchTranscriptSnapshot,
     pub memory: WorkbenchMemorySnapshot,
+    pub branchmind: WorkbenchBranchMindSnapshot,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, JsonSchema, TS)]
 pub struct WorkbenchContextSnapshotFeatures {
     pub lego_memory: bool,
     pub workbench_transcript: bool,
+    pub branchmind_workbench: bool,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, JsonSchema, TS)]
@@ -754,6 +756,15 @@ pub struct WorkbenchMemoryBlockSnapshot {
     pub status: String,
     pub priority: String,
     pub representation: String,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema, TS)]
+pub struct WorkbenchBranchMindSnapshot {
+    pub enabled: bool,
+    pub server: String,
+    pub workspace: String,
+    pub injected: bool,
+    pub error: String,
 }
 
 /// Codex errors that we expose to clients.
@@ -2129,6 +2140,7 @@ mod tests {
                 features: WorkbenchContextSnapshotFeatures {
                     lego_memory: true,
                     workbench_transcript: false,
+                    branchmind_workbench: true,
                 },
                 transcript: WorkbenchTranscriptSnapshot {
                     total_items: 10,
@@ -2167,14 +2179,23 @@ mod tests {
                     }],
                     error: String::new(),
                 },
+                branchmind: WorkbenchBranchMindSnapshot {
+                    enabled: true,
+                    server: "branchmind".to_string(),
+                    workspace: "codex/proj".to_string(),
+                    injected: true,
+                    error: String::new(),
+                },
             }),
         };
 
         let value = serde_json::to_value(&event)?;
         assert_eq!(value["msg"]["type"], "workbench_context_snapshot");
         assert_eq!(value["msg"]["features"]["lego_memory"], true);
+        assert_eq!(value["msg"]["features"]["branchmind_workbench"], true);
         assert_eq!(value["msg"]["transcript"]["tail_start_index"], 4);
         assert_eq!(value["msg"]["memory"]["project_id"], "proj");
+        assert_eq!(value["msg"]["branchmind"]["workspace"], "codex/proj");
         Ok(())
     }
 }

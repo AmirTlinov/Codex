@@ -1,6 +1,8 @@
 use crate::memory::BlockKind;
 use crate::memory::BlockPriority;
 use crate::memory::BlockStatus;
+use crate::util::escape_xml_attr;
+use crate::util::escape_xml_text;
 use codex_protocol::models::ContentItem;
 use codex_protocol::models::ResponseItem;
 use codex_protocol::protocol::ENVIRONMENT_CONTEXT_OPEN_TAG;
@@ -44,11 +46,11 @@ pub struct MemoryContext {
 impl MemoryContext {
     pub fn serialize_to_xml(&self) -> String {
         let mut lines = vec![MEMORY_CONTEXT_OPEN_TAG.to_string()];
-        let project_id = &self.project_id;
+        let project_id = escape_xml_text(&self.project_id);
         lines.push(format!("  <project_id>{project_id}</project_id>"));
         lines.push("  <blocks>".to_string());
         for block in &self.blocks {
-            let id = &block.id;
+            let id = escape_xml_attr(&block.id);
             let kind = block_kind_name(block.kind);
             let status = block_status_name(block.status);
             let priority = block_priority_name(block.priority);
@@ -56,10 +58,10 @@ impl MemoryContext {
             lines.push(format!(
                 "    <block id=\"{id}\" kind=\"{kind}\" status=\"{status}\" priority=\"{priority}\" representation=\"{representation}\">",
             ));
-            let title = &block.title;
+            let title = escape_xml_text(&block.title);
             lines.push(format!("      <title>{title}</title>"));
             if !block.body.is_empty() {
-                let body = &block.body;
+                let body = escape_xml_text(&block.body);
                 lines.push(format!("      <body>{body}</body>"));
             }
             lines.push("    </block>".to_string());
@@ -114,6 +116,7 @@ fn block_kind_name(kind: BlockKind) -> &'static str {
         BlockKind::Toolbox => "toolbox",
         BlockKind::ToolSlice => "tool_slice",
         BlockKind::Plan => "plan",
+        BlockKind::BranchMind => "branchmind",
     }
 }
 
@@ -131,5 +134,39 @@ fn block_priority_name(priority: BlockPriority) -> &'static str {
         BlockPriority::High => "high",
         BlockPriority::Normal => "normal",
         BlockPriority::Low => "low",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use pretty_assertions::assert_eq;
+
+    #[test]
+    fn serialize_to_xml_escapes_special_chars() {
+        let ctx = MemoryContext {
+            project_id: "proj<&>".to_string(),
+            blocks: vec![MemoryContextBlock {
+                id: "id\"x".to_string(),
+                kind: BlockKind::Facts,
+                status: BlockStatus::Active,
+                priority: BlockPriority::Normal,
+                representation: BlockRepresentation::Full,
+                title: "t<1>".to_string(),
+                body: "b&</body>".to_string(),
+            }],
+        };
+
+        let expected = r#"<memory_context>
+  <project_id>proj&lt;&amp;&gt;</project_id>
+  <blocks>
+    <block id="id&quot;x" kind="facts" status="active" priority="normal" representation="full">
+      <title>t&lt;1&gt;</title>
+      <body>b&amp;&lt;/body&gt;</body>
+    </block>
+  </blocks>
+</memory_context>"#;
+
+        assert_eq!(ctx.serialize_to_xml(), expected);
     }
 }

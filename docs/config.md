@@ -42,15 +42,26 @@ Supported features:
 
 | Key                                   | Default | Stage        | Description                                           |
 | ------------------------------------- | :-----: | ------------ | ----------------------------------------------------- |
-| `unified_exec`                        |  false  | Experimental | Use the unified PTY-backed exec tool                  |
-| `apply_patch_freeform`                |  false  | Beta         | Include the freeform `apply_patch` tool               |
+| `undo`                                |  false  | Stable       | Capture undo snapshots each turn                      |
+| `parallel`                            |  true   | Stable       | Allow the model to call multiple tools in parallel    |
 | `view_image_tool`                     |  true   | Stable       | Include the `view_image` tool                         |
+| `shell_tool`                          |  true   | Stable       | Allow the model to run shell commands                 |
+| `warnings`                            |  true   | Stable       | Send tool usage warnings to the model                 |
 | `web_search_request`                  |  false  | Stable       | Allow the model to issue web searches                 |
+| `unified_exec`                        |  false  | Beta         | Run long-running terminal commands in the background  |
+| `shell_snapshot`                      |  false  | Beta         | Snapshot shell environment to speed up commands       |
+| `apply_patch_freeform`                |  false  | Experimental | Include the freeform `apply_patch` tool               |
+| `exec_policy`                         |  true   | Experimental | Enforce execpolicy rules for shell/unified exec       |
+| `experimental_windows_sandbox`        |  false  | Experimental | Use the Windows restricted-token sandbox              |
+| `elevated_windows_sandbox`            |  false  | Experimental | Use the elevated Windows sandbox pipeline             |
+| `remote_compaction`                   |  true   | Experimental | Enable remote auto-compaction (ChatGPT auth only)     |
+| `remote_models`                       |  false  | Experimental | Refresh remote models list on startup                 |
+| `skills`                              |  true   | Experimental | Enable discovery and injection of skills              |
 | `lego_memory`                         |  false  | Experimental | Enable block-based context memory (lego memory)       |
 | `workbench_transcript`                |  false  | Experimental | Compile a focused transcript for each model call      |
-| `enable_experimental_windows_sandbox` |  false  | Experimental | Use the Windows restricted-token sandbox              |
+| `branchmind_workbench`                |  false  | Experimental | Inject a BranchMind snapshot into the memory overlay  |
+| `powershell_utf8`                     |  false  | Experimental | Enforce UTF-8 output in PowerShell                    |
 | `tui2`                                |  false  | Experimental | Use the experimental TUI v2 (viewport) implementation |
-| `skills`                              |  false  | Experimental | Enable discovery and injection of skills              |
 
 Notes:
 

@@ -24,6 +24,7 @@ pub(crate) struct ToolsConfig {
     pub include_view_image_tool: bool,
     pub experimental_supported_tools: Vec<String>,
     pub memory_tool: bool,
+    pub branchmind_workbench: bool,
 }
 
 pub(crate) struct ToolsConfigParams<'a> {
@@ -73,6 +74,7 @@ impl ToolsConfig {
             include_view_image_tool,
             experimental_supported_tools: model_family.experimental_supported_tools.clone(),
             memory_tool: features.enabled(Feature::LegoMemory),
+            branchmind_workbench: features.enabled(Feature::BranchMindWorkbench),
         }
     }
 }
@@ -1046,8 +1048,14 @@ pub(crate) fn build_specs(
     builder.register_handler("list_mcp_resource_templates", mcp_resource_handler.clone());
     builder.register_handler("read_mcp_resource", mcp_resource_handler);
 
-    builder.push_spec(PLAN_TOOL.clone());
-    builder.register_handler("update_plan", plan_handler);
+    let branchmind_snapshot_available = config.branchmind_workbench
+        && mcp_tools
+            .as_ref()
+            .is_some_and(|tools| tools.contains_key("mcp__branchmind__snapshot"));
+    if !branchmind_snapshot_available {
+        builder.push_spec(PLAN_TOOL.clone());
+        builder.register_handler("update_plan", plan_handler);
+    }
 
     if config.memory_tool {
         builder.push_spec(MEMORY_TOOL.clone());
@@ -1300,6 +1308,42 @@ mod tests {
         let (tools, _) = build_specs(&tools_config, Some(HashMap::new())).build();
         let tool_names = tools.iter().map(|t| t.spec.name()).collect::<Vec<_>>();
         assert_eq!(&tool_names, &expected_tools,);
+    }
+
+    #[test]
+    fn test_build_specs_disables_update_plan_when_branchmind_workbench_enabled() {
+        let config = test_config();
+        let model_family = ModelsManager::construct_model_family_offline("o3", &config);
+        let mut features = Features::with_defaults();
+        features.enable(Feature::BranchMindWorkbench);
+        let tools_config = ToolsConfig::new(&ToolsConfigParams {
+            model_family: &model_family,
+            features: &features,
+        });
+
+        let mcp_tools = HashMap::from([(
+            "mcp__branchmind__snapshot".to_string(),
+            mcp_types::Tool {
+                name: "snapshot".to_string(),
+                input_schema: ToolInputSchema {
+                    properties: Some(serde_json::json!({})),
+                    required: None,
+                    r#type: "object".to_string(),
+                },
+                output_schema: None,
+                title: None,
+                annotations: None,
+                description: Some("snapshot".to_string()),
+            },
+        )]);
+
+        let (tools, _) = build_specs(&tools_config, Some(mcp_tools)).build();
+        assert!(
+            !tools
+                .iter()
+                .any(|tool| tool_name(&tool.spec) == "update_plan"),
+            "expected update_plan to be omitted when BranchMind workbench is enabled"
+        );
     }
 
     #[test]

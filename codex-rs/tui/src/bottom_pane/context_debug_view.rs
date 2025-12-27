@@ -84,6 +84,10 @@ impl ContextDebugView {
                 "workbench_transcript",
                 bool_on_off(snapshot.features.workbench_transcript),
             ),
+            kv_row(
+                "branchmind_workbench",
+                bool_on_off(snapshot.features.branchmind_workbench),
+            ),
             blank_row(),
             section_row("Transcript"),
             kv_row("history items", transcript.total_items.to_string()),
@@ -136,6 +140,17 @@ impl ContextDebugView {
                 description: Some(format!("{}: {}", item.role, item.preview)),
                 ..Default::default()
             });
+        }
+
+        rows.push(blank_row());
+        rows.push(section_row("BranchMind"));
+        let branchmind = &snapshot.branchmind;
+        rows.push(kv_row("enabled", bool_on_off(branchmind.enabled)));
+        rows.push(kv_row("server", branchmind.server.clone()));
+        rows.push(kv_row("workspace", branchmind.workspace.clone()));
+        rows.push(kv_row("injected", bool_on_off(branchmind.injected)));
+        if !branchmind.error.is_empty() {
+            rows.push(kv_row("error", branchmind.error.clone()));
         }
 
         rows.push(blank_row());

@@ -18,6 +18,8 @@ pub enum BlockKind {
     Toolbox,
     ToolSlice,
     Plan,
+    #[serde(rename = "branchmind")]
+    BranchMind,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

@@ -109,6 +109,8 @@ pub enum Feature {
     LegoMemory,
     /// Compile a virtual transcript so the model only sees a focused tail + pinned context.
     WorkbenchTranscript,
+    /// Inject a BranchMind snapshot into the workbench memory overlay.
+    BranchMindWorkbench,
     /// Enforce UTF8 output in Powershell.
     PowershellUtf8,
 }
@@ -328,6 +330,11 @@ impl FeatureSpec {
                     description: "Let the workbench compile a focused transcript (pinned + tail).",
                     stage: FeatureMenuStage::Experimental,
                 }),
+                Feature::BranchMindWorkbench => Some(FeatureMenuEntry {
+                    name: "BranchMind workbench",
+                    description: "Inject a BranchMind snapshot into the memory overlay (MCP).",
+                    stage: FeatureMenuStage::Experimental,
+                }),
                 _ => None,
             },
             _ => None,
@@ -445,6 +452,12 @@ pub const FEATURES: &[FeatureSpec] = &[
     FeatureSpec {
         id: Feature::WorkbenchTranscript,
         key: "workbench_transcript",
+        stage: Stage::Experimental,
+        default_enabled: false,
+    },
+    FeatureSpec {
+        id: Feature::BranchMindWorkbench,
+        key: "branchmind_workbench",
         stage: Stage::Experimental,
         default_enabled: false,
     },

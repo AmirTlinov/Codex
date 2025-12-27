@@ -2,6 +2,8 @@ use std::path::Path;
 use std::path::PathBuf;
 use std::time::Duration;
 
+use std::borrow::Cow;
+
 use rand::Rng;
 use tracing::debug;
 use tracing::error;
@@ -39,6 +41,38 @@ pub(crate) fn try_parse_error_message(text: &str) -> String {
     text.to_string()
 }
 
+pub(crate) fn escape_xml_text(text: &str) -> Cow<'_, str> {
+    escape_xml(text, false)
+}
+
+pub(crate) fn escape_xml_attr(text: &str) -> Cow<'_, str> {
+    escape_xml(text, true)
+}
+
+fn escape_xml(text: &str, is_attr: bool) -> Cow<'_, str> {
+    let needs_escape = text.chars().any(|ch| match ch {
+        '&' | '<' | '>' => true,
+        '"' | '\'' if is_attr => true,
+        _ => false,
+    });
+    if !needs_escape {
+        return Cow::Borrowed(text);
+    }
+
+    let mut out = String::with_capacity(text.len());
+    for ch in text.chars() {
+        match ch {
+            '&' => out.push_str("&amp;"),
+            '<' => out.push_str("&lt;"),
+            '>' => out.push_str("&gt;"),
+            '"' if is_attr => out.push_str("&quot;"),
+            '\'' if is_attr => out.push_str("&apos;"),
+            _ => out.push(ch),
+        }
+    }
+    Cow::Owned(out)
+}
+
 pub fn resolve_path(base: &Path, path: &PathBuf) -> PathBuf {
     if path.is_absolute() {
         path.clone()
@@ -73,5 +107,15 @@ mod tests {
         let text = r#"{"message": "test"}"#;
         let message = try_parse_error_message(text);
         assert_eq!(message, r#"{"message": "test"}"#);
+    }
+
+    #[test]
+    fn test_escape_xml_text_escapes_special_chars() {
+        assert_eq!(escape_xml_text("<&>"), "&lt;&amp;&gt;");
+    }
+
+    #[test]
+    fn test_escape_xml_attr_escapes_quotes() {
+        assert_eq!(escape_xml_attr("\"'&<>"), "&quot;&apos;&amp;&lt;&gt;");
     }
 }

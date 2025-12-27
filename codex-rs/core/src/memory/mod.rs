@@ -16,5 +16,6 @@ pub(crate) use block::SourceRef;
 pub(crate) use compiler::ContextCompiler;
 pub(crate) use fingerprint::fill_missing_file_fingerprints;
 pub(crate) use store::BlockStore;
+pub(crate) use store::project_id_for_path;
 pub(crate) use workbench::ContextSelection;
 pub(crate) use workbench::MemoryWorkbench;

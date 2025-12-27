@@ -38,7 +38,7 @@ The compiler:
 
 When lego memory is enabled, the workbench keeps a small working set per turn:
 
-- `focus` is updated from the latest user message (pinned)
+- `focus` is updated from the latest user message by default (pinned)
 - `plan` is updated when the `update_plan` tool emits a plan update
 - selection is deterministic: pinned + focus/goals/constraints/plan + top‑K relevant blocks
 
@@ -63,13 +63,34 @@ When enabled, Codex compiles a focused prompt transcript for each model call:
 
 This does not delete the local history; it only changes what is sent to the model.
 
+### BranchMind workbench (project thinking overlay)
+
+If you want Codex to pull a compact “project thinking” snapshot from a BranchMind MCP server and
+inject it as a pinned block in the lego memory overlay, enable:
+
+```toml
+[features]
+branchmind_workbench = true
+```
+
+Notes:
+
+- This feature requires `lego_memory = true` (the BranchMind snapshot is injected as part of the memory overlay).
+- Codex expects an MCP server named `branchmind` that exposes two tools:
+  - `snapshot` (used to fetch a bounded snapshot for the current project workspace)
+  - `note` (used to append small “user_focus” notes when the focus block updates)
+- When a BranchMind snapshot is available, Codex derives a compact focus summary from it (goal/now/next/verify) and may emit a PlanUpdate event for the UI.
+- When `branchmind_workbench` is enabled and the BranchMind `snapshot` tool is present, the `update_plan` tool may be omitted from the model toolset to encourage BranchMind-first task management.
+- Tool calls are bounded and time‑limited; failures do not break the turn. Errors are shown only in diagnostics.
+
 ### Diagnostics
 
 Use `/context-debug` in the TUI to inspect what is sent to the model:
 
-- enabled feature flags (lego memory / workbench transcript)
+- enabled feature flags (lego memory / workbench transcript / BranchMind workbench)
 - compiled transcript preview (pinned prefix + tail)
 - compiled memory overlay (selected blocks + budgets + staleness)
+- BranchMind status (workspace id / injected / error)
 
 ### Staleness
 

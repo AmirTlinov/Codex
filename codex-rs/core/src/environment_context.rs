@@ -3,6 +3,7 @@ use crate::protocol::AskForApproval;
 use crate::protocol::NetworkAccess;
 use crate::protocol::SandboxPolicy;
 use crate::shell::Shell;
+use crate::util::escape_xml_text;
 use codex_protocol::config_types::SandboxMode;
 use codex_protocol::models::ContentItem;
 use codex_protocol::models::ResponseItem;
@@ -136,17 +137,25 @@ impl EnvironmentContext {
     pub fn serialize_to_xml(self) -> String {
         let mut lines = vec![ENVIRONMENT_CONTEXT_OPEN_TAG.to_string()];
         if let Some(cwd) = self.cwd {
-            lines.push(format!("  <cwd>{}</cwd>", cwd.to_string_lossy()));
+            let cwd_lossy = cwd.to_string_lossy();
+            let cwd = escape_xml_text(&cwd_lossy);
+            lines.push(format!("  <cwd>{cwd}</cwd>"));
         }
         if let Some(approval_policy) = self.approval_policy {
+            let approval_policy = approval_policy.to_string();
+            let approval_policy = escape_xml_text(&approval_policy);
             lines.push(format!(
                 "  <approval_policy>{approval_policy}</approval_policy>"
             ));
         }
         if let Some(sandbox_mode) = self.sandbox_mode {
+            let sandbox_mode = sandbox_mode.to_string();
+            let sandbox_mode = escape_xml_text(&sandbox_mode);
             lines.push(format!("  <sandbox_mode>{sandbox_mode}</sandbox_mode>"));
         }
         if let Some(network_access) = self.network_access {
+            let network_access = network_access.to_string();
+            let network_access = escape_xml_text(&network_access);
             lines.push(format!(
                 "  <network_access>{network_access}</network_access>"
             ));
@@ -154,15 +163,15 @@ impl EnvironmentContext {
         if let Some(writable_roots) = self.writable_roots {
             lines.push("  <writable_roots>".to_string());
             for writable_root in writable_roots {
-                lines.push(format!(
-                    "    <root>{}</root>",
-                    writable_root.to_string_lossy()
-                ));
+                let root_lossy = writable_root.to_string_lossy();
+                let root = escape_xml_text(&root_lossy);
+                lines.push(format!("    <root>{root}</root>"));
             }
             lines.push("  </writable_roots>".to_string());
         }
 
         let shell_name = self.shell.name();
+        let shell_name = escape_xml_text(shell_name);
         lines.push(format!("  <shell>{shell_name}</shell>"));
         lines.push(ENVIRONMENT_CONTEXT_CLOSE_TAG.to_string());
         lines.join("\n")
@@ -260,6 +269,24 @@ mod tests {
   <approval_policy>never</approval_policy>
   <sandbox_mode>read-only</sandbox_mode>
   <network_access>restricted</network_access>
+  <shell>bash</shell>
+</environment_context>"#;
+
+        assert_eq!(context.serialize_to_xml(), expected);
+    }
+
+    #[test]
+    fn serialize_environment_context_escapes_special_chars() {
+        let context = EnvironmentContext::new(
+            Some(PathBuf::from("a<&b>")),
+            Some(AskForApproval::Never),
+            None,
+            fake_shell(),
+        );
+
+        let expected = r#"<environment_context>
+  <cwd>a&lt;&amp;b&gt;</cwd>
+  <approval_policy>never</approval_policy>
   <shell>bash</shell>
 </environment_context>"#;
 

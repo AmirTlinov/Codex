@@ -105,11 +105,27 @@ impl MemoryWorkbench {
         let Some(text) = latest_user_text(items) else {
             return Ok(false);
         };
-        let full = truncate_text(text.trim(), TruncationPolicy::Bytes(MAX_FOCUS_BYTES));
-        let summary = truncate_text(
-            text.trim(),
-            TruncationPolicy::Bytes(MAX_FOCUS_SUMMARY_BYTES),
-        );
+        let source = SourceRef {
+            kind: SourceKind::Conversation,
+            locator: format!("turn:{turn_id}"),
+            fingerprint: None,
+        };
+        self.sync_focus_text(store, text.as_str(), source).await
+    }
+
+    pub async fn sync_focus_text(
+        &self,
+        store: &mut BlockStore,
+        text: &str,
+        source: SourceRef,
+    ) -> io::Result<bool> {
+        let trimmed = text.trim();
+        if trimmed.is_empty() {
+            return Ok(false);
+        }
+
+        let full = truncate_text(trimmed, TruncationPolicy::Bytes(MAX_FOCUS_BYTES));
+        let summary = truncate_text(trimmed, TruncationPolicy::Bytes(MAX_FOCUS_SUMMARY_BYTES));
         let label = build_label("Focus", &full);
 
         if let Some(existing) = store.get("focus")
@@ -125,11 +141,7 @@ impl MemoryWorkbench {
         block.body_summary = Some(summary);
         block.body_label = Some(label);
         block.tags = vec!["focus".to_string()];
-        block.sources = vec![SourceRef {
-            kind: SourceKind::Conversation,
-            locator: format!("turn:{turn_id}"),
-            fingerprint: None,
-        }];
+        block.sources = vec![source];
 
         store.upsert(block).await?;
         Ok(true)
@@ -198,14 +210,14 @@ fn user_message_text(message: &codex_protocol::items::UserMessageItem) -> Option
 fn extract_terms(query: &str) -> Vec<String> {
     let mut terms = Vec::new();
     for term in query
-        .split(|c: char| !c.is_ascii_alphanumeric())
+        .split(|c: char| !c.is_alphanumeric())
         .map(str::trim)
-        .filter(|term| term.len() >= 2)
+        .filter(|term| term.chars().count() >= 2)
     {
         if terms.len() >= MAX_QUERY_TERMS {
             break;
         }
-        let lowered = term.to_ascii_lowercase();
+        let lowered = term.to_lowercase();
         if !terms.contains(&lowered) {
             terms.push(lowered);
         }
@@ -225,13 +237,13 @@ fn score_block(block: &Block, terms: &[String]) -> i64 {
         return base_score;
     }
 
-    let title = block.title.to_ascii_lowercase();
+    let title = block.title.to_lowercase();
     let body = block
         .body_summary
         .as_deref()
         .or(block.body_label.as_deref())
         .unwrap_or_default();
-    let body = body.to_ascii_lowercase();
+    let body = body.to_lowercase();
 
     let mut match_score = 0;
     for term in terms {
@@ -241,7 +253,7 @@ fn score_block(block: &Block, terms: &[String]) -> i64 {
         if body.contains(term) {
             match_score += 3;
         }
-        if block.tags.iter().any(|tag| tag.eq_ignore_ascii_case(term)) {
+        if block.tags.iter().any(|tag| tag.to_lowercase() == *term) {
             match_score += 10;
         }
     }
@@ -268,6 +280,7 @@ fn kind_weight(kind: BlockKind) -> i64 {
         BlockKind::Constraints => 200,
         BlockKind::Goals => 180,
         BlockKind::Plan => 170,
+        BlockKind::BranchMind => 160,
         BlockKind::Decisions => 150,
         BlockKind::Facts => 120,
         BlockKind::OpenQuestions => 110,

@@ -2421,18 +2421,58 @@ async fn build_memory_context_item(
     let workbench = MemoryWorkbench::default();
     let mut history = sess.clone_history().await;
     let history_items = history.get_history();
-    let focus_updated = match workbench
-        .sync_focus(&mut store, &turn_context.sub_id, &history_items)
-        .await
-    {
-        Ok(updated) => updated,
-        Err(err) => {
-            warn!("memory workbench focus sync failed: {err}");
-            false
-        }
+    let query = latest_user_query(&history_items);
+    let branchmind_attempt = if sess.enabled(Feature::BranchMindWorkbench) {
+        Some(try_build_branchmind_block(sess, &store).await)
+    } else {
+        None
     };
+
+    let focus_updated = match branchmind_attempt
+        .as_ref()
+        .and_then(|attempt| attempt.payload.as_ref())
+        .and_then(branchmind_focus_text)
+    {
+        Some(focus_text) => {
+            let source = crate::memory::SourceRef {
+                kind: crate::memory::SourceKind::ToolOutput,
+                locator: branchmind_attempt
+                    .as_ref()
+                    .map(|attempt| {
+                        format!("mcp:branchmind/snapshot workspace={}", attempt.workspace)
+                    })
+                    .unwrap_or_else(|| "mcp:branchmind/snapshot".to_string()),
+                fingerprint: None,
+            };
+            match workbench
+                .sync_focus_text(&mut store, focus_text.as_str(), source)
+                .await
+            {
+                Ok(updated) => updated,
+                Err(err) => {
+                    warn!("memory workbench BranchMind focus sync failed: {err}");
+                    false
+                }
+            }
+        }
+        None => match workbench
+            .sync_focus(&mut store, &turn_context.sub_id, &history_items)
+            .await
+        {
+            Ok(updated) => updated,
+            Err(err) => {
+                warn!("memory workbench focus sync failed: {err}");
+                false
+            }
+        },
+    };
+
     if focus_updated && let Err(err) = store.enforce_budget(memory_config.max_bytes).await {
         warn!("memory budget enforcement failed: {err}");
+    }
+
+    if sess.enabled(Feature::BranchMindWorkbench) && focus_updated {
+        branchmind_log_focus(sess, &store, &turn_context.sub_id, &query).await;
     }
     let tool_roots = tool_roots(turn_context);
     let mut extra_blocks = Vec::new();
@@ -2440,12 +2480,16 @@ async fn build_memory_context_item(
     if let Some(tool_block) = build_tool_catalog_block(sess, turn_context, &tool_roots).await {
         extra_blocks.push(tool_block);
     }
+    if let Some(attempt) = branchmind_attempt.as_ref()
+        && let Some(block) = attempt.block.clone()
+    {
+        extra_blocks.push(block);
+    }
 
     let compiler = ContextCompiler::new(
         memory_config.working_set_token_budget,
         memory_config.staleness,
     );
-    let query = latest_user_query(&history_items);
     let selection = Some(workbench.select(&store, &query));
     let context = match compiler
         .compile(&store, &turn_context.cwd, extra_blocks, selection.as_ref())
@@ -2457,7 +2501,16 @@ async fn build_memory_context_item(
             return None;
         }
     };
-    Some(context.into())
+    let item = context.into();
+
+    if let Some(attempt) = branchmind_attempt.as_ref()
+        && let Some(payload) = attempt.payload.as_ref()
+        && let Some(plan_update) = branchmind_plan_update(payload)
+    {
+        maybe_emit_branchmind_plan_update(sess, turn_context, plan_update).await;
+    }
+
+    Some(item)
 }
 
 async fn build_workbench_context_snapshot(
@@ -2472,6 +2525,7 @@ async fn build_workbench_context_snapshot(
     let features = crate::protocol::WorkbenchContextSnapshotFeatures {
         lego_memory: sess.enabled(Feature::LegoMemory),
         workbench_transcript: sess.enabled(Feature::WorkbenchTranscript),
+        branchmind_workbench: sess.enabled(Feature::BranchMindWorkbench),
     };
 
     let mut effective_items = history_items.clone();
@@ -2481,7 +2535,7 @@ async fn build_workbench_context_snapshot(
         trimmed_items = report.total_items.saturating_sub(effective_items.len());
     }
 
-    let (memory_snapshot, memory_item_opt) =
+    let (memory_snapshot, memory_item_opt, branchmind_snapshot) =
         build_memory_snapshot(sess, turn_context, &history_items).await;
 
     if let Some(memory_item) = memory_item_opt {
@@ -2523,6 +2577,7 @@ async fn build_workbench_context_snapshot(
             trimmed_items,
         },
         memory: memory_snapshot,
+        branchmind: branchmind_snapshot,
     }
 }
 
@@ -2533,6 +2588,7 @@ async fn build_memory_snapshot(
 ) -> (
     crate::protocol::WorkbenchMemorySnapshot,
     Option<ResponseItem>,
+    crate::protocol::WorkbenchBranchMindSnapshot,
 ) {
     let memory_config = &turn_context.memory_config;
     let staleness_mode = match memory_config.staleness {
@@ -2540,6 +2596,16 @@ async fn build_memory_snapshot(
         crate::config::types::MemoryStalenessMode::MtimeSize => "mtime-size",
     }
     .to_string();
+
+    let branchmind_enabled = sess.enabled(Feature::BranchMindWorkbench);
+    let project_id = crate::memory::project_id_for_path(&turn_context.cwd);
+    let mut branchmind_snapshot = crate::protocol::WorkbenchBranchMindSnapshot {
+        enabled: branchmind_enabled,
+        server: "branchmind".to_string(),
+        workspace: format!("codex/{project_id}"),
+        injected: false,
+        error: String::new(),
+    };
 
     let mut snapshot = crate::protocol::WorkbenchMemorySnapshot {
         enabled: false,
@@ -2552,8 +2618,18 @@ async fn build_memory_snapshot(
         error: String::new(),
     };
 
-    if !sess.enabled(Feature::LegoMemory) || memory_config.working_set_token_budget == 0 {
-        return (snapshot, None);
+    if !sess.enabled(Feature::LegoMemory) {
+        if branchmind_enabled {
+            branchmind_snapshot.error = "requires lego_memory".to_string();
+        }
+        return (snapshot, None, branchmind_snapshot);
+    }
+
+    if memory_config.working_set_token_budget == 0 {
+        if branchmind_enabled {
+            branchmind_snapshot.error = "requires memory.working_set_token_budget > 0".to_string();
+        }
+        return (snapshot, None, branchmind_snapshot);
     }
     snapshot.enabled = true;
 
@@ -2561,18 +2637,30 @@ async fn build_memory_snapshot(
         Ok(store) => store,
         Err(err) => {
             snapshot.error = err.to_string();
-            return (snapshot, None);
+            if branchmind_enabled {
+                branchmind_snapshot.error = "memory store unavailable".to_string();
+            }
+            return (snapshot, None, branchmind_snapshot);
         }
     };
 
     snapshot.project_id = store.project_id().to_string();
     snapshot.blocks_total = store.blocks().count();
+    branchmind_snapshot.workspace = format!("codex/{}", store.project_id());
 
     let tool_roots = tool_roots(turn_context);
     let mut extra_blocks = Vec::new();
     extra_blocks.push(build_workspace_block(turn_context, &store, &tool_roots));
     if let Some(tool_block) = build_tool_catalog_block(sess, turn_context, &tool_roots).await {
         extra_blocks.push(tool_block);
+    }
+    if branchmind_enabled {
+        let attempt = try_build_branchmind_block(sess, &store).await;
+        branchmind_snapshot.injected = attempt.block.is_some();
+        branchmind_snapshot.error = attempt.error.unwrap_or_default();
+        if let Some(block) = attempt.block {
+            extra_blocks.push(block);
+        }
     }
 
     let compiler = ContextCompiler::new(
@@ -2590,7 +2678,13 @@ async fn build_memory_snapshot(
         Ok(ctx) => ctx,
         Err(err) => {
             snapshot.error = err.to_string();
-            return (snapshot, None);
+            if branchmind_enabled {
+                branchmind_snapshot.injected = false;
+                if branchmind_snapshot.error.is_empty() {
+                    branchmind_snapshot.error = "memory context compile failed".to_string();
+                }
+            }
+            return (snapshot, None, branchmind_snapshot);
         }
     };
 
@@ -2607,7 +2701,7 @@ async fn build_memory_snapshot(
         .collect();
 
     let item: ResponseItem = ctx.into();
-    (snapshot, Some(item))
+    (snapshot, Some(item), branchmind_snapshot)
 }
 
 fn workbench_item_preview(
@@ -2722,6 +2816,7 @@ fn memory_kind_name(kind: BlockKind) -> &'static str {
         BlockKind::Toolbox => "toolbox",
         BlockKind::ToolSlice => "tool_slice",
         BlockKind::Plan => "plan",
+        BlockKind::BranchMind => "branchmind",
     }
 }
 
@@ -2842,6 +2937,493 @@ fn build_workspace_block(
     block.body_summary = Some(body);
     block.body_label = Some("Workspace view".to_string());
     block
+}
+
+async fn branchmind_log_focus(sess: &Session, store: &BlockStore, turn_id: &str, query: &str) {
+    const SERVER_NAME: &str = "branchmind";
+    const TOOL_NAME: &str = "note";
+    const MCP_TIMEOUT_MS: u64 = 400;
+
+    let query = query.trim();
+    if query.is_empty() {
+        return;
+    }
+
+    let workspace = format!("codex/{}", store.project_id());
+    let content = truncate_line(query, 800);
+    let args = serde_json::json!({
+        "workspace": workspace,
+        "title": "user_focus",
+        "format": "text",
+        "content": content,
+        "meta": {
+            "turn_id": turn_id,
+        },
+    });
+
+    let outcome = tokio::time::timeout(
+        std::time::Duration::from_millis(MCP_TIMEOUT_MS),
+        sess.call_tool(SERVER_NAME, TOOL_NAME, Some(args)),
+    )
+    .await;
+
+    match outcome {
+        Ok(Ok(_)) => {}
+        Ok(Err(err)) => debug!("BranchMind note call failed: {err:#}"),
+        Err(_) => debug!("BranchMind note call timed out after {MCP_TIMEOUT_MS}ms"),
+    }
+}
+
+#[derive(Debug)]
+struct BranchMindBlockAttempt {
+    workspace: String,
+    block: Option<Block>,
+    error: Option<String>,
+    payload: Option<Value>,
+}
+
+async fn try_build_branchmind_block(sess: &Session, store: &BlockStore) -> BranchMindBlockAttempt {
+    const SERVER_NAME: &str = "branchmind";
+    const TOOL_NAME: &str = "snapshot";
+    const SNAPSHOT_MAX_CHARS: usize = 1600;
+    const MCP_TIMEOUT_MS: u64 = 800;
+
+    let workspace = format!("codex/{}", store.project_id());
+    let args = serde_json::json!({
+        "workspace": workspace.clone(),
+        "max_chars": SNAPSHOT_MAX_CHARS,
+    });
+
+    let outcome = tokio::time::timeout(
+        std::time::Duration::from_millis(MCP_TIMEOUT_MS),
+        sess.call_tool(SERVER_NAME, TOOL_NAME, Some(args)),
+    )
+    .await;
+
+    let result = match outcome {
+        Ok(Ok(result)) => result,
+        Ok(Err(err)) => {
+            debug!("BranchMind snapshot call failed: {err:#}");
+            return BranchMindBlockAttempt {
+                workspace,
+                block: None,
+                error: Some(truncate_line(&err.to_string(), 200)),
+                payload: None,
+            };
+        }
+        Err(_) => {
+            debug!("BranchMind snapshot timed out after {MCP_TIMEOUT_MS}ms");
+            return BranchMindBlockAttempt {
+                workspace,
+                block: None,
+                error: Some(format!("timeout after {MCP_TIMEOUT_MS}ms")),
+                payload: None,
+            };
+        }
+    };
+
+    if result.is_error.unwrap_or(false) {
+        debug!("BranchMind snapshot returned is_error=true");
+        return BranchMindBlockAttempt {
+            workspace,
+            block: None,
+            error: Some("tool returned is_error=true".to_string()),
+            payload: None,
+        };
+    }
+
+    let Some(payload) = branchmind_payload(&result) else {
+        debug!("BranchMind snapshot returned no parseable JSON payload");
+        return BranchMindBlockAttempt {
+            workspace,
+            block: None,
+            error: Some("no parseable JSON payload".to_string()),
+            payload: None,
+        };
+    };
+
+    let mut minimal = BranchMindMinimalResult::from_payload(&payload);
+    if minimal.workspace.is_none() {
+        minimal.workspace = Some(workspace.clone());
+    }
+    let Some(body_full) = minimal.full_text() else {
+        debug!("BranchMind snapshot missing minimal fields");
+        return BranchMindBlockAttempt {
+            workspace,
+            block: None,
+            error: Some("missing minimal fields".to_string()),
+            payload: Some(payload),
+        };
+    };
+
+    let body_summary = minimal.summary_text().unwrap_or_else(|| body_full.clone());
+    let body_label = minimal
+        .label_text()
+        .unwrap_or_else(|| "BranchMind".to_string());
+
+    let mut block = Block::new("branchmind", BlockKind::BranchMind, "BranchMind");
+    block.priority = BlockPriority::Pinned;
+    block.status = BlockStatus::Active;
+    block.tags = vec!["branchmind".to_string()];
+    block.body_full = Some(body_full);
+    block.body_summary = Some(body_summary);
+    block.body_label = Some(body_label);
+    block.sources = vec![crate::memory::SourceRef {
+        kind: crate::memory::SourceKind::ToolOutput,
+        locator: format!("mcp:{SERVER_NAME}/{TOOL_NAME}"),
+        fingerprint: None,
+    }];
+    BranchMindBlockAttempt {
+        workspace,
+        block: Some(block),
+        error: None,
+        payload: Some(payload),
+    }
+}
+
+fn branchmind_payload(result: &CallToolResult) -> Option<Value> {
+    if let Some(payload) = result
+        .structured_content
+        .as_ref()
+        .filter(|payload| !payload.is_null())
+    {
+        return Some(payload.clone());
+    }
+
+    for block in &result.content {
+        let mcp_types::ContentBlock::TextContent(text) = block else {
+            continue;
+        };
+        let candidate = text.text.trim();
+        if candidate.is_empty() {
+            continue;
+        }
+        if let Ok(payload) = serde_json::from_str::<Value>(candidate) {
+            return Some(payload);
+        }
+    }
+
+    None
+}
+
+#[derive(Debug, Clone)]
+struct BranchMindMinimalResult {
+    workspace: Option<String>,
+    why: Option<String>,
+    next_action: Option<Value>,
+    continuation: Option<Value>,
+    state: Option<Value>,
+    truncated: Option<bool>,
+}
+
+impl BranchMindMinimalResult {
+    fn from_payload(payload: &Value) -> Self {
+        let root = payload.get("result").unwrap_or(payload);
+
+        Self {
+            workspace: root
+                .get("workspace")
+                .and_then(Value::as_str)
+                .map(ToString::to_string),
+            why: root
+                .get("why")
+                .and_then(Value::as_str)
+                .map(ToString::to_string),
+            next_action: root.get("next_action").cloned(),
+            continuation: root.get("continuation").cloned(),
+            state: root.get("state").cloned(),
+            truncated: root.get("truncated").and_then(Value::as_bool),
+        }
+    }
+
+    fn full_text(&self) -> Option<String> {
+        let mut lines = Vec::new();
+
+        if let Some(workspace) = self.workspace.as_deref() {
+            lines.push(format!("workspace: {workspace}"));
+        }
+        if let Some(why) = self.why.as_deref()
+            && !why.trim().is_empty()
+        {
+            lines.push(format!("why: {}", truncate_line(why, 200)));
+        }
+        if let Some(next) = self.next_action.as_ref().and_then(format_branchmind_action) {
+            lines.push(format!("next: {next}"));
+        }
+        if let Some(continuation) = self
+            .continuation
+            .as_ref()
+            .and_then(format_branchmind_action)
+        {
+            lines.push(format!("more: {continuation}"));
+        }
+        if self.truncated.unwrap_or(false) {
+            lines.push("truncated: true".to_string());
+        }
+
+        if let Some(state) = self.state.as_ref() {
+            let state_lines = format_branchmind_state(state);
+            if !state_lines.is_empty() {
+                lines.push(String::new());
+                lines.push("state:".to_string());
+                lines.extend(state_lines);
+            }
+        }
+
+        if lines.is_empty() {
+            None
+        } else {
+            Some(lines.join("\n"))
+        }
+    }
+
+    fn summary_text(&self) -> Option<String> {
+        let mut lines = Vec::new();
+
+        if let Some(workspace) = self.workspace.as_deref() {
+            lines.push(format!("workspace: {workspace}"));
+        }
+        if let Some(why) = self.why.as_deref()
+            && !why.trim().is_empty()
+        {
+            lines.push(format!("why: {}", truncate_line(why, 200)));
+        }
+        if let Some(next) = self.next_action.as_ref().and_then(format_branchmind_action) {
+            lines.push(format!("next: {next}"));
+        }
+
+        if lines.is_empty() {
+            None
+        } else {
+            Some(lines.join("\n"))
+        }
+    }
+
+    fn label_text(&self) -> Option<String> {
+        if let Some(why) = self.why.as_deref() {
+            let why = why.trim();
+            if !why.is_empty() {
+                return Some(format!("BranchMind: {}", truncate_line(why, 120)));
+            }
+        }
+        self.next_action
+            .as_ref()
+            .and_then(format_branchmind_action)
+            .map(|action| format!("BranchMind: {action}"))
+    }
+}
+
+fn format_branchmind_action(action: &Value) -> Option<String> {
+    let tool = action.get("tool")?.as_str()?.trim();
+    if tool.is_empty() {
+        return None;
+    }
+
+    let params = action.get("params");
+    let mut suffix = String::new();
+    if let Some(target_id) = params
+        .and_then(|params| params.get("target"))
+        .and_then(|target| target.get("id"))
+        .and_then(Value::as_str)
+    {
+        suffix = format!(" target={target_id}");
+    }
+
+    Some(format!("{tool}{suffix}"))
+}
+
+fn format_branchmind_state(state: &Value) -> Vec<String> {
+    const MAX_LINES: usize = 8;
+
+    match state {
+        Value::Object(map) => map
+            .iter()
+            .take(MAX_LINES)
+            .map(|(k, v)| format!("  {k}: {}", format_branchmind_value(v)))
+            .collect(),
+        Value::String(s) => vec![format!("  {}", truncate_line(s, 240))],
+        Value::Array(items) => vec![format!("  items: {}", items.len())],
+        other => vec![format!("  {}", format_branchmind_value(other))],
+    }
+}
+
+fn format_branchmind_value(value: &Value) -> String {
+    match value {
+        Value::Null => "null".to_string(),
+        Value::Bool(value) => value.to_string(),
+        Value::Number(value) => value.to_string(),
+        Value::String(value) => format!("{:?}", truncate_line(value, 200)),
+        Value::Array(items) => format!("[{} items]", items.len()),
+        Value::Object(map) => format!("{{{} keys}}", map.len()),
+    }
+}
+
+fn truncate_line(text: &str, max_chars: usize) -> String {
+    let mut out = String::new();
+    for ch in text.chars().take(max_chars) {
+        out.push(ch);
+    }
+    if text.chars().count() > max_chars {
+        out.push('…');
+    }
+    out
+}
+
+fn branchmind_focus_text(payload: &Value) -> Option<String> {
+    const MAX_ITEM_CHARS: usize = 240;
+    const MAX_LIST_ITEMS: usize = 6;
+
+    let root = payload.get("result").unwrap_or(payload);
+    let radar = root.get("state").and_then(|state| state.get("radar"));
+
+    let mut lines = Vec::new();
+
+    if let Some(why) = root.get("why").and_then(Value::as_str) {
+        let why = why.trim();
+        if !why.is_empty() {
+            lines.push(format!("goal: {}", truncate_line(why, MAX_ITEM_CHARS)));
+        }
+    }
+
+    if let Some(now) = radar
+        .and_then(|radar| radar.get("now"))
+        .and_then(Value::as_str)
+    {
+        let now = now.trim();
+        if !now.is_empty() {
+            lines.push(format!("now: {}", truncate_line(now, MAX_ITEM_CHARS)));
+        }
+    }
+
+    if let Some(next) = radar
+        .and_then(|radar| radar.get("next"))
+        .and_then(Value::as_array)
+    {
+        let items = next
+            .iter()
+            .filter_map(Value::as_str)
+            .map(str::trim)
+            .filter(|text| !text.is_empty())
+            .take(MAX_LIST_ITEMS)
+            .map(|text| truncate_line(text, MAX_ITEM_CHARS))
+            .collect::<Vec<_>>();
+        if !items.is_empty() {
+            lines.push(format!("next: {}", items.join(" | ")));
+        }
+    }
+
+    if let Some(verify) = radar
+        .and_then(|radar| radar.get("verify"))
+        .and_then(Value::as_array)
+    {
+        let items = verify
+            .iter()
+            .filter_map(Value::as_str)
+            .map(str::trim)
+            .filter(|text| !text.is_empty())
+            .take(MAX_LIST_ITEMS)
+            .map(|text| truncate_line(text, MAX_ITEM_CHARS))
+            .collect::<Vec<_>>();
+        if !items.is_empty() {
+            lines.push(format!("verify: {}", items.join(" | ")));
+        }
+    }
+
+    if lines.is_empty() {
+        None
+    } else {
+        Some(lines.join("\n"))
+    }
+}
+
+fn branchmind_plan_update(payload: &Value) -> Option<UpdatePlanArgs> {
+    const MAX_ITEMS: usize = 12;
+    const MAX_STEP_CHARS: usize = 200;
+
+    let root = payload.get("result").unwrap_or(payload);
+    let radar = root.get("state").and_then(|state| state.get("radar"));
+    let why = root
+        .get("why")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|why| !why.is_empty())
+        .map(|why| truncate_line(why, 200));
+
+    let mut plan = Vec::new();
+
+    let now = radar
+        .and_then(|radar| radar.get("now"))
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|now| !now.is_empty())
+        .map(|now| truncate_line(now, MAX_STEP_CHARS));
+
+    if let Some(now) = now.as_deref() {
+        plan.push(codex_protocol::plan_tool::PlanItemArg {
+            step: now.to_string(),
+            status: codex_protocol::plan_tool::StepStatus::InProgress,
+        });
+    }
+
+    if let Some(next) = radar
+        .and_then(|radar| radar.get("next"))
+        .and_then(Value::as_array)
+    {
+        for step in next
+            .iter()
+            .filter_map(Value::as_str)
+            .map(str::trim)
+            .filter(|text| !text.is_empty())
+        {
+            if plan.len() >= MAX_ITEMS {
+                break;
+            }
+            plan.push(codex_protocol::plan_tool::PlanItemArg {
+                step: truncate_line(step, MAX_STEP_CHARS),
+                status: codex_protocol::plan_tool::StepStatus::Pending,
+            });
+        }
+    }
+
+    if plan.is_empty()
+        && let Some(step) = why.as_deref().map(|why| format!("Goal: {why}"))
+    {
+        plan.push(codex_protocol::plan_tool::PlanItemArg {
+            step: truncate_line(step.as_str(), MAX_STEP_CHARS),
+            status: codex_protocol::plan_tool::StepStatus::InProgress,
+        });
+    }
+
+    if plan.is_empty() {
+        return None;
+    }
+
+    Some(UpdatePlanArgs {
+        explanation: why.map(|why| format!("BranchMind: {why}")),
+        plan,
+    })
+}
+
+async fn maybe_emit_branchmind_plan_update(
+    sess: &Session,
+    turn_context: &TurnContext,
+    update: UpdatePlanArgs,
+) {
+    let signature = serde_json::to_string(&update).unwrap_or_default();
+    let should_emit = {
+        let mut state = sess.state.lock().await;
+        if state.last_branchmind_plan_signature.as_deref() == Some(signature.as_str()) {
+            false
+        } else {
+            state.last_branchmind_plan_signature = Some(signature);
+            true
+        }
+    };
+
+    if should_emit {
+        sess.send_event(turn_context, EventMsg::PlanUpdate(update))
+            .await;
+    }
 }
 
 async fn build_tool_catalog_block(
