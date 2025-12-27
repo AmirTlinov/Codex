@@ -782,6 +782,7 @@ Notes:
 
 - Only takes effect if the selected model/provider actually emits raw reasoning content. Many models do not. When unsupported, this option has no visible effect.
 - Raw reasoning may include intermediate thoughts or sensitive context. Enable only if acceptable for your workflow.
+- This is always opt-in: `--oss` does not automatically enable raw reasoning output; use `config.toml` (or a profile) to turn it on.
 
 Example:
 

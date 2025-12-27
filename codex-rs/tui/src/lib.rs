@@ -221,7 +221,7 @@ pub async fn run_main(
         model_provider: model_provider_override.clone(),
         config_profile: cli.config_profile.clone(),
         codex_linux_sandbox_exe,
-        show_raw_agent_reasoning: cli.oss.then_some(true),
+        show_raw_agent_reasoning: None,
         additional_writable_roots: additional_dirs,
         ..Default::default()
     };
