@@ -50,6 +50,7 @@ pub mod sandboxing;
 mod stream_events_utils;
 mod text_encoding;
 pub mod token_data;
+mod tool_output_denoise;
 mod truncate;
 mod unified_exec;
 mod user_instructions;

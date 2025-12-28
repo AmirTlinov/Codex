@@ -1238,6 +1238,40 @@ impl Session {
         items: &[ResponseItem],
         turn_context: &TurnContext,
     ) {
+        if self.enabled(Feature::ToolOutputDenoise)
+            && self.enabled(Feature::LegoMemory)
+            && items.iter().any(|item| {
+                matches!(
+                    item,
+                    ResponseItem::FunctionCallOutput { .. }
+                        | ResponseItem::CustomToolCallOutput { .. }
+                )
+            })
+        {
+            match BlockStore::open(&turn_context.memory_config.root_dir, &turn_context.cwd).await {
+                Ok(mut store) => {
+                    if let Err(err) = crate::tool_output_denoise::archive_outputs(
+                        &mut store,
+                        &turn_context.sub_id,
+                        items,
+                    )
+                    .await
+                    {
+                        warn!("tool output archive failed: {err}");
+                    }
+                    if let Err(err) = store
+                        .enforce_budget(turn_context.memory_config.max_bytes)
+                        .await
+                    {
+                        warn!("memory budget enforcement failed: {err}");
+                    }
+                }
+                Err(err) => {
+                    warn!("memory store open failed (tool output archive skipped): {err}");
+                }
+            }
+        }
+
         let mut state = self.state.lock().await;
         state.record_items(items.iter(), turn_context.truncation_policy);
     }
@@ -2309,6 +2343,20 @@ pub(crate) async fn run_task(
             .map(ResponseItem::from)
             .collect::<Vec<ResponseItem>>();
 
+        let show_context_build_status = sess.enabled(Feature::WorkbenchTranscript)
+            || sess.enabled(Feature::ToolOutputDenoise)
+            || (sess.enabled(Feature::LegoMemory)
+                && turn_context.memory_config.working_set_token_budget > 0);
+        if show_context_build_status {
+            let label = if sess.enabled(Feature::WorkbenchTranscript) {
+                "Context: assembling workbench…"
+            } else {
+                "Context: assembling prompt…"
+            };
+            sess.notify_background_event(turn_context.as_ref(), label)
+                .await;
+        }
+
         // Construct the input that we will send to the model.
         let mut turn_input: Vec<ResponseItem> = {
             sess.record_conversation_items(&turn_context, &pending_input)
@@ -2319,11 +2367,23 @@ pub(crate) async fn run_task(
             turn_input = trim_history_for_workbench(turn_input, 0);
         }
         if sess.enabled(Feature::LegoMemory)
-            && let Some(memory_item) =
-                build_memory_context_item(sess.as_ref(), turn_context.as_ref()).await
+            && turn_context.memory_config.working_set_token_budget > 0
         {
-            let insert_at = memory_injection_index(&turn_input);
-            turn_input.insert(insert_at, memory_item);
+            sess.notify_background_event(turn_context.as_ref(), "Context: retrieving memory…")
+                .await;
+            if let Some(memory_item) =
+                build_memory_context_item(sess.as_ref(), turn_context.as_ref()).await
+            {
+                let insert_at = memory_injection_index(&turn_input);
+                turn_input.insert(insert_at, memory_item);
+            }
+        }
+        if sess.enabled(Feature::ToolOutputDenoise) {
+            crate::tool_output_denoise::denoise_for_prompt(&mut turn_input);
+        }
+        if show_context_build_status {
+            sess.notify_background_event(turn_context.as_ref(), "Working")
+                .await;
         }
 
         let turn_input_messages = turn_input
@@ -2542,6 +2602,10 @@ async fn build_workbench_context_snapshot(
     if let Some(memory_item) = memory_item_opt {
         let insert_at = memory_injection_index(&effective_items);
         effective_items.insert(insert_at, memory_item);
+    }
+
+    if sess.enabled(Feature::ToolOutputDenoise) {
+        crate::tool_output_denoise::denoise_for_prompt(&mut effective_items);
     }
 
     let kept_items_truncated = effective_items.len() > MAX_PREVIEW_ITEMS;

@@ -35,6 +35,16 @@ struct BlockEntry {
     origin: BlockOrigin,
 }
 
+struct CompiledBlock {
+    block: Block,
+    origin: BlockOrigin,
+    status: BlockStatus,
+    candidate: BlockCandidate,
+    representation: BlockRepresentation,
+    body: String,
+    tokens: usize,
+}
+
 impl ContextCompiler {
     pub fn new(token_budget: usize, staleness_mode: MemoryStalenessMode) -> Self {
         Self {
@@ -73,28 +83,61 @@ impl ContextCompiler {
             };
 
             let candidate = BlockCandidate::from_block(&block, status);
-            let representation =
-                select_representation(&candidate, &block, status, entry.origin, remaining);
-
-            let Some((representation, body, tokens)) = representation else {
+            let Some((representation, body, tokens)) =
+                pick_min_representation(&candidate, &block, status, entry.origin, remaining)
+            else {
                 continue;
             };
 
             remaining = remaining.saturating_sub(tokens);
-            compiled.push(MemoryContextBlock {
-                id: block.id.clone(),
-                kind: block.kind,
+            compiled.push(CompiledBlock {
+                block,
+                origin: entry.origin,
                 status,
-                priority: block.priority,
+                candidate,
                 representation,
-                title: block.title.clone(),
                 body,
+                tokens,
             });
+        }
+
+        for entry in &mut compiled {
+            let budget = entry.tokens.saturating_add(remaining);
+            let Some((representation, body, tokens)) = pick_best_representation(
+                &entry.candidate,
+                &entry.block,
+                entry.status,
+                entry.origin,
+                budget,
+            ) else {
+                continue;
+            };
+
+            if is_better_representation(representation, tokens, entry.representation, entry.tokens)
+            {
+                remaining = remaining
+                    .saturating_add(entry.tokens)
+                    .saturating_sub(tokens);
+                entry.representation = representation;
+                entry.body = body;
+                entry.tokens = tokens;
+            }
         }
 
         Ok(MemoryContext {
             project_id: store.project_id().to_string(),
-            blocks: compiled,
+            blocks: compiled
+                .into_iter()
+                .map(|entry| MemoryContextBlock {
+                    id: entry.block.id,
+                    kind: entry.block.kind,
+                    status: entry.status,
+                    priority: entry.block.priority,
+                    representation: entry.representation,
+                    title: entry.block.title,
+                    body: entry.body,
+                })
+                .collect(),
         })
     }
 }
@@ -247,45 +290,20 @@ impl BlockCandidate {
         }
     }
 
-    fn pick(&self, budget: usize) -> Option<(BlockRepresentation, String, usize)> {
-        self.full(budget)
-            .or_else(|| self.summary(budget))
-            .or_else(|| self.label(budget))
-    }
-
-    fn full(&self, budget: usize) -> Option<(BlockRepresentation, String, usize)> {
-        let tokens = estimate_tokens(&self.title, &self.full);
-        if tokens <= budget {
-            Some((BlockRepresentation::Full, self.full.clone(), tokens))
-        } else {
-            None
+    fn body_for(&self, representation: BlockRepresentation) -> &str {
+        match representation {
+            BlockRepresentation::Full => self.full.as_str(),
+            BlockRepresentation::Summary => self.summary.as_str(),
+            BlockRepresentation::Label => self.label.as_str(),
         }
     }
 
-    fn summary(&self, budget: usize) -> Option<(BlockRepresentation, String, usize)> {
-        let tokens = estimate_tokens(&self.title, &self.summary);
-        if tokens <= budget {
-            Some((BlockRepresentation::Summary, self.summary.clone(), tokens))
-        } else {
-            None
-        }
-    }
-
-    fn label(&self, budget: usize) -> Option<(BlockRepresentation, String, usize)> {
-        let tokens = estimate_tokens(&self.title, &self.label);
-        if tokens <= budget {
-            Some((BlockRepresentation::Label, self.label.clone(), tokens))
-        } else {
-            None
-        }
-    }
-
-    fn summary_or_label(&self, budget: usize) -> Option<(BlockRepresentation, String, usize)> {
-        self.summary(budget).or_else(|| self.label(budget))
+    fn tokens_for(&self, representation: BlockRepresentation) -> usize {
+        estimate_tokens(&self.title, self.body_for(representation))
     }
 }
 
-fn select_representation(
+fn pick_min_representation(
     candidate: &BlockCandidate,
     block: &Block,
     status: BlockStatus,
@@ -295,11 +313,105 @@ fn select_representation(
     if status == BlockStatus::Stale
         || (block.status == BlockStatus::Stashed && block.priority != BlockPriority::Pinned)
     {
-        candidate.label(budget)
-    } else if origin == BlockOrigin::Linked {
-        candidate.summary_or_label(budget)
+        return representation_if_fits(candidate, BlockRepresentation::Label, budget);
+    }
+
+    let allowed = if origin == BlockOrigin::Linked {
+        &[BlockRepresentation::Label, BlockRepresentation::Summary][..]
     } else {
-        candidate.pick(budget)
+        &[
+            BlockRepresentation::Label,
+            BlockRepresentation::Summary,
+            BlockRepresentation::Full,
+        ][..]
+    };
+
+    let mut best: Option<(BlockRepresentation, usize)> = None;
+    for representation in allowed {
+        let tokens = candidate.tokens_for(*representation);
+        if tokens > budget {
+            continue;
+        }
+        best = match best {
+            None => Some((*representation, tokens)),
+            Some((best_representation, best_tokens)) => {
+                if tokens < best_tokens
+                    || (tokens == best_tokens
+                        && representation_rank(*representation)
+                            < representation_rank(best_representation))
+                {
+                    Some((*representation, tokens))
+                } else {
+                    Some((best_representation, best_tokens))
+                }
+            }
+        };
+    }
+
+    best.map(|(representation, tokens)| {
+        (
+            representation,
+            candidate.body_for(representation).to_string(),
+            tokens,
+        )
+    })
+}
+
+fn pick_best_representation(
+    candidate: &BlockCandidate,
+    block: &Block,
+    status: BlockStatus,
+    origin: BlockOrigin,
+    budget: usize,
+) -> Option<(BlockRepresentation, String, usize)> {
+    if status == BlockStatus::Stale
+        || (block.status == BlockStatus::Stashed && block.priority != BlockPriority::Pinned)
+    {
+        return representation_if_fits(candidate, BlockRepresentation::Label, budget);
+    }
+
+    if origin == BlockOrigin::Linked {
+        return representation_if_fits(candidate, BlockRepresentation::Summary, budget)
+            .or_else(|| representation_if_fits(candidate, BlockRepresentation::Label, budget));
+    }
+
+    representation_if_fits(candidate, BlockRepresentation::Full, budget)
+        .or_else(|| representation_if_fits(candidate, BlockRepresentation::Summary, budget))
+        .or_else(|| representation_if_fits(candidate, BlockRepresentation::Label, budget))
+}
+
+fn representation_if_fits(
+    candidate: &BlockCandidate,
+    representation: BlockRepresentation,
+    budget: usize,
+) -> Option<(BlockRepresentation, String, usize)> {
+    let tokens = candidate.tokens_for(representation);
+    if tokens <= budget {
+        Some((
+            representation,
+            candidate.body_for(representation).to_string(),
+            tokens,
+        ))
+    } else {
+        None
+    }
+}
+
+fn is_better_representation(
+    candidate_representation: BlockRepresentation,
+    candidate_tokens: usize,
+    current_representation: BlockRepresentation,
+    current_tokens: usize,
+) -> bool {
+    representation_rank(candidate_representation) > representation_rank(current_representation)
+        || (candidate_representation == current_representation && candidate_tokens < current_tokens)
+}
+
+fn representation_rank(representation: BlockRepresentation) -> u8 {
+    match representation {
+        BlockRepresentation::Label => 0,
+        BlockRepresentation::Summary => 1,
+        BlockRepresentation::Full => 2,
     }
 }
 

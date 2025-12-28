@@ -63,6 +63,32 @@ When enabled, Codex compiles a focused prompt transcript for each model call:
 
 This does not delete the local history; it only changes what is sent to the model.
 
+### Tool output denoise (evidence vs attention)
+
+Tool outputs (logs, diffs, stack traces) are often the biggest source of context noise. When this
+feature is enabled, Codex archives large tool outputs as `tool_slice:*` blocks in lego memory and
+keeps only a deterministic digest in the prompt transcript.
+
+This preserves a strong invariant:
+
+- the model sees a short, high-signal summary (attention)
+- the full output is still available as evidence (via the `memory` tool or by inspecting the rollout)
+
+Enable:
+
+```toml
+[features]
+lego_memory = true
+tool_output_denoise = true
+```
+
+Notes:
+
+- The archive blocks are stored as `tool_slice:<call_id>` with status `stashed` and low priority.
+- Outputs containing images are not denoised (to avoid breaking `view_image` workflows).
+- The prompt digest includes a pointer like `archived=tool_slice:<call_id>` so the model can fetch
+  the full output on demand using the `memory` tool.
+
 ### BranchMind workbench (project thinking overlay)
 
 If you want Codex to pull a compact “project thinking” snapshot from a BranchMind MCP server and

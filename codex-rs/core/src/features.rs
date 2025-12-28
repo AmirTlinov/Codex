@@ -107,6 +107,8 @@ pub enum Feature {
     Skills,
     /// Enable block-based context memory (lego memory).
     LegoMemory,
+    /// Archive large tool outputs as stashed memory blocks and keep only a digest in the prompt.
+    ToolOutputDenoise,
     /// Compile a virtual transcript so the model only sees a focused tail + pinned context.
     WorkbenchTranscript,
     /// Inject a BranchMind snapshot into the workbench memory overlay.
@@ -325,6 +327,11 @@ impl FeatureSpec {
                     description: "Enable block-based context memory with the workbench selector.",
                     stage: FeatureMenuStage::Experimental,
                 }),
+                Feature::ToolOutputDenoise => Some(FeatureMenuEntry {
+                    name: "Tool output denoise",
+                    description: "Archive large tool outputs as evidence and keep only a digest in the prompt.",
+                    stage: FeatureMenuStage::Experimental,
+                }),
                 Feature::WorkbenchTranscript => Some(FeatureMenuEntry {
                     name: "Workbench transcript",
                     description: "Let the workbench compile a focused transcript (pinned + tail).",
@@ -446,6 +453,12 @@ pub const FEATURES: &[FeatureSpec] = &[
     FeatureSpec {
         id: Feature::LegoMemory,
         key: "lego_memory",
+        stage: Stage::Experimental,
+        default_enabled: false,
+    },
+    FeatureSpec {
+        id: Feature::ToolOutputDenoise,
+        key: "tool_output_denoise",
         stage: Stage::Experimental,
         default_enabled: false,
     },

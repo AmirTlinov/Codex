@@ -58,6 +58,7 @@ Supported features:
 | `remote_models`                       |  false  | Experimental | Refresh remote models list on startup                 |
 | `skills`                              |  true   | Experimental | Enable discovery and injection of skills              |
 | `lego_memory`                         |  false  | Experimental | Enable block-based context memory (lego memory)       |
+| `tool_output_denoise`                 |  false  | Experimental | Archive large tool outputs and keep only a digest     |
 | `workbench_transcript`                |  false  | Experimental | Compile a focused transcript for each model call      |
 | `branchmind_workbench`                |  false  | Experimental | Inject a BranchMind snapshot into the memory overlay  |
 | `powershell_utf8`                     |  false  | Experimental | Enforce UTF-8 output in PowerShell                    |
