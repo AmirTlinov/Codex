@@ -711,6 +711,15 @@ pub struct ConfigToml {
     #[serde(default)]
     pub developer_instructions: Option<String>,
 
+    /// Preferred output language for user-facing assistant prose (including reasoning summaries).
+    ///
+    /// - Set to `"auto"` (or an empty string) to disable language forcing.
+    /// - When set to a non-empty string, Codex injects an additional developer instruction
+    ///   requesting that prose be written in this language while keeping code blocks, commands,
+    ///   file paths, and identifiers in English.
+    #[serde(default)]
+    pub assistant_language: Option<String>,
+
     /// Compact prompt used for history compaction.
     pub compact_prompt: Option<String>,
 
@@ -1288,7 +1297,19 @@ impl Config {
             "experimental instructions file",
         )?;
         let base_instructions = base_instructions.or(file_base_instructions);
+
+        let assistant_language = normalize_assistant_language(
+            config_profile
+                .assistant_language
+                .as_deref()
+                .or(cfg.assistant_language.as_deref()),
+        );
+
         let developer_instructions = developer_instructions.or(cfg.developer_instructions);
+        let developer_instructions = append_assistant_language_developer_instructions(
+            developer_instructions,
+            &assistant_language,
+        );
 
         let experimental_compact_prompt_path = config_profile
             .experimental_compact_prompt_file
@@ -1502,6 +1523,42 @@ impl Config {
     }
 }
 
+fn normalize_assistant_language(value: Option<&str>) -> Option<String> {
+    value.and_then(|value| {
+        let trimmed = value.trim();
+        if trimmed.is_empty() || trimmed.eq_ignore_ascii_case("auto") {
+            None
+        } else {
+            Some(trimmed.to_string())
+        }
+    })
+}
+
+fn append_assistant_language_developer_instructions(
+    developer_instructions: Option<String>,
+    assistant_language: &Option<String>,
+) -> Option<String> {
+    let Some(assistant_language) = assistant_language.as_deref() else {
+        return developer_instructions;
+    };
+
+    let language_policy = format!(
+        "Output language: {assistant_language} for user-facing prose (including any reasoning summaries). Keep code blocks, commands, file paths, and identifiers in English; do not translate them."
+    );
+
+    match developer_instructions {
+        None => Some(language_policy),
+        Some(existing) => {
+            let trimmed = existing.trim();
+            if trimmed.is_empty() {
+                Some(language_policy)
+            } else {
+                Some(format!("{trimmed}\n\n{language_policy}"))
+            }
+        }
+    }
+}
+
 fn resolve_memory_config(cfg: &ConfigToml, codex_home: &Path) -> std::io::Result<MemoryConfig> {
     let memory_cfg = cfg.memory.clone().unwrap_or_default();
     let root_dir = match memory_cfg.root_dir {
@@ -1606,6 +1663,102 @@ persistence = "none"
             }),
             history_no_persistence_cfg.history
         );
+    }
+
+    #[test]
+    fn assistant_language_auto_is_noop() {
+        let codex_home = TempDir::new().expect("create temp dir");
+        let cwd = TempDir::new().expect("create temp dir");
+
+        let cfg = ConfigToml {
+            developer_instructions: Some("Existing developer instructions.".to_string()),
+            assistant_language: Some("auto".to_string()),
+            ..ConfigToml::default()
+        };
+
+        let overrides = ConfigOverrides {
+            cwd: Some(cwd.path().to_path_buf()),
+            ..ConfigOverrides::default()
+        };
+
+        let config = Config::load_from_base_config_with_overrides(
+            cfg,
+            overrides,
+            codex_home.path().to_path_buf(),
+        )
+        .expect("load config");
+
+        assert_eq!(
+            Some("Existing developer instructions.".to_string()),
+            config.developer_instructions
+        );
+    }
+
+    #[test]
+    fn assistant_language_appends_developer_instruction() {
+        let codex_home = TempDir::new().expect("create temp dir");
+        let cwd = TempDir::new().expect("create temp dir");
+
+        let cfg = ConfigToml {
+            assistant_language: Some("ru".to_string()),
+            ..ConfigToml::default()
+        };
+
+        let overrides = ConfigOverrides {
+            cwd: Some(cwd.path().to_path_buf()),
+            ..ConfigOverrides::default()
+        };
+
+        let config = Config::load_from_base_config_with_overrides(
+            cfg,
+            overrides,
+            codex_home.path().to_path_buf(),
+        )
+        .expect("load config");
+
+        let developer_instructions = config
+            .developer_instructions
+            .expect("developer instructions injected");
+        assert!(developer_instructions.contains("Output language: ru"));
+    }
+
+    #[test]
+    fn assistant_language_profile_overrides_global() {
+        let codex_home = TempDir::new().expect("create temp dir");
+        let cwd = TempDir::new().expect("create temp dir");
+
+        let mut profiles = HashMap::new();
+        profiles.insert(
+            "work".to_string(),
+            ConfigProfile {
+                assistant_language: Some("ja".to_string()),
+                ..ConfigProfile::default()
+            },
+        );
+
+        let cfg = ConfigToml {
+            assistant_language: Some("ru".to_string()),
+            profile: Some("work".to_string()),
+            profiles,
+            ..ConfigToml::default()
+        };
+
+        let overrides = ConfigOverrides {
+            cwd: Some(cwd.path().to_path_buf()),
+            ..ConfigOverrides::default()
+        };
+
+        let config = Config::load_from_base_config_with_overrides(
+            cfg,
+            overrides,
+            codex_home.path().to_path_buf(),
+        )
+        .expect("load config");
+
+        let developer_instructions = config
+            .developer_instructions
+            .expect("developer instructions injected");
+        assert!(developer_instructions.contains("Output language: ja"));
     }
 
     #[test]

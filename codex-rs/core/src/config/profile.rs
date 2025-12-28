@@ -21,6 +21,12 @@ pub struct ConfigProfile {
     pub model_reasoning_effort: Option<ReasoningEffort>,
     pub model_reasoning_summary: Option<ReasoningSummary>,
     pub model_verbosity: Option<Verbosity>,
+    /// Preferred output language for user-facing assistant prose (including reasoning summaries).
+    ///
+    /// When set, Codex injects an additional developer instruction requesting that prose be
+    /// written in this language while keeping code blocks, commands, file paths, and identifiers
+    /// in English.
+    pub assistant_language: Option<String>,
     pub chatgpt_base_url: Option<String>,
     pub experimental_instructions_file: Option<AbsolutePathBuf>,
     pub experimental_compact_prompt_file: Option<AbsolutePathBuf>,
