@@ -1,6 +1,7 @@
 use std::pin::Pin;
 use std::sync::Arc;
 
+use codex_protocol::items::ReasoningItem;
 use codex_protocol::items::TurnItem;
 use tokio_util::sync::CancellationToken;
 
@@ -10,6 +11,8 @@ use crate::error::CodexErr;
 use crate::error::Result;
 use crate::function_tool::FunctionCallError;
 use crate::parse_turn_item;
+use crate::reasoning_localization::is_english_language_tag;
+use crate::reasoning_localization::localize_reasoning_sections;
 use crate::tools::parallel::ToolCallRuntime;
 use crate::tools::router::ToolRouter;
 use codex_protocol::models::FunctionCallOutputPayload;
@@ -30,6 +33,7 @@ pub(crate) struct OutputItemResult {
     pub last_agent_message: Option<String>,
     pub needs_follow_up: bool,
     pub tool_future: Option<InFlightFuture<'static>>,
+    pub post_turn_task: Option<tokio::task::JoinHandle<()>>,
 }
 
 pub(crate) struct HandleOutputCtx {
@@ -69,7 +73,132 @@ pub(crate) async fn handle_output_item_done(
         }
         // No tool call: convert messages/reasoning into turn items and mark them as complete.
         Ok(None) => {
-            if let Some(turn_item) = handle_non_tool_response_item(&item).await {
+            let config = ctx.turn_context.client.config();
+            let assistant_language = config.assistant_language.clone();
+
+            if let Some(target_language) = assistant_language.as_deref()
+                && !is_english_language_tag(target_language)
+                && matches!(&item, ResponseItem::Reasoning { .. })
+                && (!config.hide_agent_reasoning || config.show_raw_agent_reasoning)
+            {
+                // Emit an "empty" started item if we never saw the streamed `OutputItemAdded`.
+                if previously_active_item.is_none()
+                    && let ResponseItem::Reasoning { id, .. } = &item
+                {
+                    ctx.sess
+                        .emit_turn_item_started(
+                            &ctx.turn_context,
+                            &TurnItem::Reasoning(ReasoningItem {
+                                id: id.clone(),
+                                summary_text: Vec::new(),
+                                raw_content: Vec::new(),
+                            }),
+                        )
+                        .await;
+                }
+
+                let sess = Arc::clone(&ctx.sess);
+                let turn_context = Arc::clone(&ctx.turn_context);
+                let auth_manager = Arc::clone(&ctx.sess.services.auth_manager);
+                let provider = ctx.turn_context.client.get_provider();
+                let model = ctx.turn_context.client.get_model();
+                let idle_timeout = provider.stream_idle_timeout();
+
+                // Snapshot visibility rules to avoid translation work for content that won't render.
+                let translate_summary = !config.hide_agent_reasoning;
+                let translate_raw = config.show_raw_agent_reasoning;
+
+                let (reasoning_id, summary, raw) = match &item {
+                    ResponseItem::Reasoning {
+                        id,
+                        summary,
+                        content,
+                        ..
+                    } => {
+                        let summary = if translate_summary {
+                            summary
+                                .iter()
+                                .map(|entry| match entry {
+                                    codex_protocol::models::ReasoningItemReasoningSummary::SummaryText { text } => text.as_str(),
+                                })
+                                .collect::<Vec<_>>()
+                                .join("\n\n")
+                        } else {
+                            String::new()
+                        };
+
+                        let raw = if translate_raw {
+                            content
+                                .clone()
+                                .unwrap_or_default()
+                                .into_iter()
+                                .map(|entry| match entry {
+                                    codex_protocol::models::ReasoningItemContent::ReasoningText { text }
+                                    | codex_protocol::models::ReasoningItemContent::Text { text } => text,
+                                })
+                                .collect::<Vec<_>>()
+                                .join("")
+                        } else {
+                            String::new()
+                        };
+
+                        (id.clone(), summary, raw)
+                    }
+                    _ => (String::new(), String::new(), String::new()),
+                };
+
+                let fallback_turn_item = parse_turn_item(&item);
+                let target_language = target_language.to_string();
+
+                let cancellation_token = ctx.cancellation_token.child_token();
+                output.post_turn_task = Some(tokio::spawn(async move {
+                    let localized = if cancellation_token.is_cancelled() {
+                        None
+                    } else {
+                        localize_reasoning_sections(
+                            auth_manager,
+                            provider,
+                            model,
+                            target_language,
+                            summary.clone(),
+                            raw.clone(),
+                            idle_timeout,
+                        )
+                        .await
+                        .ok()
+                    };
+
+                    if cancellation_token.is_cancelled() {
+                        return;
+                    }
+
+                    let turn_item = match localized {
+                        Some(localized) => TurnItem::Reasoning(ReasoningItem {
+                            id: reasoning_id,
+                            summary_text: if localized.summary.trim().is_empty() {
+                                Vec::new()
+                            } else {
+                                vec![localized.summary]
+                            },
+                            raw_content: if localized.raw.trim().is_empty() {
+                                Vec::new()
+                            } else {
+                                vec![localized.raw]
+                            },
+                        }),
+                        None => fallback_turn_item.unwrap_or_else(|| {
+                            TurnItem::Reasoning(ReasoningItem {
+                                id: reasoning_id,
+                                summary_text: Vec::new(),
+                                raw_content: Vec::new(),
+                            })
+                        }),
+                    };
+
+                    sess.emit_turn_item_completed(&turn_context, turn_item)
+                        .await;
+                }));
+            } else if let Some(turn_item) = handle_non_tool_response_item(&item).await {
                 if previously_active_item.is_none() {
                     ctx.sess
                         .emit_turn_item_started(&ctx.turn_context, &turn_item)

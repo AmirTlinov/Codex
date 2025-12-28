@@ -19,6 +19,7 @@ use core_test_support::responses::ev_response_created;
 use core_test_support::responses::ev_web_search_call_added;
 use core_test_support::responses::ev_web_search_call_done;
 use core_test_support::responses::mount_sse_once;
+use core_test_support::responses::mount_sse_sequence;
 use core_test_support::responses::sse;
 use core_test_support::responses::start_mock_server;
 use core_test_support::skip_if_no_network;
@@ -413,6 +414,119 @@ async fn reasoning_raw_content_delta_respects_flag() -> anyhow::Result<()> {
     assert_eq!(delta_event.item_id, reasoning_item.id);
     assert_eq!(delta_event.delta, "raw detail");
     assert_eq!(legacy_delta.delta, "raw detail");
+
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn reasoning_deltas_are_suppressed_when_assistant_language_is_configured()
+-> anyhow::Result<()> {
+    use tokio::time::Duration;
+    use tokio::time::timeout;
+
+    skip_if_no_network!(Ok(()));
+
+    let server = start_mock_server().await;
+
+    let TestCodex { codex, .. } = test_codex()
+        .with_config(|config| {
+            config.show_raw_agent_reasoning = true;
+            config.assistant_language = Some("ru".to_string());
+        })
+        .build(&server)
+        .await?;
+
+    let main_response = sse(vec![
+        ev_response_created("resp-1"),
+        ev_reasoning_item_added("reasoning-raw", &[""]),
+        ev_reasoning_text_delta("raw detail"),
+        ev_reasoning_item("reasoning-raw", &["complete"], &["raw detail"]),
+        ev_assistant_message("msg-1", "done"),
+        ev_completed("resp-1"),
+    ]);
+
+    let translation_response = sse(vec![
+        ev_response_created("resp-tr-1"),
+        ev_output_text_delta(
+            "<CODEX_SECTION_SUMMARY_BEGIN>\nперевод summary\n</CODEX_SECTION_SUMMARY_END>\n<CODEX_SECTION_RAW_BEGIN>\nперевод raw\n</CODEX_SECTION_RAW_END>\n",
+        ),
+        ev_completed("resp-tr-1"),
+    ]);
+
+    mount_sse_sequence(&server, vec![main_response, translation_response]).await;
+
+    codex
+        .submit(Op::UserInput {
+            items: vec![UserInput::Text {
+                text: "translate reasoning".into(),
+            }],
+        })
+        .await?;
+
+    let mut events = Vec::new();
+    loop {
+        let ev = timeout(Duration::from_secs(10), codex.next_event())
+            .await
+            .expect("timeout waiting for event")
+            .expect("stream ended unexpectedly");
+        events.push(ev.msg.clone());
+        if matches!(ev.msg, EventMsg::TaskComplete(_)) {
+            break;
+        }
+    }
+
+    assert!(
+        !events
+            .iter()
+            .any(|ev| matches!(ev, EventMsg::ReasoningContentDelta(_)))
+    );
+    assert!(
+        !events
+            .iter()
+            .any(|ev| matches!(ev, EventMsg::ReasoningRawContentDelta(_)))
+    );
+    assert!(
+        !events
+            .iter()
+            .any(|ev| matches!(ev, EventMsg::AgentReasoningDelta(_)))
+    );
+    assert!(
+        !events
+            .iter()
+            .any(|ev| matches!(ev, EventMsg::AgentReasoningRawContentDelta(_)))
+    );
+
+    let completed = events
+        .iter()
+        .find_map(|ev| match ev {
+            EventMsg::ItemCompleted(ItemCompletedEvent {
+                item: TurnItem::Reasoning(item),
+                ..
+            }) => Some(item.clone()),
+            _ => None,
+        })
+        .expect("expected reasoning completion item to be emitted");
+
+    assert_eq!(completed.summary_text, vec!["перевод summary".to_string()]);
+    assert_eq!(completed.raw_content, vec!["перевод raw".to_string()]);
+
+    let summary = events
+        .iter()
+        .find_map(|ev| match ev {
+            EventMsg::AgentReasoning(reasoning) => Some(reasoning.text.clone()),
+            _ => None,
+        })
+        .expect("expected AgentReasoning event to be emitted");
+    assert_eq!(summary, "перевод summary");
+
+    let raw = events
+        .iter()
+        .find_map(|ev| match ev {
+            EventMsg::AgentReasoningRawContent(raw) => Some(raw.text.clone()),
+            _ => None,
+        })
+        .expect("expected AgentReasoningRawContent event to be emitted");
+    assert_eq!(raw, "перевод raw");
 
     Ok(())
 }

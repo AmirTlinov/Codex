@@ -31,6 +31,7 @@ use crate::models_manager::manager::ModelsManager;
 use crate::models_manager::model_family::ModelFamily;
 use crate::parse_command::parse_command;
 use crate::parse_turn_item;
+use crate::reasoning_localization::is_english_language_tag;
 use crate::stream_events_utils::HandleOutputCtx;
 use crate::stream_events_utils::handle_non_tool_response_item;
 use crate::stream_events_utils::handle_output_item_done;
@@ -3794,6 +3795,14 @@ async fn try_run_turn(
     );
     let mut in_flight: FuturesOrdered<BoxFuture<'static, CodexResult<ResponseInputItem>>> =
         FuturesOrdered::new();
+    let mut post_turn_tasks: Vec<tokio::task::JoinHandle<()>> = Vec::new();
+    let suppress_reasoning_deltas = {
+        let config = turn_context.client.config();
+        config
+            .assistant_language
+            .as_deref()
+            .is_some_and(|language| !is_english_language_tag(language))
+    };
     let mut needs_follow_up = false;
     let mut last_agent_message: Option<String> = None;
     let mut active_item: Option<TurnItem> = None;
@@ -3849,6 +3858,9 @@ async fn try_run_turn(
                 if let Some(tool_future) = output_result.tool_future {
                     in_flight.push_back(tool_future);
                 }
+                if let Some(task) = output_result.post_turn_task {
+                    post_turn_tasks.push(task);
+                }
                 if let Some(agent_message) = output_result.last_agent_message {
                     last_agent_message = Some(agent_message);
                 }
@@ -3900,6 +3912,9 @@ async fn try_run_turn(
                 delta,
                 summary_index,
             } => {
+                if suppress_reasoning_deltas {
+                    continue;
+                }
                 if let Some(active) = active_item.as_ref() {
                     let event = ReasoningContentDeltaEvent {
                         thread_id: sess.conversation_id.to_string(),
@@ -3915,6 +3930,9 @@ async fn try_run_turn(
                 }
             }
             ResponseEvent::ReasoningSummaryPartAdded { summary_index } => {
+                if suppress_reasoning_deltas {
+                    continue;
+                }
                 if let Some(active) = active_item.as_ref() {
                     let event =
                         EventMsg::AgentReasoningSectionBreak(AgentReasoningSectionBreakEvent {
@@ -3930,6 +3948,9 @@ async fn try_run_turn(
                 delta,
                 content_index,
             } => {
+                if suppress_reasoning_deltas {
+                    continue;
+                }
                 if let Some(active) = active_item.as_ref() {
                     let event = ReasoningRawContentDeltaEvent {
                         thread_id: sess.conversation_id.to_string(),
@@ -3948,6 +3969,12 @@ async fn try_run_turn(
     };
 
     drain_in_flight(&mut in_flight, sess.clone(), turn_context.clone()).await?;
+
+    for task in post_turn_tasks {
+        if let Err(err) = task.await {
+            warn!("post-turn task failed: {err}");
+        }
+    }
 
     if should_emit_turn_diff {
         let unified_diff = {

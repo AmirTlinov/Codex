@@ -153,6 +153,13 @@ pub struct Config {
     /// Developer instructions override injected as a separate message.
     pub developer_instructions: Option<String>,
 
+    /// Preferred output language for user-facing assistant prose (including any reasoning shown in
+    /// the UI and reasoning summaries).
+    ///
+    /// When set, Codex also uses this as a hint for localizing reasoning output that may be
+    /// produced in a fixed language by some models/providers.
+    pub assistant_language: Option<String>,
+
     /// Compact prompt override.
     pub compact_prompt: Option<String>,
 
@@ -1360,6 +1367,7 @@ impl Config {
             user_instructions,
             base_instructions,
             developer_instructions,
+            assistant_language,
             compact_prompt,
             // The config.toml omits "_mode" because it's a config file. However, "_mode"
             // is important in code to differentiate the mode from the store implementation.
@@ -3374,6 +3382,7 @@ model_verbosity = "high"
                 chatgpt_base_url: "https://chatgpt.com/backend-api/".to_string(),
                 base_instructions: None,
                 developer_instructions: None,
+                assistant_language: None,
                 compact_prompt: None,
                 forced_chatgpt_workspace_id: None,
                 forced_login_method: None,
@@ -3464,6 +3473,7 @@ model_verbosity = "high"
             chatgpt_base_url: "https://chatgpt.com/backend-api/".to_string(),
             base_instructions: None,
             developer_instructions: None,
+            assistant_language: None,
             compact_prompt: None,
             forced_chatgpt_workspace_id: None,
             forced_login_method: None,
@@ -3569,6 +3579,7 @@ model_verbosity = "high"
             chatgpt_base_url: "https://chatgpt.com/backend-api/".to_string(),
             base_instructions: None,
             developer_instructions: None,
+            assistant_language: None,
             compact_prompt: None,
             forced_chatgpt_workspace_id: None,
             forced_login_method: None,
@@ -3660,6 +3671,7 @@ model_verbosity = "high"
             chatgpt_base_url: "https://chatgpt.com/backend-api/".to_string(),
             base_instructions: None,
             developer_instructions: None,
+            assistant_language: None,
             compact_prompt: None,
             forced_chatgpt_workspace_id: None,
             forced_login_method: None,
