@@ -21,7 +21,8 @@ pub struct ConfigProfile {
     pub model_reasoning_effort: Option<ReasoningEffort>,
     pub model_reasoning_summary: Option<ReasoningSummary>,
     pub model_verbosity: Option<Verbosity>,
-    /// Preferred output language for user-facing assistant prose (including reasoning summaries).
+    /// Preferred output language for user-facing assistant prose (including any reasoning shown in
+    /// the UI and reasoning summaries).
     ///
     /// When set, Codex injects an additional developer instruction requesting that prose be
     /// written in this language while keeping code blocks, commands, file paths, and identifiers

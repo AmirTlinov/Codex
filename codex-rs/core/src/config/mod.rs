@@ -711,7 +711,8 @@ pub struct ConfigToml {
     #[serde(default)]
     pub developer_instructions: Option<String>,
 
-    /// Preferred output language for user-facing assistant prose (including reasoning summaries).
+    /// Preferred output language for user-facing assistant prose (including any reasoning shown in
+    /// the UI and reasoning summaries).
     ///
     /// - Set to `"auto"` (or an empty string) to disable language forcing.
     /// - When set to a non-empty string, Codex injects an additional developer instruction
@@ -1543,7 +1544,7 @@ fn append_assistant_language_developer_instructions(
     };
 
     let language_policy = format!(
-        "Output language: {assistant_language} for user-facing prose (including any reasoning summaries). Keep code blocks, commands, file paths, and identifiers in English; do not translate them."
+        "Output language: {assistant_language} for user-facing prose (including any reasoning or reasoning summaries shown in the UI). Keep code blocks, commands, file paths, and identifiers in English; do not translate them."
     );
 
     match developer_instructions {
