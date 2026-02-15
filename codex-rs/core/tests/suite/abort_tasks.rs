@@ -2,6 +2,7 @@ use assert_matches::assert_matches;
 use std::sync::Arc;
 use std::time::Duration;
 
+use codex_core::features::Feature;
 use codex_core::protocol::EventMsg;
 use codex_core::protocol::Op;
 use codex_protocol::user_input::UserInput;
@@ -38,6 +39,9 @@ async fn interrupt_long_running_tool_emits_turn_aborted() {
 
     let codex = test_codex()
         .with_model("gpt-5.1")
+        .with_config(|config| {
+            config.features.disable(Feature::Collab);
+        })
         .build(&server)
         .await
         .unwrap()
@@ -93,6 +97,9 @@ async fn interrupt_tool_records_history_entries() {
 
     let fixture = test_codex()
         .with_model("gpt-5.1")
+        .with_config(|config| {
+            config.features.disable(Feature::Collab);
+        })
         .build(&server)
         .await
         .unwrap();
@@ -191,6 +198,9 @@ async fn interrupt_persists_turn_aborted_marker_in_next_request() {
 
     let fixture = test_codex()
         .with_model("gpt-5.1")
+        .with_config(|config| {
+            config.features.disable(Feature::Collab);
+        })
         .build(&server)
         .await
         .unwrap();

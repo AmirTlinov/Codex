@@ -72,6 +72,14 @@ write-config-schema:
 write-app-server-schema *args:
     cargo run -p codex-app-server-protocol --bin write_schema_fixtures -- "$@"
 
+# Generate a markdown context pack from a Scout excerpt spec (YAML/JSON).
+scout-pack *args:
+    python3 scripts/scout_pack.py "$@"
+
+# Validate a Scout excerpt spec and render to stdout (discarded).
+scout-pack-check spec:
+    python3 scripts/scout_pack.py "{{spec}}" -o - >/dev/null
+
 # Tail logs from the state SQLite database
 log *args:
     if [ "${1:-}" = "--" ]; then shift; fi; cargo run -p codex-state --bin logs_client -- "$@"

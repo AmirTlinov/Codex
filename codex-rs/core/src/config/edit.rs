@@ -1,3 +1,4 @@
+use crate::agent::AgentRole;
 use crate::config::CONFIG_TOML_FILE;
 use crate::config::types::McpServerConfig;
 use crate::config::types::Notice;
@@ -24,6 +25,11 @@ pub enum ConfigEdit {
     SetModel {
         model: Option<String>,
         effort: Option<ReasoningEffort>,
+    },
+    /// Update the configured model for a specific agent role under `[agents]`.
+    SetAgentRoleModel {
+        role: AgentRole,
+        model: Option<String>,
     },
     /// Update the active (or default) model personality.
     SetModelPersonality { personality: Option<Personality> },
@@ -297,6 +303,21 @@ impl ConfigDocument {
                     effort.map(|effort| value(effort.to_string())),
                 );
                 mutated
+            }),
+            ConfigEdit::SetAgentRoleModel { role, model } => Ok({
+                let key = match role {
+                    AgentRole::Default => "main_model",
+                    AgentRole::Scout => "scout_model",
+                    AgentRole::ContextValidator => "context_validator_model",
+                    AgentRole::Builder => "builder_model",
+                    AgentRole::PostBuilderValidator => "post_builder_validator_model",
+                    AgentRole::Validator => "validator_model",
+                    AgentRole::Plan => "plan_model",
+                };
+                self.write_profile_value(
+                    &["agents", key],
+                    model.as_ref().map(|model_value| value(model_value.clone())),
+                )
             }),
             ConfigEdit::SetModelPersonality { personality } => Ok(self.write_profile_value(
                 &["personality"],
@@ -741,6 +762,14 @@ impl ConfigEditsBuilder {
         self.edits.push(ConfigEdit::SetModel {
             model: model.map(ToOwned::to_owned),
             effort,
+        });
+        self
+    }
+
+    pub fn set_agent_role_model(mut self, role: AgentRole, model: Option<&str>) -> Self {
+        self.edits.push(ConfigEdit::SetAgentRoleModel {
+            role,
+            model: model.map(ToOwned::to_owned),
         });
         self
     }

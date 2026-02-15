@@ -545,6 +545,7 @@ fn collab_spawn_begin_and_end_emit_item_events() {
         EventMsg::CollabAgentSpawnBegin(CollabAgentSpawnBeginEvent {
             call_id: "call-10".to_string(),
             sender_thread_id,
+            agent_type: None,
             prompt: prompt.clone(),
         }),
     );
@@ -572,6 +573,7 @@ fn collab_spawn_begin_and_end_emit_item_events() {
             call_id: "call-10".to_string(),
             sender_thread_id,
             new_thread_id: Some(new_thread_id),
+            agent_type: None,
             prompt: prompt.clone(),
             status: AgentStatus::Running,
         }),

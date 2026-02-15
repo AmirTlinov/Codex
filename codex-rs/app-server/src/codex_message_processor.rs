@@ -5188,6 +5188,50 @@ impl CodexMessageProcessor {
         review_request: ReviewRequest,
         display_text: &str,
     ) -> std::result::Result<(), JSONRPCErrorError> {
+        let (turn, review_thread_id) = self
+            .prepare_detached_review(
+                parent_thread_id,
+                parent_thread,
+                review_request,
+                display_text,
+                request_id.connection_id,
+            )
+            .await?;
+
+        self.emit_review_started(request_id, turn, review_thread_id.clone(), review_thread_id)
+            .await;
+
+        Ok(())
+    }
+
+    async fn start_detached_review_sidecar(
+        &mut self,
+        parent_thread_id: ThreadId,
+        parent_thread: Arc<CodexThread>,
+        review_request: ReviewRequest,
+        display_text: &str,
+        connection_id: ConnectionId,
+    ) -> std::result::Result<(), JSONRPCErrorError> {
+        let _ = self
+            .prepare_detached_review(
+                parent_thread_id,
+                parent_thread,
+                review_request,
+                display_text,
+                connection_id,
+            )
+            .await?;
+        Ok(())
+    }
+
+    async fn prepare_detached_review(
+        &mut self,
+        parent_thread_id: ThreadId,
+        parent_thread: Arc<CodexThread>,
+        review_request: ReviewRequest,
+        display_text: &str,
+        connection_id: ConnectionId,
+    ) -> std::result::Result<(Turn, String), JSONRPCErrorError> {
         let rollout_path = if let Some(path) = parent_thread.rollout_path() {
             path
         } else {
@@ -5210,28 +5254,31 @@ impl CodexMessageProcessor {
             config.model = Some(review_model.clone());
         }
 
+        let thread_manager = Arc::clone(&self.thread_manager);
+        let fork_result = tokio::spawn(async move {
+            thread_manager
+                .fork_thread(usize::MAX, config, rollout_path, false)
+                .await
+        })
+        .await
+        .map_err(|err| JSONRPCErrorError {
+            code: INTERNAL_ERROR_CODE,
+            message: format!("failed to join detached review thread creation task: {err}"),
+            data: None,
+        })?;
         let NewThread {
             thread_id,
             thread: review_thread,
             session_configured,
             ..
-        } = self
-            .thread_manager
-            .fork_thread(usize::MAX, config, rollout_path, false)
-            .await
-            .map_err(|err| JSONRPCErrorError {
-                code: INTERNAL_ERROR_CODE,
-                message: format!("error creating detached review thread: {err}"),
-                data: None,
-            })?;
+        } = fork_result.map_err(|err| JSONRPCErrorError {
+            code: INTERNAL_ERROR_CODE,
+            message: format!("error creating detached review thread: {err}"),
+            data: None,
+        })?;
 
         if let Err(err) = self
-            .ensure_conversation_listener(
-                thread_id,
-                request_id.connection_id,
-                false,
-                ApiVersion::V2,
-            )
+            .ensure_conversation_listener(thread_id, connection_id, false, ApiVersion::V2)
             .await
         {
             tracing::warn!(
@@ -5277,10 +5324,7 @@ impl CodexMessageProcessor {
 
         let turn = Self::build_review_turn(turn_id, display_text);
         let review_thread_id = thread_id.to_string();
-        self.emit_review_started(request_id, turn, review_thread_id.clone(), review_thread_id)
-            .await;
-
-        Ok(())
+        Ok((turn, review_thread_id))
     }
 
     async fn review_start(&mut self, request_id: ConnectionRequestId, params: ReviewStartParams) {
@@ -5333,6 +5377,39 @@ impl CodexMessageProcessor {
                     .await
                 {
                     self.outgoing.send_error(request_id, err).await;
+                }
+            }
+            CoreReviewDelivery::Hybrid => {
+                let connection_id = request_id.connection_id;
+                if let Err(err) = self
+                    .start_inline_review(
+                        &request_id,
+                        parent_thread.clone(),
+                        review_request.clone(),
+                        display_text.as_str(),
+                        thread_id.clone(),
+                    )
+                    .await
+                {
+                    self.outgoing.send_error(request_id, err).await;
+                    return;
+                }
+
+                if let Err(err) = self
+                    .start_detached_review_sidecar(
+                        parent_thread_id,
+                        parent_thread,
+                        review_request,
+                        display_text.as_str(),
+                        connection_id,
+                    )
+                    .await
+                {
+                    tracing::warn!(
+                        "hybrid review sidecar failed for thread {}: {}",
+                        thread_id,
+                        err.message
+                    );
                 }
             }
         }

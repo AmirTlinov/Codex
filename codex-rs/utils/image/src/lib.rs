@@ -101,16 +101,18 @@ pub fn load_and_resize_to_fit(path: &Path) -> Result<EncodedImage, ImageProcessi
 
 fn read_file_bytes(path: &Path, path_for_error: &Path) -> Result<Vec<u8>, ImageProcessingError> {
     match tokio::runtime::Handle::try_current() {
-        // If we're inside a Tokio runtime, avoid block_on (it panics on worker threads).
-        // Use block_in_place and do a standard blocking read safely.
-        Ok(_) => tokio::task::block_in_place(|| std::fs::read(path)).map_err(|source| {
-            ImageProcessingError::Read {
-                path: path_for_error.to_path_buf(),
-                source,
-            }
-        }),
-        // Outside a runtime, just read synchronously.
-        Err(_) => std::fs::read(path).map_err(|source| ImageProcessingError::Read {
+        Ok(handle) if handle.runtime_flavor() == tokio::runtime::RuntimeFlavor::MultiThread => {
+            // If we're inside a multi-threaded Tokio runtime, avoid block_on (it panics on worker
+            // threads). Use block_in_place and do a standard blocking read safely.
+            tokio::task::block_in_place(|| std::fs::read(path)).map_err(|source| {
+                ImageProcessingError::Read {
+                    path: path_for_error.to_path_buf(),
+                    source,
+                }
+            })
+        }
+        // Outside a runtime (or in a current-thread runtime), just read synchronously.
+        _ => std::fs::read(path).map_err(|source| ImageProcessingError::Read {
             path: path_for_error.to_path_buf(),
             source,
         }),

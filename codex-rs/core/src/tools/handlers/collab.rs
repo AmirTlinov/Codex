@@ -95,6 +95,19 @@ mod spawn {
     use crate::agent::exceeds_thread_spawn_depth_limit;
     use crate::agent::next_thread_spawn_depth;
     use std::sync::Arc;
+    use std::sync::atomic::Ordering;
+
+    fn agent_type_label(agent_role: AgentRole) -> &'static str {
+        match agent_role {
+            AgentRole::Default => "default",
+            AgentRole::Scout => "scout",
+            AgentRole::Builder => "builder",
+            AgentRole::ContextValidator => "context_validator",
+            AgentRole::Validator => "validator",
+            AgentRole::PostBuilderValidator => "post_builder_validator",
+            AgentRole::Plan => "plan",
+        }
+    }
 
     #[derive(Debug, Deserialize)]
     struct SpawnAgentArgs {
@@ -115,9 +128,54 @@ mod spawn {
         arguments: String,
     ) -> Result<ToolOutput, FunctionCallError> {
         let args: SpawnAgentArgs = parse_arguments(&arguments)?;
-        let agent_role = args.agent_type.unwrap_or(AgentRole::Default);
         let input_items = parse_collab_input(args.message, args.items)?;
+        let agent_role = args.agent_type.unwrap_or(AgentRole::Scout);
+        if turn.tools_config.agent_role == AgentRole::Plan && agent_role != AgentRole::Scout {
+            return Err(FunctionCallError::RespondToModel(
+                "Plan agents can only spawn scout agents. Set `agent_type` to \"scout\"."
+                    .to_string(),
+            ));
+        }
+        if turn.tools_config.agent_role == AgentRole::Default {
+            if !matches!(
+                agent_role,
+                AgentRole::Scout
+                    | AgentRole::ContextValidator
+                    | AgentRole::Builder
+                    | AgentRole::PostBuilderValidator
+                    | AgentRole::Validator
+            ) {
+                return Err(FunctionCallError::RespondToModel(
+                    "Main role can only spawn scout, context_validator, builder, post_builder_validator, or validator."
+                        .to_string(),
+                ));
+            }
+
+            if !turn.scout_context_ready.load(Ordering::Acquire) {
+                if !matches!(agent_role, AgentRole::Scout) {
+                    return Err(FunctionCallError::RespondToModel(
+                        "run spawn_agent(agent_type=\"scout\") first to collect context."
+                            .to_string(),
+                    ));
+                }
+            } else if matches!(agent_role, AgentRole::Builder)
+                && !turn.context_validated.load(Ordering::Acquire)
+            {
+                return Err(FunctionCallError::RespondToModel(
+                    "run context_validator before spawning builder.".to_string(),
+                ));
+            } else if matches!(
+                agent_role,
+                AgentRole::Validator | AgentRole::PostBuilderValidator
+            ) && !turn.builder_spawned.load(Ordering::Acquire)
+            {
+                return Err(FunctionCallError::RespondToModel(
+                    "spawn builder before validator roles.".to_string(),
+                ));
+            }
+        }
         let prompt = input_preview(&input_items);
+        let agent_type = Some(agent_type_label(agent_role).to_string());
         let session_source = turn.session_source.clone();
         let child_depth = next_thread_spawn_depth(&session_source);
         if exceeds_thread_spawn_depth_limit(child_depth) {
@@ -131,6 +189,7 @@ mod spawn {
                 CollabAgentSpawnBeginEvent {
                     call_id: call_id.clone(),
                     sender_thread_id: session.conversation_id,
+                    agent_type: agent_type.clone(),
                     prompt: prompt.clone(),
                 }
                 .into(),
@@ -169,6 +228,7 @@ mod spawn {
                     call_id,
                     sender_thread_id: session.conversation_id,
                     new_thread_id,
+                    agent_type,
                     prompt,
                     status,
                 }
@@ -176,6 +236,25 @@ mod spawn {
             )
             .await;
         let new_thread_id = result?;
+        if agent_role == AgentRole::Scout {
+            turn.context_validated.store(false, Ordering::Release);
+            turn.builder_spawned.store(false, Ordering::Release);
+            turn.validator_spawned.store(false, Ordering::Release);
+            turn.scout_context_ready.store(true, Ordering::Release);
+        } else if matches!(agent_role, AgentRole::ContextValidator) {
+            turn.context_validated.store(true, Ordering::Release);
+            turn.builder_spawned.store(false, Ordering::Release);
+            turn.validator_spawned.store(false, Ordering::Release);
+            turn.scout_context_ready.store(true, Ordering::Release);
+        } else if matches!(agent_role, AgentRole::Builder) {
+            turn.builder_spawned.store(true, Ordering::Release);
+            turn.validator_spawned.store(false, Ordering::Release);
+        } else if matches!(
+            agent_role,
+            AgentRole::Validator | AgentRole::PostBuilderValidator
+        ) {
+            turn.validator_spawned.store(true, Ordering::Release);
+        }
 
         let content = serde_json::to_string(&SpawnAgentResult {
             agent_id: new_thread_id.to_string(),
@@ -844,9 +923,11 @@ mod tests {
     use crate::AuthManager;
     use crate::CodexAuth;
     use crate::ThreadManager;
+    use crate::agent::AgentRole;
     use crate::agent::MAX_THREAD_SPAWN_DEPTH;
     use crate::built_in_model_providers;
     use crate::codex::make_session_and_context;
+    use crate::config::AgentsToml;
     use crate::config::types::ShellEnvironmentPolicy;
     use crate::function_tool::FunctionCallError;
     use crate::protocol::AskForApproval;
@@ -937,6 +1018,42 @@ mod tests {
             err,
             FunctionCallError::RespondToModel("unsupported collab tool unknown_tool".to_string())
         );
+    }
+
+    #[tokio::test]
+    async fn plan_role_rejects_spawning_non_scout_agents() {
+        let (session, mut turn) = make_session_and_context().await;
+        turn.tools_config.agent_role = AgentRole::Plan;
+        let session = Arc::new(session);
+        let turn = Arc::new(turn);
+        let invalid_agent_types = [
+            "validator",
+            "context_validator",
+            "post_builder_validator",
+            "builder",
+        ];
+
+        for invalid_agent_type in invalid_agent_types {
+            let invocation = invocation(
+                session.clone(),
+                turn.clone(),
+                "spawn_agent",
+                function_payload(json!({
+                    "message": "context please",
+                    "agent_type": invalid_agent_type,
+                })),
+            );
+            let Err(err) = CollabHandler.handle(invocation).await else {
+                panic!("spawn_agent should be rejected for non-scout agent_type");
+            };
+            assert_eq!(
+                err,
+                FunctionCallError::RespondToModel(
+                    "Plan agents can only spawn scout agents. Set `agent_type` to \"scout\"."
+                        .to_string()
+                )
+            );
+        }
     }
 
     #[tokio::test]
@@ -1794,5 +1911,101 @@ mod tests {
             .set(turn.sandbox_policy)
             .expect("sandbox policy set");
         assert_eq!(config, expected);
+    }
+
+    #[tokio::test]
+    async fn build_agent_spawn_config_applies_role_models() {
+        let (_session, mut turn) = make_session_and_context().await;
+        let base_instructions = BaseInstructions {
+            text: "base".to_string(),
+        };
+
+        turn.config = Arc::new(Config {
+            agents: AgentsToml {
+                max_threads: Some(7),
+                main_model: Some("main-role".to_string()),
+                scout_model: Some("scout-role".to_string()),
+                builder_model: None,
+                context_validator_model: None,
+                validator_model: None,
+                post_builder_validator_model: None,
+                plan_model: Some("plan-role".to_string()),
+            },
+            model: Some("fallback-model".to_string()),
+            ..(*turn.config).clone()
+        });
+
+        let mut config =
+            build_agent_spawn_config(&base_instructions, &turn, 0).expect("spawn config");
+        let writable_policy = [
+            SandboxPolicy::new_workspace_write_policy(),
+            SandboxPolicy::DangerFullAccess,
+        ]
+        .into_iter()
+        .find(|policy| config.permissions.sandbox_policy.can_set(policy).is_ok())
+        .unwrap_or_else(|| config.permissions.sandbox_policy.get().clone());
+        config
+            .permissions
+            .sandbox_policy
+            .set(writable_policy.clone())
+            .expect("test should start from a writable sandbox policy");
+
+        let mut default_config = config.clone();
+        AgentRole::Default
+            .apply_to_config(&mut default_config)
+            .expect("default role should inherit main model");
+        assert_eq!(default_config.model, Some("main-role".to_string()));
+        assert_eq!(
+            *default_config.permissions.sandbox_policy.get(),
+            writable_policy
+        );
+
+        let mut scout_config = config.clone();
+        AgentRole::Scout
+            .apply_to_config(&mut scout_config)
+            .expect("scout should use scout override");
+        assert_eq!(scout_config.model, Some("scout-role".to_string()));
+        assert_eq!(
+            *scout_config.permissions.sandbox_policy.get(),
+            SandboxPolicy::new_read_only_policy()
+        );
+
+        let mut builder_config = config.clone();
+        AgentRole::Builder
+            .apply_to_config(&mut builder_config)
+            .expect("builder should fallback to main model");
+        assert_eq!(builder_config.model, Some("main-role".to_string()));
+        assert_eq!(
+            *builder_config.permissions.sandbox_policy.get(),
+            SandboxPolicy::new_read_only_policy()
+        );
+
+        let mut validator_config = config.clone();
+        AgentRole::Validator
+            .apply_to_config(&mut validator_config)
+            .expect("validator should fallback to main model");
+        assert_eq!(validator_config.model, Some("main-role".to_string()));
+        assert_eq!(
+            *validator_config.permissions.sandbox_policy.get(),
+            writable_policy
+        );
+
+        let mut plan_config = config.clone();
+        AgentRole::Plan
+            .apply_to_config(&mut plan_config)
+            .expect("plan should use plan override");
+        assert_eq!(plan_config.model, Some("plan-role".to_string()));
+        assert_eq!(
+            *plan_config.permissions.sandbox_policy.get(),
+            writable_policy
+        );
+
+        let mut fallback_config = config;
+        fallback_config.agents = AgentsToml::default();
+        fallback_config.model = Some("global-fallback".to_string());
+        AgentRole::Scout
+            .apply_to_config(&mut fallback_config)
+            .expect("scout should fallback to global model");
+        assert_eq!(fallback_config.model, Some("global-fallback".to_string()));
     }
 }

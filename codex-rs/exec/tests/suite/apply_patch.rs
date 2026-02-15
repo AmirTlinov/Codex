@@ -83,6 +83,8 @@ async fn test_apply_patch_tool() -> anyhow::Result<()> {
         .arg("--skip-git-repo-check")
         .arg("-s")
         .arg("danger-full-access")
+        .arg("-c")
+        .arg("features.collab=false")
         .arg("foo")
         .assert()
         .success();
@@ -134,6 +136,8 @@ async fn test_apply_patch_freeform_tool() -> anyhow::Result<()> {
         .arg("--skip-git-repo-check")
         .arg("-s")
         .arg("danger-full-access")
+        .arg("-c")
+        .arg("features.collab=false")
         .arg("foo")
         .assert()
         .success();

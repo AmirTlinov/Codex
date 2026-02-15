@@ -3,7 +3,9 @@ use schemars::JsonSchema;
 use serde::Deserialize;
 use serde::Serialize;
 
+use crate::config::AgentsToml;
 use crate::config::types::Personality;
+use crate::config::types::ReviewConfigToml;
 use crate::config::types::WindowsToml;
 use crate::protocol::AskForApproval;
 use codex_protocol::config_types::ReasoningSummary;
@@ -18,6 +20,13 @@ use codex_protocol::openai_models::ReasoningEffort;
 #[schemars(deny_unknown_fields)]
 pub struct ConfigProfile {
     pub model: Option<String>,
+    /// Review model override used by `/review` for this profile.
+    pub review_model: Option<String>,
+    /// Review settings override for this profile (`review.mode`, `review.local.model`, ...).
+    #[serde(default)]
+    pub review: Option<ReviewConfigToml>,
+    /// Per-role model selection for sub-agents.
+    pub agents: Option<AgentsToml>,
     /// The key in the `model_providers` map identifying the
     /// [`ModelProviderInfo`] to use.
     pub model_provider: Option<String>,

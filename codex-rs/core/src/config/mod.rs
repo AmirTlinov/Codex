@@ -15,6 +15,10 @@ use crate::config::types::Notifications;
 use crate::config::types::OtelConfig;
 use crate::config::types::OtelConfigToml;
 use crate::config::types::OtelExporterKind;
+use crate::config::types::ReviewConfigToml;
+use crate::config::types::ReviewHybridPolicy;
+use crate::config::types::ReviewMode;
+use crate::config::types::ReviewRemoteToml;
 use crate::config::types::SandboxWorkspaceWrite;
 use crate::config::types::ShellEnvironmentPolicy;
 use crate::config::types::ShellEnvironmentPolicyToml;
@@ -148,8 +152,17 @@ pub struct Config {
     /// Optional override of model selection.
     pub model: Option<String>,
 
-    /// Model used specifically for review sessions.
+    /// Local model used specifically for review sessions.
     pub review_model: Option<String>,
+
+    /// Review execution mode controlling how `/review` runs.
+    pub review_mode: ReviewMode,
+
+    /// Remote review configuration used when `review_mode` is `Remote` or `Hybrid`.
+    pub review_remote: ReviewRemoteToml,
+
+    /// Hybrid mode policy (defaults to local-first).
+    pub review_hybrid_policy: ReviewHybridPolicy,
 
     /// Size of the context window for the model, in tokens.
     pub model_context_window: Option<i64>,
@@ -290,6 +303,9 @@ pub struct Config {
 
     /// Maximum number of agent threads that can be open concurrently.
     pub agent_max_threads: Option<usize>,
+
+    /// Config for agent roles.
+    pub agents: AgentsToml,
 
     /// Memories subsystem settings.
     pub memories: MemoriesConfig,
@@ -865,6 +881,9 @@ pub struct ConfigToml {
     pub model: Option<String>,
     /// Review model override used by the `/review` feature.
     pub review_model: Option<String>,
+    /// Review settings (mode + local/remote configuration).
+    #[serde(default)]
+    pub review: ReviewConfigToml,
 
     /// Provider to use from the model_providers map.
     pub model_provider: Option<String>,
@@ -1141,6 +1160,44 @@ pub struct AgentsToml {
     /// When unset, no limit is enforced.
     #[schemars(range(min = 1))]
     pub max_threads: Option<usize>,
+    /// Model override for the main/orchestrator role.
+    pub main_model: Option<String>,
+    /// Model override for the scout role.
+    pub scout_model: Option<String>,
+    /// Model override for the builder role.
+    pub builder_model: Option<String>,
+    /// Model override for the context validator role.
+    pub context_validator_model: Option<String>,
+    /// Model override for the validator role.
+    pub validator_model: Option<String>,
+    /// Model override for the post-builder validator role.
+    pub post_builder_validator_model: Option<String>,
+    /// Model override for the plan role.
+    pub plan_model: Option<String>,
+}
+
+impl AgentsToml {
+    fn merge(profile_agents: Option<Self>, config_agents: Option<Self>) -> Self {
+        let profile_agents = profile_agents.unwrap_or_default();
+        let config_agents = config_agents.unwrap_or_default();
+
+        Self {
+            max_threads: profile_agents.max_threads.or(config_agents.max_threads),
+            main_model: profile_agents.main_model.or(config_agents.main_model),
+            scout_model: profile_agents.scout_model.or(config_agents.scout_model),
+            builder_model: profile_agents.builder_model.or(config_agents.builder_model),
+            context_validator_model: profile_agents
+                .context_validator_model
+                .or(config_agents.context_validator_model),
+            validator_model: profile_agents
+                .validator_model
+                .or(config_agents.validator_model),
+            post_builder_validator_model: profile_agents
+                .post_builder_validator_model
+                .or(config_agents.post_builder_validator_model),
+            plan_model: profile_agents.plan_model.or(config_agents.plan_model),
+        }
+    }
 }
 
 impl From<ToolsToml> for Tools {
@@ -1459,6 +1516,7 @@ impl Config {
                 .clone(),
             None => ConfigProfile::default(),
         };
+        let agents = AgentsToml::merge(config_profile.agents.clone(), cfg.agents.clone());
 
         let feature_overrides = FeatureOverrides {
             include_apply_patch_tool: include_apply_patch_tool_override,
@@ -1572,11 +1630,7 @@ impl Config {
 
         let history = cfg.history.unwrap_or_default();
 
-        let agent_max_threads = cfg
-            .agents
-            .as_ref()
-            .and_then(|agents| agents.max_threads)
-            .or(DEFAULT_AGENT_MAX_THREADS);
+        let agent_max_threads = agents.max_threads.or(DEFAULT_AGENT_MAX_THREADS);
         if agent_max_threads == Some(0) {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::InvalidInput,
@@ -1668,7 +1722,36 @@ impl Config {
             .or(config_profile.js_repl_node_path.map(Into::into))
             .or(cfg.js_repl_node_path.map(Into::into));
 
-        let review_model = override_review_model.or(cfg.review_model);
+        let profile_review = config_profile.review.as_ref();
+        let toml_review = &cfg.review;
+
+        let review_model = override_review_model
+            .or(profile_review.and_then(|review| review.local.model.clone()))
+            .or(config_profile.review_model)
+            .or(toml_review.local.model.clone())
+            .or(cfg.review_model);
+
+        let review_mode = profile_review
+            .and_then(|review| review.mode)
+            .or(toml_review.mode)
+            .unwrap_or_default();
+
+        let review_hybrid_policy = profile_review
+            .and_then(|review| review.hybrid.policy)
+            .or(toml_review.hybrid.policy)
+            .unwrap_or_default();
+
+        let review_remote = ReviewRemoteToml {
+            provider: profile_review
+                .and_then(|review| review.remote.provider)
+                .or(toml_review.remote.provider),
+            model: profile_review
+                .and_then(|review| review.remote.model.clone())
+                .or(toml_review.remote.model.clone()),
+            trigger: profile_review
+                .and_then(|review| review.remote.trigger.clone())
+                .or(toml_review.remote.trigger.clone()),
+        };
 
         let check_for_update_on_startup = cfg.check_for_update_on_startup.unwrap_or(true);
 
@@ -1733,6 +1816,9 @@ impl Config {
         let config = Self {
             model,
             review_model,
+            review_mode,
+            review_remote,
+            review_hybrid_policy,
             model_context_window: cfg.model_context_window,
             model_auto_compact_token_limit: cfg.model_auto_compact_token_limit,
             model_provider_id,
@@ -1779,6 +1865,7 @@ impl Config {
                 .collect(),
             tool_output_token_limit: cfg.tool_output_token_limit,
             agent_max_threads,
+            agents,
             memories: cfg.memories.unwrap_or_default().into(),
             codex_home,
             log_dir,
@@ -1998,6 +2085,7 @@ mod tests {
     use crate::config::types::MemoriesToml;
     use crate::config::types::NotificationMethod;
     use crate::config::types::Notifications;
+    use crate::config::types::ReviewLocalToml;
     use crate::config_loader::RequirementSource;
     use crate::features::Feature;
 
@@ -2723,6 +2811,141 @@ profile = "project"
             &SandboxPolicy::DangerFullAccess
         ));
         assert!(config.did_user_set_custom_approval_policy_or_sandbox_mode);
+
+        Ok(())
+    }
+
+    #[test]
+    fn review_model_precedence_cli_overrides_profile_and_top_level() -> std::io::Result<()> {
+        let codex_home = TempDir::new()?;
+        let mut profiles = HashMap::new();
+        profiles.insert(
+            "work".to_string(),
+            ConfigProfile {
+                review_model: Some("profile-review".to_string()),
+                ..Default::default()
+            },
+        );
+        let cfg = ConfigToml {
+            review_model: Some("global-review".to_string()),
+            profiles,
+            profile: Some("work".to_string()),
+            ..Default::default()
+        };
+
+        let profile_selected = Config::load_from_base_config_with_overrides(
+            cfg.clone(),
+            ConfigOverrides::default(),
+            codex_home.path().to_path_buf(),
+        )?;
+        assert_eq!(
+            profile_selected.review_model.as_deref(),
+            Some("profile-review")
+        );
+
+        let cli_override = Config::load_from_base_config_with_overrides(
+            cfg,
+            ConfigOverrides {
+                review_model: Some("override-review".to_string()),
+                ..Default::default()
+            },
+            codex_home.path().to_path_buf(),
+        )?;
+        assert_eq!(
+            cli_override.review_model.as_deref(),
+            Some("override-review")
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    fn review_mode_precedence_profile_overrides_top_level() -> std::io::Result<()> {
+        let codex_home = TempDir::new()?;
+        let mut profiles = HashMap::new();
+        profiles.insert(
+            "work".to_string(),
+            ConfigProfile {
+                review: Some(ReviewConfigToml {
+                    mode: Some(ReviewMode::Hybrid),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            },
+        );
+        let cfg = ConfigToml {
+            review: ReviewConfigToml {
+                mode: Some(ReviewMode::Remote),
+                ..Default::default()
+            },
+            profiles,
+            profile: Some("work".to_string()),
+            ..Default::default()
+        };
+
+        let config = Config::load_from_base_config_with_overrides(
+            cfg,
+            ConfigOverrides::default(),
+            codex_home.path().to_path_buf(),
+        )?;
+
+        assert_eq!(config.review_mode, ReviewMode::Hybrid);
+
+        Ok(())
+    }
+
+    #[test]
+    fn review_local_model_precedence_overrides_legacy_review_model() -> std::io::Result<()> {
+        let codex_home = TempDir::new()?;
+        let mut profiles = HashMap::new();
+        profiles.insert(
+            "work".to_string(),
+            ConfigProfile {
+                review_model: Some("profile-legacy-review".to_string()),
+                review: Some(ReviewConfigToml {
+                    local: ReviewLocalToml {
+                        model: Some("profile-local-review".to_string()),
+                    },
+                    ..Default::default()
+                }),
+                ..Default::default()
+            },
+        );
+        let cfg = ConfigToml {
+            review_model: Some("global-legacy-review".to_string()),
+            review: ReviewConfigToml {
+                local: ReviewLocalToml {
+                    model: Some("global-local-review".to_string()),
+                },
+                ..Default::default()
+            },
+            profiles,
+            profile: Some("work".to_string()),
+            ..Default::default()
+        };
+
+        let profile_selected = Config::load_from_base_config_with_overrides(
+            cfg.clone(),
+            ConfigOverrides::default(),
+            codex_home.path().to_path_buf(),
+        )?;
+        assert_eq!(
+            profile_selected.review_model.as_deref(),
+            Some("profile-local-review")
+        );
+
+        let cli_override = Config::load_from_base_config_with_overrides(
+            cfg,
+            ConfigOverrides {
+                review_model: Some("override-review".to_string()),
+                ..Default::default()
+            },
+            codex_home.path().to_path_buf(),
+        )?;
+        assert_eq!(
+            cli_override.review_model.as_deref(),
+            Some("override-review")
+        );
 
         Ok(())
     }
@@ -4044,6 +4267,58 @@ model_verbosity = "high"
         })
     }
 
+    #[test]
+    fn agents_config_precedence_profile_overrides_global() -> std::io::Result<()> {
+        let toml = r#"
+model = "o3"
+profile = "profile"
+
+[agents]
+main_model = "global-main"
+scout_model = "global-scout"
+plan_model = "global-plan"
+max_threads = 4
+
+[profiles.profile]
+model = "o3"
+
+[profiles.profile.agents]
+main_model = "profile-main"
+builder_model = "profile-builder"
+plan_model = "profile-plan"
+"#;
+        let cfg =
+            toml::from_str::<ConfigToml>(toml).expect("ConfigToml deserialization should succeed");
+        let codex_home = TempDir::new()?;
+        let cwd = TempDir::new()?;
+
+        let config = Config::load_from_base_config_with_overrides(
+            cfg,
+            ConfigOverrides {
+                cwd: Some(cwd.path().to_path_buf()),
+                ..Default::default()
+            },
+            codex_home.path().to_path_buf(),
+        )?;
+
+        assert_eq!(
+            config.agents,
+            AgentsToml {
+                max_threads: Some(4),
+                main_model: Some("profile-main".to_string()),
+                scout_model: Some("global-scout".to_string()),
+                builder_model: Some("profile-builder".to_string()),
+                context_validator_model: None,
+                validator_model: None,
+                post_builder_validator_model: None,
+                plan_model: Some("profile-plan".to_string()),
+            }
+        );
+        assert_eq!(config.agent_max_threads, Some(4));
+
+        Ok(())
+    }
+
     /// Users can specify config values at multiple levels that have the
     /// following precedence:
     ///
@@ -4074,6 +4349,9 @@ model_verbosity = "high"
             Config {
                 model: Some("o3".to_string()),
                 review_model: None,
+                review_mode: ReviewMode::Local,
+                review_remote: ReviewRemoteToml::default(),
+                review_hybrid_policy: ReviewHybridPolicy::LocalFirst,
                 model_context_window: None,
                 model_auto_compact_token_limit: None,
                 model_provider_id: "openai".to_string(),
@@ -4099,6 +4377,7 @@ model_verbosity = "high"
                 project_doc_fallback_filenames: Vec::new(),
                 tool_output_token_limit: None,
                 agent_max_threads: DEFAULT_AGENT_MAX_THREADS,
+                agents: AgentsToml::default(),
                 memories: MemoriesConfig::default(),
                 codex_home: fixture.codex_home(),
                 log_dir: fixture.codex_home().join("log"),
@@ -4184,6 +4463,9 @@ model_verbosity = "high"
         let expected_gpt3_profile_config = Config {
             model: Some("gpt-3.5-turbo".to_string()),
             review_model: None,
+            review_mode: ReviewMode::Local,
+            review_remote: ReviewRemoteToml::default(),
+            review_hybrid_policy: ReviewHybridPolicy::LocalFirst,
             model_context_window: None,
             model_auto_compact_token_limit: None,
             model_provider_id: "openai-custom".to_string(),
@@ -4209,6 +4491,7 @@ model_verbosity = "high"
             project_doc_fallback_filenames: Vec::new(),
             tool_output_token_limit: None,
             agent_max_threads: DEFAULT_AGENT_MAX_THREADS,
+            agents: AgentsToml::default(),
             memories: MemoriesConfig::default(),
             codex_home: fixture.codex_home(),
             log_dir: fixture.codex_home().join("log"),
@@ -4292,6 +4575,9 @@ model_verbosity = "high"
         let expected_zdr_profile_config = Config {
             model: Some("o3".to_string()),
             review_model: None,
+            review_mode: ReviewMode::Local,
+            review_remote: ReviewRemoteToml::default(),
+            review_hybrid_policy: ReviewHybridPolicy::LocalFirst,
             model_context_window: None,
             model_auto_compact_token_limit: None,
             model_provider_id: "openai".to_string(),
@@ -4317,6 +4603,7 @@ model_verbosity = "high"
             project_doc_fallback_filenames: Vec::new(),
             tool_output_token_limit: None,
             agent_max_threads: DEFAULT_AGENT_MAX_THREADS,
+            agents: AgentsToml::default(),
             memories: MemoriesConfig::default(),
             codex_home: fixture.codex_home(),
             log_dir: fixture.codex_home().join("log"),
@@ -4386,6 +4673,9 @@ model_verbosity = "high"
         let expected_gpt5_profile_config = Config {
             model: Some("gpt-5.1".to_string()),
             review_model: None,
+            review_mode: ReviewMode::Local,
+            review_remote: ReviewRemoteToml::default(),
+            review_hybrid_policy: ReviewHybridPolicy::LocalFirst,
             model_context_window: None,
             model_auto_compact_token_limit: None,
             model_provider_id: "openai".to_string(),
@@ -4411,6 +4701,7 @@ model_verbosity = "high"
             project_doc_fallback_filenames: Vec::new(),
             tool_output_token_limit: None,
             agent_max_threads: DEFAULT_AGENT_MAX_THREADS,
+            agents: AgentsToml::default(),
             memories: MemoriesConfig::default(),
             codex_home: fixture.codex_home(),
             log_dir: fixture.codex_home().join("log"),

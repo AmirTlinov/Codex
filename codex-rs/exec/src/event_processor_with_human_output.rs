@@ -615,6 +615,7 @@ impl EventProcessor for EventProcessorWithHumanOutput {
             EventMsg::CollabAgentSpawnBegin(CollabAgentSpawnBeginEvent {
                 call_id,
                 sender_thread_id: _,
+                agent_type: _,
                 prompt,
             }) => {
                 ts_msg!(
@@ -629,6 +630,7 @@ impl EventProcessor for EventProcessorWithHumanOutput {
                 call_id,
                 sender_thread_id: _,
                 new_thread_id,
+                agent_type: _,
                 prompt,
                 status,
             }) => {

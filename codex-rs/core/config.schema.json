@@ -9,11 +9,39 @@
     "AgentsToml": {
       "additionalProperties": false,
       "properties": {
+        "builder_model": {
+          "description": "Model override for the builder role.",
+          "type": "string"
+        },
+        "context_validator_model": {
+          "description": "Model override for the context validator role.",
+          "type": "string"
+        },
+        "main_model": {
+          "description": "Model override for the main/orchestrator role.",
+          "type": "string"
+        },
         "max_threads": {
           "description": "Maximum number of agent threads that can be open concurrently. When unset, no limit is enforced.",
           "format": "uint",
           "minimum": 1.0,
           "type": "integer"
+        },
+        "plan_model": {
+          "description": "Model override for the plan role.",
+          "type": "string"
+        },
+        "post_builder_validator_model": {
+          "description": "Model override for the post-builder validator role.",
+          "type": "string"
+        },
+        "scout_model": {
+          "description": "Model override for the scout role.",
+          "type": "string"
+        },
+        "validator_model": {
+          "description": "Model override for the validator role.",
+          "type": "string"
         }
       },
       "type": "object"
@@ -159,6 +187,14 @@
       "additionalProperties": false,
       "description": "Collection of common configuration options that a user can define as a unit in `config.toml`.",
       "properties": {
+        "agents": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/AgentsToml"
+            }
+          ],
+          "description": "Per-role model selection for sub-agents."
+        },
         "analytics": {
           "$ref": "#/definitions/AnalyticsConfigToml"
         },
@@ -331,6 +367,19 @@
         },
         "personality": {
           "$ref": "#/definitions/Personality"
+        },
+        "review": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/ReviewConfigToml"
+            }
+          ],
+          "default": null,
+          "description": "Review settings override for this profile (`review.mode`, `review.local.model`, ...)."
+        },
+        "review_model": {
+          "description": "Review model override used by `/review` for this profile.",
+          "type": "string"
         },
         "sandbox_mode": {
           "$ref": "#/definitions/SandboxMode"
@@ -957,6 +1006,127 @@
           "type": "string"
         }
       ]
+    },
+    "ReviewConfigToml": {
+      "additionalProperties": false,
+      "properties": {
+        "hybrid": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/ReviewHybridToml"
+            }
+          ],
+          "default": {
+            "policy": null
+          },
+          "description": "Hybrid combination policy."
+        },
+        "local": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/ReviewLocalToml"
+            }
+          ],
+          "default": {
+            "model": null
+          },
+          "description": "Local reviewer configuration."
+        },
+        "mode": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/ReviewMode"
+            }
+          ],
+          "description": "Which review channel(s) to run."
+        },
+        "remote": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/ReviewRemoteToml"
+            }
+          ],
+          "default": {
+            "model": null,
+            "provider": null,
+            "trigger": null
+          },
+          "description": "Remote reviewer configuration."
+        }
+      },
+      "type": "object"
+    },
+    "ReviewHybridPolicy": {
+      "description": "Policy for `review.mode = \"hybrid\"`.",
+      "enum": [
+        "local_first",
+        "remote_first",
+        "required_both"
+      ],
+      "type": "string"
+    },
+    "ReviewHybridToml": {
+      "additionalProperties": false,
+      "properties": {
+        "policy": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/ReviewHybridPolicy"
+            }
+          ],
+          "description": "Policy for how to combine local and remote reviews."
+        }
+      },
+      "type": "object"
+    },
+    "ReviewLocalToml": {
+      "additionalProperties": false,
+      "description": "Nested config for the `/review` feature.",
+      "properties": {
+        "model": {
+          "description": "Model slug to use for local review runs.",
+          "type": "string"
+        }
+      },
+      "type": "object"
+    },
+    "ReviewMode": {
+      "description": "Controls how `/review` is executed (local model, remote provider, or both).",
+      "enum": [
+        "local",
+        "remote",
+        "hybrid"
+      ],
+      "type": "string"
+    },
+    "ReviewRemoteProvider": {
+      "description": "Remote review provider when `review.mode` involves a remote channel.",
+      "enum": [
+        "github_codex"
+      ],
+      "type": "string"
+    },
+    "ReviewRemoteToml": {
+      "additionalProperties": false,
+      "properties": {
+        "model": {
+          "description": "Optional remote model identifier (provider-specific).",
+          "type": "string"
+        },
+        "provider": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/ReviewRemoteProvider"
+            }
+          ],
+          "description": "Remote review provider (e.g. GitHub Codex)."
+        },
+        "trigger": {
+          "description": "Trigger phrase/comment used by the provider (e.g. \"@codex review\").",
+          "type": "string"
+        }
+      },
+      "type": "object"
     },
     "SandboxMode": {
       "enum": [
@@ -1652,6 +1822,28 @@
         "$ref": "#/definitions/ProjectConfig"
       },
       "type": "object"
+    },
+    "review": {
+      "allOf": [
+        {
+          "$ref": "#/definitions/ReviewConfigToml"
+        }
+      ],
+      "default": {
+        "hybrid": {
+          "policy": null
+        },
+        "local": {
+          "model": null
+        },
+        "mode": null,
+        "remote": {
+          "model": null,
+          "provider": null,
+          "trigger": null
+        }
+      },
+      "description": "Review settings (mode + local/remote configuration)."
     },
     "review_model": {
       "description": "Review model override used by the `/review` feature.",

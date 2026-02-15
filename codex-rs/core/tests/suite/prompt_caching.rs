@@ -148,10 +148,16 @@ async fn prompt_tools_are_consistent_across_requests() -> anyhow::Result<()> {
         "list_mcp_resource_templates",
         "read_mcp_resource",
         "update_plan",
-        "request_user_input",
         "apply_patch",
         "web_search",
         "view_image",
+    ]);
+    expected_tools_names.extend([
+        "spawn_agent",
+        "send_input",
+        "resume_agent",
+        "wait",
+        "close_agent",
     ]);
     let body0 = req1.single_request().body_json();
 

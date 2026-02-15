@@ -2005,6 +2005,7 @@ pub struct GitInfo {
 pub enum ReviewDelivery {
     Inline,
     Detached,
+    Hybrid,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, JsonSchema, TS)]
@@ -2652,6 +2653,9 @@ pub struct CollabAgentSpawnBeginEvent {
     pub call_id: String,
     /// Thread ID of the sender.
     pub sender_thread_id: ThreadId,
+    /// Optional agent role/type requested for the spawned agent (e.g. `scout`, `builder`).
+    #[serde(default)]
+    pub agent_type: Option<String>,
     /// Initial prompt sent to the agent. Can be empty to prevent CoT leaking at the
     /// beginning.
     pub prompt: String,
@@ -2665,6 +2669,9 @@ pub struct CollabAgentSpawnEndEvent {
     pub sender_thread_id: ThreadId,
     /// Thread ID of the newly spawned agent, if it was created.
     pub new_thread_id: Option<ThreadId>,
+    /// Optional agent role/type requested for the spawned agent (e.g. `scout`, `builder`).
+    #[serde(default)]
+    pub agent_type: Option<String>,
     /// Initial prompt sent to the agent. Can be empty to prevent CoT leaking at the
     /// beginning.
     pub prompt: String,

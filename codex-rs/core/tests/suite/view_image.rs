@@ -29,6 +29,7 @@ use core_test_support::responses::sse;
 use core_test_support::responses::start_mock_server;
 use core_test_support::skip_if_no_network;
 use core_test_support::test_codex::TestCodex;
+use core_test_support::test_codex::TestCodexBuilder;
 use core_test_support::test_codex::test_codex;
 use core_test_support::wait_for_event;
 use core_test_support::wait_for_event_with_timeout;
@@ -60,6 +61,12 @@ fn find_image_message(body: &Value) -> Option<&Value> {
         })
 }
 
+fn view_image_builder() -> TestCodexBuilder {
+    test_codex().with_config(|config| {
+        config.features.disable(Feature::Collab);
+    })
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn user_turn_with_local_image_attaches_image() -> anyhow::Result<()> {
     skip_if_no_network!(Ok(()));
@@ -71,7 +78,7 @@ async fn user_turn_with_local_image_attaches_image() -> anyhow::Result<()> {
         cwd,
         session_configured,
         ..
-    } = test_codex().build(&server).await?;
+    } = view_image_builder().build(&server).await?;
 
     let rel_path = "user-turn/example.png";
     let abs_path = cwd.path().join(rel_path);
@@ -163,7 +170,7 @@ async fn view_image_tool_attaches_local_image() -> anyhow::Result<()> {
         cwd,
         session_configured,
         ..
-    } = test_codex().build(&server).await?;
+    } = view_image_builder().build(&server).await?;
 
     let rel_path = "assets/example.png";
     let abs_path = cwd.path().join(rel_path);
@@ -296,7 +303,7 @@ async fn js_repl_view_image_tool_attaches_local_image() -> anyhow::Result<()> {
     skip_if_no_network!(Ok(()));
 
     let server = start_mock_server().await;
-    let mut builder = test_codex().with_config(|config| {
+    let mut builder = view_image_builder().with_config(|config| {
         config.features.enable(Feature::JsRepl);
     });
     let TestCodex {
@@ -317,7 +324,7 @@ const png = Buffer.from(
 );
 await fs.writeFile(imagePath, png);
 const out = await codex.tool("view_image", { path: imagePath });
-console.log(out.output?.body?.text ?? "");
+console.log(typeof out.output === "string" ? out.output : "");
 "#;
 
     let first_response = sse(vec![
@@ -411,7 +418,7 @@ async fn view_image_tool_errors_when_path_is_directory() -> anyhow::Result<()> {
         cwd,
         session_configured,
         ..
-    } = test_codex().build(&server).await?;
+    } = view_image_builder().build(&server).await?;
 
     let rel_path = "assets";
     let abs_path = cwd.path().join(rel_path);
@@ -483,7 +490,7 @@ async fn view_image_tool_placeholder_for_non_image_files() -> anyhow::Result<()>
         cwd,
         session_configured,
         ..
-    } = test_codex().build(&server).await?;
+    } = view_image_builder().build(&server).await?;
 
     let rel_path = "assets/example.json";
     let abs_path = cwd.path().join(rel_path);
@@ -581,7 +588,7 @@ async fn view_image_tool_errors_when_file_missing() -> anyhow::Result<()> {
         cwd,
         session_configured,
         ..
-    } = test_codex().build(&server).await?;
+    } = view_image_builder().build(&server).await?;
 
     let rel_path = "missing/example.png";
     let abs_path = cwd.path().join(rel_path);
@@ -694,7 +701,7 @@ async fn view_image_tool_returns_unsupported_message_for_text_only_model() -> an
     )
     .await;
 
-    let TestCodex { codex, cwd, .. } = test_codex()
+    let TestCodex { codex, cwd, .. } = view_image_builder()
         .with_auth(CodexAuth::create_dummy_chatgpt_auth_for_testing())
         .with_config(|config| {
             config.features.enable(Feature::RemoteModels);
@@ -791,7 +798,7 @@ async fn replaces_invalid_local_image_after_bad_request() -> anyhow::Result<()> 
         cwd,
         session_configured,
         ..
-    } = test_codex().build(&server).await?;
+    } = view_image_builder().build(&server).await?;
 
     let rel_path = "assets/poisoned.png";
     let abs_path = cwd.path().join(rel_path);

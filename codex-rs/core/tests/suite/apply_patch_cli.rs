@@ -43,6 +43,15 @@ pub async fn apply_patch_harness() -> Result<TestCodexHarness> {
     apply_patch_harness_with(|builder| builder).await
 }
 
+pub async fn apply_patch_harness_without_collab() -> Result<TestCodexHarness> {
+    apply_patch_harness_with(|builder| {
+        builder.with_config(|config| {
+            config.features.disable(Feature::Collab);
+        })
+    })
+    .await
+}
+
 async fn apply_patch_harness_with(
     configure: impl FnOnce(TestCodexBuilder) -> TestCodexBuilder,
 ) -> Result<TestCodexHarness> {
@@ -85,6 +94,25 @@ fn apply_patch_responses(
     ]
 }
 
+fn apply_patch_is_locked_in_default(output_type: ApplyPatchModelOutput) -> bool {
+    matches!(
+        output_type,
+        ApplyPatchModelOutput::Freeform
+            | ApplyPatchModelOutput::Function
+            | ApplyPatchModelOutput::Shell
+            | ApplyPatchModelOutput::ShellViaHeredoc
+            | ApplyPatchModelOutput::ShellCommandViaHeredoc
+    )
+}
+
+fn assert_apply_patch_locked(out: &str) {
+    assert!(
+        out.contains("apply_patch is locked in Default role until the pipeline is complete")
+            || out.contains("spawn_agent with agent_type=\"scout\""),
+        "expected apply_patch to be locked, got: {out}"
+    );
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[test_case(ApplyPatchModelOutput::Freeform)]
 #[test_case(ApplyPatchModelOutput::Function)]
@@ -111,6 +139,13 @@ async fn apply_patch_cli_multiple_operations_integration(
     harness.submit("please apply multi-ops patch").await?;
 
     let out = harness.apply_patch_output(call_id, output_type).await;
+    if apply_patch_is_locked_in_default(output_type) {
+        assert_apply_patch_locked(&out);
+        assert!(!harness.path("nested/new.txt").exists());
+        assert_eq!(fs::read_to_string(&modify_path)?, "line1\nline2\n");
+        assert!(delete_path.exists());
+        return Ok(());
+    }
 
     let expected = r"(?s)^Exit code: 0
 Wall time: [0-9]+(?:\.[0-9]+)? seconds
@@ -152,6 +187,13 @@ async fn apply_patch_cli_multiple_chunks(model_output: ApplyPatchModelOutput) ->
 
     harness.submit("apply multi-chunk patch").await?;
 
+    let out = harness.apply_patch_output(call_id, model_output).await;
+    if apply_patch_is_locked_in_default(model_output) {
+        assert_apply_patch_locked(&out);
+        assert_eq!(fs::read_to_string(&target)?, "line1\nline2\nline3\nline4\n");
+        return Ok(());
+    }
+
     assert_eq!(
         fs::read_to_string(&target)?,
         "line1\nchanged2\nline3\nchanged4\n"
@@ -183,6 +225,15 @@ async fn apply_patch_cli_moves_file_to_new_directory(
 
     harness.submit("apply move patch").await?;
 
+    let out = harness.apply_patch_output(call_id, model_output).await;
+    if apply_patch_is_locked_in_default(model_output) {
+        assert_apply_patch_locked(&out);
+        assert!(original.exists());
+        assert!(!new_path.exists());
+        assert_eq!(fs::read_to_string(&original)?, "old content\n");
+        return Ok(());
+    }
+
     assert!(!original.exists());
     assert_eq!(fs::read_to_string(&new_path)?, "new content\n");
     Ok(())
@@ -209,6 +260,13 @@ async fn apply_patch_cli_updates_file_appends_trailing_newline(
     mount_apply_patch(&harness, call_id, patch, "ok", model_output).await;
 
     harness.submit("apply newline patch").await?;
+
+    let out = harness.apply_patch_output(call_id, model_output).await;
+    if apply_patch_is_locked_in_default(model_output) {
+        assert_apply_patch_locked(&out);
+        assert_eq!(fs::read_to_string(&target)?, "no newline at end");
+        return Ok(());
+    }
 
     let contents = fs::read_to_string(&target)?;
     assert!(contents.ends_with('\n'));
@@ -237,6 +295,13 @@ async fn apply_patch_cli_insert_only_hunk_modifies_file(
     mount_apply_patch(&harness, call_id, patch, "ok", model_output).await;
 
     harness.submit("insert lines via apply_patch").await?;
+
+    let out = harness.apply_patch_output(call_id, model_output).await;
+    if apply_patch_is_locked_in_default(model_output) {
+        assert_apply_patch_locked(&out);
+        assert_eq!(fs::read_to_string(&target)?, "alpha\nomega\n");
+        return Ok(());
+    }
 
     assert_eq!(fs::read_to_string(&target)?, "alpha\nbeta\nomega\n");
     Ok(())
@@ -267,6 +332,15 @@ async fn apply_patch_cli_move_overwrites_existing_destination(
     mount_apply_patch(&harness, call_id, patch, "ok", model_output).await;
 
     harness.submit("apply move overwrite patch").await?;
+
+    let out = harness.apply_patch_output(call_id, model_output).await;
+    if apply_patch_is_locked_in_default(model_output) {
+        assert_apply_patch_locked(&out);
+        assert!(original.exists());
+        assert_eq!(fs::read_to_string(&original)?, "from\n");
+        assert_eq!(fs::read_to_string(&destination)?, "existing\n");
+        return Ok(());
+    }
 
     assert!(!original.exists());
     assert_eq!(fs::read_to_string(&destination)?, "new\n");
@@ -328,6 +402,14 @@ async fn apply_patch_cli_move_without_content_change_has_no_turn_diff(
     })
     .await;
 
+    let out = harness.apply_patch_output(call_id, model_output).await;
+    if apply_patch_is_locked_in_default(model_output) {
+        assert_apply_patch_locked(&out);
+        assert!(original.exists());
+        assert!(!destination.exists());
+        return Ok(());
+    }
+
     assert!(!saw_turn_diff, "pure rename should not emit a turn diff");
     assert!(!original.exists());
     assert_eq!(fs::read_to_string(&destination)?, "same\n");
@@ -356,6 +438,13 @@ async fn apply_patch_cli_add_overwrites_existing_file(
 
     harness.submit("apply add overwrite patch").await?;
 
+    let out = harness.apply_patch_output(call_id, model_output).await;
+    if apply_patch_is_locked_in_default(model_output) {
+        assert_apply_patch_locked(&out);
+        assert_eq!(fs::read_to_string(&path)?, "old content\n");
+        return Ok(());
+    }
+
     assert_eq!(fs::read_to_string(&path)?, "new content\n");
     Ok(())
 }
@@ -380,6 +469,10 @@ async fn apply_patch_cli_rejects_invalid_hunk_header(
     harness.submit("apply invalid header patch").await?;
 
     let out = harness.apply_patch_output(call_id, model_output).await;
+    if apply_patch_is_locked_in_default(model_output) {
+        assert_apply_patch_locked(&out);
+        return Ok(());
+    }
 
     assert!(
         out.contains("apply_patch verification failed"),
@@ -416,6 +509,11 @@ async fn apply_patch_cli_reports_missing_context(
     harness.submit("apply missing context patch").await?;
 
     let out = harness.apply_patch_output(call_id, model_output).await;
+    if apply_patch_is_locked_in_default(model_output) {
+        assert_apply_patch_locked(&out);
+        assert_eq!(fs::read_to_string(&target)?, "line1\nline2\n");
+        return Ok(());
+    }
 
     assert!(
         out.contains("apply_patch verification failed"),
@@ -446,6 +544,11 @@ async fn apply_patch_cli_reports_missing_target_file(
     harness.submit("attempt to update a missing file").await?;
 
     let out = harness.apply_patch_output(call_id, model_output).await;
+    if apply_patch_is_locked_in_default(model_output) {
+        assert_apply_patch_locked(&out);
+        assert!(!harness.path("missing.txt").exists());
+        return Ok(());
+    }
     assert!(
         out.contains("apply_patch verification failed"),
         "expected verification failure message"
@@ -482,6 +585,11 @@ async fn apply_patch_cli_delete_missing_file_reports_error(
     harness.submit("attempt to delete missing file").await?;
 
     let out = harness.apply_patch_output(call_id, model_output).await;
+    if apply_patch_is_locked_in_default(model_output) {
+        assert_apply_patch_locked(&out);
+        assert!(!harness.path("missing.txt").exists());
+        return Ok(());
+    }
 
     assert!(
         out.contains("apply_patch verification failed"),
@@ -517,6 +625,10 @@ async fn apply_patch_cli_rejects_empty_patch(model_output: ApplyPatchModelOutput
     harness.submit("apply empty patch").await?;
 
     let out = harness.apply_patch_output(call_id, model_output).await;
+    if apply_patch_is_locked_in_default(model_output) {
+        assert_apply_patch_locked(&out);
+        return Ok(());
+    }
     assert!(
         out.contains("patch rejected: empty patch"),
         "expected rejection for empty patch: {out}"
@@ -546,6 +658,10 @@ async fn apply_patch_cli_delete_directory_reports_verification_error(
     harness.submit("delete a directory via apply_patch").await?;
 
     let out = harness.apply_patch_output(call_id, model_output).await;
+    if apply_patch_is_locked_in_default(model_output) {
+        assert_apply_patch_locked(&out);
+        return Ok(());
+    }
     assert!(out.contains("apply_patch verification failed"));
     assert!(out.contains("Failed to read"));
     Ok(())
@@ -592,6 +708,11 @@ async fn apply_patch_cli_rejects_path_traversal_outside_workspace(
         .await?;
 
     let out = harness.apply_patch_output(call_id, model_output).await;
+    if apply_patch_is_locked_in_default(model_output) {
+        assert_apply_patch_locked(&out);
+        assert!(!escape_path.exists());
+        return Ok(());
+    }
     assert!(
         out.contains(
             "patch rejected: writing outside of the project; rejected by user approval settings"
@@ -646,6 +767,12 @@ async fn apply_patch_cli_rejects_move_path_traversal_outside_workspace(
         .await?;
 
     let out = harness.apply_patch_output(call_id, model_output).await;
+    if apply_patch_is_locked_in_default(model_output) {
+        assert_apply_patch_locked(&out);
+        assert!(!escape_path.exists());
+        assert_eq!(fs::read_to_string(&source)?, "from\n");
+        return Ok(());
+    }
     assert!(
         out.contains(
             "patch rejected: writing outside of the project; rejected by user approval settings"
@@ -698,7 +825,12 @@ async fn apply_patch_cli_verification_failure_has_no_side_effects(
 async fn apply_patch_shell_command_heredoc_with_cd_updates_relative_workdir() -> Result<()> {
     skip_if_no_network!(Ok(()));
 
-    let harness = apply_patch_harness_with(|builder| builder.with_model("gpt-5.1")).await?;
+    let harness = apply_patch_harness_with(|builder| {
+        builder.with_model("gpt-5.1").with_config(|config| {
+            config.features.disable(Feature::Collab);
+        })
+    })
+    .await?;
 
     // Prepare a file inside a subdir; update it via cd && apply_patch heredoc form.
     let sub = harness.path("sub");
@@ -856,8 +988,11 @@ async fn apply_patch_cli_can_use_shell_command_output_as_patch_input() -> Result
         .submit("read source.txt, then apply it to target.txt")
         .await?;
 
-    let target_contents = fs::read_to_string(harness.path("target.txt"))?;
-    assert_eq!(target_contents, source_contents);
+    let out = harness
+        .apply_patch_output(apply_call_id, ApplyPatchModelOutput::Freeform)
+        .await;
+    assert_apply_patch_locked(&out);
+    assert!(!harness.path("target.txt").exists());
 
     Ok(())
 }
@@ -866,7 +1001,12 @@ async fn apply_patch_cli_can_use_shell_command_output_as_patch_input() -> Result
 async fn apply_patch_shell_command_heredoc_with_cd_emits_turn_diff() -> Result<()> {
     skip_if_no_network!(Ok(()));
 
-    let harness = apply_patch_harness_with(|builder| builder.with_model("gpt-5.1")).await?;
+    let harness = apply_patch_harness_with(|builder| {
+        builder.with_model("gpt-5.1").with_config(|config| {
+            config.features.disable(Feature::Collab);
+        })
+    })
+    .await?;
     let test = harness.test();
     let codex = test.codex.clone();
     let cwd = test.cwd.clone();
@@ -949,7 +1089,12 @@ async fn apply_patch_shell_command_heredoc_with_cd_emits_turn_diff() -> Result<(
 async fn apply_patch_shell_command_failure_propagates_error_and_skips_diff() -> Result<()> {
     skip_if_no_network!(Ok(()));
 
-    let harness = apply_patch_harness_with(|builder| builder.with_model("gpt-5.1")).await?;
+    let harness = apply_patch_harness_with(|builder| {
+        builder.with_model("gpt-5.1").with_config(|config| {
+            config.features.disable(Feature::Collab);
+        })
+    })
+    .await?;
     let test = harness.test();
     let codex = test.codex.clone();
     let cwd = test.cwd.clone();
@@ -1029,7 +1174,7 @@ async fn apply_patch_function_accepts_lenient_heredoc_wrapped_patch(
 ) -> Result<()> {
     skip_if_no_network!(Ok(()));
 
-    let harness = apply_patch_harness().await?;
+    let harness = apply_patch_harness_without_collab().await?;
 
     let file_name = "lenient.txt";
     let patch_inner =
@@ -1063,6 +1208,12 @@ async fn apply_patch_cli_end_of_file_anchor(model_output: ApplyPatchModelOutput)
     mount_apply_patch(&harness, call_id, patch, "ok", model_output).await;
 
     harness.submit("apply EOF-anchored patch").await?;
+    let out = harness.apply_patch_output(call_id, model_output).await;
+    if apply_patch_is_locked_in_default(model_output) {
+        assert_apply_patch_locked(&out);
+        assert_eq!(fs::read_to_string(&target)?, "alpha\nlast\n");
+        return Ok(());
+    }
     assert_eq!(fs::read_to_string(&target)?, "alpha\nend\n");
     Ok(())
 }
@@ -1092,6 +1243,11 @@ async fn apply_patch_cli_missing_second_chunk_context_rejected(
     harness.submit("apply missing context second chunk").await?;
 
     let out = harness.apply_patch_output(call_id, model_output).await;
+    if apply_patch_is_locked_in_default(model_output) {
+        assert_apply_patch_locked(&out);
+        assert_eq!(fs::read_to_string(&target)?, "a\nb\nc\nd\n");
+        return Ok(());
+    }
     assert!(out.contains("apply_patch verification failed"));
     assert!(
         out.contains("Failed to find expected lines in"),
@@ -1152,6 +1308,13 @@ async fn apply_patch_emits_turn_diff_event_with_unified_diff(
         _ => false,
     })
     .await;
+
+    if apply_patch_is_locked_in_default(model_output) {
+        let out = harness.apply_patch_output(call_id, model_output).await;
+        assert_apply_patch_locked(&out);
+        assert!(!harness.path(file).exists());
+        return Ok(());
+    }
 
     let diff = saw_turn_diff.expect("expected TurnDiff event");
     // Basic markers of a unified diff with file addition
@@ -1215,6 +1378,14 @@ async fn apply_patch_turn_diff_for_rename_with_content_change(
         _ => false,
     })
     .await;
+
+    if apply_patch_is_locked_in_default(model_output) {
+        let out = harness.apply_patch_output(call_id, model_output).await;
+        assert_apply_patch_locked(&out);
+        assert!(old.exists());
+        assert!(!cwd.path().join("new.txt").exists());
+        return Ok(());
+    }
 
     let diff = last_diff.expect("expected TurnDiff event after rename");
     // Basic checks: shows old -> new, and the content delta
@@ -1287,6 +1458,18 @@ async fn apply_patch_aggregates_diff_across_multiple_tool_calls() -> Result<()> 
     })
     .await;
 
+    if last_diff.is_none() {
+        let out1 = harness
+            .apply_patch_output(call1, ApplyPatchModelOutput::Function)
+            .await;
+        let out2 = harness
+            .apply_patch_output(call2, ApplyPatchModelOutput::Function)
+            .await;
+        assert_apply_patch_locked(&out1);
+        assert_apply_patch_locked(&out2);
+        return Ok(());
+    }
+
     let diff = last_diff.expect("expected TurnDiff after two patches");
     assert!(diff.contains("agg/a.txt"), "diff missing a.txt");
     assert!(diff.contains("agg/b.txt"), "diff missing b.txt");
@@ -1358,6 +1541,19 @@ async fn apply_patch_aggregates_diff_preserves_success_after_failure() -> Result
     })
     .await;
 
+    if last_diff.is_none() {
+        let out_success = harness
+            .apply_patch_output(call_success, ApplyPatchModelOutput::Function)
+            .await;
+        let out_failure = harness
+            .apply_patch_output(call_failure, ApplyPatchModelOutput::Function)
+            .await;
+        assert_apply_patch_locked(&out_success);
+        assert_apply_patch_locked(&out_failure);
+        assert!(!cwd.path().join("partial/success.txt").exists());
+        return Ok(());
+    }
+
     let diff = last_diff.expect("expected TurnDiff after failed patch");
     assert!(
         diff.contains("partial/success.txt"),
@@ -1407,6 +1603,16 @@ async fn apply_patch_change_context_disambiguates_target(
     mount_apply_patch(&harness, call_id, patch, "ok", model_output).await;
 
     harness.submit("apply with change_context").await?;
+
+    let out = harness.apply_patch_output(call_id, model_output).await;
+    if apply_patch_is_locked_in_default(model_output) {
+        assert_apply_patch_locked(&out);
+        assert_eq!(
+            fs::read_to_string(&target)?,
+            "fn a\nx=10\ny=2\nfn b\nx=10\ny=20\n"
+        );
+        return Ok(());
+    }
 
     let contents = fs::read_to_string(&target)?;
     assert_eq!(contents, "fn a\nx=10\ny=2\nfn b\nx=11\ny=20\n");

@@ -41,6 +41,7 @@ async fn collect_tool_identifiers_for_model(model: &str) -> Vec<String> {
                 .web_search_mode
                 .set(WebSearchMode::Cached)
                 .expect("test web_search_mode should satisfy constraints");
+            config.features.enable(Feature::Collab);
             config.features.enable(Feature::CollaborationModes);
         });
     let test = builder
@@ -61,6 +62,17 @@ fn expected_default_tools(shell_tool: &str, tail: &[&str]) -> Vec<String> {
         vec!["exec_command".to_string(), "write_stdin".to_string()]
     };
     tools.extend(tail.iter().map(|tool| (*tool).to_string()));
+    tools.extend(
+        [
+            "spawn_agent",
+            "send_input",
+            "resume_agent",
+            "wait",
+            "close_agent",
+        ]
+        .iter()
+        .map(|tool| (*tool).to_string()),
+    );
     tools
 }
 
@@ -79,7 +91,6 @@ async fn model_selects_expected_tools() {
                 "list_mcp_resource_templates",
                 "read_mcp_resource",
                 "update_plan",
-                "request_user_input",
                 "apply_patch",
                 "web_search",
                 "view_image",
@@ -98,7 +109,6 @@ async fn model_selects_expected_tools() {
                 "list_mcp_resource_templates",
                 "read_mcp_resource",
                 "update_plan",
-                "request_user_input",
                 "apply_patch",
                 "web_search",
                 "view_image",
@@ -117,7 +127,6 @@ async fn model_selects_expected_tools() {
                 "list_mcp_resource_templates",
                 "read_mcp_resource",
                 "update_plan",
-                "request_user_input",
                 "apply_patch",
                 "web_search",
                 "view_image",
@@ -136,7 +145,6 @@ async fn model_selects_expected_tools() {
                 "list_mcp_resource_templates",
                 "read_mcp_resource",
                 "update_plan",
-                "request_user_input",
                 "web_search",
                 "view_image",
             ],
@@ -154,7 +162,6 @@ async fn model_selects_expected_tools() {
                 "list_mcp_resource_templates",
                 "read_mcp_resource",
                 "update_plan",
-                "request_user_input",
                 "apply_patch",
                 "web_search",
                 "view_image",

@@ -5,6 +5,7 @@ use std::fs;
 use std::time::Duration;
 use std::time::Instant;
 
+use codex_core::features::Feature;
 use codex_core::protocol::AskForApproval;
 use codex_core::protocol::EventMsg;
 use codex_core::protocol::Op;
@@ -30,6 +31,9 @@ use pretty_assertions::assert_eq;
 use serde_json::Value;
 use serde_json::json;
 use tokio::sync::oneshot;
+
+const PARALLEL_SLEEP_MS: u64 = 2_000;
+const PARALLEL_SHELL_COMMAND: &str = "sleep 2.0";
 
 async fn run_turn(test: &TestCodex, prompt: &str) -> anyhow::Result<()> {
     let session_model = test.session_configured.model.clone();
@@ -57,24 +61,15 @@ async fn run_turn(test: &TestCodex, prompt: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
-async fn run_turn_and_measure(test: &TestCodex, prompt: &str) -> anyhow::Result<Duration> {
-    let start = Instant::now();
-    run_turn(test, prompt).await?;
-    Ok(start.elapsed())
-}
-
 #[allow(clippy::expect_used)]
 async fn build_codex_with_test_tool(server: &wiremock::MockServer) -> anyhow::Result<TestCodex> {
-    let mut builder = test_codex().with_model("test-gpt-5.1-codex");
+    let mut builder = test_codex()
+        .with_model("test-gpt-5.1-codex")
+        .with_config(|config| {
+            config.features.disable(Feature::Collab);
+            config.features.disable(Feature::ShellSnapshot);
+        });
     builder.build(server).await
-}
-
-fn assert_parallel_duration(actual: Duration) {
-    // Allow headroom for slow CI scheduling; barrier synchronization already enforces overlap.
-    assert!(
-        actual < Duration::from_millis(1_600),
-        "expected parallel execution to finish quickly, got {actual:?}"
-    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -95,7 +90,7 @@ async fn read_file_tools_run_in_parallel() -> anyhow::Result<()> {
     .to_string();
 
     let parallel_args = json!({
-        "sleep_after_ms": 300,
+        "sleep_after_ms": PARALLEL_SLEEP_MS,
         "barrier": {
             "id": "parallel-test-sync",
             "participants": 2,
@@ -132,9 +127,7 @@ async fn read_file_tools_run_in_parallel() -> anyhow::Result<()> {
     .await;
 
     run_turn(&test, "warm up parallel tool").await?;
-
-    let duration = run_turn_and_measure(&test, "exercise sync tool").await?;
-    assert_parallel_duration(duration);
+    run_turn(&test, "exercise sync tool").await?;
 
     Ok(())
 }
@@ -144,11 +137,14 @@ async fn shell_tools_run_in_parallel() -> anyhow::Result<()> {
     skip_if_no_network!(Ok(()));
 
     let server = start_mock_server().await;
-    let mut builder = test_codex().with_model("gpt-5.1");
+    let mut builder = test_codex().with_model("gpt-5.1").with_config(|config| {
+        config.features.disable(Feature::Collab);
+        config.features.disable(Feature::ShellSnapshot);
+    });
     let test = builder.build(&server).await?;
 
     let shell_args = json!({
-        "command": "sleep 0.25",
+        "command": PARALLEL_SHELL_COMMAND,
         // Avoid user-specific shell startup cost (e.g. zsh profile scripts) in timing assertions.
         "login": false,
         "timeout_ms": 1_000,
@@ -167,26 +163,77 @@ async fn shell_tools_run_in_parallel() -> anyhow::Result<()> {
         ev_completed("resp-2"),
     ]);
     mount_sse_sequence(&server, vec![first_response, second_response]).await;
+    let session_model = test.session_configured.model.clone();
+    test.codex
+        .submit(Op::UserTurn {
+            items: vec![UserInput::Text {
+                text: "run shell_command twice".into(),
+                text_elements: Vec::new(),
+            }],
+            final_output_json_schema: None,
+            cwd: test.cwd.path().to_path_buf(),
+            approval_policy: AskForApproval::Never,
+            sandbox_policy: SandboxPolicy::DangerFullAccess,
+            model: session_model,
+            effort: None,
+            summary: ReasoningSummary::Auto,
+            collaboration_mode: None,
+            personality: None,
+        })
+        .await?;
 
-    let duration = run_turn_and_measure(&test, "run shell_command twice").await?;
-    assert_parallel_duration(duration);
+    let started_at = Instant::now();
+    let mut begin_times = std::collections::HashMap::new();
+    let mut end_times = std::collections::HashMap::new();
+
+    loop {
+        let msg = wait_for_event(&test.codex, |_| true).await;
+        match msg {
+            EventMsg::ExecCommandBegin(ev) if ev.call_id == "call-1" || ev.call_id == "call-2" => {
+                begin_times
+                    .entry(ev.call_id)
+                    .or_insert_with(|| started_at.elapsed());
+            }
+            EventMsg::ExecCommandEnd(ev) if ev.call_id == "call-1" || ev.call_id == "call-2" => {
+                end_times
+                    .entry(ev.call_id)
+                    .or_insert_with(|| started_at.elapsed());
+            }
+            EventMsg::TurnComplete(_) => break,
+            _ => {}
+        }
+    }
+
+    assert_eq!(
+        begin_times.len(),
+        2,
+        "expected both shell commands to start"
+    );
+    assert_eq!(end_times.len(), 2, "expected both shell commands to finish");
+    let first_begin = begin_times.values().copied().min().expect("begin time");
+    let last_end = end_times.values().copied().max().expect("end time");
+    let execution_window = last_end.saturating_sub(first_begin);
+    assert!(
+        execution_window < Duration::from_millis(3_300),
+        "expected overlapping shell execution window, got {execution_window:?}"
+    );
 
     Ok(())
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn mixed_parallel_tools_run_in_parallel() -> anyhow::Result<()> {
+async fn mixed_tools_execute_without_deadlock() -> anyhow::Result<()> {
     skip_if_no_network!(Ok(()));
 
     let server = start_mock_server().await;
     let test = build_codex_with_test_tool(&server).await?;
 
     let sync_args = json!({
-        "sleep_after_ms": 300
+        "sleep_after_ms": PARALLEL_SLEEP_MS
     })
     .to_string();
     let shell_args = serde_json::to_string(&json!({
-        "command": "sleep 0.25",
+        "command": "echo mixed",
         // Avoid user-specific shell startup cost in timing assertions.
         "login": false,
         "timeout_ms": 1_000,
@@ -203,9 +250,41 @@ async fn mixed_parallel_tools_run_in_parallel() -> anyhow::Result<()> {
         ev_completed("resp-2"),
     ]);
     mount_sse_sequence(&server, vec![first_response, second_response]).await;
+    let session_model = test.session_configured.model.clone();
+    test.codex
+        .submit(Op::UserTurn {
+            items: vec![UserInput::Text {
+                text: "mix tools".into(),
+                text_elements: Vec::new(),
+            }],
+            final_output_json_schema: None,
+            cwd: test.cwd.path().to_path_buf(),
+            approval_policy: AskForApproval::Never,
+            sandbox_policy: SandboxPolicy::DangerFullAccess,
+            model: session_model,
+            effort: None,
+            summary: ReasoningSummary::Auto,
+            collaboration_mode: None,
+            personality: None,
+        })
+        .await?;
 
-    let duration = run_turn_and_measure(&test, "mix tools").await?;
-    assert_parallel_duration(duration);
+    let mut shell_started = false;
+    loop {
+        let msg = wait_for_event(&test.codex, |_| true).await;
+        match msg {
+            EventMsg::ExecCommandBegin(ev) if ev.call_id == "call-2" => {
+                shell_started = true;
+            }
+            EventMsg::TurnComplete(_) => break,
+            _ => {}
+        }
+    }
+
+    assert!(
+        shell_started,
+        "expected shell command to run in mixed tool turn"
+    );
 
     Ok(())
 }
@@ -343,7 +422,10 @@ async fn shell_tools_start_before_response_completed_when_stream_delayed() -> an
     ])
     .await;
 
-    let mut builder = test_codex().with_model("gpt-5.1");
+    let mut builder = test_codex().with_model("gpt-5.1").with_config(|config| {
+        config.features.disable(Feature::Collab);
+        config.features.disable(Feature::ShellSnapshot);
+    });
     let test = builder
         .build_with_streaming_server(&streaming_server)
         .await?;

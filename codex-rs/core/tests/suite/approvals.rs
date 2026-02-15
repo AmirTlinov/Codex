@@ -1503,6 +1503,7 @@ async fn run_scenario(scenario: &ScenarioSpec) -> Result<()> {
     let model = model_override.unwrap_or("gpt-5.1");
 
     let mut builder = test_codex().with_model(model).with_config(move |config| {
+        config.features.disable(Feature::Collab);
         config.permissions.approval_policy = Constrained::allow_any(approval_policy);
         config.permissions.sandbox_policy = Constrained::allow_any(sandbox_policy.clone());
         for feature in features {
@@ -1621,6 +1622,7 @@ async fn approving_apply_patch_for_session_skips_future_prompts_for_same_file() 
     let mut builder = test_codex()
         .with_model("gpt-5.1-codex")
         .with_config(move |config| {
+            config.features.disable(Feature::Collab);
             config.permissions.approval_policy = Constrained::allow_any(approval_policy);
             config.permissions.sandbox_policy = Constrained::allow_any(sandbox_policy_for_config);
         });
@@ -1728,6 +1730,7 @@ async fn approving_execpolicy_amendment_persists_policy_and_skips_future_prompts
     let sandbox_policy = SandboxPolicy::new_read_only_policy();
     let sandbox_policy_for_config = sandbox_policy.clone();
     let mut builder = test_codex().with_config(move |config| {
+        config.features.disable(Feature::Collab);
         config.permissions.approval_policy = Constrained::allow_any(approval_policy);
         config.permissions.sandbox_policy = Constrained::allow_any(sandbox_policy_for_config);
     });
@@ -1900,6 +1903,7 @@ async fn heredoc_with_chained_allowed_prefix_still_requires_approval() -> Result
     let sandbox_policy = SandboxPolicy::new_read_only_policy();
     let sandbox_policy_for_config = sandbox_policy.clone();
     let mut builder = test_codex().with_config(move |config| {
+        config.features.disable(Feature::Collab);
         config.permissions.approval_policy = Constrained::allow_any(approval_policy);
         config.permissions.sandbox_policy = Constrained::allow_any(sandbox_policy_for_config);
     });

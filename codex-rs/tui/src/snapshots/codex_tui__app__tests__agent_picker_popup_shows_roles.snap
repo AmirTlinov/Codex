@@ -1,0 +1,15 @@
+---
+source: tui/src/app.rs
+expression: popup
+---
+  Agents
+  Select a thread to focus
+
+› 1. Main (current)  <thread-1> • model: gpt-5.2-
+                     codex
+  2. Scout           <thread-2> • model: gpt-5.2-
+                     codex
+  3. Builder         <thread-3> • model: gpt-5.2-
+                     codex
+
+  Press enter to confirm or esc to go back

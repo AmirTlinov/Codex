@@ -30,6 +30,7 @@ async fn undo_harness() -> Result<TestCodexHarness> {
     let builder = test_codex().with_model("gpt-5.1").with_config(|config| {
         config.include_apply_patch_tool = true;
         config.features.enable(Feature::GhostCommit);
+        config.features.disable(Feature::Collab);
     });
     TestCodexHarness::with_builder(builder).await
 }

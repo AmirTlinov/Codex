@@ -9,5 +9,7 @@ export type ReviewStartResponse = { turn: Turn,
  *
  * For inline reviews, this is the original thread id.
  * For detached reviews, this is the id of the new review thread.
+ * For hybrid reviews, this is the original thread id (inline leg),
+ * while a detached sidecar thread is announced via `thread/started`.
  */
 reviewThreadId: string, };

@@ -4449,6 +4449,14 @@
         {
           "description": "Collab interaction: agent spawn begin.",
           "properties": {
+            "agent_type": {
+              "default": null,
+              "description": "Optional agent role/type requested for the spawned agent (e.g. `scout`, `builder`).",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
             "call_id": {
               "description": "Identifier for the collab tool call.",
               "type": "string"
@@ -4485,6 +4493,14 @@
         {
           "description": "Collab interaction: agent spawn end.",
           "properties": {
+            "agent_type": {
+              "default": null,
+              "description": "Optional agent role/type requested for the spawned agent (e.g. `scout`, `builder`).",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
             "call_id": {
               "description": "Identifier for the collab tool call.",
               "type": "string"
@@ -13783,7 +13799,8 @@
       "ReviewDelivery": {
         "enum": [
           "inline",
-          "detached"
+          "detached",
+          "hybrid"
         ],
         "type": "string"
       },
@@ -13800,7 +13817,7 @@
               }
             ],
             "default": null,
-            "description": "Where to run the review: inline (default) on the current thread or detached on a new thread (returned in `reviewThreadId`)."
+            "description": "Where to run the review: - inline (default): run on the current thread - detached: run on a new thread (returned in `reviewThreadId`) - hybrid: run inline and also start a detached sidecar review thread"
           },
           "target": {
             "$ref": "#/definitions/v2/ReviewTarget"
@@ -13820,7 +13837,7 @@
         "$schema": "http://json-schema.org/draft-07/schema#",
         "properties": {
           "reviewThreadId": {
-            "description": "Identifies the thread where the review runs.\n\nFor inline reviews, this is the original thread id. For detached reviews, this is the id of the new review thread.",
+            "description": "Identifies the thread where the review runs.\n\nFor inline reviews, this is the original thread id. For detached reviews, this is the id of the new review thread. For hybrid reviews, this is the original thread id (inline leg), while a detached sidecar thread is announced via `thread/started`.",
             "type": "string"
           },
           "turn": {

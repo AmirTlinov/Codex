@@ -169,6 +169,17 @@ impl ToolRouter {
             ));
         }
 
+        if !turn.tools_config.role_allows_tool(&tool_name) {
+            let err = FunctionCallError::RespondToModel(format!(
+                "tool `{tool_name}` is not available for the current agent role"
+            ));
+            return Ok(Self::failure_response(
+                failure_call_id,
+                payload_outputs_custom,
+                err,
+            ));
+        }
+
         let invocation = ToolInvocation {
             session,
             turn,
@@ -215,6 +226,7 @@ impl ToolRouter {
 mod tests {
     use std::sync::Arc;
 
+    use crate::agent::AgentRole;
     use crate::codex::make_session_and_context;
     use crate::tools::context::ToolPayload;
     use crate::turn_diff_tracker::TurnDiffTracker;
@@ -318,6 +330,41 @@ mod tests {
                 assert!(
                     !content.contains("direct tool calls are disabled"),
                     "js_repl source should bypass direct-call policy gate"
+                );
+            }
+            other => panic!("expected function call output, got {other:?}"),
+        }
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn builder_role_blocks_non_patch_tools_fail_closed() -> anyhow::Result<()> {
+        let (session, mut turn) = make_session_and_context().await;
+        turn.tools_config.agent_role = AgentRole::Builder;
+
+        let session = Arc::new(session);
+        let turn = Arc::new(turn);
+        let router = ToolRouter::from_config(&turn.tools_config, Some(Default::default()), &[]);
+
+        let call = ToolCall {
+            tool_name: "shell".to_string(),
+            call_id: "call-builder-shell".to_string(),
+            payload: ToolPayload::Function {
+                arguments: "{}".to_string(),
+            },
+        };
+        let tracker = Arc::new(tokio::sync::Mutex::new(TurnDiffTracker::new()));
+        let response = router
+            .dispatch_tool_call(session, turn, tracker, call, ToolCallSource::JsRepl)
+            .await?;
+
+        match response {
+            ResponseInputItem::FunctionCallOutput { output, .. } => {
+                let content = output.text_content().unwrap_or_default();
+                assert!(
+                    content.contains("not available for the current agent role"),
+                    "expected role policy failure, got: {content}"
                 );
             }
             other => panic!("expected function call output, got {other:?}"),

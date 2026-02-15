@@ -14,6 +14,7 @@ use crate::tools::handlers::collab::MAX_WAIT_TIMEOUT_MS;
 use crate::tools::handlers::collab::MIN_WAIT_TIMEOUT_MS;
 use crate::tools::handlers::request_user_input_tool_description;
 use crate::tools::registry::ToolRegistryBuilder;
+use codex_protocol::config_types::ModeKind;
 use codex_protocol::config_types::WebSearchMode;
 use codex_protocol::dynamic_tools::DynamicToolSpec;
 use codex_protocol::models::VIEW_IMAGE_TOOL_NAME;
@@ -39,6 +40,8 @@ pub(crate) struct ToolsConfig {
     pub collaboration_modes_tools: bool,
     pub request_rule_enabled: bool,
     pub experimental_supported_tools: Vec<String>,
+    pub agent_role: AgentRole,
+    pub collaboration_mode: ModeKind,
 }
 
 pub(crate) struct ToolsConfigParams<'a> {
@@ -99,18 +102,331 @@ impl ToolsConfig {
             collaboration_modes_tools: include_collaboration_modes_tools,
             request_rule_enabled,
             experimental_supported_tools: model_info.experimental_supported_tools.clone(),
+            agent_role: AgentRole::Default,
+            collaboration_mode: ModeKind::Default,
         }
+    }
+
+    pub(crate) fn role_allows_tool(&self, tool_name: &str) -> bool {
+        if !Self::is_known_builtin_tool(tool_name) {
+            return Self::role_allows_mcp_and_dynamic_tools(self.agent_role);
+        }
+
+        if tool_name == "request_user_input" {
+            if !self.collaboration_mode.allows_request_user_input() {
+                return false;
+            }
+            return self.agent_role == AgentRole::Plan || self.collaboration_mode == ModeKind::Plan;
+        }
+        if tool_name == "web_search" && !Self::role_allows_web_search(self.agent_role) {
+            return false;
+        }
+        if tool_name == "shell" && !Self::role_allows_tool_name(self.agent_role, "shell") {
+            return false;
+        }
+        if tool_name == "local_shell"
+            && !Self::role_allows_tool_name(self.agent_role, "local_shell")
+        {
+            return false;
+        }
+        if tool_name == "exec_command"
+            && !Self::role_allows_tool_name(self.agent_role, "exec_command")
+        {
+            return false;
+        }
+        if tool_name == "write_stdin"
+            && !Self::role_allows_tool_name(self.agent_role, "write_stdin")
+        {
+            return false;
+        }
+        if tool_name == "apply_patch"
+            && !Self::role_allows_tool_name(self.agent_role, "apply_patch")
+        {
+            return false;
+        }
+        Self::role_allows_tool_name(self.agent_role, tool_name)
+    }
+
+    fn role_allows_tool_name(role: AgentRole, tool_name: &str) -> bool {
+        match role {
+            AgentRole::Default => matches!(
+                tool_name,
+                "local_shell"
+                    | "shell"
+                    | "shell_command"
+                    | "exec_command"
+                    | "write_stdin"
+                    | "spawn_agent"
+                    | "send_input"
+                    | "resume_agent"
+                    | "wait"
+                    | "close_agent"
+                    | "list_mcp_resources"
+                    | "list_mcp_resource_templates"
+                    | "read_mcp_resource"
+                    | "search_tool_bm25"
+                    | "grep_files"
+                    | "read_file"
+                    | "list_dir"
+                    | "update_plan"
+                    | "apply_patch"
+                    | "js_repl"
+                    | "js_repl_reset"
+                    | "test_sync_tool"
+                    | "web_search"
+                    | VIEW_IMAGE_TOOL_NAME
+            ),
+            AgentRole::Scout => !matches!(
+                tool_name,
+                "apply_patch"
+                    | "spawn_agent"
+                    | "send_input"
+                    | "resume_agent"
+                    | "wait"
+                    | "close_agent"
+                    | "request_user_input"
+                    | "update_plan"
+            ),
+            AgentRole::ContextValidator => matches!(
+                tool_name,
+                "list_mcp_resources"
+                    | "list_mcp_resource_templates"
+                    | "read_mcp_resource"
+                    | "search_tool_bm25"
+                    | "grep_files"
+                    | "read_file"
+                    | "list_dir"
+                    | VIEW_IMAGE_TOOL_NAME
+            ),
+            AgentRole::Builder => false,
+            AgentRole::Validator => matches!(tool_name, "apply_patch"),
+            AgentRole::PostBuilderValidator => matches!(tool_name, "apply_patch"),
+            AgentRole::Plan => matches!(
+                tool_name,
+                "apply_patch"
+                    | "request_user_input"
+                    | "spawn_agent"
+                    | "send_input"
+                    | "resume_agent"
+                    | "wait"
+                    | "close_agent"
+                    | "list_mcp_resources"
+                    | "list_mcp_resource_templates"
+                    | "read_mcp_resource"
+                    | "search_tool_bm25"
+                    | "grep_files"
+                    | "read_file"
+                    | "list_dir"
+                    | VIEW_IMAGE_TOOL_NAME
+            ),
+        }
+    }
+
+    fn role_allows_web_search(role: AgentRole) -> bool {
+        matches!(
+            role,
+            AgentRole::Default | AgentRole::Scout | AgentRole::ContextValidator | AgentRole::Plan
+        )
+    }
+
+    fn role_allows_mcp_and_dynamic_tools(role: AgentRole) -> bool {
+        matches!(
+            role,
+            AgentRole::Default | AgentRole::Scout | AgentRole::ContextValidator | AgentRole::Plan
+        )
+    }
+
+    fn is_known_builtin_tool(tool_name: &str) -> bool {
+        matches!(
+            tool_name,
+            "local_shell"
+                | "shell"
+                | "shell_command"
+                | "exec_command"
+                | "write_stdin"
+                | "spawn_agent"
+                | "send_input"
+                | "resume_agent"
+                | "wait"
+                | "close_agent"
+                | "list_mcp_resources"
+                | "list_mcp_resource_templates"
+                | "read_mcp_resource"
+                | "search_tool_bm25"
+                | "grep_files"
+                | "read_file"
+                | "list_dir"
+                | "update_plan"
+                | "apply_patch"
+                | "js_repl"
+                | "js_repl_reset"
+                | "test_sync_tool"
+                | "web_search"
+                | VIEW_IMAGE_TOOL_NAME
+                | "request_user_input"
+        )
+    }
+}
+
+#[cfg(test)]
+mod role_policy_tests {
+    use super::*;
+    use crate::agent::AgentRole;
+    use crate::codex::make_session_and_context;
+    use crate::features::Feature;
+    use crate::protocol::AskForApproval;
+    use crate::tools::ToolRouter;
+    use crate::tools::context::ToolPayload;
+    use crate::tools::router::ToolCall;
+    use crate::tools::router::ToolCallSource;
+    use crate::turn_diff_tracker::TurnDiffTracker;
+    use codex_protocol::models::ResponseInputItem;
+    use codex_protocol::openai_models::ApplyPatchToolType;
+    use serde_json::json;
+    use std::sync::Arc;
+
+    #[tokio::test]
+    async fn non_plan_roles_block_request_user_input_outside_plan_mode() -> anyhow::Result<()> {
+        let roles = [
+            AgentRole::Default,
+            AgentRole::Scout,
+            AgentRole::ContextValidator,
+            AgentRole::Builder,
+            AgentRole::PostBuilderValidator,
+            AgentRole::Validator,
+        ];
+
+        for role in roles {
+            let (session, mut turn) = make_session_and_context().await;
+            turn.tools_config.agent_role = role;
+            turn.tools_config.collaboration_modes_tools = true;
+            turn.tools_config.collaboration_mode = ModeKind::Default;
+
+            let session = Arc::new(session);
+            let turn = Arc::new(turn);
+            let router = ToolRouter::from_config(&turn.tools_config, Some(Default::default()), &[]);
+
+            let call = ToolCall {
+                tool_name: "request_user_input".to_string(),
+                call_id: format!("call-{role:?}"),
+                payload: ToolPayload::Function {
+                    arguments: r#"{"questions":[{"id":"q","header":"H","question":"Q","options":[{"label":"A","description":"a"}]}]}"#.to_string(),
+                },
+            };
+            let tracker = Arc::new(tokio::sync::Mutex::new(TurnDiffTracker::new()));
+            let response = router
+                .dispatch_tool_call(session, turn, tracker, call, ToolCallSource::JsRepl)
+                .await?;
+
+            match response {
+                ResponseInputItem::FunctionCallOutput { output, .. } => {
+                    let content = output.text_content().unwrap_or_default();
+                    assert!(
+                        content.contains("not available for the current agent role"),
+                        "expected role policy gate, got: {content} for role {role:?}",
+                    );
+                }
+                other => panic!("expected function call output, got {other:?}"),
+            }
+        }
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn default_role_apply_patch_requires_scout_context_pipeline() -> anyhow::Result<()> {
+        let (session, mut turn) = make_session_and_context().await;
+        turn.tools_config.agent_role = AgentRole::Default;
+        turn.tools_config.collab_tools = true;
+        turn.tools_config.collaboration_mode = ModeKind::Default;
+        turn.tools_config.apply_patch_tool_type = Some(ApplyPatchToolType::Freeform);
+        turn.features.enable(Feature::ApplyPatchFreeform);
+        turn.features.enable(Feature::Collab);
+        turn.approval_policy = AskForApproval::Never;
+
+        let session = Arc::new(session);
+        let turn = Arc::new(turn);
+        let router = ToolRouter::from_config(&turn.tools_config, Some(Default::default()), &[]);
+
+        let patch_input = json!({
+            "input": "*** Begin Patch\n*** Add File: /tmp/ignored.md\n+hello\n*** End Patch"
+        })
+        .to_string();
+        let call = ToolCall {
+            tool_name: "apply_patch".to_string(),
+            call_id: "call-default-pipeline".to_string(),
+            payload: ToolPayload::Function {
+                arguments: patch_input,
+            },
+        };
+        let tracker = Arc::new(tokio::sync::Mutex::new(TurnDiffTracker::new()));
+        let response = router
+            .dispatch_tool_call(session, turn.clone(), tracker, call, ToolCallSource::JsRepl)
+            .await?;
+
+        match response {
+            ResponseInputItem::FunctionCallOutput { output, .. } => {
+                let content = output.text_content().unwrap_or_default();
+                assert!(
+                    content.contains("pipeline is complete"),
+                    "expected pipeline guard message; got: {content}"
+                );
+            }
+            other => panic!("expected function output, got {other:?}"),
+        }
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn plan_role_allows_request_user_input_in_plan_mode() -> anyhow::Result<()> {
+        let (session, mut turn) = make_session_and_context().await;
+        turn.tools_config.agent_role = AgentRole::Plan;
+        turn.tools_config.collaboration_modes_tools = true;
+        turn.tools_config.collaboration_mode = ModeKind::Plan;
+
+        let session = Arc::new(session);
+        let turn = Arc::new(turn);
+        let router = ToolRouter::from_config(&turn.tools_config, Some(Default::default()), &[]);
+
+        let call = ToolCall {
+            tool_name: "request_user_input".to_string(),
+            call_id: "call-1".to_string(),
+            payload: ToolPayload::Function {
+                arguments: r#"{"questions":[{"id":"q","header":"H","question":"Q","options":[{"label":"A","description":"a"}]}]}"#.to_string(),
+            },
+        };
+        let tracker = Arc::new(tokio::sync::Mutex::new(TurnDiffTracker::new()));
+        let response = router
+            .dispatch_tool_call(session, turn, tracker, call, ToolCallSource::JsRepl)
+            .await?;
+
+        match response {
+            ResponseInputItem::FunctionCallOutput { output, .. } => {
+                let content = output.text_content().unwrap_or_default();
+                assert!(
+                    !content.contains("not available for the current agent role"),
+                    "expected tool dispatch to proceed; got role gate: {content}",
+                );
+            }
+            other => panic!("expected function call output, got {other:?}"),
+        }
+
+        Ok(())
     }
 }
 
 pub(crate) fn filter_tools_for_model(tools: Vec<ToolSpec>, config: &ToolsConfig) -> Vec<ToolSpec> {
-    if !config.js_repl_tools_only {
-        return tools;
-    }
-
     tools
         .into_iter()
-        .filter(|spec| matches!(spec.name(), "js_repl" | "js_repl_reset"))
+        .filter(|spec| config.role_allows_tool(spec.name()))
+        .filter(|spec| {
+            if config.js_repl_tools_only {
+                matches!(spec.name(), "js_repl" | "js_repl_reset")
+            } else {
+                true
+            }
+        })
         .collect()
 }
 
@@ -1428,37 +1744,39 @@ pub(crate) fn build_specs(
     let js_repl_handler = Arc::new(JsReplHandler);
     let js_repl_reset_handler = Arc::new(JsReplResetHandler);
 
-    match &config.shell_type {
-        ConfigShellToolType::Default => {
-            builder.push_spec_with_parallel_support(
-                create_shell_tool(config.request_rule_enabled),
-                true,
-            );
-        }
-        ConfigShellToolType::Local => {
-            builder.push_spec_with_parallel_support(ToolSpec::LocalShell {}, true);
-        }
-        ConfigShellToolType::UnifiedExec => {
-            builder.push_spec_with_parallel_support(
-                create_exec_command_tool(config.request_rule_enabled),
-                true,
-            );
-            builder.push_spec(create_write_stdin_tool());
-            builder.register_handler("exec_command", unified_exec_handler.clone());
-            builder.register_handler("write_stdin", unified_exec_handler);
-        }
-        ConfigShellToolType::Disabled => {
-            // Do nothing.
-        }
-        ConfigShellToolType::ShellCommand => {
-            builder.push_spec_with_parallel_support(
-                create_shell_command_tool(config.request_rule_enabled),
-                true,
-            );
+    if config.role_allows_tool("shell") {
+        match &config.shell_type {
+            ConfigShellToolType::Default => {
+                builder.push_spec_with_parallel_support(
+                    create_shell_tool(config.request_rule_enabled),
+                    true,
+                );
+            }
+            ConfigShellToolType::Local => {
+                builder.push_spec_with_parallel_support(ToolSpec::LocalShell {}, true);
+            }
+            ConfigShellToolType::UnifiedExec => {
+                builder.push_spec_with_parallel_support(
+                    create_exec_command_tool(config.request_rule_enabled),
+                    true,
+                );
+                builder.push_spec(create_write_stdin_tool());
+                builder.register_handler("exec_command", unified_exec_handler.clone());
+                builder.register_handler("write_stdin", unified_exec_handler);
+            }
+            ConfigShellToolType::Disabled => {
+                // Do nothing.
+            }
+            ConfigShellToolType::ShellCommand => {
+                builder.push_spec_with_parallel_support(
+                    create_shell_command_tool(config.request_rule_enabled),
+                    true,
+                );
+            }
         }
     }
 
-    if config.shell_type != ConfigShellToolType::Disabled {
+    if config.shell_type != ConfigShellToolType::Disabled && config.role_allows_tool("shell") {
         // Always register shell aliases so older prompts remain compatible.
         builder.register_handler("shell", shell_handler.clone());
         builder.register_handler("container.exec", shell_handler.clone());
@@ -1466,34 +1784,44 @@ pub(crate) fn build_specs(
         builder.register_handler("shell_command", shell_command_handler);
     }
 
-    builder.push_spec_with_parallel_support(create_list_mcp_resources_tool(), true);
-    builder.push_spec_with_parallel_support(create_list_mcp_resource_templates_tool(), true);
-    builder.push_spec_with_parallel_support(create_read_mcp_resource_tool(), true);
-    builder.register_handler("list_mcp_resources", mcp_resource_handler.clone());
-    builder.register_handler("list_mcp_resource_templates", mcp_resource_handler.clone());
-    builder.register_handler("read_mcp_resource", mcp_resource_handler);
+    if config.role_allows_tool("list_mcp_resources") {
+        builder.push_spec_with_parallel_support(create_list_mcp_resources_tool(), true);
+        builder.register_handler("list_mcp_resources", mcp_resource_handler.clone());
+    }
+    if config.role_allows_tool("list_mcp_resource_templates") {
+        builder.push_spec_with_parallel_support(create_list_mcp_resource_templates_tool(), true);
+        builder.register_handler("list_mcp_resource_templates", mcp_resource_handler.clone());
+    }
+    if config.role_allows_tool("read_mcp_resource") {
+        builder.push_spec_with_parallel_support(create_read_mcp_resource_tool(), true);
+        builder.register_handler("read_mcp_resource", mcp_resource_handler);
+    }
 
-    builder.push_spec(PLAN_TOOL.clone());
-    builder.register_handler("update_plan", plan_handler);
+    if config.role_allows_tool("update_plan") {
+        builder.push_spec(PLAN_TOOL.clone());
+        builder.register_handler("update_plan", plan_handler);
+    }
 
-    if config.js_repl_enabled {
+    if config.js_repl_enabled && config.role_allows_tool("js_repl") {
         builder.push_spec(create_js_repl_tool());
         builder.push_spec(create_js_repl_reset_tool());
         builder.register_handler("js_repl", js_repl_handler);
         builder.register_handler("js_repl_reset", js_repl_reset_handler);
     }
 
-    if config.collaboration_modes_tools {
+    if config.collaboration_modes_tools && config.role_allows_tool("request_user_input") {
         builder.push_spec(create_request_user_input_tool());
         builder.register_handler("request_user_input", request_user_input_handler);
     }
 
-    if config.search_tool {
+    if config.search_tool && config.role_allows_tool("search_tool_bm25") {
         builder.push_spec_with_parallel_support(create_search_tool_bm25_tool(), true);
         builder.register_handler("search_tool_bm25", search_tool_handler);
     }
 
-    if let Some(apply_patch_tool_type) = &config.apply_patch_tool_type {
+    if config.role_allows_tool("apply_patch")
+        && let Some(apply_patch_tool_type) = &config.apply_patch_tool_type
+    {
         match apply_patch_tool_type {
             ApplyPatchToolType::Freeform => {
                 builder.push_spec(create_apply_patch_freeform_tool());
@@ -1505,44 +1833,51 @@ pub(crate) fn build_specs(
         builder.register_handler("apply_patch", apply_patch_handler);
     }
 
-    if config
-        .experimental_supported_tools
-        .contains(&"grep_files".to_string())
+    if config.role_allows_tool("grep_files")
+        && config
+            .experimental_supported_tools
+            .contains(&"grep_files".to_string())
     {
         let grep_files_handler = Arc::new(GrepFilesHandler);
         builder.push_spec_with_parallel_support(create_grep_files_tool(), true);
         builder.register_handler("grep_files", grep_files_handler);
     }
 
-    if config
-        .experimental_supported_tools
-        .contains(&"read_file".to_string())
+    if config.role_allows_tool("read_file")
+        && config
+            .experimental_supported_tools
+            .contains(&"read_file".to_string())
     {
         let read_file_handler = Arc::new(ReadFileHandler);
         builder.push_spec_with_parallel_support(create_read_file_tool(), true);
         builder.register_handler("read_file", read_file_handler);
     }
 
-    if config
-        .experimental_supported_tools
-        .iter()
-        .any(|tool| tool == "list_dir")
+    if config.role_allows_tool("list_dir")
+        && config
+            .experimental_supported_tools
+            .iter()
+            .any(|tool| tool == "list_dir")
     {
         let list_dir_handler = Arc::new(ListDirHandler);
         builder.push_spec_with_parallel_support(create_list_dir_tool(), true);
         builder.register_handler("list_dir", list_dir_handler);
     }
 
-    if config
-        .experimental_supported_tools
-        .contains(&"test_sync_tool".to_string())
+    if config.role_allows_tool("test_sync_tool")
+        && config
+            .experimental_supported_tools
+            .contains(&"test_sync_tool".to_string())
     {
         let test_sync_handler = Arc::new(TestSyncHandler);
         builder.push_spec_with_parallel_support(create_test_sync_tool(), true);
         builder.register_handler("test_sync_tool", test_sync_handler);
     }
 
-    match config.web_search_mode {
+    match config
+        .web_search_mode
+        .filter(|_| ToolsConfig::role_allows_web_search(config.agent_role))
+    {
         Some(WebSearchMode::Cached) => {
             builder.push_spec(ToolSpec::WebSearch {
                 external_web_access: Some(false),
@@ -1556,10 +1891,12 @@ pub(crate) fn build_specs(
         Some(WebSearchMode::Disabled) | None => {}
     }
 
-    builder.push_spec_with_parallel_support(create_view_image_tool(), true);
-    builder.register_handler("view_image", view_image_handler);
+    if config.role_allows_tool(VIEW_IMAGE_TOOL_NAME) {
+        builder.push_spec_with_parallel_support(create_view_image_tool(), true);
+        builder.register_handler("view_image", view_image_handler);
+    }
 
-    if config.collab_tools {
+    if config.collab_tools && config.role_allows_tool("spawn_agent") {
         let collab_handler = Arc::new(CollabHandler);
         builder.push_spec(create_spawn_agent_tool());
         builder.push_spec(create_send_input_tool());
@@ -1573,11 +1910,16 @@ pub(crate) fn build_specs(
         builder.register_handler("close_agent", collab_handler);
     }
 
-    if let Some(mcp_tools) = mcp_tools {
+    if ToolsConfig::role_allows_mcp_and_dynamic_tools(config.agent_role)
+        && let Some(mcp_tools) = mcp_tools
+    {
         let mut entries: Vec<(String, rmcp::model::Tool)> = mcp_tools.into_iter().collect();
         entries.sort_by(|a, b| a.0.cmp(&b.0));
 
         for (name, tool) in entries.into_iter() {
+            if !ToolsConfig::role_allows_mcp_and_dynamic_tools(config.agent_role) {
+                continue;
+            }
             match mcp_tool_to_openai_tool(name.clone(), tool.clone()) {
                 Ok(converted_tool) => {
                     builder.push_spec(ToolSpec::Function(converted_tool));
@@ -1590,8 +1932,13 @@ pub(crate) fn build_specs(
         }
     }
 
-    if !dynamic_tools.is_empty() {
+    if ToolsConfig::role_allows_mcp_and_dynamic_tools(config.agent_role)
+        && !dynamic_tools.is_empty()
+    {
         for tool in dynamic_tools {
+            if !config.role_allows_tool(&tool.name) {
+                continue;
+            }
             match dynamic_tool_to_openai_tool(tool) {
                 Ok(converted_tool) => {
                     builder.push_spec(ToolSpec::Function(converted_tool));
@@ -1822,12 +2169,16 @@ mod tests {
             create_list_mcp_resource_templates_tool(),
             create_read_mcp_resource_tool(),
             PLAN_TOOL.clone(),
-            create_request_user_input_tool(),
             create_apply_patch_freeform_tool(),
             ToolSpec::WebSearch {
                 external_web_access: Some(true),
             },
             create_view_image_tool(),
+            create_spawn_agent_tool(),
+            create_send_input_tool(),
+            create_resume_agent_tool(),
+            create_wait_tool(),
+            create_close_agent_tool(),
         ] {
             expected.insert(tool_name(&spec).to_string(), spec);
         }
@@ -1874,7 +2225,210 @@ mod tests {
     }
 
     #[test]
-    fn request_user_input_requires_collaboration_modes_feature() {
+    fn spawn_agent_tool_lists_supported_agent_roles() {
+        let ToolSpec::Function(tool) = create_spawn_agent_tool() else {
+            panic!("spawn_agent must be a function tool");
+        };
+        let JsonSchema::Object { properties, .. } = tool.parameters else {
+            panic!("spawn_agent parameters must be an object");
+        };
+        let Some(JsonSchema::String { description }) = properties.get("agent_type") else {
+            panic!("spawn_agent.agent_type must be a string schema");
+        };
+        let description = description
+            .as_deref()
+            .expect("spawn_agent.agent_type description should be present");
+
+        assert!(description.contains("default"));
+        assert!(description.contains("scout"));
+        assert!(description.contains("builder"));
+        assert!(description.contains("context_validator"));
+        assert!(description.contains("post_builder_validator"));
+        assert!(description.contains("validator"));
+        assert!(description.contains("plan"));
+    }
+
+    #[test]
+    fn builder_role_exposes_no_tools() {
+        let config = test_config();
+        let model_info =
+            ModelsManager::construct_model_info_offline_for_tests("gpt-5-codex", &config);
+        let mut features = Features::with_defaults();
+        features.enable(Feature::Collab);
+        features.enable(Feature::CollaborationModes);
+        features.enable(Feature::ApplyPatchFreeform);
+
+        let mut tools_config = ToolsConfig::new(&ToolsConfigParams {
+            model_info: &model_info,
+            features: &features,
+            web_search_mode: Some(WebSearchMode::Live),
+        });
+        tools_config.agent_role = AgentRole::Builder;
+
+        let (tools, _) = build_specs(&tools_config, None, &[]).build();
+        assert!(tools.is_empty());
+    }
+
+    #[test]
+    fn scout_role_does_not_expose_patch_or_collab_tools() {
+        let config = test_config();
+        let model_info =
+            ModelsManager::construct_model_info_offline_for_tests("gpt-5-codex", &config);
+        let mut features = Features::with_defaults();
+        features.enable(Feature::ShellTool);
+        features.enable(Feature::Collab);
+        features.enable(Feature::CollaborationModes);
+        features.enable(Feature::ApplyPatchFreeform);
+
+        let mut tools_config = ToolsConfig::new(&ToolsConfigParams {
+            model_info: &model_info,
+            features: &features,
+            web_search_mode: Some(WebSearchMode::Live),
+        });
+        tools_config.agent_role = AgentRole::Scout;
+
+        let (tools, _) = build_specs(&tools_config, None, &[]).build();
+        let names: Vec<_> = tools
+            .iter()
+            .map(|tool| tool.spec.name().to_string())
+            .collect();
+
+        assert!(
+            names.contains(&"shell".to_string())
+                || names.contains(&"shell_command".to_string())
+                || names.contains(&"exec_command".to_string()),
+            "expected scout to expose a shell tool; had: {names:?}"
+        );
+        assert!(!names.contains(&"apply_patch".to_string()));
+        assert!(!names.contains(&"spawn_agent".to_string()));
+        assert!(!names.contains(&"request_user_input".to_string()));
+    }
+
+    #[test]
+    fn context_validator_role_does_not_expose_patch_or_collab_tools() {
+        let config = test_config();
+        let model_info =
+            ModelsManager::construct_model_info_offline_for_tests("gpt-5-codex", &config);
+        let mut features = Features::with_defaults();
+        features.enable(Feature::Collab);
+        features.enable(Feature::CollaborationModes);
+        features.enable(Feature::ApplyPatchFreeform);
+
+        let mut tools_config = ToolsConfig::new(&ToolsConfigParams {
+            model_info: &model_info,
+            features: &features,
+            web_search_mode: Some(WebSearchMode::Live),
+        });
+        tools_config.agent_role = AgentRole::ContextValidator;
+
+        let (tools, _) = build_specs(&tools_config, None, &[]).build();
+        let names: Vec<_> = tools
+            .iter()
+            .map(|tool| tool.spec.name().to_string())
+            .collect();
+
+        assert!(!names.contains(&"apply_patch".to_string()));
+        assert!(!names.contains(&"spawn_agent".to_string()));
+        assert!(!names.contains(&"request_user_input".to_string()));
+        assert!(!names.contains(&"shell".to_string()));
+        assert!(!names.contains(&"exec_command".to_string()));
+        assert!(!names.contains(&"write_stdin".to_string()));
+    }
+
+    #[test]
+    fn plan_role_exposes_minimal_orchestration_tools() {
+        let config = test_config();
+        let model_info =
+            ModelsManager::construct_model_info_offline_for_tests("gpt-5-codex", &config);
+        let mut features = Features::with_defaults();
+        features.enable(Feature::Collab);
+        features.enable(Feature::CollaborationModes);
+        features.enable(Feature::ApplyPatchFreeform);
+
+        let mut tools_config = ToolsConfig::new(&ToolsConfigParams {
+            model_info: &model_info,
+            features: &features,
+            web_search_mode: Some(WebSearchMode::Live),
+        });
+        tools_config.agent_role = AgentRole::Plan;
+        tools_config.collaboration_mode = ModeKind::Plan;
+
+        let (tools, _) = build_specs(&tools_config, None, &[]).build();
+        let names: Vec<_> = tools
+            .iter()
+            .map(|tool| tool.spec.name().to_string())
+            .collect();
+
+        assert!(names.contains(&"apply_patch".to_string()));
+        assert!(names.contains(&"spawn_agent".to_string()));
+        assert!(names.contains(&"send_input".to_string()));
+        assert!(names.contains(&"wait".to_string()));
+        assert!(names.contains(&"close_agent".to_string()));
+        assert!(names.contains(&"request_user_input".to_string()));
+        assert!(!names.contains(&"shell".to_string()));
+        assert!(!names.contains(&"exec_command".to_string()));
+    }
+
+    #[test]
+    fn validator_role_blocks_shell_and_collab_tools() {
+        let config = test_config();
+        let model_info =
+            ModelsManager::construct_model_info_offline_for_tests("gpt-5-codex", &config);
+        let mut features = Features::with_defaults();
+        features.enable(Feature::Collab);
+        features.enable(Feature::CollaborationModes);
+        features.enable(Feature::ApplyPatchFreeform);
+
+        let mut tools_config = ToolsConfig::new(&ToolsConfigParams {
+            model_info: &model_info,
+            features: &features,
+            web_search_mode: Some(WebSearchMode::Live),
+        });
+        tools_config.agent_role = AgentRole::Validator;
+
+        let (tools, _) = build_specs(&tools_config, None, &[]).build();
+        let names: Vec<_> = tools
+            .iter()
+            .map(|tool| tool.spec.name().to_string())
+            .collect();
+
+        assert!(names.contains(&"apply_patch".to_string()));
+        assert!(!names.contains(&"spawn_agent".to_string()));
+        assert!(!names.contains(&"shell".to_string()));
+        assert!(!names.contains(&"exec_command".to_string()));
+    }
+
+    #[test]
+    fn post_builder_validator_role_blocks_shell_and_collab_tools() {
+        let config = test_config();
+        let model_info =
+            ModelsManager::construct_model_info_offline_for_tests("gpt-5-codex", &config);
+        let mut features = Features::with_defaults();
+        features.enable(Feature::Collab);
+        features.enable(Feature::CollaborationModes);
+        features.enable(Feature::ApplyPatchFreeform);
+
+        let mut tools_config = ToolsConfig::new(&ToolsConfigParams {
+            model_info: &model_info,
+            features: &features,
+            web_search_mode: Some(WebSearchMode::Live),
+        });
+        tools_config.agent_role = AgentRole::PostBuilderValidator;
+
+        let (tools, _) = build_specs(&tools_config, None, &[]).build();
+        let names: Vec<_> = tools
+            .iter()
+            .map(|tool| tool.spec.name().to_string())
+            .collect();
+
+        assert!(names.contains(&"apply_patch".to_string()));
+        assert!(!names.contains(&"spawn_agent".to_string()));
+        assert!(!names.contains(&"shell".to_string()));
+        assert!(!names.contains(&"exec_command".to_string()));
+    }
+
+    #[test]
+    fn request_user_input_requires_plan_mode_and_collaboration_modes_feature() {
         let config = test_config();
         let model_info =
             ModelsManager::construct_model_info_offline_for_tests("gpt-5-codex", &config);
@@ -1892,13 +2446,21 @@ mod tests {
         );
 
         features.enable(Feature::CollaborationModes);
-        let tools_config = ToolsConfig::new(&ToolsConfigParams {
+        let mut tools_config = ToolsConfig::new(&ToolsConfigParams {
             model_info: &model_info,
             features: &features,
             web_search_mode: Some(WebSearchMode::Cached),
         });
+        tools_config.collaboration_mode = ModeKind::Plan;
         let (tools, _) = build_specs(&tools_config, None, &[]).build();
         assert_contains_tool_names(&tools, &["request_user_input"]);
+
+        tools_config.collaboration_mode = ModeKind::Default;
+        let (tools, _) = build_specs(&tools_config, None, &[]).build();
+        assert!(
+            !tools.iter().any(|t| t.spec.name() == "request_user_input"),
+            "request_user_input should be hidden outside Plan mode"
+        );
     }
 
     #[test]
@@ -1966,6 +2528,31 @@ mod tests {
             !filtered.iter().any(|tool| tool_name(tool) == "shell"),
             "expected non-js_repl tools to be hidden when js_repl_tools_only is enabled"
         );
+    }
+
+    #[test]
+    fn role_filter_hides_all_builder_tools_from_model() {
+        let config = test_config();
+        let model_info =
+            ModelsManager::construct_model_info_offline_for_tests("gpt-5-codex", &config);
+        let mut features = Features::with_defaults();
+        features.enable(Feature::ApplyPatchFreeform);
+        features.enable(Feature::Collab);
+
+        let mut tools_config = ToolsConfig::new(&ToolsConfigParams {
+            model_info: &model_info,
+            features: &features,
+            web_search_mode: Some(WebSearchMode::Cached),
+        });
+        tools_config.agent_role = AgentRole::Builder;
+
+        let (tools, _) = build_specs(&tools_config, None, &[]).build();
+        let filtered = filter_tools_for_model(
+            tools.iter().map(|tool| tool.spec.clone()).collect(),
+            &tools_config,
+        );
+
+        assert!(filtered.is_empty());
     }
 
     #[test]
@@ -2043,6 +2630,15 @@ mod tests {
             vec![shell_tool]
         };
         expected.extend(expected_tail);
+        if features.enabled(Feature::Collab) {
+            expected.extend([
+                "spawn_agent",
+                "send_input",
+                "resume_agent",
+                "wait",
+                "close_agent",
+            ]);
+        }
         assert_model_tools(model_slug, features, web_search_mode, &expected);
     }
 
@@ -2106,7 +2702,6 @@ mod tests {
                 "list_mcp_resource_templates",
                 "read_mcp_resource",
                 "update_plan",
-                "request_user_input",
                 "apply_patch",
                 "web_search",
                 "view_image",
@@ -2128,7 +2723,6 @@ mod tests {
                 "list_mcp_resource_templates",
                 "read_mcp_resource",
                 "update_plan",
-                "request_user_input",
                 "apply_patch",
                 "web_search",
                 "view_image",
@@ -2152,10 +2746,14 @@ mod tests {
                 "list_mcp_resource_templates",
                 "read_mcp_resource",
                 "update_plan",
-                "request_user_input",
                 "apply_patch",
                 "web_search",
                 "view_image",
+                "spawn_agent",
+                "send_input",
+                "resume_agent",
+                "wait",
+                "close_agent",
             ],
         );
     }
@@ -2176,10 +2774,14 @@ mod tests {
                 "list_mcp_resource_templates",
                 "read_mcp_resource",
                 "update_plan",
-                "request_user_input",
                 "apply_patch",
                 "web_search",
                 "view_image",
+                "spawn_agent",
+                "send_input",
+                "resume_agent",
+                "wait",
+                "close_agent",
             ],
         );
     }
@@ -2198,7 +2800,6 @@ mod tests {
                 "list_mcp_resource_templates",
                 "read_mcp_resource",
                 "update_plan",
-                "request_user_input",
                 "apply_patch",
                 "web_search",
                 "view_image",
@@ -2220,7 +2821,6 @@ mod tests {
                 "list_mcp_resource_templates",
                 "read_mcp_resource",
                 "update_plan",
-                "request_user_input",
                 "apply_patch",
                 "web_search",
                 "view_image",
@@ -2242,7 +2842,6 @@ mod tests {
                 "list_mcp_resource_templates",
                 "read_mcp_resource",
                 "update_plan",
-                "request_user_input",
                 "web_search",
                 "view_image",
             ],
@@ -2263,7 +2862,6 @@ mod tests {
                 "list_mcp_resource_templates",
                 "read_mcp_resource",
                 "update_plan",
-                "request_user_input",
                 "apply_patch",
                 "web_search",
                 "view_image",
@@ -2287,10 +2885,14 @@ mod tests {
                 "list_mcp_resource_templates",
                 "read_mcp_resource",
                 "update_plan",
-                "request_user_input",
                 "apply_patch",
                 "web_search",
                 "view_image",
+                "spawn_agent",
+                "send_input",
+                "resume_agent",
+                "wait",
+                "close_agent",
             ],
         );
     }

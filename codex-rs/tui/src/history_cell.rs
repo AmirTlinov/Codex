@@ -943,6 +943,7 @@ pub(crate) fn new_session_info(
     config: &Config,
     requested_model: &str,
     event: SessionConfiguredEvent,
+    agent_role_label: Option<&'static str>,
     is_first_event: bool,
     auth_plan: Option<PlanType>,
 ) -> SessionInfoCell {
@@ -957,6 +958,7 @@ pub(crate) fn new_session_info(
         reasoning_effort,
         config.cwd.clone(),
         CODEX_CLI_VERSION,
+        agent_role_label,
     );
     let mut parts: Vec<Box<dyn HistoryCell>> = vec![Box::new(header)];
 
@@ -1031,6 +1033,7 @@ pub(crate) struct SessionHeaderHistoryCell {
     version: &'static str,
     model: String,
     model_style: Style,
+    agent_role_label: Option<&'static str>,
     reasoning_effort: Option<ReasoningEffortConfig>,
     directory: PathBuf,
 }
@@ -1041,6 +1044,7 @@ impl SessionHeaderHistoryCell {
         reasoning_effort: Option<ReasoningEffortConfig>,
         directory: PathBuf,
         version: &'static str,
+        agent_role_label: Option<&'static str>,
     ) -> Self {
         Self::new_with_style(
             model,
@@ -1048,6 +1052,7 @@ impl SessionHeaderHistoryCell {
             reasoning_effort,
             directory,
             version,
+            agent_role_label,
         )
     }
 
@@ -1057,11 +1062,13 @@ impl SessionHeaderHistoryCell {
         reasoning_effort: Option<ReasoningEffortConfig>,
         directory: PathBuf,
         version: &'static str,
+        agent_role_label: Option<&'static str>,
     ) -> Self {
         Self {
             version,
             model,
             model_style,
+            agent_role_label,
             reasoning_effort,
             directory,
         }
@@ -1125,6 +1132,7 @@ impl HistoryCell for SessionHeaderHistoryCell {
         const CHANGE_MODEL_HINT_COMMAND: &str = "/model";
         const CHANGE_MODEL_HINT_EXPLANATION: &str = " to change";
         const DIR_LABEL: &str = "directory:";
+        const ROLE_LABEL: &str = "agent:";
         let label_width = DIR_LABEL.len();
 
         let model_label = format!(
@@ -1155,12 +1163,23 @@ impl HistoryCell for SessionHeaderHistoryCell {
         let dir = self.format_directory(Some(dir_max_width));
         let dir_spans = vec![Span::from(dir_prefix).dim(), Span::from(dir)];
 
-        let lines = vec![
+        let role_spans = self.agent_role_label.map(|agent_role_label| {
+            let role_label = format!("{ROLE_LABEL:<label_width$}");
+            vec![
+                Span::from(format!("{role_label} ")).dim(),
+                Span::from(agent_role_label),
+            ]
+        });
+
+        let mut lines = vec![
             make_row(title_spans),
             make_row(Vec::new()),
             make_row(model_spans),
             make_row(dir_spans),
         ];
+        if let Some(agent_role_spans) = role_spans {
+            lines.insert(2, make_row(agent_role_spans));
+        }
 
         with_border(lines)
     }
@@ -2965,6 +2984,7 @@ mod tests {
             Some(ReasoningEffortConfig::High),
             std::env::temp_dir(),
             "test",
+            None,
         );
 
         let lines = render_lines(&cell.display_lines(80));

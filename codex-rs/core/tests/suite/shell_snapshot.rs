@@ -57,6 +57,7 @@ async fn wait_for_snapshot(codex_home: &Path) -> Result<PathBuf> {
 #[allow(clippy::expect_used)]
 async fn run_snapshot_command(command: &str) -> Result<SnapshotRun> {
     let builder = test_codex().with_config(|config| {
+        config.features.disable(Feature::Collab);
         config.use_experimental_unified_exec_tool = true;
         config.features.enable(Feature::UnifiedExec);
         config.features.enable(Feature::ShellSnapshot);
@@ -133,6 +134,7 @@ async fn run_snapshot_command(command: &str) -> Result<SnapshotRun> {
 #[allow(clippy::expect_used)]
 async fn run_shell_command_snapshot(command: &str) -> Result<SnapshotRun> {
     let builder = test_codex().with_config(|config| {
+        config.features.disable(Feature::Collab);
         config.features.enable(Feature::ShellSnapshot);
     });
     let harness = TestCodexHarness::with_builder(builder).await?;
@@ -264,6 +266,7 @@ async fn linux_shell_command_uses_shell_snapshot() -> Result<()> {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn shell_command_snapshot_still_intercepts_apply_patch() -> Result<()> {
     let builder = test_codex().with_config(|config| {
+        config.features.disable(Feature::Collab);
         config.features.enable(Feature::ShellSnapshot);
         config.include_apply_patch_tool = true;
     });
@@ -329,6 +332,7 @@ async fn shell_command_snapshot_still_intercepts_apply_patch() -> Result<()> {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn shell_snapshot_deleted_after_shutdown_with_skills() -> Result<()> {
     let builder = test_codex().with_config(|config| {
+        config.features.disable(Feature::Collab);
         config.features.enable(Feature::ShellSnapshot);
     });
     let harness = TestCodexHarness::with_builder(builder).await?;

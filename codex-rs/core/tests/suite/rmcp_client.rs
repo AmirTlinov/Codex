@@ -13,6 +13,7 @@ use codex_core::config::types::McpServerConfig;
 use codex_core::config::types::McpServerTransportConfig;
 use codex_core::features::Feature;
 use codex_core::models_manager::manager::RefreshStrategy;
+use codex_rmcp_client::OAuthCredentialsStoreMode;
 
 use codex_core::protocol::AskForApproval;
 use codex_core::protocol::EventMsg;
@@ -83,6 +84,7 @@ async fn stdio_server_round_trip() -> anyhow::Result<()> {
 
     let fixture = test_codex()
         .with_config(move |config| {
+            config.mcp_oauth_credentials_store_mode = OAuthCredentialsStoreMode::File;
             let mut servers = config.mcp_servers.get().clone();
             servers.insert(
                 server_name.to_string(),
@@ -114,6 +116,10 @@ async fn stdio_server_round_trip() -> anyhow::Result<()> {
         })
         .build(&server)
         .await?;
+    assert_eq!(
+        fixture.config.mcp_oauth_credentials_store_mode,
+        OAuthCredentialsStoreMode::File
+    );
     let session_model = fixture.session_configured.model.clone();
 
     fixture
@@ -225,6 +231,7 @@ async fn stdio_image_responses_round_trip() -> anyhow::Result<()> {
 
     let fixture = test_codex()
         .with_config(move |config| {
+            config.mcp_oauth_credentials_store_mode = OAuthCredentialsStoreMode::File;
             let mut servers = config.mcp_servers.get().clone();
             servers.insert(
                 server_name.to_string(),
@@ -256,6 +263,10 @@ async fn stdio_image_responses_round_trip() -> anyhow::Result<()> {
         })
         .build(&server)
         .await?;
+    assert_eq!(
+        fixture.config.mcp_oauth_credentials_store_mode,
+        OAuthCredentialsStoreMode::File
+    );
     let session_model = fixture.session_configured.model.clone();
 
     let tools_ready_deadline = Instant::now() + Duration::from_secs(30);
@@ -563,6 +574,7 @@ async fn stdio_server_propagates_whitelisted_env_vars() -> anyhow::Result<()> {
 
     let fixture = test_codex()
         .with_config(move |config| {
+            config.mcp_oauth_credentials_store_mode = OAuthCredentialsStoreMode::File;
             let mut servers = config.mcp_servers.get().clone();
             servers.insert(
                 server_name.to_string(),
@@ -723,6 +735,7 @@ async fn streamable_http_tool_call_round_trip() -> anyhow::Result<()> {
 
     let fixture = test_codex()
         .with_config(move |config| {
+            config.mcp_oauth_credentials_store_mode = OAuthCredentialsStoreMode::File;
             let mut servers = config.mcp_servers.get().clone();
             servers.insert(
                 server_name.to_string(),
@@ -914,6 +927,7 @@ async fn streamable_http_with_oauth_round_trip() -> anyhow::Result<()> {
 
     let fixture = test_codex()
         .with_config(move |config| {
+            config.mcp_oauth_credentials_store_mode = OAuthCredentialsStoreMode::File;
             let mut servers = config.mcp_servers.get().clone();
             servers.insert(
                 server_name.to_string(),
@@ -941,6 +955,11 @@ async fn streamable_http_with_oauth_round_trip() -> anyhow::Result<()> {
         })
         .build(&server)
         .await?;
+
+    assert_eq!(
+        fixture.config.mcp_oauth_credentials_store_mode,
+        OAuthCredentialsStoreMode::File
+    );
     let session_model = fixture.session_configured.model.clone();
 
     fixture

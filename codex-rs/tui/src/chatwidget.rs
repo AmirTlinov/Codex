@@ -157,6 +157,62 @@ const PLAN_IMPLEMENTATION_NO: &str = "No, stay in Plan mode";
 const PLAN_IMPLEMENTATION_CODING_MESSAGE: &str = "Implement the plan.";
 const CONNECTORS_SELECTION_VIEW_ID: &str = "connectors-selection";
 
+pub(crate) fn agent_role_label_from_type(role_type: &str) -> Option<&'static str> {
+    match role_type.trim().to_ascii_lowercase().as_str() {
+        "default" | "main" | "orchestrator" => Some("Main"),
+        "scout" | "explorer" => Some("Scout"),
+        "context_validator" => Some("Context validator"),
+        "builder" | "worker" => Some("Builder"),
+        "post_builder_validator" => Some("Post-builder validator"),
+        "validator" => Some("Validator"),
+        "plan" | "planner" => Some("Plan"),
+        _ => None,
+    }
+}
+
+pub(crate) fn agent_role_from_type(role_type: &str) -> Option<AgentRole> {
+    match role_type.trim().to_ascii_lowercase().as_str() {
+        "default" | "main" | "orchestrator" => Some(AgentRole::Default),
+        "scout" | "explorer" => Some(AgentRole::Scout),
+        "context_validator" => Some(AgentRole::ContextValidator),
+        "builder" | "worker" => Some(AgentRole::Builder),
+        "post_builder_validator" => Some(AgentRole::PostBuilderValidator),
+        "validator" => Some(AgentRole::Validator),
+        "plan" | "planner" => Some(AgentRole::Plan),
+        _ => None,
+    }
+}
+
+pub(crate) fn agent_role_model_override_from_type<'a>(
+    role_type: &'a str,
+    config: &'a Config,
+) -> Option<&'a str> {
+    match agent_role_from_type(role_type) {
+        Some(AgentRole::Default) => config.agents.main_model.as_deref(),
+        Some(AgentRole::Scout) => config.agents.scout_model.as_deref(),
+        Some(AgentRole::ContextValidator) => config.agents.context_validator_model.as_deref(),
+        Some(AgentRole::Builder) => config.agents.builder_model.as_deref(),
+        Some(AgentRole::PostBuilderValidator) => {
+            config.agents.post_builder_validator_model.as_deref()
+        }
+        Some(AgentRole::Validator) => config.agents.validator_model.as_deref(),
+        Some(AgentRole::Plan) => config.agents.plan_model.as_deref(),
+        None => None,
+    }
+}
+
+fn agent_role_model_from_type(role: AgentRole, config: &Config) -> Option<&str> {
+    match role {
+        AgentRole::Default => config.agents.main_model.as_deref(),
+        AgentRole::Scout => config.agents.scout_model.as_deref(),
+        AgentRole::ContextValidator => config.agents.context_validator_model.as_deref(),
+        AgentRole::Builder => config.agents.builder_model.as_deref(),
+        AgentRole::PostBuilderValidator => config.agents.post_builder_validator_model.as_deref(),
+        AgentRole::Validator => config.agents.validator_model.as_deref(),
+        AgentRole::Plan => config.agents.plan_model.as_deref(),
+    }
+}
+
 use crate::app_event::AppEvent;
 use crate::app_event::ConnectorsSnapshot;
 use crate::app_event::ExitMode;
@@ -232,6 +288,7 @@ use crate::streaming::controller::PlanStreamController;
 use crate::streaming::controller::StreamController;
 
 use chrono::Local;
+use codex_core::AgentRole;
 use codex_core::AuthManager;
 use codex_core::CodexAuth;
 use codex_core::ThreadManager;
@@ -516,6 +573,7 @@ pub(crate) struct ChatWidget {
     // Stream lifecycle controller for proposed plan output.
     plan_stream_controller: Option<PlanStreamController>,
     running_commands: HashMap<String, RunningCommand>,
+    collab_agent_types: HashMap<ThreadId, String>,
     suppressed_exec_calls: HashSet<String>,
     skills_all: Vec<ProtocolSkillMetadata>,
     skills_initial_state: Option<HashMap<PathBuf, bool>>,
@@ -792,7 +850,7 @@ impl ChatWidget {
         if let Some(header) = extract_first_bold(&self.reasoning_buffer) {
             self.set_status_header(header);
         } else if self.bottom_pane.is_task_running() {
-            self.set_status_header(String::from("Working"));
+            self.set_status_header(self.working_status_header());
         }
     }
 
@@ -853,6 +911,45 @@ impl ChatWidget {
     fn set_status(&mut self, header: String, details: Option<String>) {
         self.current_status_header = header.clone();
         self.bottom_pane.update_status(header, details);
+    }
+
+    fn current_agent_role_label(&self) -> Option<&'static str> {
+        self.current_agent_role().map(Self::agent_role_label)
+    }
+
+    fn current_agent_role(&self) -> Option<AgentRole> {
+        self.thread_id
+            .and_then(|thread_id| self.collab_agent_types.get(&thread_id))
+            .and_then(|role_type| agent_role_from_type(role_type))
+    }
+
+    fn agent_role_model_display(&self, role: AgentRole) -> String {
+        self.agent_role_model(role)
+            .map(str::to_string)
+            .or_else(|| self.config.agents.main_model.clone())
+            .unwrap_or_else(|| self.current_model().to_string())
+    }
+
+    fn working_status_header(&self) -> String {
+        let Some(role_label) = self.current_agent_role_label() else {
+            return String::from("Working");
+        };
+
+        let role = self.current_agent_role().unwrap_or(AgentRole::Default);
+        let model = self.agent_role_model_display(role);
+        format!("Working ({role_label} • {model})")
+    }
+
+    fn agent_role_current_model_description(&self, role: AgentRole) -> String {
+        let current = self.agent_role_model(role).unwrap_or("Inherit");
+        if current == "Inherit" {
+            format!(
+                "Inherit (effective: {})",
+                self.agent_role_model_display(role)
+            )
+        } else {
+            format!("Current override: {current}")
+        }
     }
 
     /// Convenience wrapper around [`Self::set_status`];
@@ -1020,6 +1117,7 @@ impl ChatWidget {
         let initial_messages = event.initial_messages.clone();
         let forked_from_id = event.forked_from_id;
         let model_for_header = event.model.clone();
+        let agent_role_label = self.current_agent_role_label();
         self.session_header.set_model(&model_for_header);
         self.current_collaboration_mode = self.current_collaboration_mode.with_updates(
             Some(model_for_header.clone()),
@@ -1032,6 +1130,7 @@ impl ChatWidget {
             &self.config,
             &model_for_header,
             event,
+            agent_role_label,
             self.show_welcome_banner,
             self.auth_manager
                 .auth_cached()
@@ -1291,7 +1390,7 @@ impl ChatWidget {
         self.retry_status_header = None;
         self.pending_status_indicator_restore = false;
         self.bottom_pane.set_interrupt_hint_visible(true);
-        self.set_status_header(String::from("Working"));
+        self.set_status_header(self.working_status_header());
         self.full_reasoning_buffer.clear();
         self.reasoning_buffer.clear();
         self.request_redraw();
@@ -2590,6 +2689,7 @@ impl ChatWidget {
             active_cell,
             active_cell_revision: 0,
             config,
+            collab_agent_types: HashMap::new(),
             skills_all: Vec::new(),
             skills_initial_state: None,
             current_collaboration_mode,
@@ -2755,6 +2855,7 @@ impl ChatWidget {
             active_cell,
             active_cell_revision: 0,
             config,
+            collab_agent_types: HashMap::new(),
             skills_all: Vec::new(),
             skills_initial_state: None,
             current_collaboration_mode,
@@ -2909,6 +3010,7 @@ impl ChatWidget {
             active_cell: None,
             active_cell_revision: 0,
             config,
+            collab_agent_types: HashMap::new(),
             skills_all: Vec::new(),
             skills_initial_state: None,
             current_collaboration_mode,
@@ -3107,7 +3209,7 @@ impl ChatWidget {
                         // Reset any reasoning header only when we are actually submitting a turn.
                         self.reasoning_buffer.clear();
                         self.full_reasoning_buffer.clear();
-                        self.set_status_header(String::from("Working"));
+                        self.set_status_header(self.working_status_header());
                         self.submit_user_message(user_message);
                     } else {
                         self.queue_user_message(user_message);
@@ -3246,6 +3348,9 @@ impl ChatWidget {
             }
             SlashCommand::Model => {
                 self.open_model_popup();
+            }
+            SlashCommand::AgentModels => {
+                self.open_agent_role_models_popup();
             }
             SlashCommand::Personality => {
                 self.open_personality_popup();
@@ -3518,7 +3623,7 @@ impl ChatWidget {
                 if self.is_session_configured() {
                     self.reasoning_buffer.clear();
                     self.full_reasoning_buffer.clear();
-                    self.set_status_header(String::from("Working"));
+                    self.set_status_header(self.working_status_header());
                     self.submit_user_message(user_message);
                 } else {
                     self.queue_user_message(user_message);
@@ -4049,17 +4154,36 @@ impl ChatWidget {
             EventMsg::ExitedReviewMode(review) => self.on_exited_review_mode(review),
             EventMsg::ContextCompacted(_) => self.on_agent_message("Context compacted".to_owned()),
             EventMsg::CollabAgentSpawnBegin(_) => {}
-            EventMsg::CollabAgentSpawnEnd(ev) => self.on_collab_event(collab::spawn_end(ev)),
+            EventMsg::CollabAgentSpawnEnd(ev) => {
+                if let Some(thread_id) = ev.new_thread_id
+                    && let Some(agent_type) = ev.agent_type.clone()
+                {
+                    self.record_collab_agent_type(thread_id, agent_type);
+                }
+                self.on_collab_event(collab::spawn_end(ev))
+            }
             EventMsg::CollabAgentInteractionBegin(_) => {}
             EventMsg::CollabAgentInteractionEnd(ev) => {
-                self.on_collab_event(collab::interaction_end(ev))
+                self.on_collab_event(collab::interaction_end(ev, &self.collab_agent_types))
             }
-            EventMsg::CollabWaitingBegin(ev) => self.on_collab_event(collab::waiting_begin(ev)),
-            EventMsg::CollabWaitingEnd(ev) => self.on_collab_event(collab::waiting_end(ev)),
+            EventMsg::CollabWaitingBegin(ev) => {
+                self.on_collab_event(collab::waiting_begin(ev, &self.collab_agent_types))
+            }
+            EventMsg::CollabWaitingEnd(ev) => {
+                for cell in collab::waiting_end(ev, &self.collab_agent_types) {
+                    self.on_collab_event(cell);
+                }
+            }
             EventMsg::CollabCloseBegin(_) => {}
-            EventMsg::CollabCloseEnd(ev) => self.on_collab_event(collab::close_end(ev)),
-            EventMsg::CollabResumeBegin(ev) => self.on_collab_event(collab::resume_begin(ev)),
-            EventMsg::CollabResumeEnd(ev) => self.on_collab_event(collab::resume_end(ev)),
+            EventMsg::CollabCloseEnd(ev) => {
+                self.on_collab_event(collab::close_end(ev, &self.collab_agent_types))
+            }
+            EventMsg::CollabResumeBegin(ev) => {
+                self.on_collab_event(collab::resume_begin(ev, &self.collab_agent_types))
+            }
+            EventMsg::CollabResumeEnd(ev) => {
+                self.on_collab_event(collab::resume_end(ev, &self.collab_agent_types))
+            }
             EventMsg::ThreadRolledBack(rollback) => {
                 if from_replay {
                     self.app_event_tx.send(AppEvent::ApplyThreadRollback {
@@ -4756,6 +4880,153 @@ impl ChatWidget {
         self.open_model_popup_with_presets(presets);
     }
 
+    pub(crate) fn open_agent_role_models_popup(&mut self) {
+        let roles = [
+            AgentRole::Default,
+            AgentRole::Scout,
+            AgentRole::ContextValidator,
+            AgentRole::Builder,
+            AgentRole::PostBuilderValidator,
+            AgentRole::Validator,
+            AgentRole::Plan,
+        ];
+
+        let current_role = self.current_agent_role();
+
+        let items: Vec<SelectionItem> = roles
+            .into_iter()
+            .map(|role| {
+                let role_label = Self::agent_role_label(role).to_string();
+                let description = Some(self.agent_role_current_model_description(role));
+                let actions: Vec<SelectionAction> = vec![Box::new(move |tx| {
+                    tx.send(AppEvent::OpenAgentRoleModelPicker { role });
+                })];
+                SelectionItem {
+                    name: role_label,
+                    description,
+                    is_current: Some(role) == current_role,
+                    actions,
+                    dismiss_on_select: true,
+                    ..Default::default()
+                }
+            })
+            .collect();
+
+        self.bottom_pane.show_selection_view(SelectionViewParams {
+            title: Some("Agent role models".to_string()),
+            subtitle: Some("Pick a model for each agent role.".to_string()),
+            footer_hint: Some(standard_popup_hint_line()),
+            items,
+            ..Default::default()
+        });
+    }
+
+    pub(crate) fn open_agent_role_model_picker(&mut self, role: AgentRole) {
+        if !self.is_session_configured() {
+            self.add_info_message(
+                "Agent model selection is disabled until startup completes.".to_string(),
+                None,
+            );
+            return;
+        }
+
+        let presets: Vec<ModelPreset> = match self.models_manager.try_list_models(&self.config) {
+            Ok(models) => models,
+            Err(_) => {
+                self.add_info_message(
+                    "Models are being updated; please try /agent-models again in a moment."
+                        .to_string(),
+                    None,
+                );
+                return;
+            }
+        };
+
+        let role_label = Self::agent_role_label(role);
+        let current = self.agent_role_model(role);
+        let effective_model = self.agent_role_model_display(role);
+
+        let mut items: Vec<SelectionItem> = Vec::new();
+
+        items.push(SelectionItem {
+            name: "Inherit".to_string(),
+            description: Some(
+                "Clear this role override and inherit the default model.".to_string(),
+            ),
+            is_current: current.is_none(),
+            actions: vec![Box::new(move |tx| {
+                tx.send(AppEvent::PersistAgentRoleModel { role, model: None });
+            })],
+            dismiss_on_select: true,
+            ..Default::default()
+        });
+
+        items.push(SelectionItem {
+            name: "Custom model…".to_string(),
+            description: Some("Enter a model slug manually.".to_string()),
+            actions: vec![Box::new(move |tx| {
+                tx.send(AppEvent::OpenCustomAgentRoleModelPrompt { role });
+            })],
+            dismiss_on_select: true,
+            ..Default::default()
+        });
+
+        for preset in presets {
+            let model = preset.model;
+            let name = model.clone();
+            let description = (!preset.description.is_empty()).then_some(preset.description);
+            let is_current = current.is_some_and(|current| current == model.as_str());
+            let actions: Vec<SelectionAction> = vec![Box::new(move |tx| {
+                tx.send(AppEvent::PersistAgentRoleModel {
+                    role,
+                    model: Some(model.clone()),
+                });
+            })];
+            items.push(SelectionItem {
+                name,
+                description,
+                is_current,
+                actions,
+                dismiss_on_select: true,
+                ..Default::default()
+            });
+        }
+
+        self.bottom_pane.show_selection_view(SelectionViewParams {
+            title: Some(format!("Select {role_label} model")),
+            subtitle: Some(format!("Effective model for this role: {effective_model}")),
+            footer_hint: Some(standard_popup_hint_line()),
+            items,
+            is_searchable: true,
+            search_placeholder: Some("Type to filter models".to_string()),
+            ..Default::default()
+        });
+    }
+
+    pub(crate) fn open_custom_agent_role_model_prompt(&mut self, role: AgentRole) {
+        let tx = self.app_event_tx.clone();
+        let role_label = Self::agent_role_label(role);
+        let view = CustomPromptView::new(
+            format!("Custom {role_label} model"),
+            "Type a model slug and press Enter".to_string(),
+            None,
+            Box::new(move |model: String| {
+                let model = model.trim().to_string();
+                if model.is_empty() {
+                    tx.send(AppEvent::InsertHistoryCell(Box::new(
+                        history_cell::new_error_event("Model slug cannot be empty.".to_string()),
+                    )));
+                    return;
+                }
+                tx.send(AppEvent::PersistAgentRoleModel {
+                    role,
+                    model: Some(model),
+                });
+            }),
+        );
+        self.bottom_pane.show_view(Box::new(view));
+    }
+
     pub(crate) fn open_personality_popup(&mut self) {
         if !self.is_session_configured() {
             self.add_info_message(
@@ -4772,6 +5043,22 @@ impl ChatWidget {
             return;
         }
         self.open_personality_popup_for_current_model();
+    }
+
+    fn agent_role_label(role: AgentRole) -> &'static str {
+        match role {
+            AgentRole::Default => "Main",
+            AgentRole::Scout => "Scout",
+            AgentRole::ContextValidator => "Context validator",
+            AgentRole::PostBuilderValidator => "Post-builder validator",
+            AgentRole::Builder => "Builder",
+            AgentRole::Validator => "Validator",
+            AgentRole::Plan => "Plan",
+        }
+    }
+
+    fn agent_role_model(&self, role: AgentRole) -> Option<&str> {
+        agent_role_model_from_type(role, &self.config)
     }
 
     fn open_personality_popup_for_current_model(&mut self) {
@@ -5920,6 +6207,10 @@ impl ChatWidget {
         Ok(())
     }
 
+    pub(crate) fn set_agents_config(&mut self, agents: codex_core::config::AgentsToml) {
+        self.config.agents = agents;
+    }
+
     #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
     pub(crate) fn set_windows_sandbox_mode(&mut self, mode: Option<WindowsSandboxModeToml>) {
         self.config.permissions.windows_sandbox_mode = mode;
@@ -6268,6 +6559,7 @@ impl ChatWidget {
             None,
             config.cwd.clone(),
             CODEX_CLI_VERSION,
+            None,
         ))
     }
 
@@ -7003,10 +7295,18 @@ impl ChatWidget {
         (!lines.is_empty()).then_some(lines)
     }
 
+    pub(crate) fn collab_agent_type_for_thread(&self, thread_id: ThreadId) -> Option<&str> {
+        self.collab_agent_types.get(&thread_id).map(String::as_str)
+    }
+
     /// Return a reference to the widget's current config (includes any
     /// runtime overrides applied via TUI, e.g., model or approval policy).
     pub(crate) fn config_ref(&self) -> &Config {
         &self.config
+    }
+
+    pub(crate) fn record_collab_agent_type(&mut self, thread_id: ThreadId, agent_type: String) {
+        self.collab_agent_types.insert(thread_id, agent_type);
     }
 
     pub(crate) fn clear_token_usage(&mut self) {

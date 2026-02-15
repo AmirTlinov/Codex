@@ -434,9 +434,10 @@ Use `review/start` to run Codex’s reviewer on the currently checked-out projec
 - `{"type":"baseBranch","branch":"main"}` — diff against the provided branch’s upstream (see prompt for the exact `git merge-base`/`git diff` instructions Codex will run).
 - `{"type":"commit","sha":"abc1234","title":"Optional subject"}` — review a specific commit.
 - `{"type":"custom","instructions":"Free-form reviewer instructions"}` — fallback prompt equivalent to the legacy manual review request.
-- `delivery` (`"inline"` or `"detached"`, default `"inline"`) — where the review runs:
+- `delivery` (`"inline"`, `"detached"`, or `"hybrid"`, default `"inline"`) — where the review runs:
   - `"inline"`: run the review as a new turn on the existing thread. The response’s `reviewThreadId` equals the original `threadId`, and no new `thread/started` notification is emitted.
   - `"detached"`: fork a new review thread from the parent conversation and run the review there. The response’s `reviewThreadId` is the id of this new review thread, and the server emits a `thread/started` notification for it before streaming review items.
+  - `"hybrid"`: run the review inline first and also launch a detached sidecar review thread. The response’s `reviewThreadId` stays on the original thread (inline leg), and the sidecar thread is announced via `thread/started`.
 
 Example request/response:
 
@@ -460,6 +461,8 @@ Example request/response:
 ```
 
 For a detached review, use `"delivery": "detached"`. The response is the same shape, but `reviewThreadId` will be the id of the new review thread (different from the original `threadId`). The server also emits a `thread/started` notification for that new thread before streaming the review turn.
+
+For a hybrid review, use `"delivery": "hybrid"`. The response remains inline (`reviewThreadId` equals the original `threadId`), and the detached sidecar review appears as a separate `thread/started` notification.
 
 Codex streams the usual `turn/started` notification followed by an `item/started`
 with an `enteredReviewMode` item so clients can show progress:

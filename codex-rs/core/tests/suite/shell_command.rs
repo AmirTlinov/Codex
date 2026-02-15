@@ -64,6 +64,7 @@ async fn shell_command_harness_with(
 ) -> Result<TestCodexHarness> {
     let builder = configure(test_codex()).with_config(|config| {
         config.include_apply_patch_tool = true;
+        config.features.disable(Feature::Collab);
     });
     TestCodexHarness::with_builder(builder).await
 }

@@ -81,6 +81,7 @@ async fn execpolicy_blocks_shell_invocation() -> Result<()> {
     }
 
     let mut builder = test_codex().with_config(|config| {
+        config.features.disable(Feature::Collab);
         let policy_path = config.codex_home.join("rules").join("policy.rules");
         fs::create_dir_all(
             policy_path

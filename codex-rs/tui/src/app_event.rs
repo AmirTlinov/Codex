@@ -22,6 +22,7 @@ use crate::bottom_pane::ApprovalRequest;
 use crate::bottom_pane::StatusLineItem;
 use crate::history_cell::HistoryCell;
 
+use codex_core::AgentRole;
 use codex_core::features::Feature;
 use codex_core::protocol::AskForApproval;
 use codex_core::protocol::SandboxPolicy;
@@ -157,6 +158,22 @@ pub(crate) enum AppEvent {
     PersistModelSelection {
         model: String,
         effort: Option<ReasoningEffort>,
+    },
+
+    /// Open the model picker for a specific agent role.
+    OpenAgentRoleModelPicker {
+        role: AgentRole,
+    },
+
+    /// Open a custom prompt to enter a model slug for an agent role.
+    OpenCustomAgentRoleModelPrompt {
+        role: AgentRole,
+    },
+
+    /// Persist the selected model for a specific agent role.
+    PersistAgentRoleModel {
+        role: AgentRole,
+        model: Option<String>,
     },
 
     /// Persist the selected personality to the appropriate config.

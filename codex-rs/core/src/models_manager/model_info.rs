@@ -18,6 +18,10 @@ const LOCAL_FRIENDLY_TEMPLATE: &str =
     "You optimize for team morale and being a supportive teammate as much as code quality.";
 const LOCAL_PRAGMATIC_TEMPLATE: &str = "You are a deeply pragmatic, effective software engineer.";
 const PERSONALITY_PLACEHOLDER: &str = "{{ personality }}";
+const TEST_MODEL_PREFIX: &str = "test-";
+
+const TEST_MODEL_EXPERIMENTAL_TOOLS: [&str; 4] =
+    ["test_sync_tool", "read_file", "grep_files", "list_dir"];
 
 pub(crate) fn with_config_overrides(mut model: ModelInfo, config: &Config) -> ModelInfo {
     if let Some(supports_reasoning_summaries) = config.model_supports_reasoning_summaries {
@@ -55,6 +59,37 @@ pub(crate) fn with_config_overrides(mut model: ModelInfo, config: &Config) -> Mo
 
 /// Build a minimal fallback model descriptor for missing/unknown slugs.
 pub(crate) fn model_info_from_slug(slug: &str) -> ModelInfo {
+    if slug.starts_with(TEST_MODEL_PREFIX) {
+        return ModelInfo {
+            slug: slug.to_string(),
+            display_name: slug.to_string(),
+            description: Some("Test harness model".to_string()),
+            default_reasoning_level: None,
+            supported_reasoning_levels: Vec::new(),
+            shell_type: ConfigShellToolType::ShellCommand,
+            visibility: ModelVisibility::None,
+            supported_in_api: true,
+            priority: 99,
+            upgrade: None,
+            base_instructions: BASE_INSTRUCTIONS.to_string(),
+            model_messages: local_personality_messages_for_slug(slug),
+            supports_reasoning_summaries: false,
+            support_verbosity: false,
+            default_verbosity: None,
+            apply_patch_tool_type: None,
+            truncation_policy: TruncationPolicyConfig::bytes(10_000),
+            supports_parallel_tool_calls: true,
+            context_window: Some(272_000),
+            auto_compact_token_limit: None,
+            effective_context_window_percent: 95,
+            experimental_supported_tools: TEST_MODEL_EXPERIMENTAL_TOOLS
+                .iter()
+                .map(|tool| (*tool).to_string())
+                .collect(),
+            input_modalities: default_input_modalities(),
+            prefer_websockets: false,
+        };
+    }
     warn!("Unknown model {slug} is used. This will use fallback model metadata.");
     ModelInfo {
         slug: slug.to_string(),

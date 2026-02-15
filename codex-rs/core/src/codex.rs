@@ -4,12 +4,14 @@ use std::fmt::Debug;
 use std::path::Path;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::sync::atomic::AtomicBool;
 use std::sync::atomic::AtomicU64;
 
 use crate::AuthManager;
 use crate::CodexAuth;
 use crate::SandboxState;
 use crate::agent::AgentControl;
+use crate::agent::AgentRole;
 use crate::agent::AgentStatus;
 use crate::agent::MAX_THREAD_SPAWN_DEPTH;
 use crate::agent::agent_status_from_event;
@@ -325,9 +327,14 @@ impl Codex {
                 crate::models_manager::manager::RefreshStrategy::OnlineIfUncached,
             )
             .await;
+        let primary_model_override = config
+            .agents
+            .main_model
+            .clone()
+            .or_else(|| config.model.clone());
         let model = models_manager
             .get_default_model(
-                &config.model,
+                &primary_model_override,
                 &config,
                 crate::models_manager::manager::RefreshStrategy::OnlineIfUncached,
             )
@@ -517,6 +524,7 @@ pub(crate) struct Session {
     features: Features,
     pending_mcp_server_refresh_config: Mutex<Option<McpServerRefreshConfig>>,
     pub(crate) active_turn: Mutex<Option<ActiveTurn>>,
+    pub(crate) active_plan_dir: Mutex<Option<PathBuf>>,
     pub(crate) services: SessionServices,
     js_repl: Arc<JsReplHandle>,
     next_internal_sub_id: AtomicU64,
@@ -524,6 +532,40 @@ pub(crate) struct Session {
 
 const SEARCH_TOOL_DEVELOPER_INSTRUCTIONS: &str =
     include_str!("../templates/search_tool/developer_instructions.md");
+
+fn plan_sandbox_policy_with_write_access(
+    sandbox_policy: SandboxPolicy,
+    codex_home: &Path,
+) -> SandboxPolicy {
+    let SandboxPolicy::WorkspaceWrite {
+        mut writable_roots,
+        read_only_access,
+        network_access,
+        exclude_tmpdir_env_var,
+        exclude_slash_tmp,
+    } = sandbox_policy
+    else {
+        return sandbox_policy;
+    };
+
+    let plans_root = codex_home.join("plans");
+    if let Ok(plans_root) = AbsolutePathBuf::from_absolute_path(&plans_root) {
+        let already_present = writable_roots
+            .iter()
+            .any(|root| root.as_path() == plans_root.as_path());
+        if !already_present {
+            writable_roots.push(plans_root);
+        }
+    }
+
+    SandboxPolicy::WorkspaceWrite {
+        writable_roots,
+        read_only_access,
+        network_access,
+        exclude_tmpdir_env_var,
+        exclude_slash_tmp,
+    }
+}
 
 /// The context needed for a single turn of the thread.
 #[derive(Debug)]
@@ -557,6 +599,10 @@ pub(crate) struct TurnContext {
     pub(crate) final_output_json_schema: Option<Value>,
     pub(crate) codex_linux_sandbox_exe: Option<PathBuf>,
     pub(crate) tool_call_gate: Arc<ReadinessFlag>,
+    pub(crate) scout_context_ready: Arc<AtomicBool>,
+    pub(crate) context_validated: Arc<AtomicBool>,
+    pub(crate) builder_spawned: Arc<AtomicBool>,
+    pub(crate) validator_spawned: Arc<AtomicBool>,
     pub(crate) truncation_policy: TruncationPolicy,
     pub(crate) js_repl: Arc<JsReplHandle>,
     pub(crate) dynamic_tools: Vec<DynamicToolSpec>,
@@ -601,11 +647,13 @@ impl TurnContext {
             self.collaboration_mode
                 .with_updates(Some(model.clone()), Some(reasoning_effort), None);
         let features = self.features.clone();
-        let tools_config = ToolsConfig::new(&ToolsConfigParams {
+        let mut tools_config = ToolsConfig::new(&ToolsConfigParams {
             model_info: &model_info,
             features: &features,
             web_search_mode: self.tools_config.web_search_mode,
         });
+        tools_config.agent_role = self.tools_config.agent_role;
+        tools_config.collaboration_mode = self.collaboration_mode.mode;
 
         Self {
             sub_id: self.sub_id.clone(),
@@ -637,6 +685,10 @@ impl TurnContext {
             final_output_json_schema: self.final_output_json_schema.clone(),
             codex_linux_sandbox_exe: self.codex_linux_sandbox_exe.clone(),
             tool_call_gate: Arc::new(ReadinessFlag::new()),
+            scout_context_ready: self.scout_context_ready.clone(),
+            context_validated: self.context_validated.clone(),
+            builder_spawned: self.builder_spawned.clone(),
+            validator_spawned: self.validator_spawned.clone(),
             truncation_policy,
             js_repl: Arc::clone(&self.js_repl),
             dynamic_tools: self.dynamic_tools.clone(),
@@ -800,6 +852,28 @@ impl SessionConfiguration {
         if let Some(collaboration_mode) = updates.collaboration_mode.clone() {
             next_configuration.collaboration_mode = collaboration_mode;
         }
+        let role_model_override = match next_configuration.collaboration_mode.mode {
+            ModeKind::Plan => next_configuration
+                .original_config_do_not_use
+                .agents
+                .plan_model
+                .clone()
+                .or_else(|| {
+                    next_configuration
+                        .original_config_do_not_use
+                        .agents
+                        .main_model
+                        .clone()
+                }),
+            ModeKind::Default | ModeKind::PairProgramming | ModeKind::Execute => next_configuration
+                .original_config_do_not_use
+                .agents
+                .main_model
+                .clone(),
+        };
+        if let Some(model) = role_model_override {
+            next_configuration.collaboration_mode.settings.model = model;
+        }
         if let Some(summary) = updates.reasoning_summary {
             next_configuration.model_reasoning_summary = summary;
         }
@@ -943,13 +1017,28 @@ impl Session {
         let otel_manager_for_context = otel_manager;
         let per_turn_config = Arc::new(per_turn_config);
 
-        let tools_config = ToolsConfig::new(&ToolsConfigParams {
+        let mut tools_config = ToolsConfig::new(&ToolsConfigParams {
             model_info: &model_info,
             features: &per_turn_config.features,
             web_search_mode: Some(per_turn_config.web_search_mode.value()),
         });
+        let detected_role = AgentRole::detect_from_config(&per_turn_config);
+        tools_config.agent_role = if detected_role == AgentRole::Default
+            && session_configuration.collaboration_mode.mode == ModeKind::Plan
+        {
+            AgentRole::Plan
+        } else {
+            detected_role
+        };
+        tools_config.collaboration_mode = session_configuration.collaboration_mode.mode;
 
         let cwd = session_configuration.cwd.clone();
+        let sandbox_policy = session_configuration.sandbox_policy.get().clone();
+        let sandbox_policy = if tools_config.agent_role == AgentRole::Plan {
+            plan_sandbox_policy_with_write_access(sandbox_policy, &session_configuration.codex_home)
+        } else {
+            sandbox_policy
+        };
         TurnContext {
             sub_id,
             config: per_turn_config.clone(),
@@ -967,7 +1056,7 @@ impl Session {
             collaboration_mode: session_configuration.collaboration_mode.clone(),
             personality: session_configuration.personality,
             approval_policy: session_configuration.approval_policy.value(),
-            sandbox_policy: session_configuration.sandbox_policy.get().clone(),
+            sandbox_policy,
             network,
             windows_sandbox_level: session_configuration.windows_sandbox_level,
             shell_environment_policy: per_turn_config.permissions.shell_environment_policy.clone(),
@@ -977,6 +1066,10 @@ impl Session {
             final_output_json_schema: None,
             codex_linux_sandbox_exe: per_turn_config.codex_linux_sandbox_exe.clone(),
             tool_call_gate: Arc::new(ReadinessFlag::new()),
+            scout_context_ready: Arc::new(AtomicBool::new(false)),
+            context_validated: Arc::new(AtomicBool::new(false)),
+            builder_spawned: Arc::new(AtomicBool::new(false)),
+            validator_spawned: Arc::new(AtomicBool::new(false)),
             truncation_policy: model_info.truncation_policy.into(),
             js_repl,
             dynamic_tools: session_configuration.dynamic_tools.clone(),
@@ -1297,6 +1390,7 @@ impl Session {
             features: config.features.clone(),
             pending_mcp_server_refresh_config: Mutex::new(None),
             active_turn: Mutex::new(None),
+            active_plan_dir: Mutex::new(None),
             services,
             js_repl,
             next_internal_sub_id: AtomicU64::new(0),
@@ -1731,6 +1825,10 @@ impl Session {
         final_output_json_schema: Option<Option<Value>>,
         sandbox_policy_changed: bool,
     ) -> Arc<TurnContext> {
+        // Plan patch directory caching is scoped to a turn; clear stale state so
+        // subsequent planning cycles in the same session can target a new plan directory.
+        *self.active_plan_dir.lock().await = None;
+
         let per_turn_config = Self::build_per_turn_config(&session_configuration);
 
         if sandbox_policy_changed {
@@ -3996,11 +4094,12 @@ async fn spawn_review_thread(
         .disable(crate::features::Feature::WebSearchRequest)
         .disable(crate::features::Feature::WebSearchCached);
     let review_web_search_mode = WebSearchMode::Disabled;
-    let tools_config = ToolsConfig::new(&ToolsConfigParams {
+    let mut tools_config = ToolsConfig::new(&ToolsConfigParams {
         model_info: &review_model_info,
         features: &review_features,
         web_search_mode: Some(review_web_search_mode),
     });
+    tools_config.agent_role = AgentRole::Default;
 
     let review_prompt = resolved.prompt.clone();
     let provider = parent_turn_context.provider.clone();
@@ -4061,6 +4160,10 @@ async fn spawn_review_thread(
         final_output_json_schema: None,
         codex_linux_sandbox_exe: parent_turn_context.codex_linux_sandbox_exe.clone(),
         tool_call_gate: Arc::new(ReadinessFlag::new()),
+        scout_context_ready: Arc::new(AtomicBool::new(false)),
+        context_validated: Arc::new(AtomicBool::new(false)),
+        builder_spawned: Arc::new(AtomicBool::new(false)),
+        validator_spawned: Arc::new(AtomicBool::new(false)),
         js_repl: Arc::clone(&sess.js_repl),
         dynamic_tools: parent_turn_context.dynamic_tools.clone(),
         truncation_policy: model_info.truncation_policy.into(),
@@ -5636,6 +5739,40 @@ mod tests {
         expects_apply_patch_instructions: bool,
     }
 
+    #[test]
+    fn plan_sandbox_policy_grants_write_access_to_plans_root() {
+        let codex_home = tempfile::tempdir().expect("create temp dir");
+        let base = SandboxPolicy::new_workspace_write_policy();
+        let updated = plan_sandbox_policy_with_write_access(base, codex_home.path());
+
+        let SandboxPolicy::WorkspaceWrite { writable_roots, .. } = updated else {
+            panic!("expected workspace-write sandbox policy");
+        };
+
+        let expected = codex_home.path().join("plans");
+        assert!(
+            writable_roots
+                .iter()
+                .any(|root| root.as_path() == expected.as_path()),
+            "expected writable_roots to include plans root: {}",
+            expected.display(),
+        );
+    }
+
+    #[tokio::test]
+    async fn new_turn_resets_active_plan_dir_cache() {
+        let (session, _) = make_session_and_context().await;
+        {
+            let mut active_plan_dir = session.active_plan_dir.lock().await;
+            *active_plan_dir = Some(PathBuf::from("/tmp/old-plan"));
+        }
+
+        let _ = session.new_default_turn().await;
+
+        let active_plan_dir = session.active_plan_dir.lock().await;
+        assert_eq!(*active_plan_dir, None);
+    }
+
     fn user_message(text: &str) -> ResponseItem {
         ResponseItem::Message {
             id: None,
@@ -6806,11 +6943,18 @@ mod tests {
     }
 
     async fn build_test_config(codex_home: &Path) -> Config {
-        ConfigBuilder::default()
-            .codex_home(codex_home.to_path_buf())
-            .build()
-            .await
-            .expect("load default test config")
+        let builder = ConfigBuilder::default().codex_home(codex_home.to_path_buf());
+
+        #[cfg(target_os = "linux")]
+        let builder = builder.harness_overrides(crate::config::ConfigOverrides {
+            codex_linux_sandbox_exe: Some(
+                codex_utils_cargo_bin::cargo_bin("codex-linux-sandbox")
+                    .expect("should find binary for codex-linux-sandbox"),
+            ),
+            ..crate::config::ConfigOverrides::default()
+        });
+
+        builder.build().await.expect("load default test config")
     }
 
     fn otel_manager(
@@ -7008,6 +7152,7 @@ mod tests {
             features: config.features.clone(),
             pending_mcp_server_refresh_config: Mutex::new(None),
             active_turn: Mutex::new(None),
+            active_plan_dir: Mutex::new(None),
             services,
             js_repl,
             next_internal_sub_id: AtomicU64::new(0),
@@ -7154,6 +7299,7 @@ mod tests {
             features: config.features.clone(),
             pending_mcp_server_refresh_config: Mutex::new(None),
             active_turn: Mutex::new(None),
+            active_plan_dir: Mutex::new(None),
             services,
             js_repl,
             next_internal_sub_id: AtomicU64::new(0),
@@ -7644,6 +7790,9 @@ mod tests {
             name: "shell".to_string(),
             input: "{}".to_string(),
         };
+        turn_context
+            .scout_context_ready
+            .store(true, std::sync::atomic::Ordering::Release);
 
         let call = ToolRouter::build_tool_call(session.as_ref(), item.clone())
             .await

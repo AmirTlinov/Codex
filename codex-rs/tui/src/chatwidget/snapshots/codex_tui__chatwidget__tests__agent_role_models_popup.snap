@@ -1,0 +1,16 @@
+---
+source: tui/src/chatwidget/tests.rs
+expression: popup
+---
+  Agent role models
+  Pick a model for each agent role.
+
+› 1. Main                    Inherit (effective: gpt-5-codex)
+  2. Scout                   Inherit (effective: gpt-5-codex)
+  3. Context validator       Inherit (effective: gpt-5-codex)
+  4. Builder                 Inherit (effective: gpt-5-codex)
+  5. Post-builder validator  Inherit (effective: gpt-5-codex)
+  6. Validator               Inherit (effective: gpt-5-codex)
+  7. Plan                    Inherit (effective: gpt-5-codex)
+
+  Press enter to confirm or esc to go back

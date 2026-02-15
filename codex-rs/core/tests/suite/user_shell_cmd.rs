@@ -45,6 +45,7 @@ async fn user_shell_cmd_ls_and_cat_in_temp_dir() {
     let server = start_mock_server().await;
     let cwd_path = cwd.path().to_path_buf();
     let mut builder = test_codex().with_config(move |config| {
+        config.features.disable(Feature::Collab);
         config.cwd = cwd_path;
     });
     let codex = builder
@@ -99,7 +100,9 @@ async fn user_shell_cmd_ls_and_cat_in_temp_dir() {
 async fn user_shell_cmd_can_be_interrupted() {
     // Set up isolated config and conversation.
     let server = start_mock_server().await;
-    let mut builder = test_codex();
+    let mut builder = test_codex().with_config(|config| {
+        config.features.disable(Feature::Collab);
+    });
     let fixture = builder
         .build(&server)
         .await
@@ -139,7 +142,9 @@ async fn user_shell_cmd_can_be_interrupted() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn user_shell_command_does_not_replace_active_turn() -> anyhow::Result<()> {
     let server = start_mock_server().await;
-    let mut builder = test_codex().with_model("gpt-5.1");
+    let mut builder = test_codex().with_model("gpt-5.1").with_config(|config| {
+        config.features.disable(Feature::Collab);
+    });
     let fixture = builder.build(&server).await?;
 
     let call_id = "active-turn-shell-call";
@@ -250,6 +255,7 @@ async fn user_shell_command_history_is_persisted_and_shared_with_model() -> anyh
     let server = responses::start_mock_server().await;
     // Disable it to ease command matching.
     let mut builder = core_test_support::test_codex::test_codex().with_config(move |config| {
+        config.features.disable(Feature::Collab);
         config.features.disable(Feature::ShellSnapshot);
     });
     let test = builder.build(&server).await?;
@@ -332,6 +338,7 @@ async fn user_shell_command_output_is_truncated_in_history() -> anyhow::Result<(
     let builder = core_test_support::test_codex::test_codex();
     let test = builder
         .with_config(|config| {
+            config.features.disable(Feature::Collab);
             config.tool_output_token_limit = Some(100);
         })
         .build(&server)
@@ -397,6 +404,7 @@ async fn user_shell_command_is_truncated_only_once() -> anyhow::Result<()> {
     let mut builder = test_codex()
         .with_model("gpt-5.1-codex")
         .with_config(|config| {
+            config.features.disable(Feature::Collab);
             config.tool_output_token_limit = Some(100);
         });
     let fixture = builder.build(&server).await?;

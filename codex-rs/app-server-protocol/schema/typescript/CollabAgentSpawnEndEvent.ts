@@ -18,6 +18,10 @@ sender_thread_id: ThreadId,
  */
 new_thread_id: ThreadId | null, 
 /**
+ * Optional agent role/type requested for the spawned agent (e.g. `scout`, `builder`).
+ */
+agent_type: string | null, 
+/**
  * Initial prompt sent to the agent. Can be empty to prevent CoT leaking at the
  * beginning.
  */

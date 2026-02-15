@@ -551,12 +551,8 @@ pub const FEATURES: &[FeatureSpec] = &[
     FeatureSpec {
         id: Feature::Collab,
         key: "collab",
-        stage: Stage::Experimental {
-            name: "Sub-agents",
-            menu_description: "Ask Codex to spawn multiple agents to parallelize the work and win in efficiency.",
-            announcement: "NEW: Sub-agents can now be spawned by Codex. Enable in /experimental and restart Codex!",
-        },
-        default_enabled: false,
+        stage: Stage::Stable,
+        default_enabled: true,
     },
     FeatureSpec {
         id: Feature::Apps,

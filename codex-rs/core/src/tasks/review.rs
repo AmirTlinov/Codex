@@ -1,6 +1,7 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use codex_protocol::config_types::ReviewMode;
 use codex_protocol::config_types::WebSearchMode;
 use codex_protocol::items::TurnItem;
 use codex_protocol::models::ContentItem;
@@ -55,17 +56,54 @@ impl SessionTask for ReviewTask {
             .otel_manager
             .counter("codex.task.review", 1, &[]);
 
-        // Start sub-codex conversation and get the receiver for events.
-        let output = match start_review_conversation(
-            session.clone(),
-            ctx.clone(),
-            input,
-            cancellation_token.clone(),
-        )
-        .await
-        {
-            Some(receiver) => process_review_events(session.clone(), ctx.clone(), receiver).await,
-            None => None,
+        let review_mode = ctx.config.review_mode;
+        let output = match review_mode {
+            ReviewMode::Remote => Some(ReviewOutputEvent {
+                overall_explanation: remote_review_instructions(ctx.config.as_ref()),
+                ..Default::default()
+            }),
+            ReviewMode::Local | ReviewMode::Hybrid => {
+                // Start sub-codex conversation and get the receiver for events.
+                let mut out = match start_review_conversation(
+                    session.clone(),
+                    ctx.clone(),
+                    input,
+                    cancellation_token.clone(),
+                )
+                .await
+                {
+                    Some(receiver) => {
+                        process_review_events(session.clone(), ctx.clone(), receiver).await
+                    }
+                    None => None,
+                };
+
+                if matches!(review_mode, ReviewMode::Hybrid) {
+                    let remote_note = remote_review_instructions(ctx.config.as_ref());
+                    out = match out {
+                        Some(mut ev) => {
+                            if ev.overall_explanation.trim().is_empty() {
+                                ev.overall_explanation = remote_note;
+                            } else {
+                                ev.overall_explanation = format!(
+                                    "{}\n\n{}",
+                                    ev.overall_explanation.trim_end(),
+                                    remote_note
+                                );
+                            }
+                            Some(ev)
+                        }
+                        None => Some(ReviewOutputEvent {
+                            overall_explanation: format!(
+                                "Local review did not complete.\n\n{remote_note}"
+                            ),
+                            ..Default::default()
+                        }),
+                    };
+                }
+
+                out
+            }
         };
         if !cancellation_token.is_cancelled() {
             exit_review_mode(session.clone_session(), output.clone(), ctx.clone()).await;
@@ -189,6 +227,19 @@ fn parse_review_output_event(text: &str) -> ReviewOutputEvent {
         overall_explanation: text.to_string(),
         ..Default::default()
     }
+}
+
+fn remote_review_instructions(config: &crate::config::Config) -> String {
+    let trigger = config
+        .review_remote
+        .trigger
+        .as_deref()
+        .unwrap_or("@codex review");
+    // Provider is currently informational only; remote execution is handled outside of `/review`.
+    // Keep this message deterministic and non-blocking.
+    format!(
+        "Remote review mode: request an external review (e.g. on a GitHub PR) and trigger it with `{trigger}`."
+    )
 }
 
 /// Emits an ExitedReviewMode Event with optional ReviewOutput,

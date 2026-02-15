@@ -52,7 +52,9 @@ async fn shell_tool_executes_command_and_streams_output() -> anyhow::Result<()> 
 
     let server = start_mock_server().await;
 
-    let mut builder = test_codex().with_model("gpt-5");
+    let mut builder = test_codex().with_model("gpt-5").with_config(|config| {
+        config.features.disable(Feature::Collab);
+    });
     let TestCodex {
         codex,
         cwd,
@@ -283,6 +285,7 @@ async fn apply_patch_tool_executes_and_emits_patch_events() -> anyhow::Result<()
 
     let mut builder = test_codex().with_config(|config| {
         config.features.enable(Feature::ApplyPatchFreeform);
+        config.features.disable(Feature::Collab);
     });
     let TestCodex {
         codex,
@@ -387,6 +390,7 @@ async fn apply_patch_reports_parse_diagnostics() -> anyhow::Result<()> {
 
     let mut builder = test_codex().with_config(|config| {
         config.features.enable(Feature::ApplyPatchFreeform);
+        config.features.disable(Feature::Collab);
     });
     let TestCodex {
         codex,

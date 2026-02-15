@@ -216,7 +216,7 @@ impl From<CoreSandboxMode> for SandboxMode {
 
 v2_enum_from_core!(
     pub enum ReviewDelivery from codex_protocol::protocol::ReviewDelivery {
-        Inline, Detached
+        Inline, Detached, Hybrid
     }
 );
 
@@ -2240,8 +2240,10 @@ pub struct ReviewStartParams {
     pub thread_id: String,
     pub target: ReviewTarget,
 
-    /// Where to run the review: inline (default) on the current thread or
-    /// detached on a new thread (returned in `reviewThreadId`).
+    /// Where to run the review:
+    /// - inline (default): run on the current thread
+    /// - detached: run on a new thread (returned in `reviewThreadId`)
+    /// - hybrid: run inline and also start a detached sidecar review thread
     #[serde(default)]
     #[ts(optional = nullable)]
     pub delivery: Option<ReviewDelivery>,
@@ -2256,6 +2258,8 @@ pub struct ReviewStartResponse {
     ///
     /// For inline reviews, this is the original thread id.
     /// For detached reviews, this is the id of the new review thread.
+    /// For hybrid reviews, this is the original thread id (inline leg),
+    /// while a detached sidecar thread is announced via `thread/started`.
     pub review_thread_id: String,
 }
 

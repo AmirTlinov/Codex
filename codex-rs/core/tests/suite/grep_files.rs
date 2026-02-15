@@ -1,11 +1,21 @@
 #![cfg(not(target_os = "windows"))]
 
 use anyhow::Result;
+use codex_core::protocol::AskForApproval;
+use codex_core::protocol::EventMsg;
+use codex_core::protocol::Op;
+use codex_core::protocol::SandboxPolicy;
+use codex_protocol::config_types::CollaborationMode;
+use codex_protocol::config_types::ModeKind;
+use codex_protocol::config_types::ReasoningSummary;
+use codex_protocol::config_types::Settings;
+use codex_protocol::user_input::UserInput;
 use core_test_support::responses::mount_function_call_agent_response;
 use core_test_support::responses::start_mock_server;
 use core_test_support::skip_if_no_network;
 use core_test_support::test_codex::TestCodex;
 use core_test_support::test_codex::test_codex;
+use core_test_support::wait_for_event;
 use std::collections::HashSet;
 use std::path::Path;
 use std::process::Command as StdCommand;
@@ -46,7 +56,7 @@ async fn grep_files_tool_collects_matches() -> Result<()> {
     std::fs::write(&beta, "beta needle\n")?;
     std::fs::write(&gamma, "needle in text but excluded\n")?;
 
-    let call_id = "grep-files-collect";
+    let call_id = "grep-files-collect-plan";
     let arguments = serde_json::json!({
         "pattern": "needle",
         "path": search_dir.to_string_lossy(),
@@ -56,7 +66,7 @@ async fn grep_files_tool_collects_matches() -> Result<()> {
 
     let mocks =
         mount_function_call_agent_response(&server, call_id, &arguments, "grep_files").await;
-    test.submit_turn("please find uses of needle").await?;
+    submit_turn_with_mode(&test, "please find uses of needle", ModeKind::Plan).await?;
 
     let req = mocks.completion.single_request();
     let (content_opt, success_opt) = req
@@ -88,6 +98,48 @@ async fn grep_files_tool_collects_matches() -> Result<()> {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn grep_files_tool_rejects_without_scout_context() -> Result<()> {
+    skip_if_no_network!(Ok(()));
+    skip_if_ripgrep_missing!(Ok(()));
+
+    let server = start_mock_server().await;
+    let test = build_test_codex(&server).await?;
+
+    let search_dir = test.cwd.path().join("src");
+    std::fs::create_dir_all(&search_dir)?;
+    let alpha = search_dir.join("alpha.rs");
+    let beta = search_dir.join("beta.rs");
+    let gamma = search_dir.join("gamma.txt");
+    std::fs::write(&alpha, "alpha needle\n")?;
+    std::fs::write(&beta, "beta needle\n")?;
+    std::fs::write(&gamma, "needle in text but excluded\n")?;
+
+    let call_id = "grep-files-collect-default";
+    let arguments = serde_json::json!({
+        "pattern": "needle",
+        "path": search_dir.to_string_lossy(),
+        "include": "*.rs",
+    })
+    .to_string();
+
+    let mocks =
+        mount_function_call_agent_response(&server, call_id, &arguments, "grep_files").await;
+    test.submit_turn("please find uses of needle").await?;
+
+    let req = mocks.completion.single_request();
+    let (content_opt, _) = req
+        .function_call_output_content_and_success(call_id)
+        .expect("tool output present");
+    let content = content_opt.expect("content present");
+    assert!(
+        content.contains("call spawn_agent with agent_type=\"scout\""),
+        "expected scout-gate message, got: {content}"
+    );
+
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn grep_files_tool_reports_empty_results() -> Result<()> {
     skip_if_no_network!(Ok(()));
     skip_if_ripgrep_missing!(Ok(()));
@@ -109,7 +161,7 @@ async fn grep_files_tool_reports_empty_results() -> Result<()> {
 
     let mocks =
         mount_function_call_agent_response(&server, call_id, &arguments, "grep_files").await;
-    test.submit_turn("search again").await?;
+    submit_turn_with_mode(&test, "search again", ModeKind::Plan).await?;
 
     let req = mocks.completion.single_request();
     let (content_opt, success_opt) = req
@@ -121,6 +173,42 @@ async fn grep_files_tool_reports_empty_results() -> Result<()> {
     }
     assert_eq!(content, "No matches found.");
 
+    Ok(())
+}
+
+async fn submit_turn_with_mode(test: &TestCodex, prompt: &str, mode: ModeKind) -> Result<()> {
+    let session_model = test.session_configured.model.clone();
+    let collaboration_mode = CollaborationMode {
+        mode,
+        settings: Settings {
+            model: session_model.clone(),
+            reasoning_effort: None,
+            developer_instructions: None,
+        },
+    };
+
+    test.codex
+        .submit(Op::UserTurn {
+            items: vec![UserInput::Text {
+                text: prompt.into(),
+                text_elements: Vec::new(),
+            }],
+            final_output_json_schema: None,
+            cwd: test.cwd.path().to_path_buf(),
+            approval_policy: AskForApproval::Never,
+            sandbox_policy: SandboxPolicy::DangerFullAccess,
+            model: session_model,
+            effort: None,
+            summary: ReasoningSummary::Auto,
+            collaboration_mode: Some(collaboration_mode),
+            personality: None,
+        })
+        .await?;
+
+    wait_for_event(&test.codex, |event| {
+        matches!(event, EventMsg::TurnComplete(_))
+    })
+    .await;
     Ok(())
 }
 

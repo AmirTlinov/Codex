@@ -565,6 +565,7 @@ pub(crate) struct App {
     windows_sandbox: WindowsSandboxState,
 
     thread_event_channels: HashMap<ThreadId, ThreadEventChannel>,
+    thread_agent_types: HashMap<ThreadId, String>,
     active_thread_id: Option<ThreadId>,
     active_thread_rx: Option<mpsc::Receiver<Event>>,
     primary_thread_id: Option<ThreadId>,
@@ -617,6 +618,73 @@ impl App {
             model: Some(self.chat_widget.current_model().to_string()),
             status_line_invalid_items_warned: self.status_line_invalid_items_warned.clone(),
             otel_manager: self.otel_manager.clone(),
+        }
+    }
+
+    fn record_thread_agent_type(&mut self, thread_id: ThreadId, agent_type: &str) {
+        let agent_type = agent_type.trim();
+        if !agent_type.is_empty() {
+            self.thread_agent_types
+                .insert(thread_id, agent_type.to_string());
+        }
+    }
+
+    fn normalized_agent_type(agent_type: &str) -> Option<&str> {
+        let agent_type = agent_type.trim();
+        if agent_type.is_empty() {
+            return None;
+        }
+
+        crate::chatwidget::agent_role_label_from_type(agent_type)?;
+
+        Some(agent_type)
+    }
+
+    fn sync_thread_agent_type_from_session_configured(&mut self, session: &SessionConfiguredEvent) {
+        if let Some(agent_type) = session
+            .thread_name
+            .as_deref()
+            .and_then(Self::normalized_agent_type)
+        {
+            self.record_thread_agent_type(session.session_id, agent_type);
+            return;
+        }
+
+        if self.primary_thread_id == Some(session.session_id) {
+            self.record_thread_agent_type(session.session_id, "default");
+        }
+    }
+
+    fn sync_thread_agent_type_from_spawn_end(
+        &mut self,
+        event: &codex_protocol::protocol::CollabAgentSpawnEndEvent,
+    ) {
+        if let (Some(new_thread_id), Some(agent_type)) =
+            (event.new_thread_id, event.agent_type.as_deref())
+            && let Some(agent_type) = Self::normalized_agent_type(agent_type)
+        {
+            self.record_thread_agent_type(new_thread_id, agent_type);
+        }
+    }
+
+    fn restore_chat_widget_collab_agent_types(&mut self) {
+        for (thread_id, agent_type) in &self.thread_agent_types {
+            self.chat_widget
+                .record_collab_agent_type(*thread_id, agent_type.to_string());
+        }
+    }
+
+    fn sync_thread_agent_types_from_chat_widget(&mut self) {
+        let thread_ids: Vec<ThreadId> = self.thread_event_channels.keys().copied().collect();
+        let mut entries = Vec::with_capacity(thread_ids.len());
+        for thread_id in &thread_ids {
+            if let Some(agent_type) = self.chat_widget.collab_agent_type_for_thread(*thread_id) {
+                entries.push((*thread_id, agent_type.to_string()));
+            }
+        }
+
+        for (thread_id, agent_type) in entries {
+            self.record_thread_agent_type(thread_id, &agent_type);
         }
     }
 
@@ -779,7 +847,9 @@ impl App {
         }
 
         if let EventMsg::SessionConfigured(session) = &event.msg {
+            self.sync_thread_agent_type_from_session_configured(session);
             let thread_id = session.session_id;
+            self.record_thread_agent_type(thread_id, "default");
             self.primary_thread_id = Some(thread_id);
             self.primary_session_configured = Some(session.clone());
             self.ensure_thread_channel(thread_id);
@@ -803,6 +873,8 @@ impl App {
                 self.thread_event_channels.remove(&thread_id);
             }
         }
+        self.thread_agent_types
+            .retain(|thread_id, _| self.thread_event_channels.contains_key(thread_id));
 
         if self.thread_event_channels.is_empty() {
             self.chat_widget
@@ -822,14 +894,48 @@ impl App {
                     initial_selected_idx = Some(idx);
                 }
                 let id = *thread_id;
+                let agent_type = if self.primary_thread_id == Some(id) {
+                    Some("default".to_string())
+                } else {
+                    self.thread_agent_types.get(&id).cloned()
+                };
+                let agent_role_label = if self.primary_thread_id == Some(id) {
+                    Some("Main")
+                } else {
+                    agent_type
+                        .as_deref()
+                        .and_then(crate::chatwidget::agent_role_label_from_type)
+                };
+                let thread_id_label = thread_id.to_string();
+                let model_label = if let Some(agent_type) = agent_type.as_deref() {
+                    crate::chatwidget::agent_role_model_override_from_type(agent_type, &self.config)
+                        .or_else(|| Some(self.chat_widget.current_model()))
+                } else {
+                    Some(self.chat_widget.current_model())
+                }
+                .unwrap_or("loading");
+                let model_description = format!("model: {model_label}");
+                let (name, description, search_value) =
+                    if let Some(agent_role_label) = agent_role_label {
+                        (
+                            agent_role_label.to_string(),
+                            Some(format!("{thread_id_label} • {model_description}")),
+                            Some(format!(
+                                "{agent_role_label} {thread_id_label} {model_description}"
+                            )),
+                        )
+                    } else {
+                        (thread_id_label.clone(), None, Some(thread_id_label))
+                    };
                 SelectionItem {
-                    name: thread_id.to_string(),
+                    name,
+                    description,
                     is_current: self.active_thread_id == Some(*thread_id),
                     actions: vec![Box::new(move |tx| {
                         tx.send(AppEvent::SelectAgentThread(id));
                     })],
                     dismiss_on_select: true,
-                    search_value: Some(thread_id.to_string()),
+                    search_value,
                     ..Default::default()
                 }
             })
@@ -860,6 +966,7 @@ impl App {
             }
         };
 
+        self.sync_thread_agent_types_from_chat_widget();
         let previous_thread_id = self.active_thread_id;
         self.store_active_thread_receiver().await;
         self.active_thread_id = None;
@@ -878,6 +985,7 @@ impl App {
         let init = self.chatwidget_init_for_forked_or_resumed_thread(tui, self.config.clone());
         let codex_op_tx = crate::chatwidget::spawn_op_forwarder(thread);
         self.chat_widget = ChatWidget::new_with_op_sender(init, codex_op_tx);
+        self.restore_chat_widget_collab_agent_types();
 
         self.reset_for_thread_switch(tui)?;
         self.replay_thread_snapshot(snapshot);
@@ -900,6 +1008,7 @@ impl App {
 
     fn reset_thread_event_state(&mut self) {
         self.thread_event_channels.clear();
+        self.thread_agent_types.clear();
         self.active_thread_id = None;
         self.active_thread_rx = None;
         self.primary_thread_id = None;
@@ -1157,6 +1266,7 @@ impl App {
             suppress_shutdown_complete: false,
             windows_sandbox: WindowsSandboxState::default(),
             thread_event_channels: HashMap::new(),
+            thread_agent_types: HashMap::new(),
             active_thread_id: None,
             active_thread_rx: None,
             primary_thread_id: None,
@@ -1670,6 +1780,12 @@ impl App {
             AppEvent::OpenAllModelsPopup { models } => {
                 self.chat_widget.open_all_models_popup(models);
             }
+            AppEvent::OpenAgentRoleModelPicker { role } => {
+                self.chat_widget.open_agent_role_model_picker(role);
+            }
+            AppEvent::OpenCustomAgentRoleModelPrompt { role } => {
+                self.chat_widget.open_custom_agent_role_model_prompt(role);
+            }
             AppEvent::OpenFullAccessConfirmation {
                 preset,
                 return_to_permissions,
@@ -2040,6 +2156,57 @@ impl App {
                             self.chat_widget
                                 .add_error_message(format!("Failed to save default model: {err}"));
                         }
+                    }
+                }
+            }
+            AppEvent::PersistAgentRoleModel { role, model } => {
+                let profile = self.active_profile.as_deref();
+                match ConfigEditsBuilder::new(&self.config.codex_home)
+                    .with_profile(profile)
+                    .set_agent_role_model(role, model.as_deref())
+                    .apply()
+                    .await
+                {
+                    Ok(()) => {
+                        let role_label = match role {
+                            codex_core::AgentRole::Default => "main",
+                            codex_core::AgentRole::Scout => "scout",
+                            codex_core::AgentRole::ContextValidator => "context_validator",
+                            codex_core::AgentRole::PostBuilderValidator => "post_builder_validator",
+                            codex_core::AgentRole::Builder => "builder",
+                            codex_core::AgentRole::Validator => "validator",
+                            codex_core::AgentRole::Plan => "plan",
+                        };
+                        let mut message = if let Some(model) = model.as_deref() {
+                            format!("Set {role_label} agent model to {model}")
+                        } else {
+                            format!("Cleared {role_label} agent model override")
+                        };
+                        if let Some(profile) = profile {
+                            message.push_str(" for ");
+                            message.push_str(profile);
+                            message.push_str(" profile");
+                        }
+                        self.chat_widget.add_info_message(message, None);
+
+                        if let Err(err) = self.refresh_in_memory_config_from_disk().await {
+                            tracing::warn!(
+                                error = %err,
+                                "failed to refresh config after agent model update"
+                            );
+                        } else {
+                            self.chat_widget
+                                .set_agents_config(self.config.agents.clone());
+                        }
+                        self.chat_widget.submit_op(Op::ReloadUserConfig);
+                    }
+                    Err(err) => {
+                        tracing::error!(
+                            error = %err,
+                            "failed to persist agent role model"
+                        );
+                        self.chat_widget
+                            .add_error_message(format!("Failed to save agent role model: {err}"));
                     }
                 }
             }
@@ -2470,6 +2637,15 @@ impl App {
             self.suppress_shutdown_complete = false;
             return;
         }
+        match &event.msg {
+            EventMsg::SessionConfigured(session_configured) => {
+                self.sync_thread_agent_type_from_session_configured(session_configured);
+            }
+            EventMsg::CollabAgentSpawnEnd(ev) => {
+                self.sync_thread_agent_type_from_spawn_end(ev);
+            }
+            _ => {}
+        }
         if let EventMsg::ListSkillsResponse(response) = &event.msg {
             let cwd = self.chat_widget.config_ref().cwd.clone();
             let errors = errors_for_cwd(&cwd, response);
@@ -2484,6 +2660,15 @@ impl App {
     }
 
     fn handle_codex_event_replay(&mut self, event: Event) {
+        match &event.msg {
+            EventMsg::SessionConfigured(session_configured) => {
+                self.sync_thread_agent_type_from_session_configured(session_configured);
+            }
+            EventMsg::CollabAgentSpawnEnd(ev) => {
+                self.sync_thread_agent_type_from_spawn_end(ev);
+            }
+            _ => {}
+        }
         self.chat_widget.handle_codex_event_replay(event);
     }
 
@@ -2782,7 +2967,9 @@ mod tests {
     use codex_core::CodexAuth;
     use codex_core::config::ConfigBuilder;
     use codex_core::config::ConfigOverrides;
+    use codex_core::protocol::AgentStatus;
     use codex_core::protocol::AskForApproval;
+    use codex_core::protocol::CollabAgentSpawnEndEvent;
     use codex_core::protocol::Event;
     use codex_core::protocol::EventMsg;
     use codex_core::protocol::SandboxPolicy;
@@ -2795,6 +2982,8 @@ mod tests {
     use codex_protocol::user_input::TextElement;
     use insta::assert_snapshot;
     use pretty_assertions::assert_eq;
+    use ratatui::buffer::Buffer;
+    use ratatui::layout::Rect;
     use ratatui::prelude::Line;
     use std::path::PathBuf;
     use std::sync::Arc;
@@ -2875,6 +3064,342 @@ mod tests {
         Ok(())
     }
 
+    #[tokio::test]
+    async fn agent_picker_shows_roles_when_available() -> Result<()> {
+        let mut app = make_test_app().await;
+
+        let primary = app.server.start_thread(app.config.clone()).await?;
+        time::sleep(std::time::Duration::from_millis(1)).await;
+        let scout = app.server.start_thread(app.config.clone()).await?;
+        time::sleep(std::time::Duration::from_millis(1)).await;
+        let builder = app.server.start_thread(app.config.clone()).await?;
+
+        app.thread_event_channels
+            .insert(primary.thread_id, ThreadEventChannel::new(1));
+        app.thread_event_channels
+            .insert(scout.thread_id, ThreadEventChannel::new(1));
+        app.thread_event_channels
+            .insert(builder.thread_id, ThreadEventChannel::new(1));
+
+        app.primary_thread_id = Some(primary.thread_id);
+        app.active_thread_id = Some(primary.thread_id);
+
+        // Seed role labels the same way the live collab spawn pipeline would.
+        app.handle_codex_event_now(Event {
+            id: "evt_spawn_scout".to_string(),
+            msg: EventMsg::CollabAgentSpawnEnd(CollabAgentSpawnEndEvent {
+                call_id: "call_spawn_scout".to_string(),
+                sender_thread_id: primary.thread_id,
+                new_thread_id: Some(scout.thread_id),
+                agent_type: Some("scout".to_string()),
+                prompt: String::new(),
+                status: AgentStatus::Completed(None),
+            }),
+        });
+        app.handle_codex_event_now(Event {
+            id: "evt_spawn_builder".to_string(),
+            msg: EventMsg::CollabAgentSpawnEnd(CollabAgentSpawnEndEvent {
+                call_id: "call_spawn_builder".to_string(),
+                sender_thread_id: primary.thread_id,
+                new_thread_id: Some(builder.thread_id),
+                agent_type: Some("builder".to_string()),
+                prompt: String::new(),
+                status: AgentStatus::Completed(None),
+            }),
+        });
+
+        app.open_agent_picker().await;
+
+        let popup = normalize_thread_ids(render_bottom_popup(&app.chat_widget, 80));
+        assert_snapshot!("agent_picker_popup_shows_roles", popup);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn thread_role_label_persists_when_switching_chat_threads() -> Result<()> {
+        let mut app = make_test_app().await;
+        let mut tui = tui::Tui::new(crate::tui::Terminal::with_options(
+            ratatui::backend::CrosstermBackend::new(std::io::stdout()),
+        )?);
+
+        let primary = app.server.start_thread(app.config.clone()).await?;
+        let scout = app.server.start_thread(app.config.clone()).await?;
+        let builder = app.server.start_thread(app.config.clone()).await?;
+
+        app.thread_event_channels
+            .insert(primary.thread_id, ThreadEventChannel::new(1));
+        app.thread_event_channels
+            .insert(scout.thread_id, ThreadEventChannel::new(1));
+        app.thread_event_channels
+            .insert(builder.thread_id, ThreadEventChannel::new(1));
+
+        app.primary_thread_id = Some(primary.thread_id);
+        app.active_thread_id = Some(primary.thread_id);
+
+        app.handle_codex_event_now(Event {
+            id: "evt_switch_scout".to_string(),
+            msg: EventMsg::CollabAgentSpawnEnd(CollabAgentSpawnEndEvent {
+                call_id: "call_spawn_scout".to_string(),
+                sender_thread_id: primary.thread_id,
+                new_thread_id: Some(scout.thread_id),
+                agent_type: Some("scout".to_string()),
+                prompt: String::new(),
+                status: AgentStatus::Completed(None),
+            }),
+        });
+        app.handle_codex_event_now(Event {
+            id: "evt_switch_builder".to_string(),
+            msg: EventMsg::CollabAgentSpawnEnd(CollabAgentSpawnEndEvent {
+                call_id: "call_spawn_builder".to_string(),
+                sender_thread_id: primary.thread_id,
+                new_thread_id: Some(builder.thread_id),
+                agent_type: Some("builder".to_string()),
+                prompt: String::new(),
+                status: AgentStatus::Completed(None),
+            }),
+        });
+
+        app.select_agent_thread(&mut tui, scout.thread_id).await?;
+        app.open_agent_picker().await;
+        let after_switch_to_scout = normalize_thread_ids(render_bottom_popup(&app.chat_widget, 80));
+        assert!(
+            after_switch_to_scout.contains("Scout"),
+            "scout role should be visible in picker after switching to scout thread: {after_switch_to_scout}",
+        );
+
+        app.select_agent_thread(&mut tui, builder.thread_id).await?;
+        app.open_agent_picker().await;
+        let after_switch_to_builder =
+            normalize_thread_ids(render_bottom_popup(&app.chat_widget, 80));
+        assert!(
+            after_switch_to_builder.contains("Builder"),
+            "builder role should be visible after switching to builder thread: {after_switch_to_builder}",
+        );
+
+        app.select_agent_thread(&mut tui, primary.thread_id).await?;
+        app.open_agent_picker().await;
+        let after_switch_back = normalize_thread_ids(render_bottom_popup(&app.chat_widget, 80));
+        assert!(
+            after_switch_back.contains("Builder"),
+            "builder role should still be visible after switching back: {after_switch_back}",
+        );
+        assert!(
+            after_switch_back.contains("Scout"),
+            "scout role should still be visible after switching back: {after_switch_back}",
+        );
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn thread_role_does_not_get_overwritten_by_display_name_during_switch() -> Result<()> {
+        let mut app = make_test_app().await;
+        let mut tui = tui::Tui::new(crate::tui::Terminal::with_options(
+            ratatui::backend::CrosstermBackend::new(std::io::stdout()),
+        )?);
+
+        let primary = app.server.start_thread(app.config.clone()).await?;
+        let builder = app.server.start_thread(app.config.clone()).await?;
+
+        app.thread_event_channels
+            .insert(primary.thread_id, ThreadEventChannel::new(1));
+        app.thread_event_channels
+            .insert(builder.thread_id, ThreadEventChannel::new(1));
+        app.primary_thread_id = Some(primary.thread_id);
+        app.active_thread_id = Some(primary.thread_id);
+        app.thread_agent_types
+            .insert(builder.thread_id, String::from("builder"));
+
+        {
+            let builder_channel = app
+                .thread_event_channels
+                .get_mut(&builder.thread_id)
+                .expect("builder thread channel should exist");
+            let mut store = builder_channel.store.lock().await;
+            store.push_event(Event {
+                id: "session-configured-overwrite".to_string(),
+                msg: EventMsg::SessionConfigured(session_configured_for_thread(
+                    &app.config,
+                    builder.thread_id,
+                    Some(String::from("Builder thread")),
+                )),
+            });
+        }
+
+        app.open_agent_picker().await;
+        let before_switch = normalize_thread_ids(render_bottom_popup(&app.chat_widget, 80));
+        assert!(
+            before_switch.contains("Builder"),
+            "builder role should be visible before switching: {before_switch}"
+        );
+
+        app.select_agent_thread(&mut tui, builder.thread_id).await?;
+        app.open_agent_picker().await;
+        let after_switch = normalize_thread_ids(render_bottom_popup(&app.chat_widget, 80));
+        assert!(
+            after_switch.contains("Builder"),
+            "builder role should remain after switching: {after_switch}"
+        );
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn thread_roles_in_chatwidget_are_reused_when_switching_threads() -> Result<()> {
+        let mut app = make_test_app().await;
+        let mut tui = tui::Tui::new(crate::tui::Terminal::with_options(
+            ratatui::backend::CrosstermBackend::new(std::io::stdout()),
+        )?);
+
+        let primary = app.server.start_thread(app.config.clone()).await?;
+        let scout = app.server.start_thread(app.config.clone()).await?;
+        let builder = app.server.start_thread(app.config.clone()).await?;
+
+        app.thread_event_channels
+            .insert(primary.thread_id, ThreadEventChannel::new(1));
+        app.thread_event_channels
+            .insert(scout.thread_id, ThreadEventChannel::new(1));
+        app.thread_event_channels
+            .insert(builder.thread_id, ThreadEventChannel::new(1));
+        app.primary_thread_id = Some(primary.thread_id);
+        app.active_thread_id = Some(primary.thread_id);
+
+        app.chat_widget
+            .record_collab_agent_type(scout.thread_id, String::from("scout"));
+        app.chat_widget
+            .record_collab_agent_type(builder.thread_id, String::from("builder"));
+
+        app.select_agent_thread(&mut tui, builder.thread_id).await?;
+        app.open_agent_picker().await;
+        let popup = normalize_thread_ids(render_bottom_popup(&app.chat_widget, 80));
+
+        assert!(
+            popup.contains("Scout"),
+            "scout role should be recovered from previous widget cache"
+        );
+        assert!(
+            popup.contains("Builder"),
+            "builder role should be restored into app-level cache"
+        );
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn primary_session_name_is_not_used_as_role() -> Result<()> {
+        let mut app = make_test_app().await;
+        let thread = app.server.start_thread(app.config.clone()).await?;
+
+        app.thread_event_channels
+            .insert(thread.thread_id, ThreadEventChannel::new(1));
+        app.enqueue_primary_event(Event {
+            id: "session_configured".to_string(),
+            msg: EventMsg::SessionConfigured(session_configured_for_thread(
+                &app.config,
+                thread.thread_id,
+                Some("builder".to_string()),
+            )),
+        })
+        .await?;
+
+        app.open_agent_picker().await;
+        let popup = normalize_thread_ids(render_bottom_popup(&app.chat_widget, 120));
+        assert!(
+            popup.contains("Main"),
+            "primary session should be treated as Main; got: {popup}"
+        );
+        assert!(
+            !popup.contains("Builder"),
+            "thread_name should not be repurposed as role label: {popup}"
+        );
+
+        Ok(())
+    }
+
+    fn normalize_thread_ids(input: String) -> String {
+        let mut mapping = HashMap::<String, String>::new();
+        let mut next = 1usize;
+        let mut result = String::with_capacity(input.len());
+        let mut idx = 0usize;
+        while idx < input.len() {
+            let candidate = input.get(idx..idx + 36);
+            if candidate.is_some_and(is_thread_id) {
+                let candidate = candidate.expect("candidate checked");
+                let replacement = mapping
+                    .entry(candidate.to_string())
+                    .or_insert_with(|| {
+                        let placeholder = format!("<thread-{next}>");
+                        next += 1;
+                        placeholder
+                    })
+                    .clone();
+                result.push_str(&replacement);
+                idx += 36;
+                continue;
+            }
+
+            let ch = input[idx..].chars().next().expect("next char");
+            result.push(ch);
+            idx += ch.len_utf8();
+        }
+
+        result
+    }
+
+    fn is_thread_id(candidate: &str) -> bool {
+        if candidate.len() != 36 {
+            return false;
+        }
+
+        for (idx, b) in candidate.as_bytes().iter().copied().enumerate() {
+            match idx {
+                8 | 13 | 18 | 23 => {
+                    if b != b'-' {
+                        return false;
+                    }
+                }
+                _ => {
+                    if !b.is_ascii_hexdigit() {
+                        return false;
+                    }
+                }
+            }
+        }
+
+        true
+    }
+
+    fn render_bottom_popup(chat: &ChatWidget, width: u16) -> String {
+        let height = chat.desired_height(width);
+        let area = Rect::new(0, 0, width, height);
+        let mut buf = Buffer::empty(area);
+        chat.render(area, &mut buf);
+
+        let mut lines: Vec<String> = (0..area.height)
+            .map(|row| {
+                let mut line = String::new();
+                for col in 0..area.width {
+                    let symbol = buf[(area.x + col, area.y + row)].symbol();
+                    if symbol.is_empty() {
+                        line.push(' ');
+                    } else {
+                        line.push_str(symbol);
+                    }
+                }
+                line.trim_end().to_string()
+            })
+            .collect();
+
+        while lines.first().is_some_and(|line| line.trim().is_empty()) {
+            lines.remove(0);
+        }
+        while lines.last().is_some_and(|line| line.trim().is_empty()) {
+            lines.pop();
+        }
+
+        lines.join("\n")
+    }
+
     async fn make_test_app() -> App {
         let (chat_widget, app_event_tx, _rx, _op_rx) = make_chatwidget_manual_with_sender().await;
         let config = chat_widget.config_ref().clone();
@@ -2919,6 +3444,7 @@ mod tests {
             suppress_shutdown_complete: false,
             windows_sandbox: WindowsSandboxState::default(),
             thread_event_channels: HashMap::new(),
+            thread_agent_types: HashMap::new(),
             active_thread_id: None,
             active_thread_rx: None,
             primary_thread_id: None,
@@ -2976,6 +3502,7 @@ mod tests {
                 suppress_shutdown_complete: false,
                 windows_sandbox: WindowsSandboxState::default(),
                 thread_event_channels: HashMap::new(),
+                thread_agent_types: HashMap::new(),
                 active_thread_id: None,
                 active_thread_rx: None,
                 primary_thread_id: None,
@@ -3001,6 +3528,32 @@ mod tests {
             "test".to_string(),
             SessionSource::Cli,
         )
+    }
+
+    fn session_configured_for_thread(
+        config: &Config,
+        thread_id: ThreadId,
+        thread_name: Option<String>,
+    ) -> SessionConfiguredEvent {
+        SessionConfiguredEvent {
+            session_id: thread_id,
+            forked_from_id: None,
+            thread_name,
+            model: config
+                .model
+                .clone()
+                .unwrap_or_else(|| "test-model".to_string()),
+            model_provider_id: String::from("test-provider"),
+            approval_policy: AskForApproval::Never,
+            sandbox_policy: SandboxPolicy::new_read_only_policy(),
+            cwd: config.cwd.clone(),
+            reasoning_effort: None,
+            history_log_id: 0,
+            history_entry_count: 0,
+            initial_messages: None,
+            network_proxy: None,
+            rollout_path: None,
+        }
     }
 
     fn app_enabled_in_effective_config(config: &Config, app_id: &str) -> Option<bool> {
@@ -3291,6 +3844,7 @@ mod tests {
                 app.chat_widget.config_ref(),
                 app.chat_widget.current_model(),
                 event,
+                None,
                 is_first,
                 None,
             )) as Arc<dyn HistoryCell>

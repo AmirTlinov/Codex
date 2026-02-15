@@ -2,6 +2,7 @@
 #![allow(clippy::expect_used)]
 
 use anyhow::Result;
+use codex_core::features::Feature;
 use codex_core::protocol::SandboxPolicy;
 use core_test_support::assert_regex_match;
 use core_test_support::responses::ev_assistant_message;
@@ -16,6 +17,7 @@ use core_test_support::skip_if_no_network;
 use core_test_support::test_codex::ApplyPatchModelOutput;
 use core_test_support::test_codex::ShellModelOutput;
 use core_test_support::test_codex::TestCodexBuilder;
+use core_test_support::test_codex::TestCodexHarness;
 use core_test_support::test_codex::test_codex;
 use pretty_assertions::assert_eq;
 use regex_lite::Regex;
@@ -24,7 +26,6 @@ use serde_json::json;
 use std::fs;
 use test_case::test_case;
 
-use crate::suite::apply_patch_cli::apply_patch_harness;
 use crate::suite::apply_patch_cli::mount_apply_patch;
 
 const FIXTURE_JSON: &str = r#"{
@@ -38,6 +39,14 @@ const FIXTURE_JSON: &str = r#"{
     }
 }
 "#;
+
+async fn apply_patch_harness_without_collab() -> Result<TestCodexHarness> {
+    let builder = test_codex().with_config(|config| {
+        config.include_apply_patch_tool = true;
+        config.features.disable(Feature::Collab);
+    });
+    TestCodexHarness::with_builder(builder).await
+}
 
 fn shell_responses(
     call_id: &str,
@@ -113,6 +122,7 @@ fn configure_shell_model(
 
     builder.with_config(move |config| {
         config.include_apply_patch_tool = include_apply_patch_tool;
+        config.features.disable(Feature::Collab);
     })
 }
 
@@ -456,7 +466,7 @@ async fn apply_patch_custom_tool_output_is_structured(
 ) -> Result<()> {
     skip_if_no_network!(Ok(()));
 
-    let harness = apply_patch_harness().await?;
+    let harness = apply_patch_harness_without_collab().await?;
 
     let call_id = "apply-patch-structured";
     let file_name = "structured.txt";
@@ -502,7 +512,7 @@ async fn apply_patch_custom_tool_call_creates_file(
 ) -> Result<()> {
     skip_if_no_network!(Ok(()));
 
-    let harness = apply_patch_harness().await?;
+    let harness = apply_patch_harness_without_collab().await?;
 
     let call_id = "apply-patch-add-file";
     let file_name = "custom_tool_apply_patch.txt";
@@ -551,7 +561,7 @@ async fn apply_patch_custom_tool_call_updates_existing_file(
 ) -> Result<()> {
     skip_if_no_network!(Ok(()));
 
-    let harness = apply_patch_harness().await?;
+    let harness = apply_patch_harness_without_collab().await?;
 
     let call_id = "apply-patch-update-file";
     let file_name = "custom_tool_apply_patch_existing.txt";
@@ -605,7 +615,7 @@ async fn apply_patch_custom_tool_call_reports_failure_output(
 ) -> Result<()> {
     skip_if_no_network!(Ok(()));
 
-    let harness = apply_patch_harness().await?;
+    let harness = apply_patch_harness_without_collab().await?;
 
     let call_id = "apply-patch-failure";
     let missing_file = "missing_custom_tool_apply_patch.txt";
@@ -650,7 +660,7 @@ async fn apply_patch_function_call_output_is_structured(
 ) -> Result<()> {
     skip_if_no_network!(Ok(()));
 
-    let harness = apply_patch_harness().await?;
+    let harness = apply_patch_harness_without_collab().await?;
 
     let call_id = "apply-patch-function";
     let file_name = "function_apply_patch.txt";
@@ -698,6 +708,7 @@ async fn shell_output_is_structured_for_nonzero_exit(output_type: ShellModelOutp
         .with_model("gpt-5.1-codex")
         .with_config(move |config| {
             config.include_apply_patch_tool = true;
+            config.features.disable(Feature::Collab);
         });
     let test = builder.build(&server).await?;
 
@@ -734,6 +745,7 @@ async fn shell_command_output_is_freeform() -> Result<()> {
     let server = start_mock_server().await;
     let mut builder = test_codex().with_config(move |config| {
         config.include_apply_patch_tool = true;
+        config.features.disable(Feature::Collab);
     });
     let test = builder.build(&server).await?;
 
@@ -785,7 +797,9 @@ async fn shell_command_output_is_not_truncated_under_10k_bytes() -> Result<()> {
     skip_if_no_network!(Ok(()));
 
     let server = start_mock_server().await;
-    let mut builder = test_codex().with_model("gpt-5.1");
+    let mut builder = test_codex().with_model("gpt-5.1").with_config(|config| {
+        config.features.disable(Feature::Collab);
+    });
     let test = builder.build(&server).await?;
 
     let call_id = "shell-command";
@@ -835,7 +849,9 @@ async fn shell_command_output_is_not_truncated_over_10k_bytes() -> Result<()> {
     skip_if_no_network!(Ok(()));
 
     let server = start_mock_server().await;
-    let mut builder = test_codex().with_model("gpt-5.1");
+    let mut builder = test_codex().with_model("gpt-5.1").with_config(|config| {
+        config.features.disable(Feature::Collab);
+    });
     let test = builder.build(&server).await?;
 
     let call_id = "shell-command";
@@ -889,6 +905,7 @@ async fn local_shell_call_output_is_structured() -> Result<()> {
         .with_model("gpt-5.1-codex")
         .with_config(|config| {
             config.include_apply_patch_tool = true;
+            config.features.disable(Feature::Collab);
         });
     let test = builder.build(&server).await?;
 

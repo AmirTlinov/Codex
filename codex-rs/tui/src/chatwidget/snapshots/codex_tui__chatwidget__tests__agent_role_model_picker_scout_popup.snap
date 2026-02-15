@@ -1,0 +1,19 @@
+---
+source: tui/src/chatwidget/tests.rs
+expression: popup
+---
+  Select Scout model
+  Effective model for this role: gpt-5-codex
+
+  Type to filter models
+› Inherit (current)  Clear this role override and inherit the default model.
+  Custom model…      Enter a model slug manually.
+  gpt-5.3-codex      Latest frontier agentic coding model.
+  gpt-5.2-codex      Frontier agentic coding model.
+  gpt-5.1-codex-max  Codex-optimized flagship for deep and fast reasoning.
+  gpt-5.1-codex      Optimized for codex.
+  gpt-5.2            Latest frontier model with improvements across knowledge,
+                     reasoning and coding
+  gpt-5.1            Broad world knowledge with strong general reasoning.
+
+  Press enter to confirm or esc to go back

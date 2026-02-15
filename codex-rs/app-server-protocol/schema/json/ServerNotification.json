@@ -3057,6 +3057,14 @@
         {
           "description": "Collab interaction: agent spawn begin.",
           "properties": {
+            "agent_type": {
+              "default": null,
+              "description": "Optional agent role/type requested for the spawned agent (e.g. `scout`, `builder`).",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
             "call_id": {
               "description": "Identifier for the collab tool call.",
               "type": "string"
@@ -3093,6 +3101,14 @@
         {
           "description": "Collab interaction: agent spawn end.",
           "properties": {
+            "agent_type": {
+              "default": null,
+              "description": "Optional agent role/type requested for the spawned agent (e.g. `scout`, `builder`).",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
             "call_id": {
               "description": "Identifier for the collab tool call.",
               "type": "string"

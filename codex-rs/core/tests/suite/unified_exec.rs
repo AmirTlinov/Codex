@@ -156,13 +156,19 @@ fn collect_tool_outputs(bodies: &[Value]) -> Result<HashMap<String, ParsedUnifie
     Ok(outputs)
 }
 
+fn unified_exec_builder() -> core_test_support::test_codex::TestCodexBuilder {
+    test_codex().with_config(|config| {
+        config.features.disable(Feature::Collab);
+    })
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn unified_exec_intercepts_apply_patch_exec_command() -> Result<()> {
     skip_if_no_network!(Ok(()));
     skip_if_sandbox!(Ok(()));
     skip_if_windows!(Ok(()));
 
-    let builder = test_codex().with_config(|config| {
+    let builder = unified_exec_builder().with_config(|config| {
         config.include_apply_patch_tool = true;
         config.use_experimental_unified_exec_tool = true;
         config.features.enable(Feature::UnifiedExec);
@@ -292,10 +298,12 @@ async fn unified_exec_emits_exec_command_begin_event() -> Result<()> {
 
     let server = start_mock_server().await;
 
-    let mut builder = test_codex().with_model("gpt-5").with_config(|config| {
-        config.use_experimental_unified_exec_tool = true;
-        config.features.enable(Feature::UnifiedExec);
-    });
+    let mut builder = unified_exec_builder()
+        .with_model("gpt-5")
+        .with_config(|config| {
+            config.use_experimental_unified_exec_tool = true;
+            config.features.enable(Feature::UnifiedExec);
+        });
     let TestCodex {
         codex,
         cwd,
@@ -367,10 +375,12 @@ async fn unified_exec_resolves_relative_workdir() -> Result<()> {
 
     let server = start_mock_server().await;
 
-    let mut builder = test_codex().with_model("gpt-5").with_config(|config| {
-        config.use_experimental_unified_exec_tool = true;
-        config.features.enable(Feature::UnifiedExec);
-    });
+    let mut builder = unified_exec_builder()
+        .with_model("gpt-5")
+        .with_config(|config| {
+            config.use_experimental_unified_exec_tool = true;
+            config.features.enable(Feature::UnifiedExec);
+        });
     let TestCodex {
         codex,
         cwd,
@@ -448,10 +458,12 @@ async fn unified_exec_respects_workdir_override() -> Result<()> {
 
     let server = start_mock_server().await;
 
-    let mut builder = test_codex().with_model("gpt-5").with_config(|config| {
-        config.use_experimental_unified_exec_tool = true;
-        config.features.enable(Feature::UnifiedExec);
-    });
+    let mut builder = unified_exec_builder()
+        .with_model("gpt-5")
+        .with_config(|config| {
+            config.use_experimental_unified_exec_tool = true;
+            config.features.enable(Feature::UnifiedExec);
+        });
     let TestCodex {
         codex,
         cwd,
@@ -530,7 +542,7 @@ async fn unified_exec_emits_exec_command_end_event() -> Result<()> {
 
     let server = start_mock_server().await;
 
-    let mut builder = test_codex().with_config(|config| {
+    let mut builder = unified_exec_builder().with_config(|config| {
         config.use_experimental_unified_exec_tool = true;
         config.features.enable(Feature::UnifiedExec);
     });
@@ -620,7 +632,7 @@ async fn unified_exec_emits_output_delta_for_exec_command() -> Result<()> {
 
     let server = start_mock_server().await;
 
-    let mut builder = test_codex().with_config(|config| {
+    let mut builder = unified_exec_builder().with_config(|config| {
         config.use_experimental_unified_exec_tool = true;
         config.features.enable(Feature::UnifiedExec);
     });
@@ -695,7 +707,7 @@ async fn unified_exec_full_lifecycle_with_background_end_event() -> Result<()> {
 
     let server = start_mock_server().await;
 
-    let mut builder = test_codex().with_config(|config| {
+    let mut builder = unified_exec_builder().with_config(|config| {
         config.use_experimental_unified_exec_tool = true;
         config.features.enable(Feature::UnifiedExec);
     });
@@ -805,7 +817,7 @@ async fn unified_exec_emits_terminal_interaction_for_write_stdin() -> Result<()>
 
     let server = start_mock_server().await;
 
-    let mut builder = test_codex().with_config(|config| {
+    let mut builder = unified_exec_builder().with_config(|config| {
         config.use_experimental_unified_exec_tool = true;
         config.features.enable(Feature::UnifiedExec);
     });
@@ -908,7 +920,7 @@ async fn unified_exec_terminal_interaction_captures_delayed_output() -> Result<(
 
     let server = start_mock_server().await;
 
-    let mut builder = test_codex().with_config(|config| {
+    let mut builder = unified_exec_builder().with_config(|config| {
         config.use_experimental_unified_exec_tool = true;
         config.features.enable(Feature::UnifiedExec);
     });
@@ -939,7 +951,8 @@ async fn unified_exec_terminal_interaction_captures_delayed_output() -> Result<(
     let second_poll_args = json!({
         "chars": "x",
         "session_id": 1000,
-        "yield_time_ms": 4000,
+        // Keep this poll short so the third poll reliably observes the delayed marker.
+        "yield_time_ms": 1000,
     });
 
     let third_poll_call_id = "uexec-delayed-poll-3";
@@ -1052,24 +1065,20 @@ async fn unified_exec_terminal_interaction_captures_delayed_output() -> Result<(
         "begin event should include process_id for a live session"
     );
 
-    // We expect three terminal interactions matching the three write_stdin calls.
-    assert_eq!(
-        terminal_events.len(),
-        3,
-        "expected three terminal interactions; got {terminal_events:?}"
+    // Depending on timing, the second poll may already observe process completion.
+    // In that case the third poll can miss the live session and no interaction event is emitted.
+    assert!(
+        (2..=3).contains(&terminal_events.len()),
+        "expected two or three terminal interactions; got {terminal_events:?}"
     );
 
     for event in &terminal_events {
         assert_eq!(event.call_id, open_call_id);
         assert_eq!(event.process_id, "1000");
     }
-    assert_eq!(
-        terminal_events
-            .iter()
-            .map(|ev| ev.stdin.as_str())
-            .collect::<Vec<_>>(),
-        vec!["x", "x", "x"],
-        "terminal interactions should reflect the three stdin polls"
+    assert!(
+        terminal_events.iter().all(|ev| ev.stdin == "x"),
+        "terminal interactions should reflect stdin polls; got {terminal_events:?}"
     );
 
     assert!(
@@ -1102,7 +1111,7 @@ async fn unified_exec_emits_one_begin_and_one_end_event() -> Result<()> {
 
     let server = start_mock_server().await;
 
-    let mut builder = test_codex().with_config(|config| {
+    let mut builder = unified_exec_builder().with_config(|config| {
         config.use_experimental_unified_exec_tool = true;
         config.features.enable(Feature::UnifiedExec);
     });
@@ -1222,7 +1231,7 @@ async fn exec_command_reports_chunk_and_exit_metadata() -> Result<()> {
 
     let server = start_mock_server().await;
 
-    let mut builder = test_codex().with_config(|config| {
+    let mut builder = unified_exec_builder().with_config(|config| {
         config.features.enable(Feature::UnifiedExec);
     });
     let TestCodex {
@@ -1340,7 +1349,7 @@ async fn unified_exec_defaults_to_pipe() -> Result<()> {
 
     let server = start_mock_server().await;
 
-    let mut builder = test_codex().with_config(|config| {
+    let mut builder = unified_exec_builder().with_config(|config| {
         config.features.enable(Feature::UnifiedExec);
     });
     let TestCodex {
@@ -1429,7 +1438,7 @@ async fn unified_exec_can_enable_tty() -> Result<()> {
 
     let server = start_mock_server().await;
 
-    let mut builder = test_codex().with_config(|config| {
+    let mut builder = unified_exec_builder().with_config(|config| {
         config.features.enable(Feature::UnifiedExec);
     });
     let TestCodex {
@@ -1512,7 +1521,7 @@ async fn unified_exec_respects_early_exit_notifications() -> Result<()> {
 
     let server = start_mock_server().await;
 
-    let mut builder = test_codex().with_config(|config| {
+    let mut builder = unified_exec_builder().with_config(|config| {
         config.features.enable(Feature::UnifiedExec);
     });
     let TestCodex {
@@ -1607,7 +1616,7 @@ async fn write_stdin_returns_exit_metadata_and_clears_session() -> Result<()> {
 
     let server = start_mock_server().await;
 
-    let mut builder = test_codex().with_config(|config| {
+    let mut builder = unified_exec_builder().with_config(|config| {
         config.features.enable(Feature::UnifiedExec);
     });
     let TestCodex {
@@ -1772,7 +1781,7 @@ async fn unified_exec_emits_end_event_when_session_dies_via_stdin() -> Result<()
 
     let server = start_mock_server().await;
 
-    let mut builder = test_codex().with_config(|config| {
+    let mut builder = unified_exec_builder().with_config(|config| {
         config.use_experimental_unified_exec_tool = true;
         config.features.enable(Feature::UnifiedExec);
     });
@@ -1881,7 +1890,7 @@ async fn unified_exec_keeps_long_running_session_after_turn_end() -> Result<()> 
 
     let server = start_mock_server().await;
 
-    let mut builder = test_codex().with_config(|config| {
+    let mut builder = unified_exec_builder().with_config(|config| {
         config.use_experimental_unified_exec_tool = true;
         config.features.enable(Feature::UnifiedExec);
     });
@@ -1976,7 +1985,7 @@ async fn unified_exec_interrupt_terminates_long_running_session() -> Result<()> 
 
     let server = start_mock_server().await;
 
-    let mut builder = test_codex().with_config(|config| {
+    let mut builder = unified_exec_builder().with_config(|config| {
         config.use_experimental_unified_exec_tool = true;
         config.features.enable(Feature::UnifiedExec);
     });
@@ -2052,7 +2061,7 @@ async fn unified_exec_reuses_session_via_stdin() -> Result<()> {
 
     let server = start_mock_server().await;
 
-    let mut builder = test_codex().with_config(|config| {
+    let mut builder = unified_exec_builder().with_config(|config| {
         config.features.enable(Feature::UnifiedExec);
     });
     let TestCodex {
@@ -2167,7 +2176,7 @@ async fn unified_exec_streams_after_lagged_output() -> Result<()> {
 
     let server = start_mock_server().await;
 
-    let mut builder = test_codex().with_config(|config| {
+    let mut builder = unified_exec_builder().with_config(|config| {
         config.use_experimental_unified_exec_tool = true;
         config.features.enable(Feature::UnifiedExec);
     });
@@ -2302,7 +2311,7 @@ async fn unified_exec_timeout_and_followup_poll() -> Result<()> {
 
     let server = start_mock_server().await;
 
-    let mut builder = test_codex().with_config(|config| {
+    let mut builder = unified_exec_builder().with_config(|config| {
         config.features.enable(Feature::UnifiedExec);
     });
     let TestCodex {
@@ -2411,7 +2420,7 @@ async fn unified_exec_formats_large_output_summary() -> Result<()> {
 
     let server = start_mock_server().await;
 
-    let mut builder = test_codex().with_config(|config| {
+    let mut builder = unified_exec_builder().with_config(|config| {
         config.features.enable(Feature::UnifiedExec);
     });
     let TestCodex {
@@ -2499,7 +2508,7 @@ async fn unified_exec_runs_under_sandbox() -> Result<()> {
 
     let server = start_mock_server().await;
 
-    let mut builder = test_codex().with_config(|config| {
+    let mut builder = unified_exec_builder().with_config(|config| {
         config.features.enable(Feature::UnifiedExec);
     });
     let TestCodex {
@@ -2581,7 +2590,7 @@ async fn unified_exec_python_prompt_under_seatbelt() -> Result<()> {
 
     let server = start_mock_server().await;
 
-    let mut builder = test_codex().with_config(|config| {
+    let mut builder = unified_exec_builder().with_config(|config| {
         config.use_experimental_unified_exec_tool = true;
         config.features.enable(Feature::UnifiedExec);
     });
@@ -2700,7 +2709,7 @@ async fn unified_exec_runs_on_all_platforms() -> Result<()> {
 
     let server = start_mock_server().await;
 
-    let mut builder = test_codex().with_config(|config| {
+    let mut builder = unified_exec_builder().with_config(|config| {
         config.features.enable(Feature::UnifiedExec);
     });
     let TestCodex {
@@ -2775,7 +2784,7 @@ async fn unified_exec_prunes_exited_sessions_first() -> Result<()> {
 
     let server = start_mock_server().await;
 
-    let mut builder = test_codex().with_config(|config| {
+    let mut builder = unified_exec_builder().with_config(|config| {
         config.use_experimental_unified_exec_tool = true;
         config.features.enable(Feature::UnifiedExec);
     });

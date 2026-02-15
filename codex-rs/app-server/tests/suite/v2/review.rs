@@ -19,6 +19,7 @@ use codex_app_server_protocol::ServerRequest;
 use codex_app_server_protocol::ThreadItem;
 use codex_app_server_protocol::ThreadStartParams;
 use codex_app_server_protocol::ThreadStartResponse;
+use codex_app_server_protocol::ThreadStartedNotification;
 use codex_app_server_protocol::TurnStartParams;
 use codex_app_server_protocol::TurnStatus;
 use codex_app_server_protocol::UserInput as V2UserInput;
@@ -300,6 +301,70 @@ async fn review_start_with_detached_delivery_returns_new_thread_id() -> Result<(
         review_thread_id, thread_id,
         "detached review should run on a different thread"
     );
+
+    Ok(())
+}
+
+#[cfg_attr(target_os = "windows", ignore = "flaky on windows CI")]
+#[tokio::test]
+async fn review_start_with_hybrid_delivery_runs_inline_and_spawns_sidecar() -> Result<()> {
+    let review_payload = json!({
+        "findings": [],
+        "overall_correctness": "ok",
+        "overall_explanation": "hybrid review",
+        "overall_confidence_score": 0.5
+    })
+    .to_string();
+    let server = create_mock_responses_server_repeating_assistant(&review_payload).await;
+
+    let codex_home = TempDir::new()?;
+    create_config_toml(codex_home.path(), &server.uri())?;
+
+    let mut mcp = McpProcess::new(codex_home.path()).await?;
+    timeout(DEFAULT_READ_TIMEOUT, mcp.initialize()).await??;
+
+    let thread_id = start_default_thread(&mut mcp).await?;
+    materialize_thread_rollout(&mut mcp, &thread_id).await?;
+
+    let review_req = mcp
+        .send_review_start_request(ReviewStartParams {
+            thread_id: thread_id.clone(),
+            delivery: Some(ReviewDelivery::Hybrid),
+            target: ReviewTarget::Custom {
+                instructions: "hybrid review".to_string(),
+            },
+        })
+        .await?;
+    let review_resp: JSONRPCResponse = timeout(
+        DEFAULT_READ_TIMEOUT,
+        mcp.read_stream_until_response_message(RequestId::Integer(review_req)),
+    )
+    .await??;
+    let ReviewStartResponse {
+        turn,
+        review_thread_id,
+    } = to_response::<ReviewStartResponse>(review_resp)?;
+
+    assert_eq!(turn.status, TurnStatus::InProgress);
+    assert_eq!(review_thread_id, thread_id);
+
+    let mut sidecar_thread_id: Option<String> = None;
+    for _ in 0..10 {
+        let started_notif: JSONRPCNotification = timeout(
+            DEFAULT_READ_TIMEOUT,
+            mcp.read_stream_until_notification_message("thread/started"),
+        )
+        .await??;
+        let started: ThreadStartedNotification =
+            serde_json::from_value(started_notif.params.expect("params must be present"))?;
+        if started.thread.id != thread_id {
+            sidecar_thread_id = Some(started.thread.id);
+            break;
+        }
+    }
+
+    let sidecar_thread_id = sidecar_thread_id.expect("hybrid review did not spawn sidecar thread");
+    assert_ne!(sidecar_thread_id, thread_id);
 
     Ok(())
 }

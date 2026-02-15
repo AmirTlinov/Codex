@@ -113,6 +113,40 @@ pub enum WebSearchMode {
     Live,
 }
 
+/// Controls how `/review` is executed (local model, remote provider, or both).
+#[derive(
+    Debug, Serialize, Deserialize, Default, Clone, Copy, PartialEq, Eq, Display, JsonSchema, TS,
+)]
+#[serde(rename_all = "lowercase")]
+#[strum(serialize_all = "lowercase")]
+pub enum ReviewMode {
+    #[default]
+    Local,
+    Remote,
+    Hybrid,
+}
+
+/// Policy for `review.mode = "hybrid"`.
+#[derive(
+    Debug, Serialize, Deserialize, Default, Clone, Copy, PartialEq, Eq, Display, JsonSchema, TS,
+)]
+#[serde(rename_all = "snake_case")]
+#[strum(serialize_all = "snake_case")]
+pub enum ReviewHybridPolicy {
+    #[default]
+    LocalFirst,
+    RemoteFirst,
+    RequiredBoth,
+}
+
+/// Remote review provider when `review.mode` involves a remote channel.
+#[derive(Debug, Serialize, Deserialize, Clone, Copy, PartialEq, Eq, Display, JsonSchema, TS)]
+#[serde(rename_all = "snake_case")]
+#[strum(serialize_all = "snake_case")]
+pub enum ReviewRemoteProvider {
+    GithubCodex,
+}
+
 #[derive(Debug, Serialize, Deserialize, Clone, Copy, PartialEq, Eq, Display, JsonSchema, TS)]
 #[serde(rename_all = "lowercase")]
 #[strum(serialize_all = "lowercase")]

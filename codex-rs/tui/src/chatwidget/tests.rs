@@ -15,6 +15,7 @@ use crate::history_cell::UserHistoryCell;
 use crate::test_backend::VT100Backend;
 use crate::tui::FrameRequester;
 use assert_matches::assert_matches;
+use codex_core::AgentRole;
 use codex_core::CodexAuth;
 use codex_core::config::Config;
 use codex_core::config::ConfigBuilder;
@@ -1064,6 +1065,7 @@ async fn make_chatwidget_manual(
         active_cell: None,
         active_cell_revision: 0,
         config: cfg,
+        collab_agent_types: HashMap::new(),
         current_collaboration_mode,
         active_collaboration_mask: None,
         auth_manager,
@@ -4353,6 +4355,25 @@ async fn personality_selection_popup_snapshot() {
 }
 
 #[tokio::test]
+async fn agent_role_models_popup_snapshot() {
+    let (mut chat, _rx, _op_rx) = make_chatwidget_manual(Some("gpt-5-codex")).await;
+    chat.open_agent_role_models_popup();
+
+    let popup = render_bottom_popup(&chat, 80);
+    assert_snapshot!("agent_role_models_popup", popup);
+}
+
+#[tokio::test]
+async fn agent_role_model_picker_popup_snapshot() {
+    let (mut chat, _rx, _op_rx) = make_chatwidget_manual(Some("gpt-5-codex")).await;
+    chat.thread_id = Some(ThreadId::new());
+    chat.open_agent_role_model_picker(AgentRole::Scout);
+
+    let popup = render_bottom_popup(&chat, 80);
+    assert_snapshot!("agent_role_model_picker_scout_popup", popup);
+}
+
+#[tokio::test]
 async fn model_picker_hides_show_in_picker_false_models_from_cache() {
     let (mut chat, _rx, _op_rx) = make_chatwidget_manual(Some("test-visible-model")).await;
     chat.thread_id = Some(ThreadId::new());
@@ -6152,6 +6173,40 @@ async fn stream_recovery_restores_previous_status_header() {
     assert_eq!(status.header(), "Working");
     assert_eq!(status.details(), None);
     assert!(chat.retry_status_header.is_none());
+}
+
+#[tokio::test]
+async fn status_header_includes_current_agent_role() {
+    let (mut chat, _rx, _op_rx) = make_chatwidget_manual(None).await;
+    let thread_id = ThreadId::new();
+    chat.thread_id = Some(thread_id);
+    chat.record_collab_agent_type(thread_id, "builder".to_string());
+    let model = chat.current_model().to_string();
+
+    chat.on_task_started();
+
+    let status = chat
+        .bottom_pane
+        .status_widget()
+        .expect("status indicator should be visible");
+    assert_eq!(status.header(), format!("Working (Builder • {model})"));
+}
+
+#[tokio::test]
+async fn status_header_includes_main_role_for_default_thread() {
+    let (mut chat, _rx, _op_rx) = make_chatwidget_manual(None).await;
+    let thread_id = ThreadId::new();
+    chat.thread_id = Some(thread_id);
+    chat.record_collab_agent_type(thread_id, "default".to_string());
+    let model = chat.current_model().to_string();
+
+    chat.on_task_started();
+
+    let status = chat
+        .bottom_pane
+        .status_widget()
+        .expect("status indicator should be visible");
+    assert_eq!(status.header(), format!("Working (Main • {model})"));
 }
 
 #[tokio::test]

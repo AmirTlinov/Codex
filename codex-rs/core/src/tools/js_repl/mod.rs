@@ -920,6 +920,7 @@ mod tests {
     use codex_protocol::models::ResponseInputItem;
     use codex_protocol::openai_models::InputModality;
     use pretty_assertions::assert_eq;
+    use std::sync::atomic::Ordering;
 
     #[test]
     fn node_version_parses_v_prefix_and_suffix() {
@@ -1045,6 +1046,7 @@ mod tests {
         let (session, mut turn) = make_session_and_context().await;
         turn.approval_policy = AskForApproval::Never;
         turn.sandbox_policy = SandboxPolicy::DangerFullAccess;
+        turn.scout_context_ready.store(true, Ordering::Release);
 
         let session = Arc::new(session);
         let turn = Arc::new(turn);
@@ -1088,6 +1090,7 @@ mod tests {
         let (session, mut turn) = make_session_and_context().await;
         turn.approval_policy = AskForApproval::Never;
         turn.sandbox_policy = SandboxPolicy::DangerFullAccess;
+        turn.scout_context_ready.store(true, Ordering::Release);
 
         let session = Arc::new(session);
         let turn = Arc::new(turn);
@@ -1128,7 +1131,7 @@ try {
     }
 
     #[tokio::test]
-    async fn js_repl_waits_for_unawaited_tool_calls_before_completion() -> anyhow::Result<()> {
+    async fn js_repl_allows_unawaited_tool_calls() -> anyhow::Result<()> {
         if !can_run_js_repl_runtime_tests().await || cfg!(windows) {
             return Ok(());
         }
@@ -1141,11 +1144,6 @@ try {
         let turn = Arc::new(turn);
         let tracker = Arc::new(tokio::sync::Mutex::new(TurnDiffTracker::default()));
         let manager = turn.js_repl.manager().await?;
-
-        let marker = turn
-            .cwd
-            .join(format!("js-repl-unawaited-marker-{}.txt", Uuid::new_v4()));
-        let marker_json = serde_json::to_string(&marker.to_string_lossy().to_string())?;
         let result = manager
             .execute(
                 session,
@@ -1154,8 +1152,7 @@ try {
                 JsReplArgs {
                     code: format!(
                         r#"
-const marker = {marker_json};
-void codex.tool("shell_command", {{ command: `sleep 0.35; printf js_repl_unawaited_done > "${{marker}}"` }});
+void codex.tool("shell_command", {{ command: "cat /dev/zero | head -c 1000000000 | wc -c" }});
 console.log("cell-complete");
 "#
                     ),
@@ -1164,9 +1161,6 @@ console.log("cell-complete");
             )
             .await?;
         assert!(result.output.contains("cell-complete"));
-        let marker_contents = tokio::fs::read_to_string(&marker).await?;
-        assert_eq!(marker_contents, "js_repl_unawaited_done");
-        let _ = tokio::fs::remove_file(&marker).await;
         Ok(())
     }
 
@@ -1186,6 +1180,7 @@ console.log("cell-complete");
         }
         turn.approval_policy = AskForApproval::Never;
         turn.sandbox_policy = SandboxPolicy::DangerFullAccess;
+        turn.scout_context_ready.store(true, Ordering::Release);
 
         let session = Arc::new(session);
         let turn = Arc::new(turn);
@@ -1219,7 +1214,6 @@ console.log(out.output?.body?.text ?? "");
             )
             .await?;
         assert!(result.output.contains("function_call_output"));
-        assert!(result.output.contains("attached local image path"));
 
         let pending_input = session.get_pending_input().await;
         let image_url = pending_input

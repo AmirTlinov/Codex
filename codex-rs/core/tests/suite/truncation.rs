@@ -5,6 +5,7 @@ use anyhow::Context;
 use anyhow::Result;
 use codex_core::config::types::McpServerConfig;
 use codex_core::config::types::McpServerTransportConfig;
+use codex_core::features::Feature;
 use codex_core::protocol::AskForApproval;
 use codex_core::protocol::EventMsg;
 use codex_core::protocol::Op;
@@ -39,6 +40,7 @@ async fn tool_call_output_configured_limit_chars_type() -> Result<()> {
 
     // Use a model that exposes the shell_command tool.
     let mut builder = test_codex().with_model("gpt-5.1").with_config(|config| {
+        config.features.disable(Feature::Collab);
         config.tool_output_token_limit = Some(100_000);
     });
 
@@ -114,7 +116,9 @@ async fn tool_call_output_exceeds_limit_truncated_chars_limit() -> Result<()> {
     let server = start_mock_server().await;
 
     // Use a model that exposes the shell_command tool.
-    let mut builder = test_codex().with_model("gpt-5.1");
+    let mut builder = test_codex().with_model("gpt-5.1").with_config(|config| {
+        config.features.disable(Feature::Collab);
+    });
 
     let fixture = builder.build(&server).await?;
 
@@ -188,7 +192,11 @@ async fn tool_call_output_exceeds_limit_truncated_for_model() -> Result<()> {
     let server = start_mock_server().await;
 
     // Use a model that exposes the shell_command tool.
-    let mut builder = test_codex().with_model("gpt-5.1-codex");
+    let mut builder = test_codex()
+        .with_model("gpt-5.1-codex")
+        .with_config(|config| {
+            config.features.disable(Feature::Collab);
+        });
     let fixture = builder.build(&server).await?;
 
     let call_id = "shell-too-large";
@@ -264,7 +272,11 @@ async fn tool_call_output_truncated_only_once() -> Result<()> {
 
     let server = start_mock_server().await;
 
-    let mut builder = test_codex().with_model("gpt-5.1-codex");
+    let mut builder = test_codex()
+        .with_model("gpt-5.1-codex")
+        .with_config(|config| {
+            config.features.disable(Feature::Collab);
+        });
     let fixture = builder.build(&server).await?;
     let call_id = "shell-single-truncation";
     let command = if cfg!(windows) {
@@ -352,6 +364,7 @@ async fn mcp_tool_call_output_exceeds_limit_truncated_for_model() -> Result<()> 
     let rmcp_test_server_bin = stdio_server_bin()?;
 
     let mut builder = test_codex().with_config(move |config| {
+        config.features.disable(Feature::Collab);
         let mut servers = config.mcp_servers.get().clone();
         servers.insert(
             server_name.to_string(),
@@ -443,6 +456,7 @@ async fn mcp_image_output_preserves_image_and_no_text_summary() -> Result<()> {
     let openai_png = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMB/ee9bQAAAABJRU5ErkJggg==";
 
     let mut builder = test_codex().with_config(move |config| {
+        config.features.disable(Feature::Collab);
         let mut servers = config.mcp_servers.get().clone();
         servers.insert(
             server_name.to_string(),
@@ -519,6 +533,7 @@ async fn token_policy_marker_reports_tokens() -> Result<()> {
     let mut builder = test_codex()
         .with_model("gpt-5.1-codex")
         .with_config(|config| {
+            config.features.disable(Feature::Collab);
             config.tool_output_token_limit = Some(50); // small budget to force truncation
         });
     let fixture = builder.build(&server).await?;
@@ -570,6 +585,7 @@ async fn byte_policy_marker_reports_bytes() -> Result<()> {
 
     let server = start_mock_server().await;
     let mut builder = test_codex().with_model("gpt-5.1").with_config(|config| {
+        config.features.disable(Feature::Collab);
         config.tool_output_token_limit = Some(50); // ~200 byte cap
     });
     let fixture = builder.build(&server).await?;
@@ -623,6 +639,7 @@ async fn shell_command_output_not_truncated_with_custom_limit() -> Result<()> {
     let mut builder = test_codex()
         .with_model("gpt-5.1-codex")
         .with_config(|config| {
+            config.features.disable(Feature::Collab);
             config.tool_output_token_limit = Some(50_000); // ample budget
         });
     let fixture = builder.build(&server).await?;
@@ -710,6 +727,7 @@ async fn mcp_tool_call_output_not_truncated_with_custom_limit() -> Result<()> {
     let rmcp_test_server_bin = stdio_server_bin()?;
 
     let mut builder = test_codex().with_config(move |config| {
+        config.features.disable(Feature::Collab);
         config.tool_output_token_limit = Some(50_000);
         let mut servers = config.mcp_servers.get().clone();
         servers.insert(

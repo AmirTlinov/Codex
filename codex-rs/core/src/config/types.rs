@@ -7,6 +7,9 @@ use crate::config_loader::RequirementSource;
 pub use codex_protocol::config_types::AltScreenMode;
 pub use codex_protocol::config_types::ModeKind;
 pub use codex_protocol::config_types::Personality;
+pub use codex_protocol::config_types::ReviewHybridPolicy;
+pub use codex_protocol::config_types::ReviewMode;
+pub use codex_protocol::config_types::ReviewRemoteProvider;
 pub use codex_protocol::config_types::WebSearchMode;
 use codex_utils_absolute_path::AbsolutePathBuf;
 use std::collections::BTreeMap;
@@ -39,6 +42,48 @@ pub enum WindowsSandboxModeToml {
 #[schemars(deny_unknown_fields)]
 pub struct WindowsToml {
     pub sandbox: Option<WindowsSandboxModeToml>,
+}
+
+/// Nested config for the `/review` feature.
+#[derive(Serialize, Deserialize, Debug, Clone, Default, PartialEq, Eq, JsonSchema)]
+#[schemars(deny_unknown_fields)]
+pub struct ReviewLocalToml {
+    /// Model slug to use for local review runs.
+    pub model: Option<String>,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, Default, PartialEq, Eq, JsonSchema)]
+#[schemars(deny_unknown_fields)]
+pub struct ReviewRemoteToml {
+    /// Remote review provider (e.g. GitHub Codex).
+    pub provider: Option<ReviewRemoteProvider>,
+    /// Optional remote model identifier (provider-specific).
+    pub model: Option<String>,
+    /// Trigger phrase/comment used by the provider (e.g. "@codex review").
+    pub trigger: Option<String>,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, Default, PartialEq, Eq, JsonSchema)]
+#[schemars(deny_unknown_fields)]
+pub struct ReviewHybridToml {
+    /// Policy for how to combine local and remote reviews.
+    pub policy: Option<ReviewHybridPolicy>,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, Default, PartialEq, Eq, JsonSchema)]
+#[schemars(deny_unknown_fields)]
+pub struct ReviewConfigToml {
+    /// Which review channel(s) to run.
+    pub mode: Option<ReviewMode>,
+    /// Local reviewer configuration.
+    #[serde(default)]
+    pub local: ReviewLocalToml,
+    /// Remote reviewer configuration.
+    #[serde(default)]
+    pub remote: ReviewRemoteToml,
+    /// Hybrid combination policy.
+    #[serde(default)]
+    pub hybrid: ReviewHybridToml,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
