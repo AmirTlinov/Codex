@@ -136,6 +136,11 @@ mod spawn {
                     .to_string(),
             ));
         }
+        if turn.tools_config.agent_role != AgentRole::Default && agent_role != AgentRole::Scout {
+            return Err(FunctionCallError::RespondToModel(
+                "Subagents can only spawn scout agents. Set `agent_type` to \"scout\".".to_string(),
+            ));
+        }
         if turn.tools_config.agent_role == AgentRole::Default {
             if !matches!(
                 agent_role,
@@ -1050,6 +1055,43 @@ mod tests {
                 err,
                 FunctionCallError::RespondToModel(
                     "Plan agents can only spawn scout agents. Set `agent_type` to \"scout\"."
+                        .to_string()
+                )
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn builder_role_rejects_spawning_non_scout_agents() {
+        let (session, mut turn) = make_session_and_context().await;
+        turn.tools_config.agent_role = AgentRole::Builder;
+        let session = Arc::new(session);
+        let turn = Arc::new(turn);
+        let invalid_agent_types = [
+            "default",
+            "validator",
+            "context_validator",
+            "post_builder_validator",
+            "builder",
+        ];
+
+        for invalid_agent_type in invalid_agent_types {
+            let invocation = invocation(
+                session.clone(),
+                turn.clone(),
+                "spawn_agent",
+                function_payload(json!({
+                    "message": "context please",
+                    "agent_type": invalid_agent_type,
+                })),
+            );
+            let Err(err) = CollabHandler.handle(invocation).await else {
+                panic!("spawn_agent should be rejected for non-scout agent_type");
+            };
+            assert_eq!(
+                err,
+                FunctionCallError::RespondToModel(
+                    "Subagents can only spawn scout agents. Set `agent_type` to \"scout\"."
                         .to_string()
                 )
             );

@@ -1257,6 +1257,9 @@ mod tests {
     use std::collections::HashSet;
     use std::sync::Arc;
 
+    static CODEX_APPS_TOOLS_CACHE_TEST_LOCK: LazyLock<StdMutex<()>> =
+        LazyLock::new(StdMutex::default);
+
     fn create_test_tool(server_name: &str, tool_name: &str) -> ToolInfo {
         ToolInfo {
             server_name: server_name.to_string(),
@@ -1278,6 +1281,9 @@ mod tests {
     }
 
     fn with_clean_codex_apps_tools_cache<T>(f: impl FnOnce() -> T) -> T {
+        let _guard = CODEX_APPS_TOOLS_CACHE_TEST_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let previous_cache = {
             let mut cache_guard = CODEX_APPS_TOOLS_CACHE
                 .lock()

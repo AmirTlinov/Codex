@@ -198,7 +198,10 @@ impl ToolsConfig {
                     | "list_dir"
                     | VIEW_IMAGE_TOOL_NAME
             ),
-            AgentRole::Builder => false,
+            AgentRole::Builder => matches!(
+                tool_name,
+                "spawn_agent" | "send_input" | "resume_agent" | "wait" | "close_agent"
+            ),
             AgentRole::Validator => matches!(tool_name, "apply_patch"),
             AgentRole::PostBuilderValidator => matches!(tool_name, "apply_patch"),
             AgentRole::Plan => matches!(
@@ -2249,7 +2252,7 @@ mod tests {
     }
 
     #[test]
-    fn builder_role_exposes_no_tools() {
+    fn builder_role_exposes_collab_tools_only() {
         let config = test_config();
         let model_info =
             ModelsManager::construct_model_info_offline_for_tests("gpt-5-codex", &config);
@@ -2266,7 +2269,21 @@ mod tests {
         tools_config.agent_role = AgentRole::Builder;
 
         let (tools, _) = build_specs(&tools_config, None, &[]).build();
-        assert!(tools.is_empty());
+        let mut names: Vec<_> = tools
+            .iter()
+            .map(|tool| tool.spec.name().to_string())
+            .collect();
+        names.sort();
+        assert_eq!(
+            names,
+            vec![
+                "close_agent".to_string(),
+                "resume_agent".to_string(),
+                "send_input".to_string(),
+                "spawn_agent".to_string(),
+                "wait".to_string(),
+            ]
+        );
     }
 
     #[test]
@@ -2531,7 +2548,7 @@ mod tests {
     }
 
     #[test]
-    fn role_filter_hides_all_builder_tools_from_model() {
+    fn role_filter_keeps_builder_collab_tools_visible_to_model() {
         let config = test_config();
         let model_info =
             ModelsManager::construct_model_info_offline_for_tests("gpt-5-codex", &config);
@@ -2552,7 +2569,21 @@ mod tests {
             &tools_config,
         );
 
-        assert!(filtered.is_empty());
+        let mut names: Vec<_> = filtered
+            .iter()
+            .map(|tool| tool_name(tool).to_string())
+            .collect();
+        names.sort();
+        assert_eq!(
+            names,
+            vec![
+                "close_agent".to_string(),
+                "resume_agent".to_string(),
+                "send_input".to_string(),
+                "spawn_agent".to_string(),
+                "wait".to_string(),
+            ]
+        );
     }
 
     #[test]
