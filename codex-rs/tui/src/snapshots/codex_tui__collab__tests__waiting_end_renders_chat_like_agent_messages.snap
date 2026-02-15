@@ -2,7 +2,7 @@
 source: tui/src/collab.rs
 expression: rendered.trim_end()
 ---
-@orchestrator
+@main
 Wait complete: 3 total · 1 running · 1 completed · 1 errored
 
 ---

@@ -4160,30 +4160,44 @@ impl ChatWidget {
                 {
                     self.record_collab_agent_type(thread_id, agent_type);
                 }
-                self.on_collab_event(collab::spawn_end(ev))
+                self.on_collab_event(collab::spawn_end(
+                    ev,
+                    &self.collab_agent_types,
+                    self.thread_id.as_ref(),
+                ))
             }
             EventMsg::CollabAgentInteractionBegin(_) => {}
-            EventMsg::CollabAgentInteractionEnd(ev) => {
-                self.on_collab_event(collab::interaction_end(ev, &self.collab_agent_types))
-            }
-            EventMsg::CollabWaitingBegin(ev) => {
-                self.on_collab_event(collab::waiting_begin(ev, &self.collab_agent_types))
-            }
+            EventMsg::CollabAgentInteractionEnd(ev) => self.on_collab_event(
+                collab::interaction_end(ev, &self.collab_agent_types, self.thread_id.as_ref()),
+            ),
+            EventMsg::CollabWaitingBegin(ev) => self.on_collab_event(collab::waiting_begin(
+                ev,
+                &self.collab_agent_types,
+                self.thread_id.as_ref(),
+            )),
             EventMsg::CollabWaitingEnd(ev) => {
-                for cell in collab::waiting_end(ev, &self.collab_agent_types) {
+                for cell in
+                    collab::waiting_end(ev, &self.collab_agent_types, self.thread_id.as_ref())
+                {
                     self.on_collab_event(cell);
                 }
             }
             EventMsg::CollabCloseBegin(_) => {}
-            EventMsg::CollabCloseEnd(ev) => {
-                self.on_collab_event(collab::close_end(ev, &self.collab_agent_types))
-            }
-            EventMsg::CollabResumeBegin(ev) => {
-                self.on_collab_event(collab::resume_begin(ev, &self.collab_agent_types))
-            }
-            EventMsg::CollabResumeEnd(ev) => {
-                self.on_collab_event(collab::resume_end(ev, &self.collab_agent_types))
-            }
+            EventMsg::CollabCloseEnd(ev) => self.on_collab_event(collab::close_end(
+                ev,
+                &self.collab_agent_types,
+                self.thread_id.as_ref(),
+            )),
+            EventMsg::CollabResumeBegin(ev) => self.on_collab_event(collab::resume_begin(
+                ev,
+                &self.collab_agent_types,
+                self.thread_id.as_ref(),
+            )),
+            EventMsg::CollabResumeEnd(ev) => self.on_collab_event(collab::resume_end(
+                ev,
+                &self.collab_agent_types,
+                self.thread_id.as_ref(),
+            )),
             EventMsg::ThreadRolledBack(rollback) => {
                 if from_replay {
                     self.app_event_tx.send(AppEvent::ApplyThreadRollback {

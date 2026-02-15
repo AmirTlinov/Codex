@@ -1,6 +1,4 @@
 use crate::history_cell::PlainHistoryCell;
-use crate::render::line_utils::prefix_lines;
-use crate::text_formatting::capitalize_first;
 use crate::text_formatting::truncate_text;
 use codex_core::protocol::AgentStatus;
 use codex_core::protocol::CollabAgentInteractionEndEvent;
@@ -43,13 +41,32 @@ fn agent_color(thread_id: &ThreadId) -> Color {
     PALETTE[idx]
 }
 
-fn agent_handle_label(agent_type: Option<&str>) -> String {
-    let base = agent_type.unwrap_or("agent");
-    format!("{AGENT_HANDLE_PREFIX}{base}")
+fn short_thread_id(thread_id: &ThreadId) -> String {
+    const LEN: usize = 6;
+    let text = thread_id.to_string();
+    let suffix = text.rsplit('-').next().unwrap_or(text.as_str());
+    let start = suffix.len().saturating_sub(LEN);
+    suffix[start..].to_string()
+}
+
+fn agent_handle_label(thread_id: &ThreadId, agent_type: Option<&str>) -> String {
+    let agent_type = agent_type.map(str::trim).filter(|value| !value.is_empty());
+    let base = match agent_type {
+        Some("default" | "orchestrator") => "main",
+        Some(value) => value,
+        None => "agent",
+    };
+
+    let mut label = format!("{AGENT_HANDLE_PREFIX}{base}");
+    if agent_type.is_none() {
+        label.push('#');
+        label.push_str(&short_thread_id(thread_id));
+    }
+    label
 }
 
 fn agent_handle_span(thread_id: &ThreadId, agent_type: Option<&str>) -> Span<'static> {
-    let label = agent_handle_label(agent_type);
+    let label = agent_handle_label(thread_id, agent_type);
     Span::styled(
         label,
         Style::default()
@@ -74,23 +91,7 @@ fn highlight_mentions(text: &str) -> Line<'static> {
     spans.into()
 }
 
-fn agent_type_span(agent_type: &str) -> Span<'static> {
-    Span::from(capitalize_first(agent_type)).bold()
-}
-
-fn agent_ref_spans(thread_id: &ThreadId, agent_type: Option<&str>) -> Vec<Span<'static>> {
-    if let Some(agent_type) = agent_type {
-        vec![
-            agent_type_span(agent_type),
-            Span::from(" ").dim(),
-            Span::from(thread_id.to_string()).dim(),
-        ]
-    } else {
-        vec![Span::from(thread_id.to_string()).dim()]
-    }
-}
-
-fn agents_list_spans(
+fn agent_handle_list_spans(
     ids: &[ThreadId],
     agent_types: &HashMap<ThreadId, String>,
 ) -> Vec<Span<'static>> {
@@ -103,83 +104,150 @@ fn agents_list_spans(
         if idx > 0 {
             spans.push(Span::from(", ").dim());
         }
-        spans.extend(agent_ref_spans(id, agent_types.get(id).map(String::as_str)));
+        spans.push(agent_handle_span(
+            id,
+            agent_types.get(id).map(String::as_str),
+        ));
     }
     spans
 }
 
-pub(crate) fn spawn_end(ev: CollabAgentSpawnEndEvent) -> PlainHistoryCell {
+fn sender_agent_type<'a>(
+    sender_thread_id: &ThreadId,
+    agent_types: &'a HashMap<ThreadId, String>,
+    main_thread_id: Option<&ThreadId>,
+) -> Option<&'a str> {
+    if let Some(agent_type) = agent_types.get(sender_thread_id) {
+        return Some(agent_type.as_str());
+    }
+
+    if main_thread_id == Some(sender_thread_id) {
+        return Some("main");
+    }
+
+    None
+}
+
+fn single_line_preview(text: &str, max_graphemes: usize) -> String {
+    let normalized = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    truncate_text(&normalized, max_graphemes)
+}
+
+pub(crate) fn spawn_end(
+    ev: CollabAgentSpawnEndEvent,
+    agent_types: &HashMap<ThreadId, String>,
+    main_thread_id: Option<&ThreadId>,
+) -> PlainHistoryCell {
     let CollabAgentSpawnEndEvent {
-        call_id,
-        sender_thread_id: _,
+        call_id: _,
+        sender_thread_id,
         new_thread_id,
         agent_type,
         prompt,
         status,
     } = ev;
-    let new_agent = new_thread_id
-        .map(|id| detail_line_spans("agent", agent_ref_spans(&id, agent_type.as_deref())));
-    let mut details = vec![
-        detail_line("call", call_id),
-        new_agent.unwrap_or_else(|| detail_line("agent", Span::from("not created").dim())),
-        status_line(&status),
-    ];
-    if let Some(line) = prompt_line(&prompt) {
-        details.push(line);
+
+    let sender_type = sender_agent_type(&sender_thread_id, agent_types, main_thread_id);
+    let mut lines = vec![vec![agent_handle_span(&sender_thread_id, sender_type)].into()];
+
+    match new_thread_id {
+        Some(new_thread_id) => {
+            let new_type = agent_types
+                .get(&new_thread_id)
+                .map(String::as_str)
+                .or(agent_type.as_deref());
+            lines.push(
+                vec![
+                    Span::from("Spawned ").dim(),
+                    agent_handle_span(&new_thread_id, new_type),
+                    Span::from(" (").dim(),
+                    status_span(&status),
+                    Span::from(")").dim(),
+                ]
+                .into(),
+            );
+        }
+        None => {
+            lines.push(
+                vec![
+                    Span::from("Spawn failed: ").red().dim(),
+                    Span::from("agent not created").red().dim(),
+                    Span::from(" (").dim(),
+                    status_span(&status),
+                    Span::from(")").dim(),
+                ]
+                .into(),
+            );
+        }
     }
-    collab_event("Agent spawned", details)
+
+    if !prompt.trim().is_empty() {
+        let preview = single_line_preview(&prompt, COLLAB_PROMPT_PREVIEW_GRAPHEMES);
+        lines.push(highlight_mentions(&preview).dim());
+    }
+
+    PlainHistoryCell::new(lines)
 }
 
 pub(crate) fn interaction_end(
     ev: CollabAgentInteractionEndEvent,
     agent_types: &HashMap<ThreadId, String>,
+    main_thread_id: Option<&ThreadId>,
 ) -> PlainHistoryCell {
     let CollabAgentInteractionEndEvent {
-        call_id,
-        sender_thread_id: _,
+        call_id: _,
+        sender_thread_id,
         receiver_thread_id,
         prompt,
         status,
     } = ev;
-    let mut details = vec![
-        detail_line("call", call_id),
-        detail_line_spans(
-            "receiver",
-            agent_ref_spans(
-                &receiver_thread_id,
-                agent_types.get(&receiver_thread_id).map(String::as_str),
-            ),
-        ),
-        status_line(&status),
-    ];
-    if let Some(line) = prompt_line(&prompt) {
-        details.push(line);
+
+    let sender_type = sender_agent_type(&sender_thread_id, agent_types, main_thread_id);
+    let receiver_type = agent_types.get(&receiver_thread_id).map(String::as_str);
+    let mut lines = Vec::new();
+    lines.push(
+        vec![
+            agent_handle_span(&sender_thread_id, sender_type),
+            Span::from(" → ").dim(),
+            agent_handle_span(&receiver_thread_id, receiver_type),
+            Span::from(" (").dim(),
+            status_span(&status),
+            Span::from(")").dim(),
+        ]
+        .into(),
+    );
+
+    if !prompt.trim().is_empty() {
+        let preview = single_line_preview(&prompt, COLLAB_PROMPT_PREVIEW_GRAPHEMES);
+        lines.push(highlight_mentions(&preview));
     }
-    collab_event("Input sent", details)
+
+    PlainHistoryCell::new(lines)
 }
 
 pub(crate) fn waiting_begin(
     ev: CollabWaitingBeginEvent,
     agent_types: &HashMap<ThreadId, String>,
+    main_thread_id: Option<&ThreadId>,
 ) -> PlainHistoryCell {
     let CollabWaitingBeginEvent {
-        call_id,
-        sender_thread_id: _,
+        call_id: _,
+        sender_thread_id,
         receiver_thread_ids,
     } = ev;
-    let details = vec![
-        detail_line("call", call_id),
-        detail_line_spans(
-            "receivers",
-            agents_list_spans(&receiver_thread_ids, agent_types),
-        ),
-    ];
-    collab_event("Waiting for agents", details)
+
+    let sender_type = sender_agent_type(&sender_thread_id, agent_types, main_thread_id);
+    let mut lines = vec![vec![agent_handle_span(&sender_thread_id, sender_type)].into()];
+    let mut message_spans = vec![Span::from("Waiting for ").dim()];
+    message_spans.extend(agent_handle_list_spans(&receiver_thread_ids, agent_types));
+    lines.push(message_spans.into());
+    PlainHistoryCell::new(lines)
 }
 
 pub(crate) fn waiting_end(
     ev: CollabWaitingEndEvent,
     agent_types: &HashMap<ThreadId, String>,
+    main_thread_id: Option<&ThreadId>,
 ) -> Vec<PlainHistoryCell> {
     let CollabWaitingEndEvent {
         call_id: _,
@@ -187,7 +255,7 @@ pub(crate) fn waiting_end(
         statuses,
     } = ev;
 
-    let sender_type = agent_types.get(&sender_thread_id).map(String::as_str);
+    let sender_type = sender_agent_type(&sender_thread_id, agent_types, main_thread_id);
     let mut cells = Vec::new();
 
     let summary = wait_summary_text(&statuses);
@@ -206,10 +274,8 @@ pub(crate) fn waiting_end(
         let agent_type = agent_types.get(&thread_id).map(String::as_str);
         match status {
             AgentStatus::Completed(Some(message)) => {
-                let message_preview = truncate_text(
-                    &message.split_whitespace().collect::<Vec<_>>().join(" "),
-                    COLLAB_AGENT_RESPONSE_PREVIEW_GRAPHEMES,
-                );
+                let message_preview =
+                    single_line_preview(message, COLLAB_AGENT_RESPONSE_PREVIEW_GRAPHEMES);
                 cells.push(agent_message_cell(
                     &thread_id,
                     agent_type,
@@ -218,10 +284,8 @@ pub(crate) fn waiting_end(
                 ));
             }
             AgentStatus::Errored(error) => {
-                let error_preview = truncate_text(
-                    &error.split_whitespace().collect::<Vec<_>>().join(" "),
-                    COLLAB_AGENT_ERROR_PREVIEW_GRAPHEMES,
-                );
+                let error_preview =
+                    single_line_preview(error, COLLAB_AGENT_ERROR_PREVIEW_GRAPHEMES);
                 cells.push(agent_message_cell(
                     &thread_id,
                     agent_type,
@@ -239,81 +303,78 @@ pub(crate) fn waiting_end(
 pub(crate) fn close_end(
     ev: CollabCloseEndEvent,
     agent_types: &HashMap<ThreadId, String>,
+    main_thread_id: Option<&ThreadId>,
 ) -> PlainHistoryCell {
     let CollabCloseEndEvent {
-        call_id,
-        sender_thread_id: _,
+        call_id: _,
+        sender_thread_id,
         receiver_thread_id,
         status,
     } = ev;
-    let details = vec![
-        detail_line("call", call_id),
-        detail_line_spans(
-            "receiver",
-            agent_ref_spans(
-                &receiver_thread_id,
-                agent_types.get(&receiver_thread_id).map(String::as_str),
-            ),
-        ),
-        status_line(&status),
-    ];
-    collab_event("Agent closed", details)
+
+    let sender_type = sender_agent_type(&sender_thread_id, agent_types, main_thread_id);
+    let receiver_type = agent_types.get(&receiver_thread_id).map(String::as_str);
+    PlainHistoryCell::new(vec![
+        vec![agent_handle_span(&sender_thread_id, sender_type)].into(),
+        vec![
+            Span::from("Closed ").dim(),
+            agent_handle_span(&receiver_thread_id, receiver_type),
+            Span::from(" (").dim(),
+            status_span(&status),
+            Span::from(")").dim(),
+        ]
+        .into(),
+    ])
 }
 
 pub(crate) fn resume_begin(
     ev: CollabResumeBeginEvent,
     agent_types: &HashMap<ThreadId, String>,
+    main_thread_id: Option<&ThreadId>,
 ) -> PlainHistoryCell {
     let CollabResumeBeginEvent {
-        call_id,
-        sender_thread_id: _,
+        call_id: _,
+        sender_thread_id,
         receiver_thread_id,
     } = ev;
-    let details = vec![
-        detail_line("call", call_id),
-        detail_line_spans(
-            "receiver",
-            agent_ref_spans(
-                &receiver_thread_id,
-                agent_types.get(&receiver_thread_id).map(String::as_str),
-            ),
-        ),
-    ];
-    collab_event("Resuming agent", details)
+
+    let sender_type = sender_agent_type(&sender_thread_id, agent_types, main_thread_id);
+    let receiver_type = agent_types.get(&receiver_thread_id).map(String::as_str);
+    PlainHistoryCell::new(vec![
+        vec![agent_handle_span(&sender_thread_id, sender_type)].into(),
+        vec![
+            Span::from("Resuming ").dim(),
+            agent_handle_span(&receiver_thread_id, receiver_type),
+        ]
+        .into(),
+    ])
 }
 
 pub(crate) fn resume_end(
     ev: CollabResumeEndEvent,
     agent_types: &HashMap<ThreadId, String>,
+    main_thread_id: Option<&ThreadId>,
 ) -> PlainHistoryCell {
     let CollabResumeEndEvent {
-        call_id,
-        sender_thread_id: _,
+        call_id: _,
+        sender_thread_id,
         receiver_thread_id,
         status,
     } = ev;
-    let details = vec![
-        detail_line("call", call_id),
-        detail_line_spans(
-            "receiver",
-            agent_ref_spans(
-                &receiver_thread_id,
-                agent_types.get(&receiver_thread_id).map(String::as_str),
-            ),
-        ),
-        status_line(&status),
-    ];
-    collab_event("Agent resumed", details)
-}
 
-fn collab_event(title: impl Into<String>, details: Vec<Line<'static>>) -> PlainHistoryCell {
-    let title = title.into();
-    let mut lines: Vec<Line<'static>> =
-        vec![vec![Span::from("• ").dim(), Span::from(title).bold()].into()];
-    if !details.is_empty() {
-        lines.extend(prefix_lines(details, "  └ ".dim(), "    ".into()));
-    }
-    PlainHistoryCell::new(lines)
+    let sender_type = sender_agent_type(&sender_thread_id, agent_types, main_thread_id);
+    let receiver_type = agent_types.get(&receiver_thread_id).map(String::as_str);
+    PlainHistoryCell::new(vec![
+        vec![agent_handle_span(&sender_thread_id, sender_type)].into(),
+        vec![
+            Span::from("Resumed ").dim(),
+            agent_handle_span(&receiver_thread_id, receiver_type),
+            Span::from(" (").dim(),
+            status_span(&status),
+            Span::from(")").dim(),
+        ]
+        .into(),
+    ])
 }
 
 fn wait_summary_text(statuses: &HashMap<ThreadId, AgentStatus>) -> String {
@@ -378,14 +439,6 @@ fn agent_message_cell(
     ])
 }
 
-fn detail_line(label: &str, value: impl Into<Span<'static>>) -> Line<'static> {
-    vec![Span::from(format!("{label}: ")).dim(), value.into()].into()
-}
-
-fn status_line(status: &AgentStatus) -> Line<'static> {
-    detail_line("status", status_span(status))
-}
-
 fn status_span(status: &AgentStatus) -> Span<'static> {
     match status {
         AgentStatus::PendingInit => Span::from("pending init").dim(),
@@ -395,25 +448,6 @@ fn status_span(status: &AgentStatus) -> Span<'static> {
         AgentStatus::Shutdown => Span::from("shutdown").dim(),
         AgentStatus::NotFound => Span::from("not found").red(),
     }
-}
-
-fn prompt_line(prompt: &str) -> Option<Line<'static>> {
-    let trimmed = prompt.trim();
-    if trimmed.is_empty() {
-        None
-    } else {
-        Some(detail_line(
-            "prompt",
-            Span::from(truncate_text(trimmed, COLLAB_PROMPT_PREVIEW_GRAPHEMES)).dim(),
-        ))
-    }
-}
-
-fn detail_line_spans(label: &str, mut value: Vec<Span<'static>>) -> Line<'static> {
-    let mut spans = Vec::with_capacity(value.len() + 1);
-    spans.push(Span::from(format!("{label}: ")).dim());
-    spans.append(&mut value);
-    spans.into()
 }
 
 #[cfg(test)]
@@ -460,6 +494,7 @@ mod tests {
                 statuses,
             },
             &agent_types,
+            Some(&sender_thread_id),
         );
 
         let summary_lines = cells[0].display_lines(80);
@@ -502,5 +537,239 @@ mod tests {
         }
 
         assert_snapshot!(rendered.trim_end());
+    }
+
+    #[test]
+    fn spawn_end_renders_chat_like_message() {
+        let sender_thread_id =
+            ThreadId::from_string("00000000-0000-0000-0000-000000000001").unwrap();
+        let scout_thread_id =
+            ThreadId::from_string("00000000-0000-0000-0000-000000000002").unwrap();
+
+        let mut agent_types = HashMap::new();
+        agent_types.insert(sender_thread_id, "main".to_string());
+        agent_types.insert(scout_thread_id, "scout".to_string());
+
+        let cell = spawn_end(
+            CollabAgentSpawnEndEvent {
+                call_id: "call-1".to_string(),
+                sender_thread_id,
+                new_thread_id: Some(scout_thread_id),
+                agent_type: Some("scout".to_string()),
+                prompt: "Collect context for @scout.".to_string(),
+                status: AgentStatus::Running,
+            },
+            &agent_types,
+            Some(&sender_thread_id),
+        );
+
+        let rendered = cell
+            .display_lines(80)
+            .iter()
+            .flat_map(|line| line.spans.iter())
+            .map(|span| span.content.clone())
+            .collect::<String>();
+        assert!(rendered.contains("@main"));
+        assert!(rendered.contains("Spawned"));
+
+        assert_snapshot!(
+            cell.display_lines(80)
+                .iter()
+                .map(|line| line
+                    .spans
+                    .iter()
+                    .map(|span| span.content.clone())
+                    .collect::<String>())
+                .collect::<Vec<_>>()
+                .join("\n")
+        );
+    }
+
+    #[test]
+    fn interaction_end_renders_sender_to_receiver_chat() {
+        let sender_thread_id =
+            ThreadId::from_string("00000000-0000-0000-0000-000000000001").unwrap();
+        let receiver_thread_id =
+            ThreadId::from_string("00000000-0000-0000-0000-000000000002").unwrap();
+        let mut agent_types = HashMap::new();
+        agent_types.insert(sender_thread_id, "main".to_string());
+        agent_types.insert(receiver_thread_id, "devops-engineer".to_string());
+
+        let cell = interaction_end(
+            CollabAgentInteractionEndEvent {
+                call_id: "call-1".to_string(),
+                sender_thread_id,
+                receiver_thread_id,
+                prompt: "Please deploy and report back to @main.".to_string(),
+                status: AgentStatus::Running,
+            },
+            &agent_types,
+            Some(&sender_thread_id),
+        );
+
+        assert_snapshot!(
+            cell.display_lines(80)
+                .iter()
+                .map(|line| line
+                    .spans
+                    .iter()
+                    .map(|span| span.content.clone())
+                    .collect::<String>())
+                .collect::<Vec<_>>()
+                .join("\n")
+        );
+    }
+
+    #[test]
+    fn waiting_begin_renders_chat_like_message() {
+        let sender_thread_id =
+            ThreadId::from_string("00000000-0000-0000-0000-000000000001").unwrap();
+        let scout_thread_id =
+            ThreadId::from_string("00000000-0000-0000-0000-000000000002").unwrap();
+        let validator_thread_id =
+            ThreadId::from_string("00000000-0000-0000-0000-000000000003").unwrap();
+
+        let mut agent_types = HashMap::new();
+        agent_types.insert(sender_thread_id, "main".to_string());
+        agent_types.insert(scout_thread_id, "scout".to_string());
+        agent_types.insert(validator_thread_id, "validator".to_string());
+
+        let cell = waiting_begin(
+            CollabWaitingBeginEvent {
+                sender_thread_id,
+                receiver_thread_ids: vec![scout_thread_id, validator_thread_id],
+                call_id: "call-1".to_string(),
+            },
+            &agent_types,
+            Some(&sender_thread_id),
+        );
+
+        assert_snapshot!(
+            cell.display_lines(80)
+                .iter()
+                .map(|line| line
+                    .spans
+                    .iter()
+                    .map(|span| span.content.clone())
+                    .collect::<String>())
+                .collect::<Vec<_>>()
+                .join("\n")
+        );
+    }
+
+    #[test]
+    fn close_end_renders_chat_like_message() {
+        let sender_thread_id =
+            ThreadId::from_string("00000000-0000-0000-0000-000000000001").unwrap();
+        let receiver_thread_id =
+            ThreadId::from_string("00000000-0000-0000-0000-000000000002").unwrap();
+        let mut agent_types = HashMap::new();
+        agent_types.insert(sender_thread_id, "main".to_string());
+        agent_types.insert(receiver_thread_id, "scout".to_string());
+
+        let cell = close_end(
+            CollabCloseEndEvent {
+                call_id: "call-1".to_string(),
+                sender_thread_id,
+                receiver_thread_id,
+                status: AgentStatus::Shutdown,
+            },
+            &agent_types,
+            Some(&sender_thread_id),
+        );
+
+        assert_snapshot!(
+            cell.display_lines(80)
+                .iter()
+                .map(|line| line
+                    .spans
+                    .iter()
+                    .map(|span| span.content.clone())
+                    .collect::<String>())
+                .collect::<Vec<_>>()
+                .join("\n")
+        );
+    }
+
+    #[test]
+    fn resume_begin_and_end_render_chat_like_message() {
+        let sender_thread_id =
+            ThreadId::from_string("00000000-0000-0000-0000-000000000001").unwrap();
+        let receiver_thread_id =
+            ThreadId::from_string("00000000-0000-0000-0000-000000000002").unwrap();
+        let mut agent_types = HashMap::new();
+        agent_types.insert(sender_thread_id, "main".to_string());
+        agent_types.insert(receiver_thread_id, "scout".to_string());
+
+        let begin_cell = resume_begin(
+            CollabResumeBeginEvent {
+                call_id: "call-1".to_string(),
+                sender_thread_id,
+                receiver_thread_id,
+            },
+            &agent_types,
+            Some(&sender_thread_id),
+        );
+        let end_cell = resume_end(
+            CollabResumeEndEvent {
+                call_id: "call-1".to_string(),
+                sender_thread_id,
+                receiver_thread_id,
+                status: AgentStatus::Running,
+            },
+            &agent_types,
+            Some(&sender_thread_id),
+        );
+
+        let rendered = [begin_cell, end_cell]
+            .into_iter()
+            .map(|cell| {
+                cell.display_lines(80)
+                    .iter()
+                    .map(|line| {
+                        line.spans
+                            .iter()
+                            .map(|span| span.content.clone())
+                            .collect::<String>()
+                    })
+                    .collect::<Vec<_>>()
+                    .join("\n")
+            })
+            .collect::<Vec<_>>()
+            .join("\n---\n");
+        assert_snapshot!(rendered);
+    }
+
+    #[test]
+    fn waiting_begin_renders_unknown_agents_with_thread_suffix() {
+        let sender_thread_id =
+            ThreadId::from_string("00000000-0000-0000-0000-000000000001").unwrap();
+        let unknown_thread_id =
+            ThreadId::from_string("00000000-0000-0000-0000-000000000002").unwrap();
+
+        let mut agent_types = HashMap::new();
+        agent_types.insert(sender_thread_id, "main".to_string());
+
+        let cell = waiting_begin(
+            CollabWaitingBeginEvent {
+                sender_thread_id,
+                receiver_thread_ids: vec![unknown_thread_id],
+                call_id: "call-1".to_string(),
+            },
+            &agent_types,
+            Some(&sender_thread_id),
+        );
+
+        assert_snapshot!(
+            cell.display_lines(80)
+                .iter()
+                .map(|line| line
+                    .spans
+                    .iter()
+                    .map(|span| span.content.clone())
+                    .collect::<String>())
+                .collect::<Vec<_>>()
+                .join("\n")
+        );
     }
 }

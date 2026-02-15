@@ -1,0 +1,9 @@
+---
+source: tui/src/collab.rs
+expression: rendered
+---
+@main
+Resuming @scout
+---
+@main
+Resumed @scout (running)

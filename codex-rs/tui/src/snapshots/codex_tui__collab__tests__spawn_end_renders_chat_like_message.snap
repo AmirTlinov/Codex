@@ -1,0 +1,7 @@
+---
+source: tui/src/collab.rs
+expression: "cell.display_lines(80).iter().map(|line|\nline.spans.iter().map(|span|\nspan.content.clone()).collect::<String>()).collect::<Vec<_>>().join(\"\\n\")"
+---
+@main
+Spawned @scout (running)
+Collect context for @scout.
