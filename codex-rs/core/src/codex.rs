@@ -525,6 +525,7 @@ pub(crate) struct Session {
     pending_mcp_server_refresh_config: Mutex<Option<McpServerRefreshConfig>>,
     pub(crate) active_turn: Mutex<Option<ActiveTurn>>,
     pub(crate) active_plan_dir: Mutex<Option<PathBuf>>,
+    collab_waiting_threads: Mutex<HashSet<ThreadId>>,
     pub(crate) services: SessionServices,
     js_repl: Arc<JsReplHandle>,
     next_internal_sub_id: AtomicU64,
@@ -1391,6 +1392,7 @@ impl Session {
             pending_mcp_server_refresh_config: Mutex::new(None),
             active_turn: Mutex::new(None),
             active_plan_dir: Mutex::new(None),
+            collab_waiting_threads: Mutex::new(HashSet::new()),
             services,
             js_repl,
             next_internal_sub_id: AtomicU64::new(0),
@@ -3199,6 +3201,13 @@ async fn submission_loop(sess: Arc<Session>, config: Arc<Config>, rx_sub: Receiv
                 handlers::user_input_or_turn(&sess, sub.id.clone(), sub.op, &mut previous_context)
                     .await;
             }
+            Op::CollabSendInput {
+                receiver_thread_ids,
+                items,
+            } => {
+                handlers::collab_send_input(&sess, sub.id.clone(), receiver_thread_ids, items)
+                    .await;
+            }
             Op::ExecApproval {
                 id: approval_id,
                 turn_id,
@@ -3303,6 +3312,7 @@ async fn submission_loop(sess: Arc<Session>, config: Arc<Config>, rx_sub: Receiv
 
 /// Operation handlers
 mod handlers {
+    use crate::agent::AgentStatus;
     use crate::codex::Session;
     use crate::codex::SessionSettingsUpdate;
     use crate::codex::SteerInputError;
@@ -3310,6 +3320,8 @@ mod handlers {
 
     use crate::codex::spawn_review_thread;
     use crate::config::Config;
+    use crate::error::CodexErr;
+    use crate::features::Feature;
 
     use crate::mcp::auth::compute_auth_statuses;
     use crate::mcp::collect_mcp_snapshot_from_manager;
@@ -3343,16 +3355,26 @@ mod handlers {
     use codex_protocol::request_user_input::RequestUserInputResponse;
 
     use crate::context_manager::is_user_turn_boundary;
+    use codex_protocol::ThreadId;
     use codex_protocol::config_types::CollaborationMode;
     use codex_protocol::config_types::ModeKind;
     use codex_protocol::config_types::Settings;
     use codex_protocol::dynamic_tools::DynamicToolResponse;
     use codex_protocol::mcp::RequestId as ProtocolRequestId;
+    use codex_protocol::protocol::CollabAgentInteractionBeginEvent;
+    use codex_protocol::protocol::CollabAgentInteractionEndEvent;
+    use codex_protocol::protocol::CollabWaitingBeginEvent;
+    use codex_protocol::protocol::CollabWaitingEndEvent;
     use codex_protocol::user_input::UserInput;
     use codex_rmcp_client::ElicitationAction;
     use codex_rmcp_client::ElicitationResponse;
+    use futures::StreamExt;
+    use futures::stream::FuturesUnordered;
+    use std::collections::HashMap;
+    use std::collections::HashSet;
     use std::path::PathBuf;
     use std::sync::Arc;
+    use std::time::Duration;
     use tracing::info;
     use tracing::warn;
 
@@ -3362,6 +3384,303 @@ mod handlers {
 
     pub async fn clean_background_terminals(sess: &Arc<Session>) {
         sess.close_unified_exec_processes().await;
+    }
+
+    pub async fn collab_send_input(
+        sess: &Arc<Session>,
+        sub_id: String,
+        receiver_thread_ids: Vec<ThreadId>,
+        items: Vec<UserInput>,
+    ) {
+        const MAX_ACTIVE_WAITS: usize = 32;
+        const WAIT_TIMEOUT: Duration =
+            Duration::from_millis(crate::tools::handlers::collab::MAX_WAIT_TIMEOUT_MS as u64);
+
+        if !sess.features.enabled(Feature::Collab) {
+            sess.send_event_raw(Event {
+                id: sub_id,
+                msg: EventMsg::Error(ErrorEvent {
+                    message: "Collaboration is disabled for this session.".to_string(),
+                    codex_error_info: Some(CodexErrorInfo::BadRequest),
+                }),
+            })
+            .await;
+            return;
+        }
+
+        if receiver_thread_ids.is_empty() {
+            sess.send_event_raw(Event {
+                id: sub_id,
+                msg: EventMsg::Error(ErrorEvent {
+                    message: "Missing @agent target(s).".to_string(),
+                    codex_error_info: Some(CodexErrorInfo::BadRequest),
+                }),
+            })
+            .await;
+            return;
+        }
+
+        if items.is_empty() {
+            sess.send_event_raw(Event {
+                id: sub_id,
+                msg: EventMsg::Error(ErrorEvent {
+                    message: "Empty message can't be sent to an agent.".to_string(),
+                    codex_error_info: Some(CodexErrorInfo::BadRequest),
+                }),
+            })
+            .await;
+            return;
+        }
+
+        fn input_preview(items: &[UserInput]) -> String {
+            const TEXT_PREVIEW_CHARS: usize = 200;
+
+            let parts: Vec<String> = items
+                .iter()
+                .map(|item| match item {
+                    UserInput::Text { text, .. } => {
+                        let trimmed = text.trim();
+                        if trimmed.is_empty() {
+                            String::new()
+                        } else {
+                            let mut preview = String::new();
+                            let mut chars = trimmed.chars();
+                            for ch in chars.by_ref().take(TEXT_PREVIEW_CHARS) {
+                                preview.push(ch);
+                            }
+                            if chars.next().is_some() {
+                                preview.push('…');
+                            }
+                            preview
+                        }
+                    }
+                    UserInput::Image { .. } => "[image]".to_string(),
+                    UserInput::LocalImage { .. } => "[local_image]".to_string(),
+                    UserInput::Skill { name, .. } => format!("[skill:{name}]"),
+                    UserInput::Mention { name, .. } => format!("[mention:{name}]"),
+                    _ => "[input]".to_string(),
+                })
+                .collect();
+
+            parts.join("\n")
+        }
+
+        async fn wait_for_final_status(
+            sess: &Arc<Session>,
+            receiver_thread_id: ThreadId,
+            timeout: Duration,
+        ) -> (AgentStatus, bool) {
+            use crate::agent::status::is_final;
+
+            let mut status_rx = match sess
+                .services
+                .agent_control
+                .subscribe_status(receiver_thread_id)
+                .await
+            {
+                Ok(rx) => rx,
+                Err(CodexErr::ThreadNotFound(_)) => return (AgentStatus::NotFound, false),
+                Err(err) => {
+                    return (
+                        AgentStatus::Errored(format!(
+                            "Failed to subscribe to agent status updates: {err}"
+                        )),
+                        false,
+                    );
+                }
+            };
+
+            let mut status = status_rx.borrow().clone();
+            if is_final(&status) {
+                return (status, false);
+            }
+
+            let deadline = tokio::time::Instant::now() + timeout;
+            loop {
+                match tokio::time::timeout_at(deadline, status_rx.changed()).await {
+                    Ok(Ok(())) => {
+                        status = status_rx.borrow().clone();
+                        if is_final(&status) {
+                            return (status, false);
+                        }
+                    }
+                    Ok(Err(_)) => {
+                        let latest = sess
+                            .services
+                            .agent_control
+                            .get_status(receiver_thread_id)
+                            .await;
+                        return (latest, false);
+                    }
+                    Err(_) => {
+                        let latest = sess
+                            .services
+                            .agent_control
+                            .get_status(receiver_thread_id)
+                            .await;
+                        return (latest, true);
+                    }
+                }
+            }
+        }
+
+        let call_id = sub_id.clone();
+        let prompt = input_preview(&items);
+
+        let mut dedup_targets = HashSet::new();
+        let mut targets = Vec::with_capacity(receiver_thread_ids.len());
+        for receiver_thread_id in receiver_thread_ids {
+            if dedup_targets.insert(receiver_thread_id) {
+                targets.push(receiver_thread_id);
+            }
+        }
+
+        for receiver_thread_id in &targets {
+            sess.send_event_raw(Event {
+                id: sub_id.clone(),
+                msg: CollabAgentInteractionBeginEvent {
+                    call_id: call_id.clone(),
+                    sender_thread_id: sess.conversation_id,
+                    receiver_thread_id: *receiver_thread_id,
+                    prompt: prompt.clone(),
+                }
+                .into(),
+            })
+            .await;
+
+            let result = sess
+                .services
+                .agent_control
+                .send_input(*receiver_thread_id, items.clone())
+                .await;
+
+            let status = sess
+                .services
+                .agent_control
+                .get_status(*receiver_thread_id)
+                .await;
+
+            sess.send_event_raw(Event {
+                id: sub_id.clone(),
+                msg: CollabAgentInteractionEndEvent {
+                    call_id: call_id.clone(),
+                    sender_thread_id: sess.conversation_id,
+                    receiver_thread_id: *receiver_thread_id,
+                    prompt: prompt.clone(),
+                    status: status.clone(),
+                }
+                .into(),
+            })
+            .await;
+
+            if let Err(err) = result {
+                sess.send_event_raw(Event {
+                    id: sub_id.clone(),
+                    msg: EventMsg::Error(ErrorEvent {
+                        message: format!("Failed to send to agent {receiver_thread_id}: {err}"),
+                        codex_error_info: Some(CodexErrorInfo::BadRequest),
+                    }),
+                })
+                .await;
+            }
+        }
+
+        let mut overflow = Vec::new();
+        let mut wait_targets = Vec::new();
+        {
+            let mut guard = sess.collab_waiting_threads.lock().await;
+            for receiver_thread_id in &targets {
+                if guard.contains(receiver_thread_id) {
+                    continue;
+                }
+                if guard.len() >= MAX_ACTIVE_WAITS {
+                    overflow.push(*receiver_thread_id);
+                    continue;
+                }
+                guard.insert(*receiver_thread_id);
+                wait_targets.push(*receiver_thread_id);
+            }
+        }
+
+        if !overflow.is_empty() {
+            sess.send_event_raw(Event {
+                id: sub_id.clone(),
+                msg: EventMsg::Error(ErrorEvent {
+                    message: format!(
+                        "Too many active agent waits (limit {MAX_ACTIVE_WAITS}); skipping waits for {} target(s).",
+                        overflow.len()
+                    ),
+                    codex_error_info: Some(CodexErrorInfo::BadRequest),
+                }),
+            })
+            .await;
+        }
+
+        if wait_targets.is_empty() {
+            return;
+        }
+
+        sess.send_event_raw(Event {
+            id: sub_id.clone(),
+            msg: CollabWaitingBeginEvent {
+                sender_thread_id: sess.conversation_id,
+                receiver_thread_ids: wait_targets.clone(),
+                call_id: call_id.clone(),
+            }
+            .into(),
+        })
+        .await;
+
+        let sess = Arc::clone(sess);
+        let sub_id = sub_id.clone();
+        let call_id = call_id.clone();
+        tokio::spawn(async move {
+            let mut futures = FuturesUnordered::new();
+            for receiver_thread_id in wait_targets {
+                let sess = Arc::clone(&sess);
+                futures.push(async move {
+                    let (mut status, timed_out) =
+                        wait_for_final_status(&sess, receiver_thread_id, WAIT_TIMEOUT).await;
+
+                    if timed_out {
+                        let latest_label = match status {
+                            AgentStatus::PendingInit => "pending init",
+                            AgentStatus::Running => "running",
+                            AgentStatus::Completed(_) => "completed",
+                            AgentStatus::Errored(_) => "errored",
+                            AgentStatus::Shutdown => "shutdown",
+                            AgentStatus::NotFound => "not found",
+                        };
+                        status = AgentStatus::Errored(format!(
+                            "Timed out waiting for response ({latest_label})."
+                        ));
+                    }
+
+                    {
+                        let mut guard = sess.collab_waiting_threads.lock().await;
+                        guard.remove(&receiver_thread_id);
+                    }
+
+                    (receiver_thread_id, status)
+                });
+            }
+
+            let mut statuses = HashMap::new();
+            while let Some((receiver_thread_id, status)) = futures.next().await {
+                statuses.insert(receiver_thread_id, status);
+            }
+
+            sess.send_event_raw(Event {
+                id: sub_id,
+                msg: CollabWaitingEndEvent {
+                    sender_thread_id: sess.conversation_id,
+                    call_id,
+                    statuses,
+                }
+                .into(),
+            })
+            .await;
+        });
     }
 
     pub async fn override_turn_context(
@@ -7153,6 +7472,7 @@ mod tests {
             pending_mcp_server_refresh_config: Mutex::new(None),
             active_turn: Mutex::new(None),
             active_plan_dir: Mutex::new(None),
+            collab_waiting_threads: Mutex::new(HashSet::new()),
             services,
             js_repl,
             next_internal_sub_id: AtomicU64::new(0),
@@ -7300,6 +7620,7 @@ mod tests {
             pending_mcp_server_refresh_config: Mutex::new(None),
             active_turn: Mutex::new(None),
             active_plan_dir: Mutex::new(None),
+            collab_waiting_threads: Mutex::new(HashSet::new()),
             services,
             js_repl,
             next_internal_sub_id: AtomicU64::new(0),

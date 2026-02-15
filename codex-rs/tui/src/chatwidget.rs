@@ -3769,6 +3769,23 @@ impl ChatWidget {
             text_elements,
             mention_bindings,
         } = user_message;
+        let mut text = text;
+        let trimmed_text = text.trim_start();
+        let escaped_at = trimmed_text.starts_with("\\@")
+            && text_elements.is_empty()
+            && mention_bindings.is_empty()
+            && local_images.is_empty();
+        let should_route_collab_mentions = trimmed_text.starts_with('@') && !escaped_at;
+        if escaped_at {
+            if let Some(first_non_ws) = text.find(|ch: char| !ch.is_whitespace())
+                && text[first_non_ws..].starts_with("\\@")
+            {
+                let mut unescaped = String::with_capacity(text.len().saturating_sub(1));
+                unescaped.push_str(&text[..first_non_ws]);
+                unescaped.push_str(&text[first_non_ws + 1..]);
+                text = unescaped;
+            }
+        }
         if text.is_empty() && local_images.is_empty() {
             return;
         }
@@ -3891,6 +3908,23 @@ impl ChatWidget {
                     name: app.name.clone(),
                     path: format!("app://{app_id}"),
                 });
+            }
+        }
+
+        if should_route_collab_mentions && self.collaboration_modes_enabled() {
+            match self.collab_routing_targets(&text) {
+                Ok(receiver_thread_ids) => {
+                    self.submit_op(Op::CollabSendInput {
+                        receiver_thread_ids,
+                        items,
+                    });
+                    self.needs_final_message_separator = false;
+                    return;
+                }
+                Err(err) => {
+                    self.add_error_message(err);
+                    return;
+                }
             }
         }
 
@@ -7321,6 +7355,88 @@ impl ChatWidget {
 
     pub(crate) fn record_collab_agent_type(&mut self, thread_id: ThreadId, agent_type: String) {
         self.collab_agent_types.insert(thread_id, agent_type);
+    }
+
+    fn collab_routing_targets(&self, text: &str) -> Result<Vec<ThreadId>, String> {
+        fn matches_agent_handle(agent_type: &str, handle: &str) -> bool {
+            let handle = handle.trim();
+            if handle.is_empty() {
+                return false;
+            }
+
+            let is_main_handle = handle.eq_ignore_ascii_case("main")
+                || handle.eq_ignore_ascii_case("default")
+                || handle.eq_ignore_ascii_case("orchestrator");
+            if is_main_handle {
+                return agent_type.eq_ignore_ascii_case("main")
+                    || agent_type.eq_ignore_ascii_case("default")
+                    || agent_type.eq_ignore_ascii_case("orchestrator");
+            }
+
+            agent_type.eq_ignore_ascii_case(handle)
+        }
+
+        let trimmed = text.trim_start();
+        let mentions = trimmed
+            .split_whitespace()
+            .map(|token| token.trim_end_matches(|ch| ch == ',' || ch == ':'))
+            .take_while(|token| token.starts_with('@') && token.len() > 1)
+            .map(|token| token.strip_prefix('@').unwrap_or(token))
+            .collect::<Vec<_>>();
+
+        if mentions.is_empty() {
+            return Err("Missing @agent target(s).".to_string());
+        }
+
+        let mut unknown = Vec::new();
+        let mut targets = HashSet::new();
+        for mention in mentions {
+            if mention.eq_ignore_ascii_case("all") {
+                if self.collab_agent_types.is_empty() {
+                    return Err("No agent threads are available yet.".to_string());
+                }
+                for thread_id in self.collab_agent_types.keys().copied() {
+                    if Some(thread_id) != self.thread_id {
+                        targets.insert(thread_id);
+                    }
+                }
+                continue;
+            }
+
+            if let Ok(thread_id) = ThreadId::from_string(mention) {
+                if Some(thread_id) != self.thread_id {
+                    targets.insert(thread_id);
+                }
+                continue;
+            }
+
+            let mut matched = false;
+            for (thread_id, agent_type) in &self.collab_agent_types {
+                if Some(*thread_id) == self.thread_id {
+                    continue;
+                }
+                if matches_agent_handle(agent_type.as_str(), mention) {
+                    targets.insert(*thread_id);
+                    matched = true;
+                }
+            }
+
+            if !matched {
+                unknown.push(format!("@{mention}"));
+            }
+        }
+
+        if !unknown.is_empty() {
+            return Err(format!("Unknown agent mention(s): {}", unknown.join(", ")));
+        }
+
+        if targets.is_empty() {
+            return Err("No agent threads matched the provided @mentions.".to_string());
+        }
+
+        let mut ordered = targets.into_iter().collect::<Vec<_>>();
+        ordered.sort_by(|left, right| left.to_string().cmp(&right.to_string()));
+        Ok(ordered)
     }
 
     pub(crate) fn clear_token_usage(&mut self) {

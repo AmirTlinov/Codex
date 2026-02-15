@@ -146,6 +146,17 @@ pub enum Op {
         personality: Option<Personality>,
     },
 
+    /// Route a user-authored message directly to one or more agent threads.
+    ///
+    /// This is used by the TUI for `@agent ...` / `@role ...` routing so users
+    /// can talk to the agent mesh without switching the active thread.
+    CollabSendInput {
+        /// Target agent thread ids.
+        receiver_thread_ids: Vec<ThreadId>,
+        /// Input items to send (typically a single text item).
+        items: Vec<UserInput>,
+    },
+
     /// Override parts of the persistent turn context for subsequent turns.
     ///
     /// All fields are optional; when omitted, the existing value is preserved.
