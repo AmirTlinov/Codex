@@ -2168,10 +2168,35 @@ impl ChatWidget {
         self.had_work_activity = true;
     }
 
-    fn on_collab_event(&mut self, cell: PlainHistoryCell) {
+    fn on_collab_event(&mut self, cell: impl HistoryCell + 'static) {
         self.flush_answer_stream_with_separator();
         self.add_to_history(cell);
         self.request_redraw();
+    }
+
+    fn on_foreign_agent_message_item_completed(
+        &mut self,
+        thread_id: ThreadId,
+        item: codex_protocol::items::AgentMessageItem,
+    ) {
+        let message = item
+            .content
+            .into_iter()
+            .filter_map(|content| match content {
+                codex_protocol::items::AgentMessageContent::Text { text } => Some(text),
+            })
+            .collect::<Vec<_>>()
+            .join("");
+        if message.trim().is_empty() {
+            return;
+        }
+
+        self.on_collab_event(collab::agent_message(
+            thread_id,
+            message,
+            &self.collab_agent_types,
+            self.thread_id.as_ref(),
+        ));
     }
 
     fn on_get_history_entry_response(
@@ -4246,12 +4271,18 @@ impl ChatWidget {
             | EventMsg::ReasoningRawContentDelta(_)
             | EventMsg::DynamicToolCallRequest(_) => {}
             EventMsg::ItemCompleted(event) => {
-                let item = event.item;
+                let codex_core::protocol::ItemCompletedEvent {
+                    thread_id, item, ..
+                } = event;
                 if let codex_protocol::items::TurnItem::Plan(plan_item) = &item {
                     self.on_plan_item_completed(plan_item.text.clone());
                 }
                 if let codex_protocol::items::TurnItem::AgentMessage(item) = item {
-                    self.on_agent_message_item_completed(item);
+                    if self.thread_id.is_some_and(|own| own != thread_id) {
+                        self.on_foreign_agent_message_item_completed(thread_id, item);
+                    } else {
+                        self.on_agent_message_item_completed(item);
+                    }
                 }
             }
         }

@@ -2715,6 +2715,7 @@ impl App {
             ThreadEventChannel::new_with_session_configured(THREAD_EVENT_CHANNEL_CAPACITY, event);
         let sender = channel.sender.clone();
         let store = Arc::clone(&channel.store);
+        let app_event_tx = self.app_event_tx.clone();
         self.thread_event_channels.insert(thread_id, channel);
         tokio::spawn(async move {
             loop {
@@ -2725,6 +2726,28 @@ impl App {
                         break;
                     }
                 };
+                let should_forward = matches!(
+                    &event.msg,
+                    EventMsg::CollabAgentSpawnBegin(_)
+                        | EventMsg::CollabAgentSpawnEnd(_)
+                        | EventMsg::CollabAgentInteractionBegin(_)
+                        | EventMsg::CollabAgentInteractionEnd(_)
+                        | EventMsg::CollabWaitingBegin(_)
+                        | EventMsg::CollabWaitingEnd(_)
+                        | EventMsg::CollabCloseBegin(_)
+                        | EventMsg::CollabCloseEnd(_)
+                        | EventMsg::CollabResumeBegin(_)
+                        | EventMsg::CollabResumeEnd(_)
+                ) || matches!(
+                    &event.msg,
+                    EventMsg::ItemCompleted(codex_core::protocol::ItemCompletedEvent {
+                        item: TurnItem::AgentMessage(_),
+                        ..
+                    })
+                );
+                if should_forward {
+                    app_event_tx.send(AppEvent::CodexEvent(event.clone()));
+                }
                 let should_send = {
                     let mut guard = store.lock().await;
                     guard.push_event(event.clone());

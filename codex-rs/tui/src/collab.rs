@@ -1,4 +1,6 @@
 use crate::history_cell::PlainHistoryCell;
+use crate::history_cell::PrefixedWrappedHistoryCell;
+use crate::markdown::append_markdown;
 use crate::text_formatting::truncate_text;
 use codex_core::protocol::AgentStatus;
 use codex_core::protocol::CollabAgentInteractionEndEvent;
@@ -15,10 +17,12 @@ use ratatui::style::Style;
 use ratatui::style::Stylize;
 use ratatui::text::Line;
 use ratatui::text::Span;
+use ratatui::text::Text;
 use std::collections::HashMap;
 use std::collections::hash_map::DefaultHasher;
 use std::hash::Hash;
 use std::hash::Hasher;
+use unicode_width::UnicodeWidthStr;
 
 const COLLAB_PROMPT_PREVIEW_GRAPHEMES: usize = 160;
 const COLLAB_AGENT_ERROR_PREVIEW_GRAPHEMES: usize = 160;
@@ -131,6 +135,22 @@ fn sender_agent_type<'a>(
 fn single_line_preview(text: &str, max_graphemes: usize) -> String {
     let normalized = text.split_whitespace().collect::<Vec<_>>().join(" ");
     truncate_text(&normalized, max_graphemes)
+}
+
+pub(crate) fn agent_message(
+    thread_id: ThreadId,
+    message: String,
+    agent_types: &HashMap<ThreadId, String>,
+    main_thread_id: Option<&ThreadId>,
+) -> PrefixedWrappedHistoryCell {
+    let agent_type = sender_agent_type(&thread_id, agent_types, main_thread_id);
+    let label = agent_handle_label(&thread_id, agent_type);
+    let initial_prefix = Line::from(vec![agent_handle_span(&thread_id, agent_type), " ".into()]);
+    let subsequent_prefix = " ".repeat(UnicodeWidthStr::width(label.as_str()) + 1);
+
+    let mut lines = Vec::new();
+    append_markdown(&message, None, &mut lines);
+    PrefixedWrappedHistoryCell::new(Text::from(lines), initial_prefix, subsequent_prefix)
 }
 
 pub(crate) fn spawn_end(

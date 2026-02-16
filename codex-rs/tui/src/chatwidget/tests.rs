@@ -202,6 +202,59 @@ async fn resumed_initial_messages_render_history() {
 }
 
 #[tokio::test]
+async fn foreign_agent_message_renders_with_agent_handle_prefix() {
+    let (mut chat, mut rx, _ops) = make_chatwidget_manual(None).await;
+
+    let main_thread_id = ThreadId::new();
+    let rollout_file = NamedTempFile::new().unwrap();
+    chat.handle_codex_event(Event {
+        id: "configured".into(),
+        msg: EventMsg::SessionConfigured(codex_core::protocol::SessionConfiguredEvent {
+            session_id: main_thread_id,
+            forked_from_id: None,
+            thread_name: None,
+            model: "test-model".to_string(),
+            model_provider_id: "test-provider".to_string(),
+            approval_policy: AskForApproval::Never,
+            sandbox_policy: SandboxPolicy::new_read_only_policy(),
+            cwd: PathBuf::from("/home/user/project"),
+            reasoning_effort: Some(ReasoningEffortConfig::default()),
+            history_log_id: 0,
+            history_entry_count: 0,
+            initial_messages: None,
+            network_proxy: None,
+            rollout_path: Some(rollout_file.path().to_path_buf()),
+        }),
+    });
+    drain_insert_history(&mut rx);
+
+    let scout_thread_id = ThreadId::new();
+    chat.record_collab_agent_type(scout_thread_id, "scout".to_string());
+
+    chat.handle_codex_event(Event {
+        id: "foreign-msg".into(),
+        msg: EventMsg::ItemCompleted(ItemCompletedEvent {
+            thread_id: scout_thread_id,
+            turn_id: "turn-1".to_string(),
+            item: TurnItem::AgentMessage(AgentMessageItem {
+                id: "msg-1".to_string(),
+                content: vec![AgentMessageContent::Text {
+                    text: "I deployed the project and I'm waiting for @review.".to_string(),
+                }],
+                phase: Some(MessagePhase::FinalAnswer),
+            }),
+        }),
+    });
+
+    let cells = drain_insert_history(&mut rx);
+    let rendered = cells
+        .last()
+        .map(|lines| lines_to_single_string(lines))
+        .unwrap_or_default();
+    assert_snapshot!("foreign_agent_message_unified_feed", rendered);
+}
+
+#[tokio::test]
 async fn replayed_user_message_preserves_text_elements_and_local_images() {
     let (mut chat, mut rx, _ops) = make_chatwidget_manual(None).await;
 
@@ -2125,10 +2178,11 @@ fn complete_assistant_message(
     text: &str,
     phase: Option<MessagePhase>,
 ) {
+    let thread_id = chat.thread_id.unwrap_or_else(ThreadId::new);
     chat.handle_codex_event(Event {
         id: format!("raw-{item_id}"),
         msg: EventMsg::ItemCompleted(ItemCompletedEvent {
-            thread_id: ThreadId::new(),
+            thread_id,
             turn_id: "turn-1".to_string(),
             item: TurnItem::AgentMessage(AgentMessageItem {
                 id: item_id.to_string(),
