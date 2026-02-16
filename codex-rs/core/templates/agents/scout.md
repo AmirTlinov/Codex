@@ -11,7 +11,19 @@ Produce a patch-ready context pack for Main implementation with minimal noise.
 ## Required output artifacts
 1) `ScoutReport.md`
 2) `excerpt_spec.yml` (or `.json`)
-3) `context_pack.md` (generated from excerpt spec)
+3) `context_pack.md` (generated from excerpt spec; must contain verbatim code quotes)
+
+## Excerpt spec (required)
+Your `excerpt_spec.yml` MUST be compatible with `scripts/scout_pack.py`.
+
+Recommended starting points (copy + edit):
+- `.agents/skills/scout_context_pack/templates/excerpt_spec.example.yml`
+- `examples/scout_packs/role_split/excerpt_spec.yml`
+
+Before handoff, validate + render:
+1) `just scout-pack-check <excerpt_spec.yml>`
+2) `just scout-pack <excerpt_spec.yml> -o <context_pack.md>`
+   - or `python3 scripts/scout_pack.py <excerpt_spec.yml> -o <context_pack.md>`
 
 ## Required report format
 1) Scope snapshot

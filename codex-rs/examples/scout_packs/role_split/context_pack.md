@@ -6,7 +6,7 @@ Example excerpt spec: package role-split workflow + scout-pack generator into a 
 
 Single command to render a Markdown context pack from this spec.
 
-**CODE_REF:** `justfile:67-81` — justfile: scout-pack
+**CODE_REF:** `CODE_REF::codex-rs::justfile#L67-L81` — justfile: scout-pack
 
 Forwards args to codex-rs/scripts/scout_pack.py (supports -o/--output).
 
@@ -23,16 +23,17 @@ write-app-server-schema *args:
 scout-pack *args:
     python3 scripts/scout_pack.py "$@"
 
-# Tail logs from the state SQLite database
-log *args:
-    if [ "${1:-}" = "--" ]; then shift; fi; cargo run -p codex-state --bin logs_client -- "$@"
+# Validate a Scout excerpt spec and render to stdout (discarded).
+scout-pack-check spec:
+    python3 scripts/scout_pack.py "{{spec}}" -o - >/dev/null
+
 ```
 
 ## codex-rs skills index
 
 Project skill registry in codex-rs.
 
-**CODE_REF:** `codex-rs/.agents/skills/SKILLS.md:1-32` — codex-rs/.agents/skills/SKILLS.md
+**CODE_REF:** `CODE_REF::codex-rs::codex-rs/.agents/skills/SKILLS.md#L1-L32` — codex-rs/.agents/skills/SKILLS.md
 
 Shows discoverability of scout-context-pack skill for agents.
 
@@ -69,45 +70,44 @@ Last verified: YYYY-MM-DD
 
 - [orchestrator-role-split-pipeline](.agents/skills/orchestrator_role_split_pipeline/SKILL.md)
 - [scout-context-pack](.agents/skills/scout_context_pack/SKILL.md)
+
 ```
 
 ## Orchestrator role-split pipeline
 
 How Orchestrator should request Scout context (anchors + excerpt ranges + Mermaid).
 
-**CODE_REF:** `codex-rs/.agents/skills/orchestrator_role_split_pipeline/SKILL.md:1-49` — orchestrator-role-split-pipeline
+**CODE_REF:** `CODE_REF::codex-rs::codex-rs/.agents/skills/orchestrator_role_split_pipeline/SKILL.md#L1-L47` — orchestrator-role-split-pipeline
 
 Defines the contract between Orchestrator and Scout.
 
 ```markdown
 ---
 name: orchestrator-role-split-pipeline
-description: "Оркестратор → Scout→ContextValidator→Builder→PostBuilderValidator с безопасными ролевыми контрактами и плейном"
+description: "Оркестратор → Scout→ContextValidator→Main(implement)→Validator с безопасными контрактами"
 ttl_days: 0
 ---
 
-# Orchestrator role-split pipeline
+# Orchestrator role-split pipeline (builder-off mode)
 
 ## Trigger
-Слой роли/планирования (`Default/Plan`) и инструменты TUI/модели требуются для
-безопасной, атомарной разработки с валидацией контекста и патчей.
+Нужно выполнить задачу итеративно слайсами, сохранив high-signal контекст и fail-closed проверки.
 
 ## Outcome
-- Подтверждено: роли `Default`, `Scout`, `ContextValidator`, `Builder`,
-  `PostBuilderValidator`, `Plan` подключены в runtime.
-- Подтверждено: toolset для ролей жестко ограничен и fail-closed.
-- Подтверждено: `Plan`/`post_builder`/`validator` пайплайны не допускают невалидный патч.
-- Стандарт разведки: Scout отдаёт *контекст‑пак* (anchors + excerpt ranges + Mermaid) вместо код‑дампов,
-  чтобы Builder мог патчить без доразведки (см. skill `scout-context-pack`).
-- Подтверждено: `view_image` в js_repl с предварительным `spawn_agent("scout")` проходит контракт.
-- Подтверждено: плановая схема конфигурации и схема `config.schema.json` синхронизированы.
+- Основной контур: `Scout -> ContextValidator -> Main implement -> Validator`.
+- Scout отдает patch-ready контекст-пак (CODE_REF + excerpt_spec + Mermaid).
+- ContextValidator выдает только `CONTEXT_PACK_APPROVED` или `CONTEXT_PACK_GAPS`.
+- Main делает минимальный патч по slice; Validator проверяет патч на контракт/verify.
 
 ## How to request Scout (copy/paste prompt skeleton)
-Проси Scout так, чтобы он вернул **контекст‑пак, готовый для патча** (без копипасты больших кусков кода):
+Проси Scout так, чтобы он вернул **контекст‑пак, готовый для патча**:
 
-- Sections: Scope snapshot → Key invariants → Anchor map → Excerpt spec → Mermaid → Risks → Unknowns → Next.
-- Доказательства: `CODE_REF` = `path:start-end`.
-- Отдельным файлом/блоком: `excerpt_spec.(yml|json)` по шаблону из skill `scout-context-pack`.
+- Sections: Scope snapshot -> Patch target contract -> Key invariants -> Anchor map -> Excerpt spec -> Mermaid -> Risks -> Unknowns -> Patch readiness.
+- Доказательства: `CODE_REF::<crate>::<path>#L<start>-L<end>`.
+- Артефакты: `ScoutReport.md`, `excerpt_spec.yml`, `context_pack.md`.
+
+## Handoff state machine
+`discover -> validate_ctx -> implement -> review_patch -> final_accept`
 
 ## Pointers
 - `core/src/agent/role.rs`
@@ -124,61 +124,64 @@ ttl_days: 0
 - `.agents/skills/scout_context_pack/SKILL.md`
 
 ## Known risk
-`agent role` и `plan_dir`-паттерны зависят от корректности настроек `~/.codex/plans`.
-Периодически проверять guard-слои и policy для новых API/инструментов.
+- Contract drift между skill docs и runtime templates (`core/templates/agents/*.md`).
+- Лечится регулярной сверкой handoff и CODE_REF формата.
 
 ## Last verified
 Last verified: 2026-02-14
+
 ```
 
 ## Scout context pack contract
 
 Hard rules + templates for a patch-ready scout context pack.
 
-**CODE_REF:** `codex-rs/.agents/skills/scout_context_pack/SKILL.md:1-33` — scout-context-pack
+**CODE_REF:** `CODE_REF::codex-rs::codex-rs/.agents/skills/scout_context_pack/SKILL.md#L1-L33` — scout-context-pack
 
 SSOT for required sections and Excerpt spec usage.
 
 ```markdown
 ---
 name: scout-context-pack
-description: "Scout: собрать patch-ready контекст (anchors + excerpt ranges + Mermaid) без шума"
+description: "Scout: собрать patch-ready контекст-пак (CODE_REF + excerpts + Mermaid) для прямой реализации Main"
 ttl_days: 0
 ---
 
 # Scout context pack (anchors + excerpt ranges)
 
 ## Trigger
-Когда Orchestrator просит “подготовь контекст для патча” / “сделай контекст‑пак”.
+Когда Main/Orchestrator просит контекст для атомарного slice-фикса.
 
 ## Outcome (what you MUST produce)
-1) **Scout report** (Markdown) со строгими секциями и доказательствами через `CODE_REF`.
-2) **Excerpt spec** (YAML/JSON) — список verbatim‑вставок кода через `path + start_line + end_line`.
-3) 1–2 Mermaid‑диаграммы: dependency flow и (если уместно) state machine/handoff.
+1) `ScoutReport.md` со строгими секциями и явным `Patch readiness: PASS|FAIL`.
+2) `excerpt_spec.yml` (или `.json`) с line-anchored verbatim-вырезками.
+3) `context_pack.md`, сгенерированный через `just scout-pack <excerpt_spec.yml> -o <context_pack.md>`.
+4) 1–2 Mermaid диаграммы (минимум dependency flow, опционально state/handoff).
 
-## Hard rules
-- Любое утверждение “это гейт/инвариант/обход/риск” → обязан приложить `CODE_REF`.
-- В отчёте **не** дампить большие куски кода: вместо этого — `CODE_REF` + `excerpt_spec`.
-- Диапазоны строк: **1-indexed**, `end_line` включительно.
-- Если диапазон/файл не найден → явно пометить как `BLOCKER`.
+## Required ScoutReport sections (strict order)
+1) Scope snapshot
+2) Patch target contract
+3) Key invariants / constraints
+4) Anchor map
+5) Excerpt specs
+6) Dependency map
+7) High-confidence risks / edge cases
+8) Missing context items needed before patching
+9) Patch readiness gates
 
-## Templates
-- Report: `.agents/skills/scout_context_pack/templates/ScoutReport.md`
-- Spec: `.agents/skills/scout_context_pack/templates/excerpt_spec.example.yml`
+## CODE_REF contract
+- Каждый ключевой тезис (инвариант/риск/гейт) обязан иметь минимум один `CODE_REF`.
+- Формат:
+  - `CODE_REF::<crate>::<repo_relative_path>#L<start>-L<end>`
+- Пример:
 
-## Consumption (for Orchestrator)
-- Быстро вручную: вытянуть verbatim по `CODE_REF` через `mcp__context__file_slice`/`meaning_expand`.
-- Автоматически: `just scout-pack <excerpt_spec.yml> -o <context_pack.md>`.
-
-## Last verified
-Last verified: 2026-02-14
 ```
 
 ## Generator: scout_pack.py
 
 Fail-closed, deterministic pack renderer (YAML/JSON spec → Markdown).
 
-**CODE_REF:** `codex-rs/scripts/scout_pack.py:1-160` — CLI + spec loading + helpers
+**CODE_REF:** `CODE_REF::codex-rs::codex-rs/scripts/scout_pack.py#L1-L160` — CLI + spec loading + helpers
 
 Entrypoint + YAML/JSON parsing + atomic write primitives.
 
@@ -202,6 +205,9 @@ import sys
 import tempfile
 from pathlib import Path
 from typing import Any
+
+CRATE_RE = re.compile(r"[a-z0-9][a-z0-9_-]*")
+LANG_RE = re.compile(r"[A-Za-z0-9_+\.-]+")
 
 
 def _die(message: str) -> None:
@@ -252,6 +258,36 @@ def _expect_int(value: Any, ctx: str) -> int:
     return value
 
 
+def _expect_optional_str(value: Any, ctx: str) -> str | None:
+    if value is None:
+        return None
+    if not isinstance(value, str):
+        _die(f"{ctx}: expected string")
+    if not value.strip():
+        _die(f"{ctx}: expected non-empty string")
+    return value.strip()
+
+
+def _expect_optional_str_list(value: Any, ctx: str) -> list[str]:
+    if value is None:
+        return []
+    if not isinstance(value, list) or not value:
+        _die(f"{ctx}: expected non-empty list of strings")
+    out: list[str] = []
+    for i, item in enumerate(value):
+        if not isinstance(item, str) or not item.strip():
+            _die(f"{ctx}[{i}]: expected non-empty string")
+        out.append(item.strip())
+    return out
+
+
+def _expect_crate(value: Any, ctx: str) -> str:
+    crate = _expect_str(value, ctx).strip()
+    if not CRATE_RE.fullmatch(crate):
+        _die(f"{ctx}: invalid crate name")
+    return crate
+
+
 def _guess_language(path: Path) -> str:
     if path.name == "justfile":
         return ""
@@ -277,8 +313,8 @@ def _guess_language(path: Path) -> str:
 def _fence(lang: str, body: str) -> str:
     fence_lang = lang.strip() if lang else ""
     if fence_lang:
-        return f"```{fence_lang}\n{body.rstrip('\n')}\n```"
-    return f"```\n{body.rstrip('\n')}\n```"
+        return f"```{fence_lang}\n{body.rstrip('\\n')}\n```"
+    return f"```\n{body.rstrip('\\n')}\n```"
 
 
 def _atomic_write(path: Path, content: str) -> None:
@@ -298,7 +334,30 @@ def _atomic_write(path: Path, content: str) -> None:
 
 
 def _render(spec: dict[str, Any]) -> str:
-    _validate_no_unknown_fields(spec, {"version", "title", "summary", "repo_root", "sections"}, "spec")
+    _validate_no_unknown_fields(
+        spec,
+        {
+            "version",
+            "title",
+            "summary",
+            "repo_root",
+            "default_crate",
+            "task_id",
+            "slice_id",
+            "intent",
+            "quality_gates",
+
+```
+
+**CODE_REF:** `CODE_REF::codex-rs::codex-rs/scripts/scout_pack.py#L161-L282` — validation + renderer
+
+Schema enforcement, path traversal guard, line-range slicing, deterministic markdown.
+
+```python
+            "sections",
+        },
+        "spec",
+    )
 
     version = spec.get("version")
     if version is not None:
@@ -308,6 +367,17 @@ def _render(spec: dict[str, Any]) -> str:
     summary = spec.get("summary")
     if summary is not None and not isinstance(summary, str):
         _die("spec.summary: expected string")
+
+    default_crate_raw = spec.get("default_crate")
+    if default_crate_raw is None:
+        default_crate = "codex-rs"
+    else:
+        default_crate = _expect_crate(default_crate_raw, "spec.default_crate")
+
+    task_id = _expect_optional_str(spec.get("task_id"), "spec.task_id")
+    slice_id = _expect_optional_str(spec.get("slice_id"), "spec.slice_id")
+    intent = _expect_optional_str(spec.get("intent"), "spec.intent")
+    quality_gates = _expect_optional_str_list(spec.get("quality_gates"), "spec.quality_gates")
 
     repo_root_raw = spec.get("repo_root")
     repo_root_str = _expect_str(repo_root_raw, "spec.repo_root")
@@ -320,16 +390,32 @@ def _render(spec: dict[str, Any]) -> str:
         _die("spec.sections: expected non-empty list")
 
     out: list[str] = [f"# {title}"]
+    ranges_by_path: dict[str, list[tuple[int, int, str]]] = {}
     if summary:
         out.append("")
         out.append(summary.strip())
+    if task_id or slice_id or intent:
+        out.append("")
+        out.append("## Metadata")
+        if task_id:
+            out.append(f"- Task: `{task_id}`")
+        if slice_id:
+            out.append(f"- Slice: `{slice_id}`")
+        if intent:
+            out.append(f"- Intent: {intent}")
+        out.append(f"- Default crate: `{default_crate}`")
+    if quality_gates:
+        out.append("")
+        out.append("## Quality gates")
+        for gate in quality_gates:
+            out.append(f"- {gate}")
 
     for i, section in enumerate(sections):
         if not isinstance(section, dict):
             _die(f"spec.sections[{i}]: expected mapping")
         _validate_no_unknown_fields(
             section,
-            {"heading", "description", "mermaid", "excerpts"},
+            {"heading", "description", "notes", "mermaid", "excerpts"},
             f"spec.sections[{i}]",
         )
 
@@ -337,19 +423,15 @@ def _render(spec: dict[str, Any]) -> str:
         description = section.get("description")
         if description is not None and not isinstance(description, str):
             _die(f"spec.sections[{i}].description: expected string")
+        notes = section.get("notes")
+        if notes is not None and not isinstance(notes, str):
+            _die(f"spec.sections[{i}].notes: expected string")
 
         mermaid = section.get("mermaid")
         if mermaid is not None and not isinstance(mermaid, str):
             _die(f"spec.sections[{i}].mermaid: expected string")
 
         excerpts = section.get("excerpts")
-```
-
-**CODE_REF:** `codex-rs/scripts/scout_pack.py:161-282` — validation + renderer
-
-Schema enforcement, path traversal guard, line-range slicing, deterministic markdown.
-
-```python
         if not isinstance(excerpts, list) or not excerpts:
             _die(f"spec.sections[{i}].excerpts: expected non-empty list")
 
@@ -358,6 +440,9 @@ Schema enforcement, path traversal guard, line-range slicing, deterministic mark
         if description:
             out.append("")
             out.append(description.strip())
+        if notes:
+            out.append("")
+            out.append(notes.strip())
         if mermaid and mermaid.strip():
             out.append("")
             out.append(_fence("mermaid", mermaid.strip()))
@@ -367,7 +452,17 @@ Schema enforcement, path traversal guard, line-range slicing, deterministic mark
                 _die(f"spec.sections[{i}].excerpts[{j}]: expected mapping")
             _validate_no_unknown_fields(
                 excerpt,
-                {"id", "path", "start_line", "end_line", "language", "label", "why"},
+                {
+                    "id",
+                    "crate",
+                    "path",
+                    "start_line",
+                    "end_line",
+                    "language",
+                    "label",
+                    "why",
+                    "must_include",
+                },
                 f"spec.sections[{i}].excerpts[{j}]",
             )
 
@@ -381,94 +476,5 @@ Schema enforcement, path traversal guard, line-range slicing, deterministic mark
                 f"spec.sections[{i}].excerpts[{j}].start_line",
             )
             end_line = _expect_int(
-                excerpt.get("end_line"),
-                f"spec.sections[{i}].excerpts[{j}].end_line",
-            )
-            if start_line < 1:
-                _die(f"spec.sections[{i}].excerpts[{j}]: start_line must be >= 1")
-            if end_line < start_line:
-                _die(f"spec.sections[{i}].excerpts[{j}]: end_line must be >= start_line")
 
-            language = excerpt.get("language")
-            if language is not None and not isinstance(language, str):
-                _die(f"spec.sections[{i}].excerpts[{j}].language: expected string")
-            if language is not None and language not in {"", "auto"}:
-                if not re.fullmatch(r"[A-Za-z0-9_+\.-]+", language.strip()):
-                    _die(f"spec.sections[{i}].excerpts[{j}].language: invalid value")
-
-            label = excerpt.get("label")
-            if label is not None and not isinstance(label, str):
-                _die(f"spec.sections[{i}].excerpts[{j}].label: expected string")
-            why = excerpt.get("why")
-            if why is not None and not isinstance(why, str):
-                _die(f"spec.sections[{i}].excerpts[{j}].why: expected string")
-
-            file_path = (repo_root / rel_path).resolve()
-            if not file_path.is_relative_to(repo_root):
-                _die(f"excerpt path escapes repo_root: {rel_path}")
-            if not file_path.exists() or not file_path.is_file():
-                _die(f"excerpt file not found: {rel_path}")
-
-            try:
-                text = file_path.read_text(encoding="utf-8")
-            except UnicodeDecodeError:
-                _die(f"excerpt file is not valid UTF-8: {rel_path}")
-
-            text = text.replace("\r\n", "\n")
-            lines = text.splitlines(keepends=True)
-            if end_line > len(lines):
-                _die(
-                    f"excerpt range out of bounds for {rel_path}: {start_line}-{end_line} (file has {len(lines)} lines)"
-                )
-
-            body = "".join(lines[start_line - 1 : end_line])
-            fence_lang = ""
-            if language is None or language == "auto":
-                fence_lang = _guess_language(file_path)
-            else:
-                fence_lang = language.strip()
-
-            code_ref = f"{rel_path}:{start_line}-{end_line}"
-            header_label = (label or ex_id or "").strip()
-            header = f"**CODE_REF:** `{code_ref}`"
-            if header_label:
-                header = f"{header} — {header_label}"
-
-            out.append("")
-            out.append(header)
-            if why and why.strip():
-                out.append("")
-                out.append(why.strip())
-            out.append("")
-            out.append(_fence(fence_lang, body))
-
-    return "\n".join(out).rstrip("\n") + "\n"
-
-
-def main() -> None:
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("spec", type=Path, help="Path to excerpt spec (.yml/.yaml/.json)")
-    parser.add_argument(
-        "--output",
-        "-o",
-        default="-",
-        help='Output file path, or "-" for stdout (default: -)',
-    )
-    args = parser.parse_args()
-
-    spec = _load_spec(args.spec)
-    if not isinstance(spec, dict):
-        _die("spec: expected mapping at top-level")
-
-    rendered = _render(spec)
-
-    if args.output == "-":
-        sys.stdout.write(rendered)
-        return
-
-    _atomic_write(Path(args.output), rendered)
-
-
-if __name__ == "__main__":
-    main()
 ```

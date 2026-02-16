@@ -34,7 +34,7 @@ sections:
       - id: "orchestrator-role-split-skill"
         path: "codex-rs/.agents/skills/orchestrator_role_split_pipeline/SKILL.md"
         start_line: 1
-        end_line: 49
+        end_line: 47
         language: "markdown"
         label: "orchestrator-role-split-pipeline"
         why: "Defines the contract between Orchestrator and Scout."
@@ -68,4 +68,3 @@ sections:
         language: "python"
         label: "validation + renderer"
         why: "Schema enforcement, path traversal guard, line-range slicing, deterministic markdown." 
-
