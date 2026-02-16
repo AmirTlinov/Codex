@@ -264,19 +264,7 @@ async fn enforce_apply_patch_pre_parse_guards(
     turn: &TurnContext,
     patch_input: &str,
 ) -> Result<(), FunctionCallError> {
-    if turn.tools_config.agent_role == AgentRole::Default
-        && turn.tools_config.collaboration_mode != ModeKind::Plan
-        && turn.tools_config.collab_tools
-        && matches!(turn.approval_policy, AskForApproval::Never)
-    {
-        let missing = missing_default_pipeline_stages(turn);
-        if !missing.is_empty() {
-            return Err(FunctionCallError::RespondToModel(format!(
-                "apply_patch is locked in Default role until the pipeline is complete: scout -> context_validator -> builder -> validator. Missing: {}.",
-                missing.join(", ")
-            )));
-        }
-    }
+    enforce_default_apply_patch_pipeline_guard(turn)?;
 
     if matches!(
         turn.tools_config.agent_role,
@@ -431,19 +419,17 @@ pub(crate) async fn intercept_apply_patch(
     call_id: &str,
     tool_name: &str,
 ) -> Result<Option<ToolOutput>, FunctionCallError> {
-    let patch_input = command.get(1).cloned().unwrap_or_else(|| command.join(" "));
-    if command
-        .iter()
-        .any(|segment| segment == "apply_patch" || segment.contains("apply_patch"))
-    {
-        enforce_apply_patch_pre_parse_guards(session, turn, &patch_input).await?;
+    let invokes_apply_patch = command_invokes_apply_patch(command);
+    if invokes_apply_patch {
+        enforce_default_apply_patch_pipeline_guard(turn)?;
     }
 
     match codex_apply_patch::maybe_parse_apply_patch_verified(command, cwd) {
         codex_apply_patch::MaybeApplyPatchVerified::Body(changes) => {
+            let patch_input = changes.patch.clone();
             session
                 .record_model_warning(
-                    format!("apply_patch was requested via {tool_name}. Use the apply_patch tool instead of exec_command."),
+                    format!("apply_patch was requested via {tool_name}. Use the apply_patch tool instead."),
                     turn,
                 )
                 .await;
@@ -501,10 +487,131 @@ pub(crate) async fn intercept_apply_patch(
         }
         codex_apply_patch::MaybeApplyPatchVerified::ShellParseError(error) => {
             tracing::trace!("Failed to parse apply_patch input, {error:?}");
-            Ok(None)
+            if invokes_apply_patch {
+                Err(FunctionCallError::RespondToModel(format!(
+                    "apply_patch could not be intercepted via {tool_name}. Use the apply_patch tool instead."
+                )))
+            } else {
+                Ok(None)
+            }
         }
-        codex_apply_patch::MaybeApplyPatchVerified::NotApplyPatch => Ok(None),
+        codex_apply_patch::MaybeApplyPatchVerified::NotApplyPatch => {
+            if invokes_apply_patch {
+                Err(FunctionCallError::RespondToModel(format!(
+                    "apply_patch must be invoked with the apply_patch tool, not via {tool_name}."
+                )))
+            } else {
+                Ok(None)
+            }
+        }
     }
+}
+
+fn enforce_default_apply_patch_pipeline_guard(turn: &TurnContext) -> Result<(), FunctionCallError> {
+    if turn.tools_config.agent_role == AgentRole::Default
+        && turn.tools_config.collaboration_mode != ModeKind::Plan
+        && turn.tools_config.collab_tools
+        && matches!(turn.approval_policy, AskForApproval::Never)
+    {
+        let missing = missing_default_pipeline_stages(turn);
+        if !missing.is_empty() {
+            return Err(FunctionCallError::RespondToModel(format!(
+                "apply_patch is locked in Default role until the pipeline is complete: scout -> context_validator -> builder -> validator. Missing: {}.",
+                missing.join(", ")
+            )));
+        }
+    }
+
+    Ok(())
+}
+
+fn command_invokes_apply_patch(command: &[String]) -> bool {
+    if let Some(program) = command.first()
+        && let Some(filename) = Path::new(program)
+            .file_name()
+            .and_then(|name| name.to_str())
+        && matches!(filename, "apply_patch" | "applypatch")
+    {
+        return true;
+    }
+
+    shell_script(command).is_some_and(script_invokes_apply_patch)
+}
+
+fn shell_script(command: &[String]) -> Option<&str> {
+    match command {
+        [_, flag, script, ..] if matches!(flag.as_str(), "-lc" | "-c") => Some(script.as_str()),
+        [_, flag, script, ..] if flag.eq_ignore_ascii_case("-command") => Some(script.as_str()),
+        [_, flag, script, ..] if flag.eq_ignore_ascii_case("/c") => Some(script.as_str()),
+        [_, skip_flag, flag, script, ..]
+            if skip_flag.eq_ignore_ascii_case("-noprofile")
+                && flag.eq_ignore_ascii_case("-command") =>
+        {
+            Some(script.as_str())
+        }
+        _ => None,
+    }
+}
+
+fn script_invokes_apply_patch(script: &str) -> bool {
+    script_invokes_apply_patch_command(script, "apply_patch")
+        || script_invokes_apply_patch_command(script, "applypatch")
+}
+
+fn script_invokes_apply_patch_command(script: &str, command: &str) -> bool {
+    let mut cursor = 0;
+    while let Some(hit) = script[cursor..].find(command) {
+        let start = cursor + hit;
+        let end = start + command.len();
+
+        if !matches_script_command_boundary(script, start, end) {
+            cursor = end;
+            continue;
+        }
+
+        return true;
+    }
+
+    false
+}
+
+fn matches_script_command_boundary(script: &str, start: usize, end: usize) -> bool {
+    let bytes = script.as_bytes();
+    let prev_is_boundary = if start == 0 {
+        true
+    } else {
+        let mut idx = start;
+        let mut prev = None;
+        while idx > 0 {
+            idx -= 1;
+            let byte = bytes[idx];
+            if matches!(byte, b' ' | b'\t' | b'\r') {
+                continue;
+            }
+            prev = Some(byte);
+            break;
+        }
+
+        match prev {
+            None => true,
+            Some(b'\n') => true,
+            Some(b';' | b'&' | b'|' | b'(' | b')') => true,
+            Some(_) => false,
+        }
+    };
+    if !prev_is_boundary {
+        return false;
+    }
+
+    let next = bytes.get(end).copied();
+    let next_is_boundary = match next {
+        None => true,
+        Some(b' ' | b'\t' | b'\r' | b'\n') => true,
+        Some(b'<' | b'>' | b'&' | b'|' | b';' | b'(' | b')') => true,
+        _ => false,
+    };
+
+    next_is_boundary
 }
 
 /// Returns a custom tool that can be used to edit files. Well-suited for GPT-5 models
@@ -919,5 +1026,60 @@ Some explanation.
             }
             _ => panic!("expected plan path validation failure"),
         }
+    }
+
+    #[tokio::test]
+    async fn intercept_apply_patch_rejects_shell_script_apply_patch_with_prefix_commands() {
+        let (session, mut turn) = make_session_and_context().await;
+        turn.tools_config.agent_role = AgentRole::Plan;
+        turn.tools_config.collaboration_mode = ModeKind::Plan;
+
+        let script = "echo hi; apply_patch <<'PATCH'\n*** Begin Patch\n*** End Patch\nPATCH";
+        let command = vec!["bash".to_string(), "-lc".to_string(), script.to_string()];
+        let result = intercept_apply_patch(
+            &command,
+            turn.cwd.as_path(),
+            None,
+            &session,
+            &turn,
+            None,
+            "call-1",
+            "shell",
+        )
+        .await;
+
+        match result {
+            Err(FunctionCallError::RespondToModel(message)) => {
+                assert!(message.contains("apply_patch"));
+                assert!(message.contains("apply_patch tool"));
+            }
+            _ => panic!("expected uninterceptable apply_patch invocation to be rejected"),
+        }
+    }
+
+    #[tokio::test]
+    async fn intercept_apply_patch_allows_commands_that_only_mention_apply_patch() {
+        let (session, mut turn) = make_session_and_context().await;
+        turn.tools_config.agent_role = AgentRole::Default;
+        turn.tools_config.collaboration_mode = ModeKind::Default;
+        turn.tools_config.collab_tools = true;
+        turn.approval_policy = AskForApproval::Never;
+
+        let script = "rg apply_patch";
+        let command = vec!["bash".to_string(), "-lc".to_string(), script.to_string()];
+        let result = intercept_apply_patch(
+            &command,
+            turn.cwd.as_path(),
+            None,
+            &session,
+            &turn,
+            None,
+            "call-1",
+            "shell",
+        )
+        .await
+        .expect("intercept call");
+
+        assert!(result.is_none());
     }
 }
