@@ -2,45 +2,53 @@
 
 ## 0) Meta
 - Repo: `codex-rs` (monorepo: `Codex/`)
-- Goal: показать каноничный формат “Scout context pack” так, чтобы Builder мог патчить без доразведки.
-- Артефакты:
-  - `excerpt_spec.yml` (machine-readable)
-  - `context_pack.md` (generated; см. ниже)
+- Goal: показать эталонный Scout output с минимальным шумом и patch-ready контекстом.
+- Artifacts:
+  - `examples/scout_packs/role_split/ScoutReport.md` (this file)
+  - `examples/scout_packs/role_split/excerpt_spec.yml` (machine-readable SSOT)
+  - `examples/scout_packs/role_split/context_pack.md` (generated verbatim excerpts)
 
 ## 1) Scope snapshot
-- Покрыто: skill-контракт для Scout, обновление orchestrator skill, генератор pack’ов, и just recipe.
-- Не покрыто: любые изменения runtime-гейтов (tools allowlist / apply_patch locks) — это отдельный аудит.
+- In scope: excerpt spec + генератор `scout_pack.py` + repo skills/templates + just recipe.
+- Out of scope: любые runtime-гейты (apply_patch/tool allowlist/locks) и реальные код-фиксы.
 
-## 2) Key invariants / constraints
-1) Scout не должен “дампить код” в отчёт: только `CODE_REF` + `excerpt_spec`.
-2) `excerpt_spec` задаёт диапазоны строк 1-indexed/inclusive.
-3) Генератор fail-closed: неверный путь/диапазон → ошибка, без частичного вывода.
+## 2) Patch target contract
+- Target: documentation/example only (no code patch in this slice).
+- Verify (single repro):
+  - `cd codex-rs && just scout-pack-check examples/scout_packs/role_split/excerpt_spec.yml`
 
-## 3) Anchor map (CODE_REF)
-- `../examples/scout_packs/role_split/excerpt_spec.yml:1-999` — входная спецификация (источник правды).
-- `../../justfile:67-81` — recipe `scout-pack`.
-- `../.agents/skills/scout_context_pack/SKILL.md:1-33` — контракт Scout.
-- `../scripts/scout_pack.py:1-282` — генератор.
+## 3) Key invariants / constraints
+- Scout не дампит код в отчёт: код идёт через `context_pack.md` (verbatim excerpts). (`CODE_REF::codex-rs::codex-rs/scripts/scout_pack.py#L1-L282`)
+- Диапазоны строк: 1-indexed, `end` включительно. (`CODE_REF::codex-rs::codex-rs/scripts/scout_pack.py#L1-L282`)
+- Генератор fail-closed: любая ошибка пути/диапазона → error, без частичного вывода. (`CODE_REF::codex-rs::codex-rs/scripts/scout_pack.py#L1-L282`)
 
-## 4) Excerpt spec
-Файл: `../examples/scout_packs/role_split/excerpt_spec.yml`.
+## 4) Anchor map
+- `CODE_REF::codex-rs::codex-rs/examples/scout_packs/role_split/excerpt_spec.yml#L1-L70` — SSOT excerpt spec.
+- `CODE_REF::codex-rs::justfile#L67-L81` — `scout-pack` / `scout-pack-check` recipes.
+- `CODE_REF::codex-rs::codex-rs/scripts/scout_pack.py#L1-L282` — generator implementation.
 
-## 5) Diagrams (Mermaid)
+## 5) Excerpt specs
+- File: `examples/scout_packs/role_split/excerpt_spec.yml` (use as a starting point).
+
+## 6) Dependency map
 ```mermaid
 flowchart LR
   Spec[excerpt_spec.yml] --> Gen[scripts/scout_pack.py]
   Gen --> Pack[context_pack.md]
-  Skills[.agents/skills/*] --> Spec
-  Just[justfile: scout-pack] --> Gen
 ```
 
-## 6) Next actions
-1) Сгенерировать context pack:
+## 7) High-confidence risks / edge cases
+- Drift: file edits могут сделать ranges невалидными → всегда прогоняй `scout-pack-check` перед handoff. (`CODE_REF::codex-rs::codex-rs/scripts/scout_pack.py#L1-L282`)
 
-   ```bash
-   cd codex-rs
-   just scout-pack examples/scout_packs/role_split/excerpt_spec.yml -o examples/scout_packs/role_split/context_pack.md
-   ```
+## 8) Missing context items needed before patching
+- None (example-only slice).
 
-2) Закоммитить `context_pack.md` рядом со spec (golden пример).
+## 9) Patch readiness gates
+- G1 Coverage: PASS
+- G2 Determinism: PASS
+- G3 Evidence-first: PASS
+- G4 Actionability: PASS
+- G5 Unknowns explicit: PASS
+- G6 Noise budget: PASS
 
+Patch readiness: PASS
