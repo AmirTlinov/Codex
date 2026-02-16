@@ -1,0 +1,45 @@
+version: 2
+title: "Scout context pack example (patch-ready)"
+summary: "Line-anchored excerpts for Main implementation without extra repo digging."
+repo_root: "."
+default_crate: "codex-core"
+task_id: "TASK-010"
+slice_id: "SLICE-1"
+intent: "upgrade scout context pack quality"
+
+quality_gates:
+  - "G1 Coverage"
+  - "G2 Determinism"
+  - "G3 Evidence-first"
+
+sections:
+  - heading: "Role allowlist (tools)"
+    description: "Role→Tools allowlist (deny-by-default)."
+    mermaid: |
+      flowchart LR
+        Role[Role] --> Tools[Allowed tools]
+    excerpts:
+      - id: "tools-role-allows-tool"
+        crate: "codex-core"
+        path: "core/src/tools/spec.rs"
+        start_line: 100
+        end_line: 250
+        language: "rust"
+        label: "ToolsConfig::role_allows_tool*"
+        why: "Tool allowlisting per role; confirms fail-closed boundaries."
+        must_include:
+          - "role_allows_tool"
+
+  - heading: "Router gates"
+    description: "Role gate + js_repl_tools_only gate + scout-context gate."
+    excerpts:
+      - id: "router-dispatch-tool-call"
+        crate: "codex-core"
+        path: "core/src/tools/router.rs"
+        start_line: 140
+        end_line: 260
+        language: "rust"
+        label: "ToolRouter::dispatch_tool_call"
+        why: "Central runtime enforcement used during implementation review."
+        must_include:
+          - "dispatch_tool_call"
