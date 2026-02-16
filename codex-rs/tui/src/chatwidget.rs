@@ -61,6 +61,7 @@ use codex_core::git_info::get_git_repo_root;
 use codex_core::git_info::local_git_branches;
 use codex_core::models_manager::manager::ModelsManager;
 use codex_core::project_doc::DEFAULT_PROJECT_DOC_FILENAME;
+use codex_core::protocol::AgentMessageContentDeltaEvent;
 use codex_core::protocol::AgentMessageDeltaEvent;
 use codex_core::protocol::AgentMessageEvent;
 use codex_core::protocol::AgentReasoningDeltaEvent;
@@ -257,6 +258,7 @@ use crate::history_cell::WebSearchCell;
 use crate::key_hint;
 use crate::key_hint::KeyBinding;
 use crate::markdown::append_markdown;
+use crate::markdown_stream::MarkdownStreamCollector;
 use crate::render::Insets;
 use crate::render::renderable::ColumnRenderable;
 use crate::render::renderable::FlexRenderable;
@@ -522,6 +524,11 @@ pub(crate) enum ExternalEditorState {
     Active,
 }
 
+struct ForeignAgentMessageStream {
+    collector: MarkdownStreamCollector,
+    has_emitted_prefix: bool,
+}
+
 /// Maintains the per-session UI state and interaction state machines for the chat screen.
 ///
 /// `ChatWidget` owns the state derived from the protocol event stream (history cells, streaming
@@ -574,6 +581,7 @@ pub(crate) struct ChatWidget {
     plan_stream_controller: Option<PlanStreamController>,
     running_commands: HashMap<String, RunningCommand>,
     collab_agent_types: HashMap<ThreadId, String>,
+    foreign_agent_message_streams: HashMap<(ThreadId, String), ForeignAgentMessageStream>,
     suppressed_exec_calls: HashSet<String>,
     skills_all: Vec<ProtocolSkillMetadata>,
     skills_initial_state: Option<HashMap<PathBuf, bool>>,
@@ -1110,6 +1118,7 @@ impl ChatWidget {
         self.set_skills(None);
         self.session_network_proxy = event.network_proxy.clone();
         self.thread_id = Some(event.session_id);
+        self.foreign_agent_message_streams.clear();
         self.thread_name = event.thread_name.clone();
         self.forked_from = event.forked_from_id;
         self.current_rollout_path = event.rollout_path.clone();
@@ -1269,6 +1278,20 @@ impl ChatWidget {
 
     fn on_agent_message_delta(&mut self, delta: String) {
         self.handle_streaming_delta(delta);
+    }
+
+    fn on_agent_message_content_delta(&mut self, event: AgentMessageContentDeltaEvent) {
+        let Ok(thread_id) = ThreadId::from_string(event.thread_id.as_str()) else {
+            warn!(
+                thread_id = event.thread_id,
+                "Ignoring agent message delta with invalid thread id"
+            );
+            return;
+        };
+
+        if self.thread_id.is_some_and(|own| own != thread_id) {
+            self.on_foreign_agent_message_stream_delta(thread_id, event.item_id, event.delta);
+        }
     }
 
     fn on_plan_delta(&mut self, delta: String) {
@@ -2174,6 +2197,84 @@ impl ChatWidget {
         self.request_redraw();
     }
 
+    fn on_foreign_agent_message_stream_delta(
+        &mut self,
+        thread_id: ThreadId,
+        item_id: String,
+        delta: String,
+    ) {
+        let mut emission = None;
+        {
+            let stream = self
+                .foreign_agent_message_streams
+                .entry((thread_id, item_id))
+                .or_insert_with(|| ForeignAgentMessageStream {
+                    collector: MarkdownStreamCollector::new(None),
+                    has_emitted_prefix: false,
+                });
+            stream.collector.push_delta(&delta);
+
+            if delta.contains('\n') {
+                let lines = stream.collector.commit_complete_lines();
+                if !lines.is_empty() {
+                    emission = Some((!stream.has_emitted_prefix, lines));
+                    stream.has_emitted_prefix = true;
+                }
+            }
+        }
+
+        if let Some((show_handle, lines)) = emission {
+            self.emit_foreign_agent_message_stream_lines(thread_id, show_handle, lines);
+        }
+    }
+
+    fn flush_foreign_agent_message_stream(&mut self, thread_id: ThreadId, item_id: &str) -> bool {
+        let Some(mut stream) = self
+            .foreign_agent_message_streams
+            .remove(&(thread_id, item_id.to_string()))
+        else {
+            return false;
+        };
+
+        let lines = stream.collector.finalize_and_drain();
+        if !lines.is_empty() {
+            self.emit_foreign_agent_message_stream_lines(
+                thread_id,
+                !stream.has_emitted_prefix,
+                lines,
+            );
+        }
+
+        true
+    }
+
+    fn emit_foreign_agent_message_stream_lines(
+        &mut self,
+        thread_id: ThreadId,
+        show_handle: bool,
+        lines: Vec<Line<'static>>,
+    ) {
+        if lines.is_empty() {
+            return;
+        }
+
+        let (initial_prefix, subsequent_prefix) = collab::agent_message_prefixes(
+            &thread_id,
+            &self.collab_agent_types,
+            self.thread_id.as_ref(),
+        );
+        let initial_prefix = if show_handle {
+            initial_prefix
+        } else {
+            subsequent_prefix.clone()
+        };
+        self.on_collab_event(history_cell::PrefixedWrappedHistoryCell::new(
+            lines,
+            initial_prefix,
+            subsequent_prefix,
+        ));
+    }
+
     fn on_foreign_agent_message_item_completed(
         &mut self,
         thread_id: ThreadId,
@@ -2715,6 +2816,7 @@ impl ChatWidget {
             active_cell_revision: 0,
             config,
             collab_agent_types: HashMap::new(),
+            foreign_agent_message_streams: HashMap::new(),
             skills_all: Vec::new(),
             skills_initial_state: None,
             current_collaboration_mode,
@@ -2881,6 +2983,7 @@ impl ChatWidget {
             active_cell_revision: 0,
             config,
             collab_agent_types: HashMap::new(),
+            foreign_agent_message_streams: HashMap::new(),
             skills_all: Vec::new(),
             skills_initial_state: None,
             current_collaboration_mode,
@@ -3036,6 +3139,7 @@ impl ChatWidget {
             active_cell_revision: 0,
             config,
             collab_agent_types: HashMap::new(),
+            foreign_agent_message_streams: HashMap::new(),
             skills_all: Vec::new(),
             skills_initial_state: None,
             current_collaboration_mode,
@@ -4101,6 +4205,7 @@ impl ChatWidget {
             EventMsg::AgentMessageDelta(AgentMessageDeltaEvent { delta }) => {
                 self.on_agent_message_delta(delta)
             }
+            EventMsg::AgentMessageContentDelta(event) => self.on_agent_message_content_delta(event),
             EventMsg::PlanDelta(event) => self.on_plan_delta(event.delta),
             EventMsg::AgentReasoningDelta(AgentReasoningDeltaEvent { delta })
             | EventMsg::AgentReasoningRawContentDelta(AgentReasoningRawContentDeltaEvent {
@@ -4266,7 +4371,6 @@ impl ChatWidget {
             }
             EventMsg::RawResponseItem(_)
             | EventMsg::ItemStarted(_)
-            | EventMsg::AgentMessageContentDelta(_)
             | EventMsg::ReasoningContentDelta(_)
             | EventMsg::ReasoningRawContentDelta(_)
             | EventMsg::DynamicToolCallRequest(_) => {}
@@ -4279,7 +4383,9 @@ impl ChatWidget {
                 }
                 if let codex_protocol::items::TurnItem::AgentMessage(item) = item {
                     if self.thread_id.is_some_and(|own| own != thread_id) {
-                        self.on_foreign_agent_message_item_completed(thread_id, item);
+                        if !self.flush_foreign_agent_message_stream(thread_id, item.id.as_str()) {
+                            self.on_foreign_agent_message_item_completed(thread_id, item);
+                        }
                     } else {
                         self.on_agent_message_item_completed(item);
                     }

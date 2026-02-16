@@ -24,6 +24,7 @@ use codex_core::config::ConstraintError;
 use codex_core::config_loader::RequirementSource;
 use codex_core::features::Feature;
 use codex_core::models_manager::manager::ModelsManager;
+use codex_core::protocol::AgentMessageContentDeltaEvent;
 use codex_core::protocol::AgentMessageDeltaEvent;
 use codex_core::protocol::AgentMessageEvent;
 use codex_core::protocol::AgentReasoningDeltaEvent;
@@ -252,6 +253,75 @@ async fn foreign_agent_message_renders_with_agent_handle_prefix() {
         .map(|lines| lines_to_single_string(lines))
         .unwrap_or_default();
     assert_snapshot!("foreign_agent_message_unified_feed", rendered);
+}
+
+#[tokio::test]
+async fn foreign_agent_message_deltas_stream_with_agent_handle_prefix() {
+    let (mut chat, mut rx, _ops) = make_chatwidget_manual(None).await;
+
+    let main_thread_id = ThreadId::new();
+    let rollout_file = NamedTempFile::new().unwrap();
+    chat.handle_codex_event(Event {
+        id: "configured".into(),
+        msg: EventMsg::SessionConfigured(codex_core::protocol::SessionConfiguredEvent {
+            session_id: main_thread_id,
+            forked_from_id: None,
+            thread_name: None,
+            model: "test-model".to_string(),
+            model_provider_id: "test-provider".to_string(),
+            approval_policy: AskForApproval::Never,
+            sandbox_policy: SandboxPolicy::new_read_only_policy(),
+            cwd: PathBuf::from("/home/user/project"),
+            reasoning_effort: Some(ReasoningEffortConfig::default()),
+            history_log_id: 0,
+            history_entry_count: 0,
+            initial_messages: None,
+            network_proxy: None,
+            rollout_path: Some(rollout_file.path().to_path_buf()),
+        }),
+    });
+    drain_insert_history(&mut rx);
+
+    let scout_thread_id = ThreadId::new();
+    chat.record_collab_agent_type(scout_thread_id, "scout".to_string());
+
+    chat.handle_codex_event(Event {
+        id: "foreign-delta".into(),
+        msg: EventMsg::AgentMessageContentDelta(AgentMessageContentDeltaEvent {
+            thread_id: scout_thread_id.to_string(),
+            turn_id: "turn-1".to_string(),
+            item_id: "msg-1".to_string(),
+            delta: "Streaming line one.\n".to_string(),
+        }),
+    });
+
+    let cells = drain_insert_history(&mut rx);
+    let rendered = cells
+        .last()
+        .map(|lines| lines_to_single_string(lines))
+        .unwrap_or_default();
+    assert_snapshot!("foreign_agent_message_delta_unified_feed", rendered);
+
+    chat.handle_codex_event(Event {
+        id: "foreign-complete".into(),
+        msg: EventMsg::ItemCompleted(ItemCompletedEvent {
+            thread_id: scout_thread_id,
+            turn_id: "turn-1".to_string(),
+            item: TurnItem::AgentMessage(AgentMessageItem {
+                id: "msg-1".to_string(),
+                content: vec![AgentMessageContent::Text {
+                    text: "Streaming line one.\n".to_string(),
+                }],
+                phase: Some(MessagePhase::FinalAnswer),
+            }),
+        }),
+    });
+
+    let cells = drain_insert_history(&mut rx);
+    assert!(
+        cells.is_empty(),
+        "expected no duplicate agent message cell on completion",
+    );
 }
 
 #[tokio::test]
@@ -1119,6 +1189,7 @@ async fn make_chatwidget_manual(
         active_cell_revision: 0,
         config: cfg,
         collab_agent_types: HashMap::new(),
+        foreign_agent_message_streams: HashMap::new(),
         current_collaboration_mode,
         active_collaboration_mask: None,
         auth_manager,

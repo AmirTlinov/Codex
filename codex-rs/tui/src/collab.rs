@@ -153,6 +153,19 @@ pub(crate) fn agent_message(
     PrefixedWrappedHistoryCell::new(Text::from(lines), initial_prefix, subsequent_prefix)
 }
 
+pub(crate) fn agent_message_prefixes(
+    thread_id: &ThreadId,
+    agent_types: &HashMap<ThreadId, String>,
+    main_thread_id: Option<&ThreadId>,
+) -> (Line<'static>, Line<'static>) {
+    let agent_type = sender_agent_type(thread_id, agent_types, main_thread_id);
+    let label = agent_handle_label(thread_id, agent_type);
+    (
+        Line::from(vec![agent_handle_span(thread_id, agent_type), " ".into()]),
+        Line::from(" ".repeat(UnicodeWidthStr::width(label.as_str()) + 1)),
+    )
+}
+
 pub(crate) fn spawn_end(
     ev: CollabAgentSpawnEndEvent,
     agent_types: &HashMap<ThreadId, String>,

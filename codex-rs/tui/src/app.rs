@@ -2726,25 +2726,26 @@ impl App {
                         break;
                     }
                 };
-                let should_forward = matches!(
-                    &event.msg,
-                    EventMsg::CollabAgentSpawnBegin(_)
-                        | EventMsg::CollabAgentSpawnEnd(_)
-                        | EventMsg::CollabAgentInteractionBegin(_)
-                        | EventMsg::CollabAgentInteractionEnd(_)
-                        | EventMsg::CollabWaitingBegin(_)
-                        | EventMsg::CollabWaitingEnd(_)
-                        | EventMsg::CollabCloseBegin(_)
-                        | EventMsg::CollabCloseEnd(_)
-                        | EventMsg::CollabResumeBegin(_)
-                        | EventMsg::CollabResumeEnd(_)
-                ) || matches!(
-                    &event.msg,
-                    EventMsg::ItemCompleted(codex_core::protocol::ItemCompletedEvent {
-                        item: TurnItem::AgentMessage(_),
-                        ..
-                    })
-                );
+                let should_forward =
+                    matches!(
+                        &event.msg,
+                        EventMsg::CollabAgentSpawnBegin(_)
+                            | EventMsg::CollabAgentSpawnEnd(_)
+                            | EventMsg::CollabAgentInteractionBegin(_)
+                            | EventMsg::CollabAgentInteractionEnd(_)
+                            | EventMsg::CollabWaitingBegin(_)
+                            | EventMsg::CollabWaitingEnd(_)
+                            | EventMsg::CollabCloseBegin(_)
+                            | EventMsg::CollabCloseEnd(_)
+                            | EventMsg::CollabResumeBegin(_)
+                            | EventMsg::CollabResumeEnd(_)
+                    ) || matches!(
+                        &event.msg,
+                        EventMsg::ItemCompleted(codex_core::protocol::ItemCompletedEvent {
+                            item: TurnItem::AgentMessage(_),
+                            ..
+                        })
+                    ) || matches!(&event.msg, EventMsg::AgentMessageContentDelta(_));
                 if should_forward {
                     app_event_tx.send(AppEvent::CodexEvent(event.clone()));
                 }
