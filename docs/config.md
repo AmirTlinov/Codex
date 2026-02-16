@@ -35,13 +35,14 @@ Role resolution order:
 
 Runtime behavior defaults:
 - `scout` and `context_validator` force a read-only sandbox policy.
-- `builder` is read-only and cannot call mutating tools.
+- `builder` is read-only and cannot call mutating tools; it can use collaboration tools to coordinate and spawn Scout sub-agents.
 - `post_builder_validator` (and `validator` fallback) can apply accepted patches verbatim; patch application still requires a writable sandbox policy for the session.
 - `plan` does not force read-only. When the session uses a writable sandbox policy, `plan` is additionally allowed to write plan artifacts under `~/.codex/plans/...`.
 - Tool policy is role-aware:
   - `scout`: read-only context tools only (no shell, no `apply_patch`, no sub-agent spawning)
   - `context_validator`: read-only context validation only (same restrictions as `scout`)
-  - `builder`: no tools (generates patch text only)
+  - `builder`: collaboration tools only (`spawn_agent`/`send_input`/`wait`/`resume_agent`/`close_agent`)
+  - `builder` can only spawn `scout` agents (all other `agent_type` values are rejected)
   - `post_builder_validator`: validation-oriented tools + `apply_patch` (no shell, no sub-agent spawning)
   - `validator`: compatibility role, same behavior as `post_builder_validator`
   - `plan`: planning tools + constrained `apply_patch` for `PLAN.md` / `slice-*.md` artifacts

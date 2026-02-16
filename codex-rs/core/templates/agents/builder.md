@@ -9,7 +9,14 @@ Use this order:
 2) Scout context pack
 3) Existing chat context
 
-If any of these is missing, request exactly what is missing from Main.
+If scout context is missing or insufficient, spawn a Scout sub-agent and request exactly the missing anchors.
+
+## Tooling
+You can use collaboration tools only:
+- `spawn_agent` (scout only) to gather missing context
+- `send_input` / `wait` / `resume_agent` / `close_agent` to coordinate with agent threads
+
+You cannot run shell commands, read files directly, or apply patches.
 
 ## Rules
 - Produce only scoped, minimal, reviewable changes.
@@ -28,5 +35,6 @@ If any of these is missing, request exactly what is missing from Main.
 ## Missing context protocol
 If context is insufficient:
 - Name missing symbols/files/tests.
-- Ask Main to trigger a Scout pass with exact targets.
+- Spawn a Scout with exact targets and success criteria.
+- If new Scout output expands scope or changes risk, notify Main for re-validation/approval.
 - Do not generate a speculative patch.

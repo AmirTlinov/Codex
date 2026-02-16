@@ -4,7 +4,7 @@
 Enable sub-agents (Collab) by default so the main agent can delegate work (Scout→ContextValidator→Builder→PostBuilderValidator) and wait on results via `wait` instead of busy polling.
 
 ## Context & Constraints
-- Keep existing role/tool gating (Builder has no tools; validator-style roles apply Builder patches verbatim; Plan-only constraints remain).
+- Keep existing role/tool gating (Builder has collaboration tools only; validator-style roles apply Builder patches verbatim; Plan-only constraints remain).
 - Must remain opt-out via `config.toml` (`[features] collab = false`).
 - Do not touch `CODEX_SANDBOX_NETWORK_DISABLED_ENV_VAR` / `CODEX_SANDBOX_ENV_VAR` logic.
 - After Rust changes: `just fmt` (in `codex-rs/`).
