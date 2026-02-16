@@ -403,6 +403,27 @@ mod tests {
     }
 
     #[test]
+    fn scout_prompt_contract_mentions_scout_pack_generator() {
+        let required_snippets = [
+            "`excerpt_spec.yml`",
+            "`context_pack.md`",
+            "scripts/scout_pack.py",
+            "just scout-pack-check",
+            "just scout-pack",
+            "CODE_REF::<crate>::",
+            ".agents/skills/scout_context_pack/templates/excerpt_spec.example.yml",
+            "examples/scout_packs/role_split/excerpt_spec.yml",
+        ];
+
+        for snippet in required_snippets {
+            assert!(
+                SCOUT_PROMPT.contains(snippet),
+                "SCOUT_PROMPT missing required snippet: {snippet}"
+            );
+        }
+    }
+
+    #[test]
     fn builder_feature_policy_is_restrictive_and_patch_first() {
         let mut config = crate::config::test_config();
         AgentRole::Builder
