@@ -1267,7 +1267,11 @@ fn scenarios() -> Vec<ScenarioSpec> {
             expectation: Expectation::FileNotCreated {
                 target: TargetPath::Workspace("ro_never.txt"),
                 message_contains: if cfg!(target_os = "linux") {
-                    &["Permission denied"]
+                    &[
+                        "Permission denied|Operation not permitted|operation not permitted|\
+                         Read-only file system|Отказано в доступе|\
+                         файловая система только для чтения",
+                    ]
                 } else {
                     &[
                         "Permission denied|Operation not permitted|operation not permitted|\
@@ -1414,7 +1418,11 @@ fn scenarios() -> Vec<ScenarioSpec> {
             expectation: Expectation::FileNotCreated {
                 target: TargetPath::OutsideWorkspace("ww_never.txt"),
                 message_contains: if cfg!(target_os = "linux") {
-                    &["Permission denied"]
+                    &[
+                        "Permission denied|Operation not permitted|operation not permitted|\
+                         Read-only file system|Отказано в доступе|\
+                         файловая система только для чтения",
+                    ]
                 } else {
                     &[
                         "Permission denied|Operation not permitted|operation not permitted|\

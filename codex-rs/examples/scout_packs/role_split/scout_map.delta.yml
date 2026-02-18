@@ -1,0 +1,12 @@
+# Example delta: add or update nodes/edges incrementally while scouting.
+nodes:
+  - id: MermaidState
+    label: scout_map.state.json
+    shape: rect
+edges:
+  - from: SkillContract
+    to: MermaidState
+    label: incremental updates
+  - from: MermaidState
+    to: PackGenerator
+    label: mermaid_file

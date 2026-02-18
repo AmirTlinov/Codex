@@ -1,0 +1,9 @@
+[tool]
+id = "rust-test-core-approvals"
+description = "Run core approvals suite deterministically"
+command = "cargo"
+args = ["test", "-p", "codex-core", "--test", "all", "suite::approvals::", "--", "--test-threads=1", "--nocapture"]
+
+[tool.env]
+TMPDIR = "target/tmp"
+PATH = "/home/amir/.cargo/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"

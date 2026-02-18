@@ -1,0 +1,5 @@
+[tool]
+id = "rust-test-tui"
+description = "Run codex-tui tests"
+command = "cargo"
+args = ["test", "-p", "codex-tui"]

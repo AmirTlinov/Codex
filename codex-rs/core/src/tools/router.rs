@@ -339,9 +339,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn builder_role_blocks_non_patch_tools_fail_closed() -> anyhow::Result<()> {
+    async fn validator_role_blocks_non_patch_tools_fail_closed() -> anyhow::Result<()> {
         let (session, mut turn) = make_session_and_context().await;
-        turn.tools_config.agent_role = AgentRole::Builder;
+        turn.tools_config.agent_role = AgentRole::Validator;
 
         let session = Arc::new(session);
         let turn = Arc::new(turn);
@@ -349,7 +349,7 @@ mod tests {
 
         let call = ToolCall {
             tool_name: "shell".to_string(),
-            call_id: "call-builder-shell".to_string(),
+            call_id: "call-validator-shell".to_string(),
             payload: ToolPayload::Function {
                 arguments: "{}".to_string(),
             },

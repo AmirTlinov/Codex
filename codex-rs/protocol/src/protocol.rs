@@ -2658,13 +2658,148 @@ pub enum TurnAbortReason {
     ReviewEnded,
 }
 
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq, JsonSchema, TS)]
+pub struct CollabAgentIdentity {
+    /// Stable public handle used in chat transcripts (without leading `@`).
+    pub handle: String,
+    /// Optional human-friendly display name used by transcript renderers.
+    #[serde(default)]
+    pub display_name: Option<String>,
+    /// Optional color token used by UI renderers.
+    #[serde(default)]
+    pub color_token: Option<String>,
+    /// Optional role label associated with the agent identity.
+    #[serde(default)]
+    pub role_label: Option<String>,
+    /// Optional prompt profile label for the spawned agent.
+    #[serde(default)]
+    pub prompt_profile: Option<String>,
+}
+
+impl CollabAgentIdentity {
+    fn encode_label_value(value: &str) -> String {
+        let mut encoded = String::new();
+        for byte in value.bytes() {
+            if matches!(byte, b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~') {
+                encoded.push(char::from(byte));
+            } else {
+                encoded.push('%');
+                encoded.push_str(&format!("{byte:02X}"));
+            }
+        }
+        encoded
+    }
+
+    fn decode_label_value(value: &str) -> Option<String> {
+        let mut decoded = Vec::with_capacity(value.len());
+        let bytes = value.as_bytes();
+        let mut idx = 0;
+        while idx < bytes.len() {
+            if bytes[idx] == b'%' {
+                if idx + 2 >= bytes.len() {
+                    return None;
+                }
+                let hex = std::str::from_utf8(&bytes[idx + 1..idx + 3]).ok()?;
+                let byte = u8::from_str_radix(hex, 16).ok()?;
+                decoded.push(byte);
+                idx += 3;
+                continue;
+            }
+            decoded.push(bytes[idx]);
+            idx += 1;
+        }
+        String::from_utf8(decoded).ok()
+    }
+
+    pub fn to_agent_type_label(&self) -> String {
+        let mut tokens = Vec::new();
+        let handle = self.handle.trim().trim_start_matches('@');
+        if !handle.is_empty() {
+            tokens.push(handle.to_string());
+        }
+        if let Some(display_name) = self.display_name.as_deref().map(str::trim)
+            && !display_name.is_empty()
+        {
+            tokens.push(format!("name={}", Self::encode_label_value(display_name)));
+        }
+        if let Some(color_token) = self.color_token.as_deref().map(str::trim)
+            && !color_token.is_empty()
+        {
+            tokens.push(color_token.to_ascii_lowercase());
+        }
+        if let Some(role_label) = self.role_label.as_deref().map(str::trim)
+            && !role_label.is_empty()
+        {
+            tokens.push(format!("role={role_label}"));
+        }
+        if let Some(prompt_profile) = self.prompt_profile.as_deref().map(str::trim)
+            && !prompt_profile.is_empty()
+        {
+            tokens.push(format!("prompt={prompt_profile}"));
+        }
+
+        tokens.join("|")
+    }
+
+    pub fn parse_agent_type_label(agent_type: &str) -> Option<Self> {
+        let mut tokens = agent_type
+            .split('|')
+            .map(str::trim)
+            .filter(|token| !token.is_empty());
+        let handle = tokens.next()?.trim_start_matches('@').trim();
+        if handle.is_empty() {
+            return None;
+        }
+
+        let mut identity = Self {
+            handle: handle.to_string(),
+            display_name: None,
+            color_token: None,
+            role_label: None,
+            prompt_profile: None,
+        };
+
+        for token in tokens {
+            if let Some(encoded_name) = token.strip_prefix("name=").map(str::trim)
+                && !encoded_name.is_empty()
+            {
+                if let Some(decoded_name) = Self::decode_label_value(encoded_name)
+                    && !decoded_name.trim().is_empty()
+                {
+                    identity.display_name = Some(decoded_name);
+                } else {
+                    identity.display_name = Some(encoded_name.to_string());
+                }
+                continue;
+            }
+            if let Some(role_label) = token.strip_prefix("role=").map(str::trim)
+                && !role_label.is_empty()
+            {
+                identity.role_label = Some(role_label.to_string());
+                continue;
+            }
+            if let Some(prompt_profile) = token.strip_prefix("prompt=").map(str::trim)
+                && !prompt_profile.is_empty()
+            {
+                identity.prompt_profile = Some(prompt_profile.to_string());
+                continue;
+            }
+            if identity.color_token.is_none() {
+                identity.color_token = Some(token.to_ascii_lowercase());
+            }
+        }
+
+        Some(identity)
+    }
+}
+
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, JsonSchema, TS)]
 pub struct CollabAgentSpawnBeginEvent {
     /// Identifier for the collab tool call.
     pub call_id: String,
     /// Thread ID of the sender.
     pub sender_thread_id: ThreadId,
-    /// Optional agent role/type requested for the spawned agent (e.g. `scout`, `builder`).
+    /// Optional agent label for the spawned agent (handle with optional style/role tokens).
     #[serde(default)]
     pub agent_type: Option<String>,
     /// Initial prompt sent to the agent. Can be empty to prevent CoT leaking at the
@@ -2680,7 +2815,7 @@ pub struct CollabAgentSpawnEndEvent {
     pub sender_thread_id: ThreadId,
     /// Thread ID of the newly spawned agent, if it was created.
     pub new_thread_id: Option<ThreadId>,
-    /// Optional agent role/type requested for the spawned agent (e.g. `scout`, `builder`).
+    /// Optional agent label for the spawned agent (handle with optional style/role tokens).
     #[serde(default)]
     pub agent_type: Option<String>,
     /// Initial prompt sent to the agent. Can be empty to prevent CoT leaking at the
@@ -2701,6 +2836,9 @@ pub struct CollabAgentInteractionBeginEvent {
     /// Prompt sent from the sender to the receiver. Can be empty to prevent CoT
     /// leaking at the beginning.
     pub prompt: String,
+    /// Structured metadata for agent-mesh message routing/traceability.
+    #[serde(default)]
+    pub message: CollabMessageMetadata,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, JsonSchema, TS)]
@@ -2714,8 +2852,44 @@ pub struct CollabAgentInteractionEndEvent {
     /// Prompt sent from the sender to the receiver. Can be empty to prevent CoT
     /// leaking at the beginning.
     pub prompt: String,
+    /// Structured metadata for agent-mesh message routing/traceability.
+    #[serde(default)]
+    pub message: CollabMessageMetadata,
     /// Last known status of the receiver agent reported to the sender agent.
     pub status: AgentStatus,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq, JsonSchema, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(rename_all = "camelCase")]
+pub struct CollabMessageMetadata {
+    pub author: String,
+    pub role: String,
+    pub status: String,
+    pub mentions: Vec<String>,
+    pub intent: String,
+    pub refs: Vec<String>,
+    pub priority: String,
+    pub sla: Option<String>,
+    pub task_ref: Option<String>,
+    pub slice_ref: Option<String>,
+}
+
+impl Default for CollabMessageMetadata {
+    fn default() -> Self {
+        Self {
+            author: String::new(),
+            role: String::new(),
+            status: "running".to_string(),
+            mentions: Vec::new(),
+            intent: String::new(),
+            refs: Vec::new(),
+            priority: "normal".to_string(),
+            sla: None,
+            task_ref: None,
+            slice_ref: None,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, JsonSchema, TS)]
@@ -2793,6 +2967,27 @@ mod tests {
     use pretty_assertions::assert_eq;
     use serde_json::json;
     use tempfile::NamedTempFile;
+
+    #[test]
+    fn collab_agent_identity_roundtrip() {
+        let identity = CollabAgentIdentity {
+            handle: "devops-engineer".to_string(),
+            display_name: Some("DevOps Engineer".to_string()),
+            color_token: Some("red".to_string()),
+            role_label: Some("validator".to_string()),
+            prompt_profile: Some("release-ops".to_string()),
+        };
+
+        let wire_label = identity.to_agent_type_label();
+        assert_eq!(
+            wire_label,
+            "devops-engineer|name=DevOps%20Engineer|red|role=validator|prompt=release-ops"
+        );
+
+        let decoded = CollabAgentIdentity::parse_agent_type_label(&wire_label)
+            .expect("wire label should parse");
+        assert_eq!(decoded, identity);
+    }
 
     #[test]
     fn external_sandbox_reports_full_access_flags() {

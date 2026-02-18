@@ -20,6 +20,7 @@ use std::sync::Arc;
 
 use crate::chatwidget::ActiveCellTranscriptKey;
 use crate::history_cell::HistoryCell;
+use crate::history_cell::TranscriptFeed;
 use crate::history_cell::UserHistoryCell;
 use crate::key_hint;
 use crate::key_hint::KeyBinding;
@@ -102,6 +103,44 @@ const KEY_ESC: KeyBinding = key_hint::plain(KeyCode::Esc);
 const KEY_ENTER: KeyBinding = key_hint::plain(KeyCode::Enter);
 const KEY_CTRL_T: KeyBinding = key_hint::ctrl(KeyCode::Char('t'));
 const KEY_CTRL_C: KeyBinding = key_hint::ctrl(KeyCode::Char('c'));
+const KEY_F: KeyBinding = key_hint::plain(KeyCode::Char('f'));
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum TranscriptCellFilter {
+    All,
+    UserMain,
+    AgentMesh,
+    ReviewAudit,
+}
+
+impl TranscriptCellFilter {
+    fn next(self) -> Self {
+        match self {
+            Self::All => Self::UserMain,
+            Self::UserMain => Self::AgentMesh,
+            Self::AgentMesh => Self::ReviewAudit,
+            Self::ReviewAudit => Self::All,
+        }
+    }
+
+    fn includes(self, feed: TranscriptFeed) -> bool {
+        match self {
+            Self::All => true,
+            Self::UserMain => feed == TranscriptFeed::UserMain,
+            Self::AgentMesh => feed == TranscriptFeed::AgentMesh,
+            Self::ReviewAudit => feed == TranscriptFeed::ReviewAudit,
+        }
+    }
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::All => "All",
+            Self::UserMain => "User+Main",
+            Self::AgentMesh => "Agent Mesh",
+            Self::ReviewAudit => "Review/Audit",
+        }
+    }
+}
 
 // Common pager navigation hints rendered on the first line
 const PAGER_KEY_HINTS: &[(&[KeyBinding], &str)] = &[
@@ -427,6 +466,8 @@ pub(crate) struct TranscriptOverlay {
     view: PagerView,
     /// Committed transcript cells (does not include the live tail).
     cells: Vec<Arc<dyn HistoryCell>>,
+    visible_cell_indices: Vec<usize>,
+    cell_filter: TranscriptCellFilter,
     highlight_cell: Option<usize>,
     /// Cache key for the render-only live tail appended after committed cells.
     live_tail_key: Option<LiveTailKey>,
@@ -454,32 +495,53 @@ impl TranscriptOverlay {
     /// This overlay does not own the "active cell"; callers may optionally append a live tail via
     /// `sync_live_tail` during draws to reflect in-flight activity.
     pub(crate) fn new(transcript_cells: Vec<Arc<dyn HistoryCell>>) -> Self {
+        let visible_cell_indices =
+            Self::visible_cell_indices(&transcript_cells, TranscriptCellFilter::All);
         Self {
             view: PagerView::new(
-                Self::render_cells(&transcript_cells, None),
-                "T R A N S C R I P T".to_string(),
+                Self::render_cells(&transcript_cells, &visible_cell_indices, None),
+                Self::title_for_filter(TranscriptCellFilter::All),
                 usize::MAX,
             ),
             cells: transcript_cells,
+            visible_cell_indices,
+            cell_filter: TranscriptCellFilter::All,
             highlight_cell: None,
             live_tail_key: None,
             is_done: false,
         }
     }
 
-    fn render_cells(
+    fn title_for_filter(filter: TranscriptCellFilter) -> String {
+        format!("T R A N S C R I P T · {}", filter.label())
+    }
+
+    fn visible_cell_indices(
         cells: &[Arc<dyn HistoryCell>],
-        highlight_cell: Option<usize>,
-    ) -> Vec<Box<dyn Renderable>> {
+        filter: TranscriptCellFilter,
+    ) -> Vec<usize> {
         cells
             .iter()
             .enumerate()
-            .flat_map(|(i, c)| {
+            .filter_map(|(idx, cell)| filter.includes(cell.transcript_feed()).then_some(idx))
+            .collect()
+    }
+
+    fn render_cells(
+        cells: &[Arc<dyn HistoryCell>],
+        visible_cell_indices: &[usize],
+        highlight_cell: Option<usize>,
+    ) -> Vec<Box<dyn Renderable>> {
+        visible_cell_indices
+            .iter()
+            .enumerate()
+            .filter_map(|(i, idx)| cells.get(*idx).map(|cell| (i, idx, cell)))
+            .flat_map(|(i, idx, c)| {
                 let mut v: Vec<Box<dyn Renderable>> = Vec::new();
                 let mut cell_renderable = if c.as_any().is::<UserHistoryCell>() {
                     Box::new(CachedRenderable::new(CellRenderable {
                         cell: c.clone(),
-                        style: if highlight_cell == Some(i) {
+                        style: if highlight_cell == Some(*idx) {
                             user_message_style().reversed()
                         } else {
                             user_message_style()
@@ -515,10 +577,12 @@ impl TranscriptOverlay {
     /// insertion to preserve the "follow along" behavior.
     pub(crate) fn insert_cell(&mut self, cell: Arc<dyn HistoryCell>) {
         let follow_bottom = self.view.is_scrolled_to_bottom();
-        let had_prior_cells = !self.cells.is_empty();
+        let had_prior_cells = !self.visible_cell_indices.is_empty();
         let tail_renderable = self.take_live_tail_renderable();
         self.cells.push(cell);
-        self.view.renderables = Self::render_cells(&self.cells, self.highlight_cell);
+        self.refresh_visible_cells();
+        self.view.renderables =
+            Self::render_cells(&self.cells, &self.visible_cell_indices, self.highlight_cell);
         if let Some(tail) = tail_renderable {
             let tail = if !had_prior_cells
                 && self
@@ -547,9 +611,16 @@ impl TranscriptOverlay {
     pub(crate) fn replace_cells(&mut self, cells: Vec<Arc<dyn HistoryCell>>) {
         let follow_bottom = self.view.is_scrolled_to_bottom();
         self.cells = cells;
+        self.refresh_visible_cells();
         if self
             .highlight_cell
             .is_some_and(|idx| idx >= self.cells.len())
+        {
+            self.highlight_cell = None;
+        }
+        if self
+            .highlight_cell
+            .is_some_and(|idx| !self.visible_cell_indices.contains(&idx))
         {
             self.highlight_cell = None;
         }
@@ -597,7 +668,7 @@ impl TranscriptOverlay {
             if !lines.is_empty() {
                 self.view.renderables.push(Self::live_tail_renderable(
                     lines,
-                    !self.cells.is_empty(),
+                    !self.visible_cell_indices.is_empty(),
                     key.is_stream_continuation,
                 ));
             }
@@ -610,9 +681,34 @@ impl TranscriptOverlay {
     pub(crate) fn set_highlight_cell(&mut self, cell: Option<usize>) {
         self.highlight_cell = cell;
         self.rebuild_renderables();
-        if let Some(idx) = self.highlight_cell {
+        if let Some(idx) = self.highlight_cell.and_then(|global_idx| {
+            self.visible_cell_indices
+                .iter()
+                .position(|visible_idx| *visible_idx == global_idx)
+        }) {
             self.view.scroll_chunk_into_view(idx);
         }
+    }
+
+    fn cycle_cell_filter(&mut self) {
+        let follow_bottom = self.view.is_scrolled_to_bottom();
+        self.cell_filter = self.cell_filter.next();
+        self.view.title = Self::title_for_filter(self.cell_filter);
+        self.refresh_visible_cells();
+        if self
+            .highlight_cell
+            .is_some_and(|idx| !self.visible_cell_indices.contains(&idx))
+        {
+            self.highlight_cell = None;
+        }
+        self.rebuild_renderables();
+        if follow_bottom {
+            self.view.scroll_offset = usize::MAX;
+        }
+    }
+
+    fn refresh_visible_cells(&mut self) {
+        self.visible_cell_indices = Self::visible_cell_indices(&self.cells, self.cell_filter);
     }
 
     /// Returns whether the underlying pager view is currently pinned to the bottom.
@@ -625,7 +721,8 @@ impl TranscriptOverlay {
 
     fn rebuild_renderables(&mut self) {
         let tail_renderable = self.take_live_tail_renderable();
-        self.view.renderables = Self::render_cells(&self.cells, self.highlight_cell);
+        self.view.renderables =
+            Self::render_cells(&self.cells, &self.visible_cell_indices, self.highlight_cell);
         if let Some(tail) = tail_renderable {
             self.view.renderables.push(tail);
         }
@@ -637,7 +734,8 @@ impl TranscriptOverlay {
     /// cell renderables, so this relies on the live tail always being the final entry in
     /// `view.renderables` when present.
     fn take_live_tail_renderable(&mut self) -> Option<Box<dyn Renderable>> {
-        (self.view.renderables.len() > self.cells.len()).then(|| self.view.renderables.pop())?
+        (self.view.renderables.len() > self.visible_cell_indices.len())
+            .then(|| self.view.renderables.pop())?
     }
 
     fn live_tail_renderable(
@@ -666,6 +764,7 @@ impl TranscriptOverlay {
         } else {
             pairs.push((&[KEY_ESC], "to edit prev"));
         }
+        pairs.push((&[KEY_F], "to cycle filter"));
         render_key_hints(line2, buf, &pairs);
     }
 
@@ -684,6 +783,12 @@ impl TranscriptOverlay {
             TuiEvent::Key(key_event) => match key_event {
                 e if KEY_Q.is_press(e) || KEY_CTRL_C.is_press(e) || KEY_CTRL_T.is_press(e) => {
                     self.is_done = true;
+                    Ok(())
+                }
+                e if KEY_F.is_press(e) => {
+                    self.cycle_cell_filter();
+                    tui.frame_requester()
+                        .schedule_frame_in(crate::tui::TARGET_FRAME_INTERVAL);
                     Ok(())
                 }
                 other => self.view.handle_key_event(tui, other),
@@ -830,6 +935,22 @@ mod tests {
         }
     }
 
+    #[derive(Debug)]
+    struct FeedCell {
+        lines: Vec<Line<'static>>,
+        feed: TranscriptFeed,
+    }
+
+    impl crate::history_cell::HistoryCell for FeedCell {
+        fn display_lines(&self, _width: u16) -> Vec<Line<'static>> {
+            self.lines.clone()
+        }
+
+        fn transcript_feed(&self) -> TranscriptFeed {
+            self.feed
+        }
+    }
+
     fn paragraph_block(label: &str, lines: usize) -> Box<dyn Renderable> {
         let text = Text::from(
             (0..lines)
@@ -915,6 +1036,57 @@ mod tests {
         term.draw(|f| overlay.render(f.area(), f.buffer_mut()))
             .expect("draw");
         assert_snapshot!(term.backend());
+    }
+
+    #[test]
+    fn transcript_overlay_cycles_feed_filters() {
+        let cells: Vec<Arc<dyn HistoryCell>> = vec![
+            Arc::new(FeedCell {
+                lines: vec![Line::from("user-main")],
+                feed: TranscriptFeed::UserMain,
+            }),
+            Arc::new(FeedCell {
+                lines: vec![Line::from("agent-mesh")],
+                feed: TranscriptFeed::AgentMesh,
+            }),
+            Arc::new(FeedCell {
+                lines: vec![Line::from("review-audit")],
+                feed: TranscriptFeed::ReviewAudit,
+            }),
+        ];
+        let mut overlay = TranscriptOverlay::new(cells);
+
+        assert_eq!(overlay.cell_filter, TranscriptCellFilter::All);
+        assert_eq!(overlay.visible_cell_indices, vec![0, 1, 2]);
+        assert_eq!(overlay.view.title, "T R A N S C R I P T · All".to_string());
+
+        overlay.cycle_cell_filter();
+        assert_eq!(overlay.cell_filter, TranscriptCellFilter::UserMain);
+        assert_eq!(overlay.visible_cell_indices, vec![0]);
+        assert_eq!(
+            overlay.view.title,
+            "T R A N S C R I P T · User+Main".to_string()
+        );
+
+        overlay.cycle_cell_filter();
+        assert_eq!(overlay.cell_filter, TranscriptCellFilter::AgentMesh);
+        assert_eq!(overlay.visible_cell_indices, vec![1]);
+        assert_eq!(
+            overlay.view.title,
+            "T R A N S C R I P T · Agent Mesh".to_string()
+        );
+
+        overlay.cycle_cell_filter();
+        assert_eq!(overlay.cell_filter, TranscriptCellFilter::ReviewAudit);
+        assert_eq!(overlay.visible_cell_indices, vec![2]);
+        assert_eq!(
+            overlay.view.title,
+            "T R A N S C R I P T · Review/Audit".to_string()
+        );
+
+        overlay.cycle_cell_filter();
+        assert_eq!(overlay.cell_filter, TranscriptCellFilter::All);
+        assert_eq!(overlay.visible_cell_indices, vec![0, 1, 2]);
     }
 
     #[test]

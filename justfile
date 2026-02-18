@@ -74,11 +74,26 @@ write-app-server-schema *args:
 
 # Generate a markdown context pack from a Scout excerpt spec (YAML/JSON).
 scout-pack *args:
-    python3 scripts/scout_pack.py "$@"
+    python3 "{{justfile_directory()}}/codex-rs/scripts/scout_pack.py" "$@"
 
 # Validate a Scout excerpt spec and render to stdout (discarded).
 scout-pack-check spec:
-    python3 scripts/scout_pack.py "{{spec}}" -o - >/dev/null
+    python3 "{{justfile_directory()}}/codex-rs/scripts/scout_pack.py" "{{spec}}" -o - >/dev/null
+
+
+# Initialize an incremental Scout Mermaid map state file.
+# Extra args are forwarded (e.g. --title "..." --direction LR).
+scout-map-init state *args:
+    python3 "{{justfile_directory()}}/codex-rs/scripts/scout_map.py" init "{{state}}" {{args}}
+
+# Merge YAML/JSON map delta into Scout map state.
+scout-map-merge state delta:
+    python3 "{{justfile_directory()}}/codex-rs/scripts/scout_map.py" merge "{{state}}" "{{delta}}"
+
+# Render Mermaid (or JSON) from Scout map state.
+# Extra args are forwarded (e.g. --format json -o map.json).
+scout-map-render state *args:
+    python3 "{{justfile_directory()}}/codex-rs/scripts/scout_map.py" render "{{state}}" {{args}}
 
 # Tail logs from the state SQLite database
 log *args:

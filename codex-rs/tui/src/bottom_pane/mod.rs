@@ -520,6 +520,19 @@ impl BottomPane {
         self.request_redraw();
     }
 
+    pub(crate) fn set_collab_footer_chip_counts(
+        &mut self,
+        agents_count: usize,
+        scouts_count: usize,
+    ) {
+        if self
+            .composer
+            .set_collab_footer_chip_counts(agents_count, scouts_count)
+        {
+            self.request_redraw();
+        }
+    }
+
     /// Update the status indicator header (defaults to "Working") and details below it.
     ///
     /// Passing `None` clears any existing details. No-ops if the status indicator is not active.

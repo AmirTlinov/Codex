@@ -7,7 +7,6 @@ use serde::Deserialize;
 use tokio::process::Command;
 use tokio::time::timeout;
 
-use crate::agent::AgentRole;
 use crate::function_tool::FunctionCallError;
 use crate::tools::context::ToolInvocation;
 use crate::tools::context::ToolOutput;
@@ -15,8 +14,6 @@ use crate::tools::context::ToolPayload;
 use crate::tools::handlers::parse_arguments;
 use crate::tools::registry::ToolHandler;
 use crate::tools::registry::ToolKind;
-use codex_protocol::config_types::ModeKind;
-use std::sync::atomic::Ordering;
 
 pub struct GrepFilesHandler;
 
@@ -58,17 +55,6 @@ impl ToolHandler for GrepFilesHandler {
         };
 
         let args: GrepFilesArgs = parse_arguments(&arguments)?;
-
-        if turn.tools_config.agent_role == AgentRole::Default
-            && turn.tools_config.collaboration_mode != ModeKind::Plan
-            && turn.tools_config.collab_tools
-            && !turn.scout_context_ready.load(Ordering::Acquire)
-        {
-            return Err(FunctionCallError::RespondToModel(
-                "grep_files requires scout context in Default mode; call spawn_agent with agent_type=\"scout\" first."
-                    .to_string(),
-            ));
-        }
 
         let pattern = args.pattern.trim();
         if pattern.is_empty() {

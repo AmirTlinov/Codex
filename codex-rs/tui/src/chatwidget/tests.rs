@@ -29,6 +29,7 @@ use codex_core::protocol::AgentMessageDeltaEvent;
 use codex_core::protocol::AgentMessageEvent;
 use codex_core::protocol::AgentReasoningDeltaEvent;
 use codex_core::protocol::AgentReasoningEvent;
+use codex_core::protocol::AgentStatus;
 use codex_core::protocol::ApplyPatchApprovalRequestEvent;
 use codex_core::protocol::BackgroundEventEvent;
 use codex_core::protocol::CreditsSnapshot;
@@ -87,6 +88,7 @@ use codex_protocol::plan_tool::PlanItemArg;
 use codex_protocol::plan_tool::StepStatus;
 use codex_protocol::plan_tool::UpdatePlanArgs;
 use codex_protocol::protocol::CodexErrorInfo;
+use codex_protocol::protocol::CollabCloseEndEvent;
 use codex_protocol::protocol::SkillScope;
 use codex_protocol::user_input::TextElement;
 use codex_protocol::user_input::UserInput;
@@ -203,7 +205,7 @@ async fn resumed_initial_messages_render_history() {
 }
 
 #[tokio::test]
-async fn foreign_agent_message_renders_with_agent_handle_prefix() {
+async fn foreign_scout_message_renders_compact_hidden_notice() {
     let (mut chat, mut rx, _ops) = make_chatwidget_manual(None).await;
 
     let main_thread_id = ThreadId::new();
@@ -252,11 +254,11 @@ async fn foreign_agent_message_renders_with_agent_handle_prefix() {
         .last()
         .map(|lines| lines_to_single_string(lines))
         .unwrap_or_default();
-    assert_snapshot!("foreign_agent_message_unified_feed", rendered);
+    assert_snapshot!("foreign_scout_message_hidden", rendered);
 }
 
 #[tokio::test]
-async fn foreign_agent_message_deltas_stream_with_agent_handle_prefix() {
+async fn foreign_custom_handle_scout_role_message_is_hidden() {
     let (mut chat, mut rx, _ops) = make_chatwidget_manual(None).await;
 
     let main_thread_id = ThreadId::new();
@@ -283,12 +285,132 @@ async fn foreign_agent_message_deltas_stream_with_agent_handle_prefix() {
     drain_insert_history(&mut rx);
 
     let scout_thread_id = ThreadId::new();
-    chat.record_collab_agent_type(scout_thread_id, "scout".to_string());
+    chat.record_collab_agent_type(
+        scout_thread_id,
+        "context-digger|magenta|role=scout".to_string(),
+    );
+
+    chat.handle_codex_event(Event {
+        id: "foreign-msg".into(),
+        msg: EventMsg::ItemCompleted(ItemCompletedEvent {
+            thread_id: scout_thread_id,
+            turn_id: "turn-1".to_string(),
+            item: TurnItem::AgentMessage(AgentMessageItem {
+                id: "msg-1".to_string(),
+                content: vec![AgentMessageContent::Text {
+                    text: "private scout payload".to_string(),
+                }],
+                phase: Some(MessagePhase::FinalAnswer),
+            }),
+        }),
+    });
+
+    let cells = drain_insert_history(&mut rx);
+    let rendered = cells
+        .last()
+        .map(|lines| lines_to_single_string(lines))
+        .unwrap_or_default();
+    assert!(
+        rendered.contains("details hidden"),
+        "expected hidden notice for scout-role handle, got: {rendered}",
+    );
+    assert!(
+        rendered.contains("@context-digger"),
+        "expected custom handle in hidden notice, got: {rendered}",
+    );
+    assert!(
+        !rendered.contains("private scout payload"),
+        "expected scout payload to be hidden, got: {rendered}",
+    );
+}
+
+#[tokio::test]
+async fn foreign_non_scout_message_renders_with_agent_handle_prefix() {
+    let (mut chat, mut rx, _ops) = make_chatwidget_manual(None).await;
+
+    let main_thread_id = ThreadId::new();
+    let rollout_file = NamedTempFile::new().unwrap();
+    chat.handle_codex_event(Event {
+        id: "configured".into(),
+        msg: EventMsg::SessionConfigured(codex_core::protocol::SessionConfiguredEvent {
+            session_id: main_thread_id,
+            forked_from_id: None,
+            thread_name: None,
+            model: "test-model".to_string(),
+            model_provider_id: "test-provider".to_string(),
+            approval_policy: AskForApproval::Never,
+            sandbox_policy: SandboxPolicy::new_read_only_policy(),
+            cwd: PathBuf::from("/home/user/project"),
+            reasoning_effort: Some(ReasoningEffortConfig::default()),
+            history_log_id: 0,
+            history_entry_count: 0,
+            initial_messages: None,
+            network_proxy: None,
+            rollout_path: Some(rollout_file.path().to_path_buf()),
+        }),
+    });
+    drain_insert_history(&mut rx);
+
+    let validator_thread_id = ThreadId::new();
+    chat.record_collab_agent_type(validator_thread_id, "validator".to_string());
+
+    chat.handle_codex_event(Event {
+        id: "foreign-msg".into(),
+        msg: EventMsg::ItemCompleted(ItemCompletedEvent {
+            thread_id: validator_thread_id,
+            turn_id: "turn-1".to_string(),
+            item: TurnItem::AgentMessage(AgentMessageItem {
+                id: "msg-1".to_string(),
+                content: vec![AgentMessageContent::Text {
+                    text: "I deployed the project and I'm waiting for @review.".to_string(),
+                }],
+                phase: Some(MessagePhase::FinalAnswer),
+            }),
+        }),
+    });
+
+    let cells = drain_insert_history(&mut rx);
+    let rendered = cells
+        .last()
+        .map(|lines| lines_to_single_string(lines))
+        .unwrap_or_default();
+    assert_snapshot!("foreign_agent_message_unified_feed", rendered);
+}
+
+#[tokio::test]
+async fn foreign_non_scout_message_deltas_stream_with_agent_handle_prefix() {
+    let (mut chat, mut rx, _ops) = make_chatwidget_manual(None).await;
+
+    let main_thread_id = ThreadId::new();
+    let rollout_file = NamedTempFile::new().unwrap();
+    chat.handle_codex_event(Event {
+        id: "configured".into(),
+        msg: EventMsg::SessionConfigured(codex_core::protocol::SessionConfiguredEvent {
+            session_id: main_thread_id,
+            forked_from_id: None,
+            thread_name: None,
+            model: "test-model".to_string(),
+            model_provider_id: "test-provider".to_string(),
+            approval_policy: AskForApproval::Never,
+            sandbox_policy: SandboxPolicy::new_read_only_policy(),
+            cwd: PathBuf::from("/home/user/project"),
+            reasoning_effort: Some(ReasoningEffortConfig::default()),
+            history_log_id: 0,
+            history_entry_count: 0,
+            initial_messages: None,
+            network_proxy: None,
+            rollout_path: Some(rollout_file.path().to_path_buf()),
+        }),
+    });
+    drain_insert_history(&mut rx);
+
+    let validator_thread_id = ThreadId::new();
+    chat.record_collab_agent_type(validator_thread_id, "validator".to_string());
 
     chat.handle_codex_event(Event {
         id: "foreign-delta".into(),
         msg: EventMsg::AgentMessageContentDelta(AgentMessageContentDeltaEvent {
-            thread_id: scout_thread_id.to_string(),
+            thread_id: validator_thread_id.to_string(),
             turn_id: "turn-1".to_string(),
             item_id: "msg-1".to_string(),
             delta: "Streaming line one.\n".to_string(),
@@ -305,7 +427,7 @@ async fn foreign_agent_message_deltas_stream_with_agent_handle_prefix() {
     chat.handle_codex_event(Event {
         id: "foreign-complete".into(),
         msg: EventMsg::ItemCompleted(ItemCompletedEvent {
-            thread_id: scout_thread_id,
+            thread_id: validator_thread_id,
             turn_id: "turn-1".to_string(),
             item: TurnItem::AgentMessage(AgentMessageItem {
                 id: "msg-1".to_string(),
@@ -321,6 +443,117 @@ async fn foreign_agent_message_deltas_stream_with_agent_handle_prefix() {
     assert!(
         cells.is_empty(),
         "expected no duplicate agent message cell on completion",
+    );
+}
+
+#[tokio::test]
+async fn active_scout_agent_message_is_rendered_as_hidden_notice() {
+    let (mut chat, mut rx, _ops) = make_chatwidget_manual(None).await;
+
+    let scout_thread_id = ThreadId::new();
+    let rollout_file = NamedTempFile::new().unwrap();
+    chat.handle_codex_event(Event {
+        id: "configured".into(),
+        msg: EventMsg::SessionConfigured(codex_core::protocol::SessionConfiguredEvent {
+            session_id: scout_thread_id,
+            forked_from_id: None,
+            thread_name: None,
+            model: "test-model".to_string(),
+            model_provider_id: "test-provider".to_string(),
+            approval_policy: AskForApproval::Never,
+            sandbox_policy: SandboxPolicy::new_read_only_policy(),
+            cwd: PathBuf::from("/home/user/project"),
+            reasoning_effort: Some(ReasoningEffortConfig::default()),
+            history_log_id: 0,
+            history_entry_count: 0,
+            initial_messages: None,
+            network_proxy: None,
+            rollout_path: Some(rollout_file.path().to_path_buf()),
+        }),
+    });
+    drain_insert_history(&mut rx);
+    chat.record_collab_agent_type(scout_thread_id, "scout".to_string());
+
+    chat.handle_codex_event(Event {
+        id: "agent-msg".into(),
+        msg: EventMsg::AgentMessage(AgentMessageEvent {
+            message: "Scout private payload that should be hidden".to_string(),
+        }),
+    });
+
+    let cells = drain_insert_history(&mut rx);
+    let rendered = cells
+        .last()
+        .map(|lines| lines_to_single_string(lines))
+        .unwrap_or_default();
+    assert!(
+        rendered.contains("details hidden"),
+        "expected compact hidden notice, got: {rendered}",
+    );
+    assert!(
+        rendered.contains("@scout"),
+        "expected scout handle in hidden notice, got: {rendered}",
+    );
+    assert!(
+        !rendered.contains("Scout private payload"),
+        "expected raw scout payload to be hidden, got: {rendered}",
+    );
+}
+
+#[tokio::test]
+async fn active_custom_handle_scout_role_message_is_rendered_as_hidden_notice() {
+    let (mut chat, mut rx, _ops) = make_chatwidget_manual(None).await;
+
+    let scout_thread_id = ThreadId::new();
+    let rollout_file = NamedTempFile::new().unwrap();
+    chat.handle_codex_event(Event {
+        id: "configured".into(),
+        msg: EventMsg::SessionConfigured(codex_core::protocol::SessionConfiguredEvent {
+            session_id: scout_thread_id,
+            forked_from_id: None,
+            thread_name: None,
+            model: "test-model".to_string(),
+            model_provider_id: "test-provider".to_string(),
+            approval_policy: AskForApproval::Never,
+            sandbox_policy: SandboxPolicy::new_read_only_policy(),
+            cwd: PathBuf::from("/home/user/project"),
+            reasoning_effort: Some(ReasoningEffortConfig::default()),
+            history_log_id: 0,
+            history_entry_count: 0,
+            initial_messages: None,
+            network_proxy: None,
+            rollout_path: Some(rollout_file.path().to_path_buf()),
+        }),
+    });
+    drain_insert_history(&mut rx);
+    chat.record_collab_agent_type(
+        scout_thread_id,
+        "context-digger|yellow|role=scout".to_string(),
+    );
+
+    chat.handle_codex_event(Event {
+        id: "agent-msg".into(),
+        msg: EventMsg::AgentMessage(AgentMessageEvent {
+            message: "hidden by role token".to_string(),
+        }),
+    });
+
+    let cells = drain_insert_history(&mut rx);
+    let rendered = cells
+        .last()
+        .map(|lines| lines_to_single_string(lines))
+        .unwrap_or_default();
+    assert!(
+        rendered.contains("details hidden"),
+        "expected hidden notice, got: {rendered}",
+    );
+    assert!(
+        rendered.contains("@context-digger"),
+        "expected custom handle, got: {rendered}",
+    );
+    assert!(
+        !rendered.contains("hidden by role token"),
+        "expected raw scout payload to be hidden, got: {rendered}",
     );
 }
 
@@ -1111,6 +1344,7 @@ async fn helpers_are_available_and_do_not_panic() {
         feedback: codex_feedback::CodexFeedback::new(),
         is_first_run: true,
         feedback_audience: FeedbackAudience::External,
+        show_collab_debug_ids: false,
         model: Some(resolved_model),
         status_line_invalid_items_warned: Arc::new(AtomicBool::new(false)),
         otel_manager,
@@ -1189,6 +1423,7 @@ async fn make_chatwidget_manual(
         active_cell_revision: 0,
         config: cfg,
         collab_agent_types: HashMap::new(),
+        show_collab_debug_ids: false,
         foreign_agent_message_streams: HashMap::new(),
         current_collaboration_mode,
         active_collaboration_mask: None,
@@ -1847,6 +2082,319 @@ async fn submit_user_message_with_mode_submits_when_plan_stream_is_not_active() 
 }
 
 #[tokio::test]
+async fn user_direct_mention_to_agent() {
+    let (mut chat, _rx, mut op_rx) = make_chatwidget_manual(Some("gpt-5")).await;
+    let main_thread_id = ThreadId::new();
+    let scout_thread_id = ThreadId::new();
+    chat.thread_id = Some(main_thread_id);
+    chat.record_collab_agent_type(scout_thread_id, "scout".to_string());
+    chat.set_feature_enabled(Feature::CollaborationModes, true);
+
+    let default_mode = collaboration_modes::default_mode_mask(chat.models_manager.as_ref())
+        .expect("expected default collaboration mode");
+    chat.submit_user_message_with_mode("@scout Gather context pack.".to_string(), default_mode);
+
+    match op_rx.try_recv() {
+        Ok(Op::CollabSendInput {
+            receiver_thread_ids,
+            items,
+        }) => {
+            assert_eq!(receiver_thread_ids, vec![scout_thread_id]);
+            assert_eq!(
+                items,
+                vec![UserInput::Text {
+                    text: "@scout Gather context pack.".to_string(),
+                    text_elements: Vec::new(),
+                }]
+            );
+        }
+        Ok(other) => panic!("expected Op::CollabSendInput, got {other:?}"),
+        Err(err) => panic!("expected Op::CollabSendInput, got {err:?}"),
+    }
+}
+
+#[tokio::test]
+async fn user_role_mention_routes_custom_handle_agent() {
+    let (mut chat, _rx, mut op_rx) = make_chatwidget_manual(Some("gpt-5")).await;
+    let main_thread_id = ThreadId::new();
+    let scout_thread_id = ThreadId::new();
+    chat.thread_id = Some(main_thread_id);
+    chat.record_collab_agent_type(
+        scout_thread_id,
+        "context-digger|magenta|role=scout".to_string(),
+    );
+    chat.set_feature_enabled(Feature::CollaborationModes, true);
+
+    let default_mode = collaboration_modes::default_mode_mask(chat.models_manager.as_ref())
+        .expect("expected default collaboration mode");
+    chat.submit_user_message_with_mode("@scout Gather context pack.".to_string(), default_mode);
+
+    match op_rx.try_recv() {
+        Ok(Op::CollabSendInput {
+            receiver_thread_ids,
+            items,
+        }) => {
+            assert_eq!(receiver_thread_ids, vec![scout_thread_id]);
+            assert_eq!(
+                items,
+                vec![UserInput::Text {
+                    text: "@scout Gather context pack.".to_string(),
+                    text_elements: Vec::new(),
+                }]
+            );
+        }
+        Ok(other) => panic!("expected Op::CollabSendInput, got {other:?}"),
+        Err(err) => panic!("expected Op::CollabSendInput, got {err:?}"),
+    }
+}
+
+#[tokio::test]
+async fn collab_mention_all_routes_to_all_known_agents_except_main() {
+    let (mut chat, _rx, mut op_rx) = make_chatwidget_manual(Some("gpt-5")).await;
+    let main_thread_id =
+        ThreadId::from_string("00000000-0000-0000-0000-000000000001").expect("main thread id");
+    let scout_thread_id =
+        ThreadId::from_string("00000000-0000-0000-0000-000000000002").expect("scout thread id");
+    let validator_thread_id =
+        ThreadId::from_string("00000000-0000-0000-0000-000000000003").expect("validator thread id");
+    chat.thread_id = Some(main_thread_id);
+    chat.record_collab_agent_type(main_thread_id, "main".to_string());
+    chat.record_collab_agent_type(scout_thread_id, "scout".to_string());
+    chat.record_collab_agent_type(validator_thread_id, "validator".to_string());
+    chat.set_feature_enabled(Feature::CollaborationModes, true);
+
+    let default_mode = collaboration_modes::default_mode_mask(chat.models_manager.as_ref())
+        .expect("expected default collaboration mode");
+    chat.submit_user_message_with_mode("@all Validate this slice.".to_string(), default_mode);
+
+    match op_rx.try_recv() {
+        Ok(Op::CollabSendInput {
+            receiver_thread_ids,
+            ..
+        }) => {
+            assert_eq!(
+                receiver_thread_ids,
+                vec![scout_thread_id, validator_thread_id]
+            );
+        }
+        Ok(other) => panic!("expected Op::CollabSendInput, got {other:?}"),
+        Err(err) => panic!("expected Op::CollabSendInput, got {err:?}"),
+    }
+}
+
+#[tokio::test]
+async fn collab_mention_routing_accepts_common_trailing_punctuation() {
+    let (mut chat, _rx, mut op_rx) = make_chatwidget_manual(Some("gpt-5")).await;
+    let main_thread_id =
+        ThreadId::from_string("00000000-0000-0000-0000-000000000010").expect("main thread id");
+    let scout_thread_id =
+        ThreadId::from_string("00000000-0000-0000-0000-000000000011").expect("scout thread id");
+    let validator_thread_id =
+        ThreadId::from_string("00000000-0000-0000-0000-000000000012").expect("validator thread id");
+    chat.thread_id = Some(main_thread_id);
+    chat.record_collab_agent_type(scout_thread_id, "scout".to_string());
+    chat.record_collab_agent_type(validator_thread_id, "validator".to_string());
+    chat.set_feature_enabled(Feature::CollaborationModes, true);
+
+    let default_mode = collaboration_modes::default_mode_mask(chat.models_manager.as_ref())
+        .expect("expected default collaboration mode");
+    chat.submit_user_message_with_mode(
+        "@scout, @validator. Validate this slice.".to_string(),
+        default_mode,
+    );
+
+    match op_rx.try_recv() {
+        Ok(Op::CollabSendInput {
+            receiver_thread_ids,
+            ..
+        }) => {
+            assert_eq!(
+                receiver_thread_ids,
+                vec![scout_thread_id, validator_thread_id]
+            );
+        }
+        Ok(other) => panic!("expected Op::CollabSendInput, got {other:?}"),
+        Err(err) => panic!("expected Op::CollabSendInput, got {err:?}"),
+    }
+}
+
+#[tokio::test]
+async fn collab_mention_team_agent_routes_namespaced_handle() {
+    let (mut chat, _rx, mut op_rx) = make_chatwidget_manual(Some("gpt-5")).await;
+    let main_thread_id =
+        ThreadId::from_string("00000000-0000-0000-0000-000000000013").expect("main thread id");
+    let validator_thread_id =
+        ThreadId::from_string("00000000-0000-0000-0000-000000000014").expect("validator id");
+    chat.thread_id = Some(main_thread_id);
+    chat.record_collab_agent_type(
+        validator_thread_id,
+        "backend-review/validator|name=Validator|role=validator".to_string(),
+    );
+    chat.set_feature_enabled(Feature::CollaborationModes, true);
+
+    let default_mode = collaboration_modes::default_mode_mask(chat.models_manager.as_ref())
+        .expect("expected default collaboration mode");
+    chat.submit_user_message_with_mode(
+        "@backend-review/validator Please review this patch.".to_string(),
+        default_mode,
+    );
+
+    match op_rx.try_recv() {
+        Ok(Op::CollabSendInput {
+            receiver_thread_ids,
+            ..
+        }) => {
+            assert_eq!(receiver_thread_ids, vec![validator_thread_id]);
+        }
+        Ok(other) => panic!("expected Op::CollabSendInput, got {other:?}"),
+        Err(err) => panic!("expected Op::CollabSendInput, got {err:?}"),
+    }
+}
+
+#[tokio::test]
+async fn collab_mention_team_routes_to_orchestrator_handle() {
+    let (mut chat, _rx, mut op_rx) = make_chatwidget_manual(Some("gpt-5")).await;
+    let main_thread_id =
+        ThreadId::from_string("00000000-0000-0000-0000-000000000015").expect("main thread id");
+    let orchestrator_thread_id =
+        ThreadId::from_string("00000000-0000-0000-0000-000000000016").expect("orchestrator id");
+    let validator_thread_id =
+        ThreadId::from_string("00000000-0000-0000-0000-000000000017").expect("validator id");
+    chat.thread_id = Some(main_thread_id);
+    chat.record_collab_agent_type(
+        orchestrator_thread_id,
+        "backend-review/orchestrator|role=default".to_string(),
+    );
+    chat.record_collab_agent_type(
+        validator_thread_id,
+        "backend-review/validator|role=validator".to_string(),
+    );
+    chat.set_feature_enabled(Feature::CollaborationModes, true);
+
+    let default_mode = collaboration_modes::default_mode_mask(chat.models_manager.as_ref())
+        .expect("expected default collaboration mode");
+    chat.submit_user_message_with_mode("@backend-review status update?".to_string(), default_mode);
+
+    match op_rx.try_recv() {
+        Ok(Op::CollabSendInput {
+            receiver_thread_ids,
+            ..
+        }) => {
+            assert_eq!(receiver_thread_ids, vec![orchestrator_thread_id]);
+        }
+        Ok(other) => panic!("expected Op::CollabSendInput, got {other:?}"),
+        Err(err) => panic!("expected Op::CollabSendInput, got {err:?}"),
+    }
+}
+
+#[tokio::test]
+async fn collab_mention_team_reports_ambiguity_without_orchestrator() {
+    let (mut chat, _rx, _op_rx) = make_chatwidget_manual(Some("gpt-5")).await;
+    let main_thread_id =
+        ThreadId::from_string("00000000-0000-0000-0000-000000000018").expect("main thread id");
+    let scout_thread_id =
+        ThreadId::from_string("00000000-0000-0000-0000-000000000019").expect("scout id");
+    let validator_thread_id =
+        ThreadId::from_string("00000000-0000-0000-0000-00000000001a").expect("validator id");
+    chat.thread_id = Some(main_thread_id);
+    chat.record_collab_agent_type(
+        scout_thread_id,
+        "backend-review/scout|role=scout".to_string(),
+    );
+    chat.record_collab_agent_type(
+        validator_thread_id,
+        "backend-review/validator|role=validator".to_string(),
+    );
+
+    assert_eq!(
+        chat.collab_routing_targets("@backend-review ping").unwrap_err(),
+        "Ambiguous team mention(s): @backend-review. Use one of: @backend-review/scout, @backend-review/validator".to_string()
+    );
+}
+
+#[tokio::test]
+async fn first_user_mention_does_not_trigger_collab_routing() {
+    let (mut chat, _rx, mut op_rx) = make_chatwidget_manual(Some("gpt-5")).await;
+    chat.thread_id = Some(ThreadId::new());
+    chat.set_feature_enabled(Feature::CollaborationModes, true);
+    let default_mode = collaboration_modes::default_mode_mask(chat.models_manager.as_ref())
+        .expect("expected default collaboration mode");
+
+    chat.submit_user_message_with_mode("@user ping".to_string(), default_mode);
+
+    match next_submit_op(&mut op_rx) {
+        Op::UserTurn { .. } => {}
+        other => panic!("expected Op::UserTurn for @user input, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn first_user_mention_with_additional_mentions_stays_regular_user_turn() {
+    let (mut chat, _rx, mut op_rx) = make_chatwidget_manual(Some("gpt-5")).await;
+    chat.thread_id = Some(ThreadId::new());
+    chat.set_feature_enabled(Feature::CollaborationModes, true);
+    let default_mode = collaboration_modes::default_mode_mask(chat.models_manager.as_ref())
+        .expect("expected default collaboration mode");
+
+    chat.submit_user_message_with_mode("@user ping @scout".to_string(), default_mode);
+
+    match next_submit_op(&mut op_rx) {
+        Op::UserTurn { .. } => {}
+        other => panic!("expected Op::UserTurn for mixed @user input, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn collab_routing_all_with_only_current_thread_reports_no_agents() {
+    let (mut chat, _rx, _op_rx) = make_chatwidget_manual(Some("gpt-5")).await;
+    let main_thread_id =
+        ThreadId::from_string("00000000-0000-0000-0000-000000000020").expect("main thread id");
+    chat.thread_id = Some(main_thread_id);
+    chat.record_collab_agent_type(main_thread_id, "main".to_string());
+
+    assert_eq!(
+        chat.collab_routing_targets("@all ping").unwrap_err(),
+        "No agent threads are available yet.".to_string()
+    );
+}
+
+#[tokio::test]
+async fn collab_routing_excludes_closed_agents() {
+    let (mut chat, _rx, _op_rx) = make_chatwidget_manual(Some("gpt-5")).await;
+    let main_thread_id =
+        ThreadId::from_string("00000000-0000-0000-0000-000000000020").expect("main thread id");
+    let scout_thread_id =
+        ThreadId::from_string("00000000-0000-0000-0000-000000000021").expect("scout thread id");
+    chat.thread_id = Some(main_thread_id);
+    chat.record_collab_agent_type(scout_thread_id, "scout".to_string());
+
+    assert_eq!(
+        chat.collab_routing_targets("@scout ping")
+            .expect("expected route before close"),
+        vec![scout_thread_id]
+    );
+
+    chat.handle_codex_event(Event {
+        id: "close-1".to_string(),
+        msg: EventMsg::CollabCloseEnd(CollabCloseEndEvent {
+            call_id: "close-1".to_string(),
+            sender_thread_id: main_thread_id,
+            receiver_thread_id: scout_thread_id,
+            status: AgentStatus::Shutdown,
+        }),
+    });
+
+    assert_eq!(
+        chat.collab_routing_targets("@scout ping").unwrap_err(),
+        "Unknown agent mention(s): @scout".to_string()
+    );
+    assert_eq!(
+        chat.collab_routing_targets("@all ping").unwrap_err(),
+        "No agent threads are available yet.".to_string()
+    );
+}
+
+#[tokio::test]
 async fn plan_implementation_popup_skips_replayed_turn_complete() {
     let (mut chat, _rx, _op_rx) = make_chatwidget_manual(Some("gpt-5")).await;
     chat.set_feature_enabled(Feature::CollaborationModes, true);
@@ -2249,7 +2797,7 @@ fn complete_assistant_message(
     text: &str,
     phase: Option<MessagePhase>,
 ) {
-    let thread_id = chat.thread_id.unwrap_or_else(ThreadId::new);
+    let thread_id = chat.thread_id.unwrap_or_default();
     chat.handle_codex_event(Event {
         id: format!("raw-{item_id}"),
         msg: EventMsg::ItemCompleted(ItemCompletedEvent {
@@ -3143,19 +3691,77 @@ async fn collab_mode_shift_tab_cycles_only_when_enabled_and_idle() {
     assert_eq!(chat.active_collaboration_mode_kind(), ModeKind::Default);
 
     chat.set_feature_enabled(Feature::CollaborationModes, true);
+    assert_eq!(
+        chat.active_collaboration_mask
+            .as_ref()
+            .map(|mask| mask.name.as_str()),
+        Some("Default")
+    );
+
+    chat.handle_key_event(KeyEvent::from(KeyCode::BackTab));
+    assert_eq!(chat.active_collaboration_mode_kind(), ModeKind::Default);
+    assert_eq!(
+        chat.active_collaboration_mask
+            .as_ref()
+            .map(|mask| mask.name.as_str()),
+        Some("Orchestrator")
+    );
+    assert_eq!(chat.current_collaboration_mode(), &initial);
 
     chat.handle_key_event(KeyEvent::from(KeyCode::BackTab));
     assert_eq!(chat.active_collaboration_mode_kind(), ModeKind::Plan);
+    assert_eq!(
+        chat.active_collaboration_mask
+            .as_ref()
+            .map(|mask| mask.name.as_str()),
+        Some("Plan")
+    );
     assert_eq!(chat.current_collaboration_mode(), &initial);
 
     chat.handle_key_event(KeyEvent::from(KeyCode::BackTab));
     assert_eq!(chat.active_collaboration_mode_kind(), ModeKind::Default);
+    assert_eq!(
+        chat.active_collaboration_mask
+            .as_ref()
+            .map(|mask| mask.name.as_str()),
+        Some("Default")
+    );
     assert_eq!(chat.current_collaboration_mode(), &initial);
 
     chat.on_task_started();
     let before = chat.active_collaboration_mode_kind();
     chat.handle_key_event(KeyEvent::from(KeyCode::BackTab));
     assert_eq!(chat.active_collaboration_mode_kind(), before);
+}
+
+#[tokio::test]
+async fn collab_picker_status_and_footer_follow_orchestrator_mask() {
+    let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(None).await;
+    chat.set_feature_enabled(Feature::CollaborationModes, true);
+    let orchestrator_mask = collaboration_modes::presets_for_tui(chat.models_manager.as_ref())
+        .into_iter()
+        .find(|mask| mask.name == "Orchestrator")
+        .expect("expected Orchestrator collaboration preset");
+    chat.set_collaboration_mask(orchestrator_mask);
+
+    chat.open_collaboration_modes_popup();
+    let popup = render_bottom_popup(&chat, 80);
+    assert!(
+        popup.contains("Select Collaboration Mode"),
+        "expected collaboration picker: {popup}"
+    );
+
+    chat.handle_key_event(KeyEvent::from(KeyCode::Enter));
+    let selected_mask = match rx.try_recv() {
+        Ok(AppEvent::UpdateCollaborationMode(mask)) => mask,
+        other => panic!("expected UpdateCollaborationMode event, got {other:?}"),
+    };
+    assert_eq!(selected_mask.name, "Orchestrator");
+    assert_eq!(chat.collaboration_mode_label(), Some("Orchestrator"));
+    assert_eq!(
+        chat.collaboration_mode_indicator(),
+        Some(CollaborationModeIndicator::Orchestrator)
+    );
 }
 
 #[tokio::test]
@@ -3306,6 +3912,7 @@ async fn collaboration_modes_defaults_to_code_on_startup() {
         feedback: codex_feedback::CodexFeedback::new(),
         is_first_run: true,
         feedback_audience: FeedbackAudience::External,
+        show_collab_debug_ids: false,
         model: Some(resolved_model.clone()),
         status_line_invalid_items_warned: Arc::new(AtomicBool::new(false)),
         otel_manager,
@@ -3355,6 +3962,7 @@ async fn experimental_mode_plan_applies_on_startup() {
         feedback: codex_feedback::CodexFeedback::new(),
         is_first_run: true,
         feedback_audience: FeedbackAudience::External,
+        show_collab_debug_ids: false,
         model: Some(resolved_model.clone()),
         status_line_invalid_items_warned: Arc::new(AtomicBool::new(false)),
         otel_manager,
@@ -6305,7 +6913,7 @@ async fn status_header_includes_current_agent_role() {
     let (mut chat, _rx, _op_rx) = make_chatwidget_manual(None).await;
     let thread_id = ThreadId::new();
     chat.thread_id = Some(thread_id);
-    chat.record_collab_agent_type(thread_id, "builder".to_string());
+    chat.record_collab_agent_type(thread_id, "validator".to_string());
     let model = chat.current_model().to_string();
 
     chat.on_task_started();
@@ -6314,7 +6922,7 @@ async fn status_header_includes_current_agent_role() {
         .bottom_pane
         .status_widget()
         .expect("status indicator should be visible");
-    assert_eq!(status.header(), format!("Working (Builder • {model})"));
+    assert_eq!(status.header(), format!("Working (Validator • {model})"));
 }
 
 #[tokio::test]

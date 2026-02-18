@@ -1,0 +1,9 @@
+[tool]
+id = "rust-test"
+description = "Run cargo test with deterministic test threads and workspace temp dir"
+command = "cargo"
+args = ["test"]
+
+[tool.env]
+RUST_TEST_THREADS = "1"
+TMPDIR = "target/tmp"

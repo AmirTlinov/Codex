@@ -176,6 +176,11 @@ struct CachedCodexAppsTools {
 
 static CODEX_APPS_TOOLS_CACHE: LazyLock<StdMutex<Option<CachedCodexAppsTools>>> =
     LazyLock::new(|| StdMutex::new(None));
+static MCP_SERVER_NAME_REGEX: LazyLock<regex_lite::Regex> =
+    LazyLock::new(|| match regex_lite::Regex::new(r"^[a-zA-Z0-9_-]+$") {
+        Ok(regex) => regex,
+        Err(err) => panic!("MCP server-name regex literal must compile: {err}"),
+    });
 
 type ResponderMap = HashMap<(String, RequestId), oneshot::Sender<ElicitationResponse>>;
 
@@ -1173,11 +1178,10 @@ async fn list_tools_for_client_uncached(
 }
 
 fn validate_mcp_server_name(server_name: &str) -> Result<()> {
-    let re = regex_lite::Regex::new(r"^[a-zA-Z0-9_-]+$")?;
-    if !re.is_match(server_name) {
+    if !MCP_SERVER_NAME_REGEX.is_match(server_name) {
         return Err(anyhow!(
             "Invalid MCP server name '{server_name}': must match pattern {pattern}",
-            pattern = re.as_str()
+            pattern = MCP_SERVER_NAME_REGEX.as_str()
         ));
     }
     Ok(())
@@ -1448,6 +1452,21 @@ mod tests {
         assert_eq!(filtered.len(), 1);
         assert_eq!(filtered[0].server_name, "server1");
         assert_eq!(filtered[0].tool_name, "tool_a");
+    }
+
+    #[test]
+    fn validate_mcp_server_name_accepts_allowed_characters() {
+        assert!(validate_mcp_server_name("server-1_name").is_ok());
+    }
+
+    #[test]
+    fn validate_mcp_server_name_rejects_disallowed_characters() {
+        let err = validate_mcp_server_name("server name").expect_err("must reject spaces");
+        assert!(
+            err.to_string()
+                .contains("must match pattern ^[a-zA-Z0-9_-]+$"),
+            "unexpected validation error: {err:#}"
+        );
     }
 
     #[test]

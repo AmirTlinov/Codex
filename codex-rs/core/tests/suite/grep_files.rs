@@ -98,7 +98,7 @@ async fn grep_files_tool_collects_matches() -> Result<()> {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn grep_files_tool_rejects_without_scout_context() -> Result<()> {
+async fn grep_files_tool_allows_default_role_without_scout_context() -> Result<()> {
     skip_if_no_network!(Ok(()));
     skip_if_ripgrep_missing!(Ok(()));
 
@@ -127,13 +127,24 @@ async fn grep_files_tool_rejects_without_scout_context() -> Result<()> {
     test.submit_turn("please find uses of needle").await?;
 
     let req = mocks.completion.single_request();
-    let (content_opt, _) = req
+    let (content_opt, success_opt) = req
         .function_call_output_content_and_success(call_id)
         .expect("tool output present");
     let content = content_opt.expect("content present");
+    let success = success_opt.unwrap_or(true);
     assert!(
-        content.contains("call spawn_agent with agent_type=\"scout\""),
-        "expected scout-gate message, got: {content}"
+        success,
+        "expected grep_files success without scout-gate heuristic, got content={content}"
+    );
+    let entries = collect_file_names(&content);
+    assert_eq!(entries.len(), 2, "content: {content}");
+    assert!(
+        entries.contains("alpha.rs"),
+        "missing alpha.rs in {entries:?}"
+    );
+    assert!(
+        entries.contains("beta.rs"),
+        "missing beta.rs in {entries:?}"
     );
 
     Ok(())

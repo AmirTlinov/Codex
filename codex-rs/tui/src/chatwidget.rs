@@ -129,6 +129,7 @@ use codex_protocol::items::AgentMessageItem;
 use codex_protocol::models::MessagePhase;
 use codex_protocol::models::local_image_label_text;
 use codex_protocol::parse_command::ParsedCommand;
+use codex_protocol::protocol::CollabAgentIdentity;
 use codex_protocol::request_user_input::RequestUserInputEvent;
 use codex_protocol::user_input::TextElement;
 use codex_protocol::user_input::UserInput;
@@ -158,13 +159,40 @@ const PLAN_IMPLEMENTATION_NO: &str = "No, stay in Plan mode";
 const PLAN_IMPLEMENTATION_CODING_MESSAGE: &str = "Implement the plan.";
 const CONNECTORS_SELECTION_VIEW_ID: &str = "connectors-selection";
 
+fn strip_agent_style_token(role_type: &str) -> &str {
+    role_type.split('|').next().unwrap_or(role_type).trim()
+}
+
+fn agent_role_token(role_type: &str) -> &str {
+    if let Some(identity) = CollabAgentIdentity::parse_agent_type_label(role_type)
+        && let Some(role_label) = identity.role_label.as_deref()
+    {
+        match role_label.trim().to_ascii_lowercase().as_str() {
+            "default" | "main" | "orchestrator" => return "orchestrator",
+            "scout" | "explorer" => return "scout",
+            "validator" => return "validator",
+            "plan" | "planner" => return "plan",
+            _ => {}
+        }
+    }
+
+    for token in role_type.split('|').skip(1) {
+        let token = token.trim();
+        if let Some(role) = token.strip_prefix("role=") {
+            let role = role.trim();
+            if !role.is_empty() {
+                return role;
+            }
+        }
+    }
+
+    strip_agent_style_token(role_type)
+}
+
 pub(crate) fn agent_role_label_from_type(role_type: &str) -> Option<&'static str> {
-    match role_type.trim().to_ascii_lowercase().as_str() {
+    match agent_role_token(role_type).to_ascii_lowercase().as_str() {
         "default" | "main" | "orchestrator" => Some("Main"),
         "scout" | "explorer" => Some("Scout"),
-        "context_validator" => Some("Context validator"),
-        "builder" | "worker" => Some("Builder"),
-        "post_builder_validator" => Some("Post-builder validator"),
         "validator" => Some("Validator"),
         "plan" | "planner" => Some("Plan"),
         _ => None,
@@ -172,12 +200,9 @@ pub(crate) fn agent_role_label_from_type(role_type: &str) -> Option<&'static str
 }
 
 pub(crate) fn agent_role_from_type(role_type: &str) -> Option<AgentRole> {
-    match role_type.trim().to_ascii_lowercase().as_str() {
+    match agent_role_token(role_type).to_ascii_lowercase().as_str() {
         "default" | "main" | "orchestrator" => Some(AgentRole::Default),
         "scout" | "explorer" => Some(AgentRole::Scout),
-        "context_validator" => Some(AgentRole::ContextValidator),
-        "builder" | "worker" => Some(AgentRole::Builder),
-        "post_builder_validator" => Some(AgentRole::PostBuilderValidator),
         "validator" => Some(AgentRole::Validator),
         "plan" | "planner" => Some(AgentRole::Plan),
         _ => None,
@@ -191,11 +216,6 @@ pub(crate) fn agent_role_model_override_from_type<'a>(
     match agent_role_from_type(role_type) {
         Some(AgentRole::Default) => config.agents.main_model.as_deref(),
         Some(AgentRole::Scout) => config.agents.scout_model.as_deref(),
-        Some(AgentRole::ContextValidator) => config.agents.context_validator_model.as_deref(),
-        Some(AgentRole::Builder) => config.agents.builder_model.as_deref(),
-        Some(AgentRole::PostBuilderValidator) => {
-            config.agents.post_builder_validator_model.as_deref()
-        }
         Some(AgentRole::Validator) => config.agents.validator_model.as_deref(),
         Some(AgentRole::Plan) => config.agents.plan_model.as_deref(),
         None => None,
@@ -206,9 +226,6 @@ fn agent_role_model_from_type(role: AgentRole, config: &Config) -> Option<&str> 
     match role {
         AgentRole::Default => config.agents.main_model.as_deref(),
         AgentRole::Scout => config.agents.scout_model.as_deref(),
-        AgentRole::ContextValidator => config.agents.context_validator_model.as_deref(),
-        AgentRole::Builder => config.agents.builder_model.as_deref(),
-        AgentRole::PostBuilderValidator => config.agents.post_builder_validator_model.as_deref(),
         AgentRole::Validator => config.agents.validator_model.as_deref(),
         AgentRole::Plan => config.agents.plan_model.as_deref(),
     }
@@ -308,6 +325,7 @@ use strum::IntoEnumIterator;
 const USER_SHELL_COMMAND_HELP_TITLE: &str = "Prefix a command with ! to run it locally";
 const USER_SHELL_COMMAND_HELP_HINT: &str = "Example: !ls";
 const DEFAULT_OPENAI_BASE_URL: &str = "https://api.openai.com/v1";
+const ORCHESTRATOR_COLLABORATION_PRESET_NAME: &str = "Orchestrator";
 // Track information about an in-flight exec command.
 struct RunningCommand {
     command: Vec<String>,
@@ -475,6 +493,7 @@ pub(crate) struct ChatWidgetInit {
     pub(crate) feedback: codex_feedback::CodexFeedback,
     pub(crate) is_first_run: bool,
     pub(crate) feedback_audience: FeedbackAudience,
+    pub(crate) show_collab_debug_ids: bool,
     pub(crate) model: Option<String>,
     // Shared latch so we only warn once about invalid status-line item IDs.
     pub(crate) status_line_invalid_items_warned: Arc<AtomicBool>,
@@ -581,6 +600,7 @@ pub(crate) struct ChatWidget {
     plan_stream_controller: Option<PlanStreamController>,
     running_commands: HashMap<String, RunningCommand>,
     collab_agent_types: HashMap<ThreadId, String>,
+    show_collab_debug_ids: bool,
     foreign_agent_message_streams: HashMap<(ThreadId, String), ForeignAgentMessageStream>,
     suppressed_exec_calls: HashSet<String>,
     skills_all: Vec<ProtocolSkillMetadata>,
@@ -931,6 +951,29 @@ impl ChatWidget {
             .and_then(|role_type| agent_role_from_type(role_type))
     }
 
+    fn thread_agent_role(&self, thread_id: ThreadId) -> Option<AgentRole> {
+        self.collab_agent_types
+            .get(&thread_id)
+            .and_then(|role_type| agent_role_from_type(role_type))
+    }
+
+    fn hide_verbose_output_for_thread(&self, thread_id: ThreadId) -> bool {
+        matches!(self.thread_agent_role(thread_id), Some(AgentRole::Scout))
+    }
+
+    fn hide_verbose_output_for_active_thread(&self) -> bool {
+        self.thread_id
+            .is_some_and(|thread_id| self.hide_verbose_output_for_thread(thread_id))
+    }
+
+    fn emit_hidden_agent_response(&mut self, thread_id: ThreadId) {
+        self.on_collab_event(collab::agent_message_hidden(
+            thread_id,
+            &self.collab_agent_types,
+            self.thread_id.as_ref(),
+        ));
+    }
+
     fn agent_role_model_display(&self, role: AgentRole) -> String {
         self.agent_role_model(role)
             .map(str::to_string)
@@ -1266,6 +1309,18 @@ impl ChatWidget {
     }
 
     fn on_agent_message(&mut self, message: String) {
+        if self.hide_verbose_output_for_active_thread() {
+            self.flush_answer_stream_with_separator();
+            if !message.trim().is_empty()
+                && let Some(thread_id) = self.thread_id
+            {
+                self.emit_hidden_agent_response(thread_id);
+            }
+            self.handle_stream_finished();
+            self.request_redraw();
+            return;
+        }
+
         // If we have a stream_controller, then the final agent message is redundant and will be a
         // duplicate of what has already been streamed.
         if self.stream_controller.is_none() && !message.is_empty() {
@@ -1277,6 +1332,9 @@ impl ChatWidget {
     }
 
     fn on_agent_message_delta(&mut self, delta: String) {
+        if self.hide_verbose_output_for_active_thread() {
+            return;
+        }
         self.handle_streaming_delta(delta);
     }
 
@@ -2203,6 +2261,10 @@ impl ChatWidget {
         item_id: String,
         delta: String,
     ) {
+        if self.hide_verbose_output_for_thread(thread_id) {
+            return;
+        }
+
         let mut emission = None;
         {
             let stream = self
@@ -2258,6 +2320,7 @@ impl ChatWidget {
             return;
         }
 
+        let lines = collab::highlight_mentions_in_lines(lines);
         let (initial_prefix, subsequent_prefix) = collab::agent_message_prefixes(
             &thread_id,
             &self.collab_agent_types,
@@ -2268,11 +2331,10 @@ impl ChatWidget {
         } else {
             subsequent_prefix.clone()
         };
-        self.on_collab_event(history_cell::PrefixedWrappedHistoryCell::new(
-            lines,
-            initial_prefix,
-            subsequent_prefix,
-        ));
+        self.on_collab_event(
+            history_cell::PrefixedWrappedHistoryCell::new(lines, initial_prefix, subsequent_prefix)
+                .with_feed(history_cell::TranscriptFeed::AgentMesh),
+        );
     }
 
     fn on_foreign_agent_message_item_completed(
@@ -2283,12 +2345,17 @@ impl ChatWidget {
         let message = item
             .content
             .into_iter()
-            .filter_map(|content| match content {
-                codex_protocol::items::AgentMessageContent::Text { text } => Some(text),
+            .map(|content| match content {
+                codex_protocol::items::AgentMessageContent::Text { text } => text,
             })
             .collect::<Vec<_>>()
             .join("");
         if message.trim().is_empty() {
+            return;
+        }
+
+        if self.hide_verbose_output_for_thread(thread_id) {
+            self.emit_hidden_agent_response(thread_id);
             return;
         }
 
@@ -2763,6 +2830,7 @@ impl ChatWidget {
             feedback,
             is_first_run,
             feedback_audience,
+            show_collab_debug_ids,
             model,
             status_line_invalid_items_warned,
             otel_manager,
@@ -2836,6 +2904,7 @@ impl ChatWidget {
             stream_controller: None,
             plan_stream_controller: None,
             running_commands: HashMap::new(),
+            show_collab_debug_ids,
             suppressed_exec_calls: HashSet::new(),
             last_unified_wait: None,
             unified_exec_wait_streak: None,
@@ -2931,6 +3000,7 @@ impl ChatWidget {
             feedback,
             is_first_run,
             feedback_audience,
+            show_collab_debug_ids,
             model,
             status_line_invalid_items_warned,
             otel_manager,
@@ -3003,6 +3073,7 @@ impl ChatWidget {
             stream_controller: None,
             plan_stream_controller: None,
             running_commands: HashMap::new(),
+            show_collab_debug_ids,
             suppressed_exec_calls: HashSet::new(),
             last_unified_wait: None,
             unified_exec_wait_streak: None,
@@ -3087,6 +3158,7 @@ impl ChatWidget {
             feedback,
             is_first_run: _,
             feedback_audience,
+            show_collab_debug_ids,
             model,
             status_line_invalid_items_warned,
             otel_manager,
@@ -3159,6 +3231,7 @@ impl ChatWidget {
             stream_controller: None,
             plan_stream_controller: None,
             running_commands: HashMap::new(),
+            show_collab_debug_ids,
             suppressed_exec_calls: HashSet::new(),
             last_unified_wait: None,
             unified_exec_wait_streak: None,
@@ -3407,6 +3480,15 @@ impl ChatWidget {
 
     pub(crate) fn set_footer_hint_override(&mut self, items: Option<Vec<(String, String)>>) {
         self.bottom_pane.set_footer_hint_override(items);
+    }
+
+    pub(crate) fn set_active_collab_footer_chip_counts(
+        &mut self,
+        agents_count: usize,
+        scouts_count: usize,
+    ) {
+        self.bottom_pane
+            .set_collab_footer_chip_counts(agents_count, scouts_count);
     }
 
     pub(crate) fn show_selection_view(&mut self, params: SelectionViewParams) {
@@ -3904,16 +3986,21 @@ impl ChatWidget {
             && text_elements.is_empty()
             && mention_bindings.is_empty()
             && local_images.is_empty();
-        let should_route_collab_mentions = trimmed_text.starts_with('@') && !escaped_at;
-        if escaped_at {
-            if let Some(first_non_ws) = text.find(|ch: char| !ch.is_whitespace())
-                && text[first_non_ws..].starts_with("\\@")
-            {
-                let mut unescaped = String::with_capacity(text.len().saturating_sub(1));
-                unescaped.push_str(&text[..first_non_ws]);
-                unescaped.push_str(&text[first_non_ws + 1..]);
-                text = unescaped;
-            }
+        let first_token_is_user_mention = trimmed_text
+            .split_whitespace()
+            .next()
+            .map(|token| token.trim_end_matches(|ch: char| ",:;.!?".contains(ch)))
+            .is_some_and(|token| token.eq_ignore_ascii_case("@user"));
+        let should_route_collab_mentions =
+            trimmed_text.starts_with('@') && !escaped_at && !first_token_is_user_mention;
+        if escaped_at
+            && let Some(first_non_ws) = text.find(|ch: char| !ch.is_whitespace())
+            && text[first_non_ws..].starts_with("\\@")
+        {
+            let mut unescaped = String::with_capacity(text.len().saturating_sub(1));
+            unescaped.push_str(&text[..first_non_ws]);
+            unescaped.push_str(&text[first_non_ws + 1..]);
+            text = unescaped;
         }
         if text.is_empty() && local_images.is_empty() {
             return;
@@ -4317,7 +4404,12 @@ impl ChatWidget {
             }
             EventMsg::ExitedReviewMode(review) => self.on_exited_review_mode(review),
             EventMsg::ContextCompacted(_) => self.on_agent_message("Context compacted".to_owned()),
-            EventMsg::CollabAgentSpawnBegin(_) => {}
+            EventMsg::CollabAgentSpawnBegin(ev) => self.on_collab_event(collab::spawn_begin(
+                ev,
+                &self.collab_agent_types,
+                self.thread_id.as_ref(),
+                self.show_collab_debug_ids,
+            )),
             EventMsg::CollabAgentSpawnEnd(ev) => {
                 if let Some(thread_id) = ev.new_thread_id
                     && let Some(agent_type) = ev.agent_type.clone()
@@ -4328,39 +4420,68 @@ impl ChatWidget {
                     ev,
                     &self.collab_agent_types,
                     self.thread_id.as_ref(),
+                    self.show_collab_debug_ids,
                 ))
             }
-            EventMsg::CollabAgentInteractionBegin(_) => {}
-            EventMsg::CollabAgentInteractionEnd(ev) => self.on_collab_event(
-                collab::interaction_end(ev, &self.collab_agent_types, self.thread_id.as_ref()),
-            ),
+            EventMsg::CollabAgentInteractionBegin(ev) => {
+                self.on_collab_event(collab::interaction_begin(
+                    ev,
+                    &self.collab_agent_types,
+                    self.thread_id.as_ref(),
+                    self.show_collab_debug_ids,
+                ))
+            }
+            EventMsg::CollabAgentInteractionEnd(ev) => {
+                self.on_collab_event(collab::interaction_end(
+                    ev,
+                    &self.collab_agent_types,
+                    self.thread_id.as_ref(),
+                    self.show_collab_debug_ids,
+                ))
+            }
             EventMsg::CollabWaitingBegin(ev) => self.on_collab_event(collab::waiting_begin(
                 ev,
                 &self.collab_agent_types,
                 self.thread_id.as_ref(),
+                self.show_collab_debug_ids,
             )),
             EventMsg::CollabWaitingEnd(ev) => {
-                for cell in
-                    collab::waiting_end(ev, &self.collab_agent_types, self.thread_id.as_ref())
-                {
+                for cell in collab::waiting_end(
+                    ev,
+                    &self.collab_agent_types,
+                    self.thread_id.as_ref(),
+                    self.show_collab_debug_ids,
+                ) {
                     self.on_collab_event(cell);
                 }
             }
-            EventMsg::CollabCloseBegin(_) => {}
-            EventMsg::CollabCloseEnd(ev) => self.on_collab_event(collab::close_end(
+            EventMsg::CollabCloseBegin(ev) => self.on_collab_event(collab::close_begin(
                 ev,
                 &self.collab_agent_types,
                 self.thread_id.as_ref(),
+                self.show_collab_debug_ids,
             )),
+            EventMsg::CollabCloseEnd(ev) => {
+                let receiver_thread_id = ev.receiver_thread_id;
+                self.on_collab_event(collab::close_end(
+                    ev,
+                    &self.collab_agent_types,
+                    self.thread_id.as_ref(),
+                    self.show_collab_debug_ids,
+                ));
+                self.forget_collab_agent_type(receiver_thread_id);
+            }
             EventMsg::CollabResumeBegin(ev) => self.on_collab_event(collab::resume_begin(
                 ev,
                 &self.collab_agent_types,
                 self.thread_id.as_ref(),
+                self.show_collab_debug_ids,
             )),
             EventMsg::CollabResumeEnd(ev) => self.on_collab_event(collab::resume_end(
                 ev,
                 &self.collab_agent_types,
                 self.thread_id.as_ref(),
+                self.show_collab_debug_ids,
             )),
             EventMsg::ThreadRolledBack(rollback) => {
                 if from_replay {
@@ -5069,9 +5190,6 @@ impl ChatWidget {
         let roles = [
             AgentRole::Default,
             AgentRole::Scout,
-            AgentRole::ContextValidator,
-            AgentRole::Builder,
-            AgentRole::PostBuilderValidator,
             AgentRole::Validator,
             AgentRole::Plan,
         ];
@@ -5234,9 +5352,6 @@ impl ChatWidget {
         match role {
             AgentRole::Default => "Main",
             AgentRole::Scout => "Scout",
-            AgentRole::ContextValidator => "Context validator",
-            AgentRole::PostBuilderValidator => "Post-builder validator",
-            AgentRole::Builder => "Builder",
             AgentRole::Validator => "Validator",
             AgentRole::Plan => "Plan",
         }
@@ -5483,19 +5598,17 @@ impl ChatWidget {
             return;
         }
 
-        let current_kind = self
+        let current_mask = self
             .active_collaboration_mask
-            .as_ref()
-            .and_then(|mask| mask.mode)
-            .or_else(|| {
-                collaboration_modes::default_mask(self.models_manager.as_ref())
-                    .and_then(|mask| mask.mode)
-            });
+            .clone()
+            .or_else(|| collaboration_modes::default_mask(self.models_manager.as_ref()));
         let items: Vec<SelectionItem> = presets
             .into_iter()
             .map(|mask| {
                 let name = mask.name.clone();
-                let is_current = current_kind == mask.mode;
+                let is_current = current_mask.as_ref().is_some_and(|active_mask| {
+                    active_mask == &mask || active_mask.name == mask.name
+                });
                 let actions: Vec<SelectionAction> = vec![Box::new(move |tx| {
                     tx.send(AppEvent::UpdateCollaborationMode(mask.clone()));
                 })];
@@ -6651,9 +6764,12 @@ impl ChatWidget {
     }
 
     /// Get the label for the current collaboration mode.
-    fn collaboration_mode_label(&self) -> Option<&'static str> {
+    fn collaboration_mode_label(&self) -> Option<&str> {
         if !self.collaboration_modes_enabled() {
             return None;
+        }
+        if let Some(active_mask) = self.active_collaboration_mask.as_ref() {
+            return Some(active_mask.name.as_str());
         }
         let active_mode = self.active_mode_kind();
         active_mode
@@ -6664,6 +6780,13 @@ impl ChatWidget {
     fn collaboration_mode_indicator(&self) -> Option<CollaborationModeIndicator> {
         if !self.collaboration_modes_enabled() {
             return None;
+        }
+        if self
+            .active_collaboration_mask
+            .as_ref()
+            .is_some_and(|mask| mask.name == ORCHESTRATOR_COLLABORATION_PRESET_NAME)
+        {
+            return Some(CollaborationModeIndicator::Orchestrator);
         }
         match self.active_mode_kind() {
             ModeKind::Plan => Some(CollaborationModeIndicator::Plan),
@@ -6692,7 +6815,7 @@ impl ChatWidget {
         }
     }
 
-    /// Cycle to the next collaboration mode variant (Plan -> Default -> Plan).
+    /// Cycle to the next collaboration preset in list order.
     fn cycle_collaboration_mode(&mut self) {
         if !self.collaboration_modes_enabled() {
             return;
@@ -7491,32 +7614,138 @@ impl ChatWidget {
     }
 
     pub(crate) fn record_collab_agent_type(&mut self, thread_id: ThreadId, agent_type: String) {
-        self.collab_agent_types.insert(thread_id, agent_type);
+        let normalized = agent_type.trim();
+        if !normalized.is_empty() {
+            self.collab_agent_types
+                .insert(thread_id, normalized.to_string());
+        }
+    }
+
+    pub(crate) fn forget_collab_agent_type(&mut self, thread_id: ThreadId) {
+        self.collab_agent_types.remove(&thread_id);
     }
 
     fn collab_routing_targets(&self, text: &str) -> Result<Vec<ThreadId>, String> {
+        fn is_orchestrator_label(value: &str) -> bool {
+            value.eq_ignore_ascii_case("main")
+                || value.eq_ignore_ascii_case("default")
+                || value.eq_ignore_ascii_case("orchestrator")
+        }
+
         fn matches_agent_handle(agent_type: &str, handle: &str) -> bool {
             let handle = handle.trim();
             if handle.is_empty() {
                 return false;
             }
 
+            let normalized_agent_type = strip_agent_style_token(agent_type);
+            let identity = CollabAgentIdentity::parse_agent_type_label(agent_type);
+            let role_token = agent_role_token(agent_type);
             let is_main_handle = handle.eq_ignore_ascii_case("main")
                 || handle.eq_ignore_ascii_case("default")
                 || handle.eq_ignore_ascii_case("orchestrator");
             if is_main_handle {
-                return agent_type.eq_ignore_ascii_case("main")
-                    || agent_type.eq_ignore_ascii_case("default")
-                    || agent_type.eq_ignore_ascii_case("orchestrator");
+                return normalized_agent_type.eq_ignore_ascii_case("main")
+                    || normalized_agent_type.eq_ignore_ascii_case("default")
+                    || normalized_agent_type.eq_ignore_ascii_case("orchestrator")
+                    || role_token.eq_ignore_ascii_case("main")
+                    || role_token.eq_ignore_ascii_case("default")
+                    || role_token.eq_ignore_ascii_case("orchestrator")
+                    || identity
+                        .as_ref()
+                        .and_then(|parsed| parsed.role_label.as_deref())
+                        .is_some_and(|role_label| {
+                            role_label.eq_ignore_ascii_case("main")
+                                || role_label.eq_ignore_ascii_case("default")
+                                || role_label.eq_ignore_ascii_case("orchestrator")
+                        });
             }
 
-            agent_type.eq_ignore_ascii_case(handle)
+            normalized_agent_type.eq_ignore_ascii_case(handle)
+                || role_token.eq_ignore_ascii_case(handle)
+                || identity
+                    .as_ref()
+                    .is_some_and(|parsed| parsed.handle.eq_ignore_ascii_case(handle))
+                || identity
+                    .as_ref()
+                    .and_then(|parsed| parsed.role_label.as_deref())
+                    .is_some_and(|role_label| role_label.eq_ignore_ascii_case(handle))
+        }
+
+        fn resolve_team_mention_target(
+            mention: &str,
+            thread_id: Option<ThreadId>,
+            agent_types: &HashMap<ThreadId, String>,
+        ) -> Result<Option<ThreadId>, String> {
+            if mention.contains('/') {
+                return Ok(None);
+            }
+
+            let mut team_candidates: Vec<(ThreadId, String, Option<String>, String)> = Vec::new();
+            for (candidate_thread_id, agent_type) in agent_types {
+                if Some(*candidate_thread_id) == thread_id {
+                    continue;
+                }
+                let identity = CollabAgentIdentity::parse_agent_type_label(agent_type);
+                let handle = identity
+                    .as_ref()
+                    .map(|parsed| parsed.handle.as_str())
+                    .unwrap_or_else(|| strip_agent_style_token(agent_type));
+                let mut segments = handle.splitn(2, '/');
+                let Some(team) = segments.next() else {
+                    continue;
+                };
+                let Some(agent) = segments.next() else {
+                    continue;
+                };
+                if !team.eq_ignore_ascii_case(mention) {
+                    continue;
+                }
+                team_candidates.push((
+                    *candidate_thread_id,
+                    agent.to_string(),
+                    identity.and_then(|parsed| parsed.role_label),
+                    agent_role_token(agent_type).to_string(),
+                ));
+            }
+
+            if team_candidates.is_empty() {
+                return Ok(None);
+            }
+            if team_candidates.len() == 1 {
+                return Ok(team_candidates.first().map(|(thread_id, ..)| *thread_id));
+            }
+
+            let orchestrators = team_candidates
+                .iter()
+                .filter_map(|(thread_id, agent_name, role_label, role_token)| {
+                    let is_orchestrator = is_orchestrator_label(agent_name)
+                        || is_orchestrator_label(role_token)
+                        || role_label.as_deref().is_some_and(is_orchestrator_label);
+                    is_orchestrator.then_some(*thread_id)
+                })
+                .collect::<Vec<_>>();
+
+            if orchestrators.len() == 1 {
+                return Ok(orchestrators.first().copied());
+            }
+
+            let mut variants = team_candidates
+                .iter()
+                .map(|(_, agent_name, ..)| format!("@{mention}/{agent_name}"))
+                .collect::<Vec<_>>();
+            variants.sort();
+            variants.dedup();
+            Err(format!(
+                "Ambiguous team mention(s): @{mention}. Use one of: {}",
+                variants.join(", ")
+            ))
         }
 
         let trimmed = text.trim_start();
         let mentions = trimmed
             .split_whitespace()
-            .map(|token| token.trim_end_matches(|ch| ch == ',' || ch == ':'))
+            .map(|token| token.trim_end_matches(|ch: char| ",:;.!?".contains(ch)))
             .take_while(|token| token.starts_with('@') && token.len() > 1)
             .map(|token| token.strip_prefix('@').unwrap_or(token))
             .collect::<Vec<_>>();
@@ -7528,14 +7757,21 @@ impl ChatWidget {
         let mut unknown = Vec::new();
         let mut targets = HashSet::new();
         for mention in mentions {
+            if mention.eq_ignore_ascii_case("user") {
+                continue;
+            }
             if mention.eq_ignore_ascii_case("all") {
                 if self.collab_agent_types.is_empty() {
                     return Err("No agent threads are available yet.".to_string());
                 }
+                let before = targets.len();
                 for thread_id in self.collab_agent_types.keys().copied() {
                     if Some(thread_id) != self.thread_id {
                         targets.insert(thread_id);
                     }
+                }
+                if targets.len() == before {
+                    return Err("No agent threads are available yet.".to_string());
                 }
                 continue;
             }
@@ -7559,6 +7795,18 @@ impl ChatWidget {
             }
 
             if !matched {
+                match resolve_team_mention_target(mention, self.thread_id, &self.collab_agent_types)
+                {
+                    Ok(Some(thread_id)) => {
+                        targets.insert(thread_id);
+                        matched = true;
+                    }
+                    Ok(None) => {}
+                    Err(err) => return Err(err),
+                }
+            }
+
+            if !matched {
                 unknown.push(format!("@{mention}"));
             }
         }
@@ -7572,7 +7820,7 @@ impl ChatWidget {
         }
 
         let mut ordered = targets.into_iter().collect::<Vec<_>>();
-        ordered.sort_by(|left, right| left.to_string().cmp(&right.to_string()));
+        ordered.sort_by_key(std::string::ToString::to_string);
         Ok(ordered)
     }
 

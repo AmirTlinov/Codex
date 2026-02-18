@@ -1,459 +1,240 @@
-# role_split: Scout context pack (example)
+# role_split: Scout context pack (quote-backed example)
 
-Example excerpt spec: package role-split workflow + scout-pack generator into a patch-ready context pack.
+Minimal-noise example: Scout handoff with anchor-first CODE_REF entries and auto-expanded verbatim excerpts.
 
-## Just recipe: scout-pack
+## Quality gates
+- G1 Coverage
+- G2 Determinism
+- G3 Evidence-first
+- G7 Quote-backed claims
 
-Single command to render a Markdown context pack from this spec.
+## Just recipes: scout-pack and scout-pack-check
 
-**CODE_REF:** `CODE_REF::codex-rs::justfile#L67-L81` — justfile: scout-pack
+Single-command validation and rendering flow used by Scout.
 
-Forwards args to codex-rs/scripts/scout_pack.py (supports -o/--output).
+**CODE_REF:** `CODE_REF::codex-rs::justfile#L75-L81` — justfile: scout-pack + scout-pack-check
+
+Runtime handoff requires stdout-first rendering and preflight validation.
+
+Must include:
+- `scout-pack *args:`
+- `scout-pack-check spec:`
 
 ```
-# Regenerate the json schema for config.toml from the current config types.
-write-config-schema:
-    cargo run -p codex-core --bin codex-write-config-schema
-
-# Regenerate vendored app-server protocol schema artifacts.
-write-app-server-schema *args:
-    cargo run -p codex-app-server-protocol --bin write_schema_fixtures -- "$@"
-
 # Generate a markdown context pack from a Scout excerpt spec (YAML/JSON).
 scout-pack *args:
-    python3 scripts/scout_pack.py "$@"
+    python3 "{{justfile_directory()}}/codex-rs/scripts/scout_pack.py" "$@"
 
 # Validate a Scout excerpt spec and render to stdout (discarded).
 scout-pack-check spec:
-    python3 scripts/scout_pack.py "{{spec}}" -o - >/dev/null
-
+    python3 "{{justfile_directory()}}/codex-rs/scripts/scout_pack.py" "{{spec}}" -o - >/dev/null
 ```
 
-## codex-rs skills index
+## Runtime Scout prompt contract
 
-Project skill registry in codex-rs.
+Prompt-level requirements for inline artifacts and quote-backed claims.
 
-**CODE_REF:** `CODE_REF::codex-rs::codex-rs/.agents/skills/SKILLS.md#L1-L32` — codex-rs/.agents/skills/SKILLS.md
+**CODE_REF:** `CODE_REF::codex-rs::codex-rs/core/templates/agents/scout.md#L12-L45` — Required artifacts + stdout-first render
 
-Shows discoverability of scout-context-pack skill for agents.
+Defines required artifacts and mandatory stdout render path.
+
+Must include:
+- `inline all three artifacts`
+- `version: 2`
+- `just scout-pack <excerpt_spec.yml> -o -`
 
 ```markdown
-[LEGEND]
+## Required output artifacts (inline in final answer)
+1) `ScoutReport.md`
+2) `excerpt_spec.yml` (or `.json`) — anchor-first spec (`code_ref` обязателен по умолчанию)
+3) `context_pack.md` (generated from excerpt spec; must contain verbatim code quotes)
 
-[CONTENT]
-# Skills — project memory (.agents/skills)
+Your final answer MUST inline all three artifacts as fenced blocks.
+Do not replace artifacts with prose summaries.
 
-Эта папка — “долговременная память” проекта для ИИ‑агентов.
+## Excerpt spec (required)
+Your `excerpt_spec.yml` MUST be compatible with `scripts/scout_pack.py`.
+Use the v2 shape:
+- `version: 2`
+- `sections[] -> excerpts[]` (or `sections[] -> anchors[]` alias)
+- Required default entry form: `code_ref: CODE_REF::<crate>::<path>#L<start>-L<end>`
+- `anchors[]` may use compact string form: `- "CODE_REF::<crate>::<path>#L<start>-L<end>"`
+- Explicit ranges (`path + start_line/end_line`) are legacy-only and require `allow_explicit_ranges: true`
+- A single heading may include multiple anchors from multiple files
+- Mermaid may be inline (`mermaid`) or from file (`mermaid_file`)
+- No placeholders (`Lx-Ly`, `<start>-<end>`, `...`)
 
-## Как добавить skill (норма)
+Important: Scout does NOT hand-write verbatim code excerpts.
+Scout provides anchors (`code_ref`) + heading/description/why; `scripts/scout_pack.py` expands anchors into real quoted code in `context_pack.md`.
 
-1) Создай файл: `.agents/skills/<skill>/SKILL.md`.
-2) В начале файла добавь YAML front matter:
+Recommended starting points (copy + edit):
+- `.agents/skills/scout_context_pack/templates/excerpt_spec.example.yml`
+- `examples/scout_packs/role_split/excerpt_spec.yml`
 
-```yaml
----
-name: <skill>
-description: "TRIGGER → OUTCOME → POINTERS"
-ttl_days: 90   # 0 = evergreen (без требования обновлять по TTL)
----
+Before handoff, keep Mermaid map incremental + validate output:
+1) `just scout-map-init <map_state.json> --title "<slice map>" --direction LR` (once per slice)
+2) `just scout-map-merge <map_state.json> <delta.yml>` after each new dependency finding
+3) `just scout-map-render <map_state.json> --output "<map.mmd>"`
+4) Set `mermaid_file: "<map.mmd>"` in `excerpt_spec.yml` sections that need diagrams
+5) `just scout-pack-check <excerpt_spec.yml>`
+6) `just scout-pack <excerpt_spec.yml> -o -`
 ```
 
-3) В тексте skill обязательно укажи строку:
+**CODE_REF:** `CODE_REF::codex-rs::codex-rs/core/templates/agents/scout.md#L62-L69` — CODE_REF + quote requirement
 
-```text
-Last verified: YYYY-MM-DD
-```
+Ensures Main receives claim evidence, not only line ranges.
 
-4) Зарегистрируй skill в списке ниже как ссылку на файл.
-
-## Список
-
-- [orchestrator-role-split-pipeline](.agents/skills/orchestrator_role_split_pipeline/SKILL.md)
-- [scout-context-pack](.agents/skills/scout_context_pack/SKILL.md)
-
-```
-
-## Orchestrator role-split pipeline
-
-How Orchestrator should request Scout context (anchors + excerpt ranges + Mermaid).
-
-**CODE_REF:** `CODE_REF::codex-rs::codex-rs/.agents/skills/orchestrator_role_split_pipeline/SKILL.md#L1-L47` — orchestrator-role-split-pipeline
-
-Defines the contract between Orchestrator and Scout.
+Must include:
+- `CODE_REF without a quote is invalid`
+- `placeholder anchors`
 
 ```markdown
----
-name: orchestrator-role-split-pipeline
-description: "Оркестратор → Scout→ContextValidator→Main(implement)→Validator с безопасными контрактами"
-ttl_days: 0
----
-
-# Orchestrator role-split pipeline (builder-off mode)
-
-## Trigger
-Нужно выполнить задачу итеративно слайсами, сохранив high-signal контекст и fail-closed проверки.
-
-## Outcome
-- Основной контур: `Scout -> ContextValidator -> Main implement -> Validator`.
-- Scout отдает patch-ready контекст-пак (CODE_REF + excerpt_spec + Mermaid).
-- ContextValidator выдает только `CONTEXT_PACK_APPROVED` или `CONTEXT_PACK_GAPS`.
-- Main делает минимальный патч по slice; Validator проверяет патч на контракт/verify.
-
-## How to request Scout (copy/paste prompt skeleton)
-Проси Scout так, чтобы он вернул **контекст‑пак, готовый для патча**:
-
-- Sections: Scope snapshot -> Patch target contract -> Key invariants -> Anchor map -> Excerpt spec -> Mermaid -> Risks -> Unknowns -> Patch readiness.
-- Доказательства: `CODE_REF::<crate>::<path>#L<start>-L<end>`.
-- Артефакты: `ScoutReport.md`, `excerpt_spec.yml`, `context_pack.md`.
-
-## Handoff state machine
-`discover -> validate_ctx -> implement -> review_patch -> final_accept`
-
-## Pointers
-- `core/src/agent/role.rs`
-- `core/src/tools/spec.rs`
-- `core/src/tools/handlers/collab.rs`
-- `core/src/tools/handlers/apply_patch.rs`
-- `core/src/tools/router.rs`
-- `core/src/tools/js_repl/mod.rs`
-- `core/config.schema.json`
-- `core/tests/suite/request_user_input.rs`
-- `core/tests/suite/unified_exec.rs`
-- `tui/src/chatwidget.rs`
-- `../docs/config.md` (monorepo)
-- `.agents/skills/scout_context_pack/SKILL.md`
-
-## Known risk
-- Contract drift между skill docs и runtime templates (`core/templates/agents/*.md`).
-- Лечится регулярной сверкой handoff и CODE_REF формата.
-
-## Last verified
-Last verified: 2026-02-14
-
+## CODE_REF contract
+- Every key claim MUST include at least one `CODE_REF`.
+- Format: `CODE_REF::<crate>::<repo_relative_path>#L<start>-L<end>`
+- Line ranges are 1-indexed and inclusive.
+- Avoid duplicate or overlapping anchors in the same code area.
+- Every key claim MUST also include a short verbatim quote from `context_pack.md`.
+- CODE_REF without a quote is invalid.
+- Do not use placeholder anchors (`Lx-Ly`, `<start>-<end>`, `...`).
 ```
 
-## Scout context pack contract
+## Skill-level scout contract
 
-Hard rules + templates for a patch-ready scout context pack.
+Patch-ready quality gates and anti-noise guarantees.
 
-**CODE_REF:** `CODE_REF::codex-rs::codex-rs/.agents/skills/scout_context_pack/SKILL.md#L1-L33` — scout-context-pack
+**CODE_REF:** `CODE_REF::codex-rs::codex-rs/.agents/skills/scout_context_pack/SKILL.md#L25-L60` — Required sections + CODE_REF contract + gates
 
-SSOT for required sections and Excerpt spec usage.
+Keeps role prompt and skill docs aligned on quote-backed evidence.
+
+Must include:
+- `Evidence quotes`
+- `CODE_REF`
+- `G7 Quote-backed claims`
 
 ```markdown
----
-name: scout-context-pack
-description: "Scout: собрать patch-ready контекст-пак (CODE_REF + excerpts + Mermaid) для прямой реализации Main"
-ttl_days: 0
----
-
-# Scout context pack (anchors + excerpt ranges)
-
-## Trigger
-Когда Main/Orchestrator просит контекст для атомарного slice-фикса.
-
-## Outcome (what you MUST produce)
-1) `ScoutReport.md` со строгими секциями и явным `Patch readiness: PASS|FAIL`.
-2) `excerpt_spec.yml` (или `.json`) с line-anchored verbatim-вырезками.
-3) `context_pack.md`, сгенерированный через `just scout-pack <excerpt_spec.yml> -o <context_pack.md>`.
-4) 1–2 Mermaid диаграммы (минимум dependency flow, опционально state/handoff).
-
 ## Required ScoutReport sections (strict order)
 1) Scope snapshot
 2) Patch target contract
 3) Key invariants / constraints
 4) Anchor map
 5) Excerpt specs
-6) Dependency map
-7) High-confidence risks / edge cases
-8) Missing context items needed before patching
-9) Patch readiness gates
+6) Evidence quotes (verbatim, from `context_pack.md`)
+7) Dependency map
+8) High-confidence risks / edge cases
+9) Missing context items needed before patching
+10) Patch readiness gates
 
 ## CODE_REF contract
-- Каждый ключевой тезис (инвариант/риск/гейт) обязан иметь минимум один `CODE_REF`.
+- Каждый ключевой тезис во всех секциях (инвариант/контракт/риск/гейт/gap) обязан иметь минимум один `CODE_REF`.
 - Формат:
   - `CODE_REF::<crate>::<repo_relative_path>#L<start>-L<end>`
 - Пример:
+  - `CODE_REF::codex-core::core/src/tools/router.rs#L140-L260`
+- Диапазоны строк: 1-indexed, `end` включительно.
+- Каждый тезис обязан иметь короткую verbatim-цитату (1–8 строк) из `context_pack.md`.
+- `CODE_REF` без цитаты считается невалидным доказательством.
+- Placeholder anchors (`Lx-Ly`, `<start>-<end>`, `...`) запрещены.
+- Если файл/диапазон не найден — FAIL и явный `BLOCKER`.
+- Для multi-anchor under single heading: несколько anchors в одной секции разрешены, включая разные файлы.
+- Mermaid в секции может быть inline (`mermaid`) или из файла (`mermaid_file`), но не одновременно.
+- Legacy fallback (`path/start_line/end_line`) разрешён только с `allow_explicit_ranges: true`.
 
+## Quality gates (all required)
+- G1 Coverage: все предполагаемые patch touchpoints покрыты anchors.
+- G2 Determinism: нет duplicate/overlap anchors в одной зоне.
+- G3 Evidence-first: каждый ключевой тезис имеет `CODE_REF` + quote.
+- G4 Actionability: из пакета выводится bounded file list для патча.
+- G5 Unknowns explicit: неизвестности перечислены как falsifiable gaps.
+- G6 Noise budget: нет нерелевантных дампов и лишних файлов.
+- G7 Quote-backed claims: нет claim-ов без цитаты из `context_pack.md`.
 ```
 
-## Generator: scout_pack.py
+## Scout report template expectations
 
-Fail-closed, deterministic pack renderer (YAML/JSON spec → Markdown).
+Canonical report shape consumed by Main without extra digging.
 
-**CODE_REF:** `CODE_REF::codex-rs::codex-rs/scripts/scout_pack.py#L1-L160` — CLI + spec loading + helpers
+**CODE_REF:** `CODE_REF::codex-rs::codex-rs/.agents/skills/scout_context_pack/templates/ScoutReport.md#L22-L46` — Invariants + Evidence quotes section
 
-Entrypoint + YAML/JSON parsing + atomic write primitives.
+Shows required Claim/CODE_REF/Quote/Excerpt-id tuple.
 
-```python
-#!/usr/bin/env python3
-"""Generate a Markdown context pack from a Scout excerpt spec (YAML/JSON).
+Must include:
+- `Evidence quotes`
+- `Quote:`
+- `Excerpt id:`
 
-Design goals:
-- fail-closed validation (no partial output on error)
-- deterministic output (no timestamps, stable ordering)
-- excerpt line ranges are 1-indexed and inclusive
-"""
+```markdown
+- Verify command (single repro): `…`
 
-from __future__ import annotations
+## 3) Key invariants / constraints
+Every item MUST have at least one `CODE_REF` and one short verbatim quote from `context_pack.md`.
 
-import argparse
-import json
-import os
-import re
-import sys
-import tempfile
-from pathlib import Path
-from typing import Any
+- `<invariant>` (`CODE_REF::<crate>::<path>#Lx-Ly`)
+- `<constraint>` (`CODE_REF::<crate>::<path>#Lx-Ly`)
 
-CRATE_RE = re.compile(r"[a-z0-9][a-z0-9_-]*")
-LANG_RE = re.compile(r"[A-Za-z0-9_+\.-]+")
+## 4) Anchor map
+- `CODE_REF::<crate>::<path>#Lx-Ly` — why this anchor matters.
+- `CODE_REF::<crate>::<path>#Lx-Ly` — …
 
+## 5) Excerpt specs
+- Attach or inline `excerpt_spec.yml`.
+- Preferred: anchor-first entries with `code_ref` + `label/why`; no ручной копипасты кода.
+- Multi-anchor under single heading is allowed (including anchors from different files).
+- Mermaid in section: inline (`mermaid`) or file-backed (`mermaid_file`), exactly one mode.
+- Attach or inline generated `context_pack.md` (rendered from the same spec by `scripts/scout_pack.py`).
+- Must cover all planned patch touchpoints.
 
-def _die(message: str) -> None:
-    print(f"error: {message}", file=sys.stderr)
-    raise SystemExit(2)
-
-
-def _load_spec(spec_path: Path) -> dict[str, Any]:
-    if not spec_path.exists():
-        _die(f"spec not found: {spec_path}")
-
-    suffix = spec_path.suffix.lower()
-    if suffix == ".json":
-        try:
-            return json.loads(spec_path.read_text(encoding="utf-8"))
-        except json.JSONDecodeError as err:
-            _die(f"invalid JSON spec: {err}")
-    if suffix in {".yml", ".yaml"}:
-        try:
-            import yaml  # type: ignore[import-not-found]
-        except ImportError:
-            _die("PyYAML is required for .yml/.yaml specs (pip install pyyaml)")
-        data = yaml.safe_load(spec_path.read_text(encoding="utf-8"))
-        if data is None:
-            _die("YAML spec is empty")
-        if not isinstance(data, dict):
-            _die("YAML spec must be a mapping at top-level")
-        return data
-
-    _die(f"unsupported spec extension: {suffix} (expected .yml/.yaml/.json)")
-
-
-def _validate_no_unknown_fields(obj: dict[str, Any], allowed: set[str], ctx: str) -> None:
-    extra = set(obj.keys()) - allowed
-    if extra:
-        _die(f"{ctx}: unknown field(s): {', '.join(sorted(extra))}")
-
-
-def _expect_str(value: Any, ctx: str) -> str:
-    if not isinstance(value, str) or not value:
-        _die(f"{ctx}: expected non-empty string")
-    return value
-
-
-def _expect_int(value: Any, ctx: str) -> int:
-    if isinstance(value, bool) or not isinstance(value, int):
-        _die(f"{ctx}: expected integer")
-    return value
-
-
-def _expect_optional_str(value: Any, ctx: str) -> str | None:
-    if value is None:
-        return None
-    if not isinstance(value, str):
-        _die(f"{ctx}: expected string")
-    if not value.strip():
-        _die(f"{ctx}: expected non-empty string")
-    return value.strip()
-
-
-def _expect_optional_str_list(value: Any, ctx: str) -> list[str]:
-    if value is None:
-        return []
-    if not isinstance(value, list) or not value:
-        _die(f"{ctx}: expected non-empty list of strings")
-    out: list[str] = []
-    for i, item in enumerate(value):
-        if not isinstance(item, str) or not item.strip():
-            _die(f"{ctx}[{i}]: expected non-empty string")
-        out.append(item.strip())
-    return out
-
-
-def _expect_crate(value: Any, ctx: str) -> str:
-    crate = _expect_str(value, ctx).strip()
-    if not CRATE_RE.fullmatch(crate):
-        _die(f"{ctx}: invalid crate name")
-    return crate
-
-
-def _guess_language(path: Path) -> str:
-    if path.name == "justfile":
-        return ""
-
-    suffix = path.suffix.lower()
-    return {
-        ".rs": "rust",
-        ".md": "markdown",
-        ".toml": "toml",
-        ".yml": "yaml",
-        ".yaml": "yaml",
-        ".json": "json",
-        ".py": "python",
-        ".sh": "bash",
-        ".ps1": "powershell",
-        ".ts": "typescript",
-        ".tsx": "tsx",
-        ".js": "javascript",
-        ".jsx": "jsx",
-    }.get(suffix, "")
-
-
-def _fence(lang: str, body: str) -> str:
-    fence_lang = lang.strip() if lang else ""
-    if fence_lang:
-        return f"```{fence_lang}\n{body.rstrip('\\n')}\n```"
-    return f"```\n{body.rstrip('\\n')}\n```"
-
-
-def _atomic_write(path: Path, content: str) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with tempfile.NamedTemporaryFile(
-        mode="w",
-        encoding="utf-8",
-        newline="\n",
-        delete=False,
-        dir=path.parent,
-        prefix=f".{path.name}.",
-        suffix=".tmp",
-    ) as tmp:
-        tmp.write(content)
-        tmp_path = Path(tmp.name)
-    os.replace(tmp_path, path)
-
-
-def _render(spec: dict[str, Any]) -> str:
-    _validate_no_unknown_fields(
-        spec,
-        {
-            "version",
-            "title",
-            "summary",
-            "repo_root",
-            "default_crate",
-            "task_id",
-            "slice_id",
-            "intent",
-            "quality_gates",
-
+## 6) Evidence quotes (verbatim, minimal)
+- Claim: `<claim text>`
+  - CODE_REF: `CODE_REF::<crate>::<path>#Lx-Ly`
+  - Quote: `"<1-8 verbatim lines from context_pack excerpt>"`
+  - Excerpt id: `<excerpt-id>`
 ```
 
-**CODE_REF:** `CODE_REF::codex-rs::codex-rs/scripts/scout_pack.py#L161-L282` — validation + renderer
+**CODE_REF:** `CODE_REF::codex-rs::codex-rs/.agents/skills/scout_context_pack/templates/ScoutReport.md#L77-L84` — Patch readiness gates
 
-Schema enforcement, path traversal guard, line-range slicing, deterministic markdown.
+Adds explicit gate for quote-backed claims.
+
+Must include:
+- `G7 Quote-backed claims`
+
+```markdown
+## 10) Patch readiness gates
+- G1 Coverage: PASS|FAIL
+- G2 Determinism: PASS|FAIL
+- G3 Evidence-first: PASS|FAIL
+- G4 Actionability: PASS|FAIL
+- G5 Unknowns explicit: PASS|FAIL
+- G6 Noise budget: PASS|FAIL
+- G7 Quote-backed claims: PASS|FAIL
+```
+
+## Generator fail-closed checks
+
+Renderer rejects duplicate/overlapping ranges and missing must_include tokens.
+
+**CODE_REF:** `CODE_REF::codex-rs::codex-rs/scripts/scout_pack.py#L334-L454` — code_ref parsing + overlap checks + must_include enforcement
+
+Prevents noisy or stale context by failing closed.
+
+Must include:
+- `code_ref cannot be combined`
+- `overlapping range`
+- `must_include`
+- `token not found in excerpt body`
 
 ```python
-            "sections",
-        },
-        "spec",
-    )
-
-    version = spec.get("version")
-    if version is not None:
-        _expect_int(version, "spec.version")
-
-    title = _expect_str(spec.get("title"), "spec.title")
-    summary = spec.get("summary")
-    if summary is not None and not isinstance(summary, str):
-        _die("spec.summary: expected string")
-
-    default_crate_raw = spec.get("default_crate")
-    if default_crate_raw is None:
-        default_crate = "codex-rs"
-    else:
-        default_crate = _expect_crate(default_crate_raw, "spec.default_crate")
-
-    task_id = _expect_optional_str(spec.get("task_id"), "spec.task_id")
-    slice_id = _expect_optional_str(spec.get("slice_id"), "spec.slice_id")
-    intent = _expect_optional_str(spec.get("intent"), "spec.intent")
-    quality_gates = _expect_optional_str_list(spec.get("quality_gates"), "spec.quality_gates")
-
-    repo_root_raw = spec.get("repo_root")
-    repo_root_str = _expect_str(repo_root_raw, "spec.repo_root")
-    repo_root = Path(repo_root_str).resolve()
-    if not repo_root.exists() or not repo_root.is_dir():
-        _die(f"spec.repo_root: not a directory: {repo_root}")
-
-    sections = spec.get("sections")
-    if not isinstance(sections, list) or not sections:
-        _die("spec.sections: expected non-empty list")
-
-    out: list[str] = [f"# {title}"]
-    ranges_by_path: dict[str, list[tuple[int, int, str]]] = {}
-    if summary:
-        out.append("")
-        out.append(summary.strip())
-    if task_id or slice_id or intent:
-        out.append("")
-        out.append("## Metadata")
-        if task_id:
-            out.append(f"- Task: `{task_id}`")
-        if slice_id:
-            out.append(f"- Slice: `{slice_id}`")
-        if intent:
-            out.append(f"- Intent: {intent}")
-        out.append(f"- Default crate: `{default_crate}`")
-    if quality_gates:
-        out.append("")
-        out.append("## Quality gates")
-        for gate in quality_gates:
-            out.append(f"- {gate}")
-
-    for i, section in enumerate(sections):
-        if not isinstance(section, dict):
-            _die(f"spec.sections[{i}]: expected mapping")
-        _validate_no_unknown_fields(
-            section,
-            {"heading", "description", "notes", "mermaid", "excerpts"},
-            f"spec.sections[{i}]",
-        )
-
-        heading = _expect_str(section.get("heading"), f"spec.sections[{i}].heading")
-        description = section.get("description")
-        if description is not None and not isinstance(description, str):
-            _die(f"spec.sections[{i}].description: expected string")
-        notes = section.get("notes")
-        if notes is not None and not isinstance(notes, str):
-            _die(f"spec.sections[{i}].notes: expected string")
-
-        mermaid = section.get("mermaid")
-        if mermaid is not None and not isinstance(mermaid, str):
-            _die(f"spec.sections[{i}].mermaid: expected string")
-
-        excerpts = section.get("excerpts")
-        if not isinstance(excerpts, list) or not excerpts:
-            _die(f"spec.sections[{i}].excerpts: expected non-empty list")
-
-        out.append("")
-        out.append(f"## {heading}")
-        if description:
-            out.append("")
-            out.append(description.strip())
-        if notes:
-            out.append("")
-            out.append(notes.strip())
-        if mermaid and mermaid.strip():
-            out.append("")
-            out.append(_fence("mermaid", mermaid.strip()))
-
         for j, excerpt in enumerate(excerpts):
-            if not isinstance(excerpt, dict):
-                _die(f"spec.sections[{i}].excerpts[{j}]: expected mapping")
+            range_ctx = f"spec.sections[{i}].excerpts[{j}]"
+            if isinstance(excerpt, str):
+                excerpt = {"code_ref": excerpt}
+            elif not isinstance(excerpt, dict):
+                _die(f"{range_ctx}: expected mapping or CODE_REF string")
             _validate_no_unknown_fields(
                 excerpt,
                 {
                     "id",
+                    "code_ref",
                     "crate",
                     "path",
                     "start_line",
@@ -463,18 +244,105 @@ Schema enforcement, path traversal guard, line-range slicing, deterministic mark
                     "why",
                     "must_include",
                 },
-                f"spec.sections[{i}].excerpts[{j}]",
+                range_ctx,
             )
 
             ex_id = excerpt.get("id")
-            if ex_id is not None and not isinstance(ex_id, str):
-                _die(f"spec.sections[{i}].excerpts[{j}].id: expected string")
+            if ex_id is not None:
+                ex_id = _expect_optional_str(ex_id, f"{range_ctx}.id")
+                if ex_id in excerpt_ids:
+                    _die(f"{range_ctx}.id: duplicate id: {ex_id}")
+                excerpt_ids.add(ex_id)
 
-            rel_path = _expect_str(excerpt.get("path"), f"spec.sections[{i}].excerpts[{j}].path")
-            start_line = _expect_int(
-                excerpt.get("start_line"),
-                f"spec.sections[{i}].excerpts[{j}].start_line",
+            code_ref_raw = excerpt.get("code_ref")
+            if code_ref_raw is not None:
+                code_ref = _expect_str(code_ref_raw, f"{range_ctx}.code_ref")
+                conflicting_fields = [
+                    field
+                    for field in ("crate", "path", "start_line", "end_line")
+                    if excerpt.get(field) is not None
+                ]
+                if conflicting_fields:
+                    _die(
+                        f"{range_ctx}: code_ref cannot be combined with {', '.join(conflicting_fields)}"
+                    )
+                crate, rel_path, start_line, end_line = _parse_code_ref(
+                    code_ref, f"{range_ctx}.code_ref"
+                )
+            else:
+                if not allow_explicit_ranges:
+                    _die(
+                        f"{range_ctx}: explicit path/start_line/end_line requires spec.allow_explicit_ranges=true; use code_ref"
+                    )
+                rel_path = _expect_str(excerpt.get("path"), f"{range_ctx}.path")
+                start_line = _expect_int(
+                    excerpt.get("start_line"),
+                    f"{range_ctx}.start_line",
+                )
+                end_line = _expect_int(
+                    excerpt.get("end_line"),
+                    f"{range_ctx}.end_line",
+                )
+                if start_line < 1:
+                    _die(f"{range_ctx}: start_line must be >= 1")
+                if end_line < start_line:
+                    _die(f"{range_ctx}: end_line must be >= start_line")
+
+                crate_raw = excerpt.get("crate")
+                if crate_raw is None:
+                    crate = default_crate
+                else:
+                    crate = _expect_crate(crate_raw, f"{range_ctx}.crate")
+
+            range_key = (crate, rel_path)
+            prior_ranges = ranges_by_path.setdefault(range_key, [])
+            for prev_start, prev_end, prev_ctx in prior_ranges:
+                if start_line == prev_start and end_line == prev_end:
+                    _die(
+                        f"{range_ctx}: duplicate range for {crate}::{rel_path}: {start_line}-{end_line} (already used by {prev_ctx})"
+                    )
+                if not (end_line < prev_start or start_line > prev_end):
+                    _die(
+                        f"{range_ctx}: overlapping range for {crate}::{rel_path}: {start_line}-{end_line} overlaps {prev_start}-{prev_end} ({prev_ctx})"
+                    )
+            prior_ranges.append((start_line, end_line, range_ctx))
+
+            language = excerpt.get("language")
+            if language is not None and not isinstance(language, str):
+                _die(f"spec.sections[{i}].excerpts[{j}].language: expected string")
+            if language is not None and language not in {"", "auto"} and not LANG_RE.fullmatch(language.strip()):
+                _die(f"spec.sections[{i}].excerpts[{j}].language: invalid value")
+
+            label = _expect_optional_str(excerpt.get("label"), f"{range_ctx}.label")
+            why = _expect_optional_str(excerpt.get("why"), f"{range_ctx}.why")
+
+            must_include = _expect_optional_str_list(
+                excerpt.get("must_include"),
+                f"spec.sections[{i}].excerpts[{j}].must_include",
             )
-            end_line = _expect_int(
 
+            file_path = (repo_root / rel_path).resolve()
+            if not file_path.is_relative_to(repo_root):
+                _die(f"excerpt path escapes repo_root: {rel_path}")
+            if not file_path.exists() or not file_path.is_file():
+                _die(f"excerpt file not found: {rel_path}")
+
+            try:
+                text = file_path.read_text(encoding="utf-8")
+            except UnicodeDecodeError:
+                _die(f"excerpt file is not valid UTF-8: {rel_path}")
+
+            text = text.replace("\r\n", "\n")
+            lines = text.splitlines(keepends=True)
+            if end_line > len(lines):
+                _die(
+                    f"excerpt range out of bounds for {rel_path}: {start_line}-{end_line} (file has {len(lines)} lines)"
+                )
+
+            body = "".join(lines[start_line - 1 : end_line])
+            for token in must_include:
+                if token not in body:
+                    _die(
+                        f"spec.sections[{i}].excerpts[{j}].must_include: token not found in excerpt body: {token}"
+                    )
 ```

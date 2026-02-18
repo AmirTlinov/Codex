@@ -9,14 +9,6 @@
     "AgentsToml": {
       "additionalProperties": false,
       "properties": {
-        "builder_model": {
-          "description": "Model override for the builder role.",
-          "type": "string"
-        },
-        "context_validator_model": {
-          "description": "Model override for the context validator role.",
-          "type": "string"
-        },
         "main_model": {
           "description": "Model override for the main/orchestrator role.",
           "type": "string"
@@ -29,10 +21,6 @@
         },
         "plan_model": {
           "description": "Model override for the plan role.",
-          "type": "string"
-        },
-        "post_builder_validator_model": {
-          "description": "Model override for the post-builder validator role.",
           "type": "string"
         },
         "scout_model": {

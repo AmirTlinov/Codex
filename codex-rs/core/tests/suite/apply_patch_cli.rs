@@ -95,19 +95,15 @@ fn apply_patch_responses(
 }
 
 fn apply_patch_is_locked_in_default(output_type: ApplyPatchModelOutput) -> bool {
-    matches!(
-        output_type,
-        ApplyPatchModelOutput::Freeform
-            | ApplyPatchModelOutput::Function
-            | ApplyPatchModelOutput::Shell
-            | ApplyPatchModelOutput::ShellViaHeredoc
-            | ApplyPatchModelOutput::ShellCommandViaHeredoc
-    )
+    let _ = output_type;
+    false
 }
 
 fn assert_apply_patch_locked(out: &str) {
     assert!(
         out.contains("apply_patch is locked in Default role until the pipeline is complete")
+            || out
+                .contains("apply_patch is locked in Default role until scout context is approved")
             || out.contains("spawn_agent with agent_type=\"scout\""),
         "expected apply_patch to be locked, got: {out}"
     );
@@ -991,8 +987,14 @@ async fn apply_patch_cli_can_use_shell_command_output_as_patch_input() -> Result
     let out = harness
         .apply_patch_output(apply_call_id, ApplyPatchModelOutput::Freeform)
         .await;
-    assert_apply_patch_locked(&out);
-    assert!(!harness.path("target.txt").exists());
+    assert!(
+        out.contains("Success. Updated the following files:"),
+        "expected successful apply_patch output, got: {out}"
+    );
+    assert_eq!(
+        fs::read_to_string(harness.path("target.txt"))?,
+        source_contents
+    );
 
     Ok(())
 }

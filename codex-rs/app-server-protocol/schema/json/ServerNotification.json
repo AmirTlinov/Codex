@@ -645,6 +645,65 @@
       ],
       "type": "string"
     },
+    "CollabMessageMetadata": {
+      "properties": {
+        "author": {
+          "type": "string"
+        },
+        "intent": {
+          "type": "string"
+        },
+        "mentions": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "priority": {
+          "type": "string"
+        },
+        "refs": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "role": {
+          "type": "string"
+        },
+        "sla": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "sliceRef": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "status": {
+          "type": "string"
+        },
+        "taskRef": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "author",
+        "intent",
+        "mentions",
+        "priority",
+        "refs",
+        "role",
+        "status"
+      ],
+      "type": "object"
+    },
     "CommandAction": {
       "oneOf": [
         {
@@ -3059,7 +3118,7 @@
           "properties": {
             "agent_type": {
               "default": null,
-              "description": "Optional agent role/type requested for the spawned agent (e.g. `scout`, `builder`).",
+              "description": "Optional agent label for the spawned agent (handle with optional style/role tokens).",
               "type": [
                 "string",
                 "null"
@@ -3103,7 +3162,7 @@
           "properties": {
             "agent_type": {
               "default": null,
-              "description": "Optional agent role/type requested for the spawned agent (e.g. `scout`, `builder`).",
+              "description": "Optional agent label for the spawned agent (handle with optional style/role tokens).",
               "type": [
                 "string",
                 "null"
@@ -3169,6 +3228,26 @@
               "description": "Identifier for the collab tool call.",
               "type": "string"
             },
+            "message": {
+              "allOf": [
+                {
+                  "$ref": "#/definitions/CollabMessageMetadata"
+                }
+              ],
+              "default": {
+                "author": "",
+                "intent": "",
+                "mentions": [],
+                "priority": "normal",
+                "refs": [],
+                "role": "",
+                "sla": null,
+                "sliceRef": null,
+                "status": "running",
+                "taskRef": null
+              },
+              "description": "Structured metadata for agent-mesh message routing/traceability."
+            },
             "prompt": {
               "description": "Prompt sent from the sender to the receiver. Can be empty to prevent CoT leaking at the beginning.",
               "type": "string"
@@ -3213,6 +3292,26 @@
             "call_id": {
               "description": "Identifier for the collab tool call.",
               "type": "string"
+            },
+            "message": {
+              "allOf": [
+                {
+                  "$ref": "#/definitions/CollabMessageMetadata"
+                }
+              ],
+              "default": {
+                "author": "",
+                "intent": "",
+                "mentions": [],
+                "priority": "normal",
+                "refs": [],
+                "role": "",
+                "sla": null,
+                "sliceRef": null,
+                "status": "running",
+                "taskRef": null
+              },
+              "description": "Structured metadata for agent-mesh message routing/traceability."
             },
             "prompt": {
               "description": "Prompt sent from the sender to the receiver. Can be empty to prevent CoT leaking at the beginning.",

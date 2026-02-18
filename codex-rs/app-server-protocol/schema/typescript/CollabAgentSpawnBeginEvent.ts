@@ -13,7 +13,7 @@ call_id: string,
  */
 sender_thread_id: ThreadId, 
 /**
- * Optional agent role/type requested for the spawned agent (e.g. `scout`, `builder`).
+ * Optional agent label for the spawned agent (handle with optional style/role tokens).
  */
 agent_type: string | null, 
 /**

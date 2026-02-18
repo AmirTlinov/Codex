@@ -1,6 +1,6 @@
 version: 2
 title: "Scout context pack example (patch-ready)"
-summary: "Line-anchored excerpts for Main implementation without extra repo digging."
+summary: "Anchor-first, multi-file and mermaid-aware excerpt spec for patch-ready handoff."
 repo_root: "."
 default_crate: "codex-core"
 task_id: "TASK-010"
@@ -11,33 +11,33 @@ quality_gates:
   - "G1 Coverage"
   - "G2 Determinism"
   - "G3 Evidence-first"
+  - "G7 Quote-backed claims"
 
 sections:
-  - heading: "Role allowlist (tools)"
-    description: "Role→Tools allowlist (deny-by-default)."
+  - heading: "Anchor-first multi-file under one heading"
+    description: "One section may hold multiple anchors from different files."
     mermaid: |
       flowchart LR
-        Role[Role] --> Tools[Allowed tools]
-    excerpts:
-      - id: "tools-role-allows-tool"
-        crate: "codex-core"
-        path: "core/src/tools/spec.rs"
-        start_line: 100
-        end_line: 250
-        language: "rust"
-        label: "ToolsConfig::role_allows_tool*"
-        why: "Tool allowlisting per role; confirms fail-closed boundaries."
+        Spec[excerpt_spec.yml] --> Render[scripts/scout_pack.py]
+        Render --> Pack[context_pack.md]
+    anchors:
+      - "CODE_REF::codex-core::core/src/tools/spec.rs#L100-L170"
+      - id: "scout-prompt-anchor-shape"
+        code_ref: "CODE_REF::codex-rs::core/templates/agents/scout.md#L21-L33"
+        language: "markdown"
+        label: "Scout prompt: anchor-first + mermaid rules"
+        why: "Sync prompt contract with generator capabilities."
         must_include:
-          - "role_allows_tool"
+          - "Use the v2 shape"
+          - "Required default entry form"
+          - "Mermaid may be inline"
 
   - heading: "Router gates"
     description: "Role gate + js_repl_tools_only gate + scout-context gate."
+    mermaid_file: "examples/scout_packs/role_split/scout_map.mmd"
     excerpts:
       - id: "router-dispatch-tool-call"
-        crate: "codex-core"
-        path: "core/src/tools/router.rs"
-        start_line: 140
-        end_line: 260
+        code_ref: "CODE_REF::codex-core::core/src/tools/router.rs#L140-L260"
         language: "rust"
         label: "ToolRouter::dispatch_tool_call"
         why: "Central runtime enforcement used during implementation review."

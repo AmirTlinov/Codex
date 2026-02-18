@@ -308,9 +308,6 @@ impl ConfigDocument {
                 let key = match role {
                     AgentRole::Default => "main_model",
                     AgentRole::Scout => "scout_model",
-                    AgentRole::ContextValidator => "context_validator_model",
-                    AgentRole::Builder => "builder_model",
-                    AgentRole::PostBuilderValidator => "post_builder_validator_model",
                     AgentRole::Validator => "validator_model",
                     AgentRole::Plan => "plan_model",
                 };

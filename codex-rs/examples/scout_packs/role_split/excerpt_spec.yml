@@ -1,70 +1,93 @@
-version: 1
-title: "role_split: Scout context pack (example)"
-summary: "Example excerpt spec: package role-split workflow + scout-pack generator into a patch-ready context pack."
-
-# Run the generator from `codex-rs/` (recommended: `just scout-pack ...`).
-# Then `repo_root: ".."` resolves to the monorepo root.
+version: 2
+title: "role_split: Scout context pack (quote-backed example)"
+summary: "Minimal-noise example: Scout handoff with anchor-first CODE_REF entries and auto-expanded verbatim excerpts."
 repo_root: ".."
+default_crate: "codex-rs"
+
+quality_gates:
+  - "G1 Coverage"
+  - "G2 Determinism"
+  - "G3 Evidence-first"
+  - "G7 Quote-backed claims"
 
 sections:
-  - heading: "Just recipe: scout-pack"
-    description: "Single command to render a Markdown context pack from this spec."
+  - heading: "Just recipes: scout-pack and scout-pack-check"
+    description: "Single-command validation and rendering flow used by Scout."
     excerpts:
       - id: "justfile-scout-pack"
-        path: "justfile"
-        start_line: 67
-        end_line: 81
-        label: "justfile: scout-pack"
-        why: "Forwards args to codex-rs/scripts/scout_pack.py (supports -o/--output)."
+        code_ref: "CODE_REF::codex-rs::justfile#L75-L81"
+        label: "justfile: scout-pack + scout-pack-check"
+        why: "Runtime handoff requires stdout-first rendering and preflight validation."
+        must_include:
+          - "scout-pack *args:"
+          - "scout-pack-check spec:"
 
-  - heading: "codex-rs skills index"
-    description: "Project skill registry in codex-rs."
+  - heading: "Runtime Scout prompt contract"
+    description: "Prompt-level requirements for inline artifacts and quote-backed claims."
     excerpts:
-      - id: "codex-rs-skills-index"
-        path: "codex-rs/.agents/skills/SKILLS.md"
-        start_line: 1
-        end_line: 32
+      - id: "scout-prompt-artifacts-and-render"
+        code_ref: "CODE_REF::codex-rs::codex-rs/core/templates/agents/scout.md#L12-L45"
         language: "markdown"
-        label: "codex-rs/.agents/skills/SKILLS.md"
-        why: "Shows discoverability of scout-context-pack skill for agents."
+        label: "Required artifacts + stdout-first render"
+        why: "Defines required artifacts and mandatory stdout render path."
+        must_include:
+          - "inline all three artifacts"
+          - "version: 2"
+          - "just scout-pack <excerpt_spec.yml> -o -"
 
-  - heading: "Orchestrator role-split pipeline"
-    description: "How Orchestrator should request Scout context (anchors + excerpt ranges + Mermaid)."
-    excerpts:
-      - id: "orchestrator-role-split-skill"
-        path: "codex-rs/.agents/skills/orchestrator_role_split_pipeline/SKILL.md"
-        start_line: 1
-        end_line: 47
+      - id: "scout-prompt-quote-backed-code-ref"
+        code_ref: "CODE_REF::codex-rs::codex-rs/core/templates/agents/scout.md#L62-L69"
         language: "markdown"
-        label: "orchestrator-role-split-pipeline"
-        why: "Defines the contract between Orchestrator and Scout."
+        label: "CODE_REF + quote requirement"
+        why: "Ensures Main receives claim evidence, not only line ranges."
+        must_include:
+          - "CODE_REF without a quote is invalid"
+          - "placeholder anchors"
 
-  - heading: "Scout context pack contract"
-    description: "Hard rules + templates for a patch-ready scout context pack."
+  - heading: "Skill-level scout contract"
+    description: "Patch-ready quality gates and anti-noise guarantees."
     excerpts:
-      - id: "scout-context-pack-skill"
-        path: "codex-rs/.agents/skills/scout_context_pack/SKILL.md"
-        start_line: 1
-        end_line: 33
+      - id: "scout-skill-sections-and-code-ref"
+        code_ref: "CODE_REF::codex-rs::codex-rs/.agents/skills/scout_context_pack/SKILL.md#L25-L60"
         language: "markdown"
-        label: "scout-context-pack"
-        why: "SSOT for required sections and Excerpt spec usage."
+        label: "Required sections + CODE_REF contract + gates"
+        why: "Keeps role prompt and skill docs aligned on quote-backed evidence."
+        must_include:
+          - "Evidence quotes"
+          - "CODE_REF"
+          - "G7 Quote-backed claims"
 
-  - heading: "Generator: scout_pack.py"
-    description: "Fail-closed, deterministic pack renderer (YAML/JSON spec → Markdown)."
+  - heading: "Scout report template expectations"
+    description: "Canonical report shape consumed by Main without extra digging."
     excerpts:
-      - id: "scout-pack-cli-and-io"
-        path: "codex-rs/scripts/scout_pack.py"
-        start_line: 1
-        end_line: 160
+      - id: "scout-report-template-quote-section"
+        code_ref: "CODE_REF::codex-rs::codex-rs/.agents/skills/scout_context_pack/templates/ScoutReport.md#L22-L46"
+        language: "markdown"
+        label: "Invariants + Evidence quotes section"
+        why: "Shows required Claim/CODE_REF/Quote/Excerpt-id tuple."
+        must_include:
+          - "Evidence quotes"
+          - "Quote:"
+          - "Excerpt id:"
+
+      - id: "scout-report-template-gates"
+        code_ref: "CODE_REF::codex-rs::codex-rs/.agents/skills/scout_context_pack/templates/ScoutReport.md#L77-L84"
+        language: "markdown"
+        label: "Patch readiness gates"
+        why: "Adds explicit gate for quote-backed claims."
+        must_include:
+          - "G7 Quote-backed claims"
+
+  - heading: "Generator fail-closed checks"
+    description: "Renderer rejects duplicate/overlapping ranges and missing must_include tokens."
+    excerpts:
+      - id: "scout-pack-validation-overlap-and-must-include"
+        code_ref: "CODE_REF::codex-rs::codex-rs/scripts/scout_pack.py#L334-L454"
         language: "python"
-        label: "CLI + spec loading + helpers"
-        why: "Entrypoint + YAML/JSON parsing + atomic write primitives."
-
-      - id: "scout-pack-renderer"
-        path: "codex-rs/scripts/scout_pack.py"
-        start_line: 161
-        end_line: 282
-        language: "python"
-        label: "validation + renderer"
-        why: "Schema enforcement, path traversal guard, line-range slicing, deterministic markdown." 
+        label: "code_ref parsing + overlap checks + must_include enforcement"
+        why: "Prevents noisy or stale context by failing closed."
+        must_include:
+          - "code_ref cannot be combined"
+          - "overlapping range"
+          - "must_include"
+          - "token not found in excerpt body"

@@ -1,0 +1,7 @@
+[tool]
+id = "rust-test-fast"
+description = "Run fast cargo test smoke for codex-protocol"
+command = "cargo"
+args = ["test", "-p", "codex-protocol"]
+
+[tool.env]

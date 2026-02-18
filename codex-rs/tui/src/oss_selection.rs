@@ -109,10 +109,7 @@ impl OssSelectionWidget<'_> {
         ];
 
         let mut contents: Vec<Line> = vec![
-            Line::from(vec![
-                "? ".fg(Color::Blue),
-                "Select an open-source provider".bold(),
-            ]),
+            Line::from(vec!["? ".cyan(), "Select an open-source provider".bold()]),
             Line::from(""),
             Line::from("  Choose which local AI server to use for your session."),
             Line::from(""),
@@ -283,7 +280,7 @@ fn get_status_symbol_and_color(status: &ProviderStatus) -> (&'static str, Color)
     match status {
         ProviderStatus::Running => ("●", Color::Green),
         ProviderStatus::NotRunning => ("○", Color::Red),
-        ProviderStatus::Unknown => ("?", Color::Yellow),
+        ProviderStatus::Unknown => ("?", Color::Cyan),
     }
 }
 
@@ -369,5 +366,31 @@ async fn check_port_status(port: u16) -> io::Result<bool> {
     match client.get(&url).send().await {
         Ok(response) => Ok(response.status().is_success()),
         Err(_) => Ok(false), // Connection failed = not running
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use pretty_assertions::assert_eq;
+
+    #[test]
+    fn renders_palette_without_blue_or_yellow() {
+        let widget = OssSelectionWidget::new(ProviderStatus::Running, ProviderStatus::Unknown)
+            .expect("widget should initialize");
+        let area = Rect::new(0, 0, 72, 12);
+        let mut buf = Buffer::empty(area);
+
+        (&widget).render_ref(area, &mut buf);
+
+        insta::assert_snapshot!("oss_selection_palette", format!("{buf:?}"));
+    }
+
+    #[test]
+    fn unknown_status_uses_cyan() {
+        assert_eq!(
+            get_status_symbol_and_color(&ProviderStatus::Unknown),
+            ("?", Color::Cyan)
+        );
     }
 }

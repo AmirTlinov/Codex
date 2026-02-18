@@ -1,0 +1,40 @@
+{
+  "version": 1,
+  "title": "role_split scout context flow",
+  "direction": "LR",
+  "nodes": {
+    "ScoutPrompt": {
+      "label": "core/templates/agents/scout.md",
+      "shape": "rect"
+    },
+    "SkillContract": {
+      "label": "skill: scout_context_pack",
+      "shape": "round"
+    },
+    "PackGenerator": {
+      "label": "scripts/scout_pack.py",
+      "shape": "diamond"
+    },
+    "MainConsumer": {
+      "label": "Main implementation",
+      "shape": "circle"
+    }
+  },
+  "edges": [
+    {
+      "from": "ScoutPrompt",
+      "to": "SkillContract",
+      "label": "must follow"
+    },
+    {
+      "from": "SkillContract",
+      "to": "PackGenerator",
+      "label": "excerpt_spec"
+    },
+    {
+      "from": "PackGenerator",
+      "to": "MainConsumer",
+      "label": "context_pack.md"
+    }
+  ]
+}

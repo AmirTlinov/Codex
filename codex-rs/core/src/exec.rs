@@ -538,10 +538,13 @@ pub(crate) fn is_likely_sandbox_denied(
     // 2: misuse of shell builtins
     // 126: permission denied
     // 127: command not found
-    const SANDBOX_DENIED_KEYWORDS: [&str; 7] = [
+    const SANDBOX_DENIED_KEYWORDS: [&str; 10] = [
         "operation not permitted",
         "permission denied",
         "read-only file system",
+        "операция не разрешена",
+        "отказано в доступе",
+        "файловая система только для чтения",
         "seccomp",
         "sandbox",
         "landlock",
@@ -933,6 +936,12 @@ mod tests {
     #[test]
     fn sandbox_detection_identifies_keyword_in_stderr() {
         let output = make_exec_output(1, "", "Operation not permitted", "");
+        assert!(is_likely_sandbox_denied(SandboxType::LinuxSeccomp, &output));
+    }
+
+    #[test]
+    fn sandbox_detection_identifies_localized_keyword_in_stderr() {
+        let output = make_exec_output(1, "", "Отказано в доступе", "");
         assert!(is_likely_sandbox_denied(SandboxType::LinuxSeccomp, &output));
     }
 

@@ -1,0 +1,6 @@
+---
+source: tui/src/chatwidget/tests.rs
+expression: rendered
+---
+@scout
+Response received (details hidden)

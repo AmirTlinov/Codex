@@ -98,6 +98,10 @@ pub struct Cli {
     #[arg(long = "search", default_value_t = false)]
     pub web_search: bool,
 
+    /// Show verbose debug IDs for collaboration system events in the transcript.
+    #[arg(long = "verbose", alias = "collab-debug-ids", default_value_t = false)]
+    pub verbose: bool,
+
     /// Additional directories that should be writable alongside the primary workspace.
     #[arg(long = "add-dir", value_name = "DIR", value_hint = ValueHint::DirPath)]
     pub add_dir: Vec<PathBuf>,
@@ -112,4 +116,21 @@ pub struct Cli {
 
     #[clap(skip)]
     pub config_overrides: CliConfigOverrides,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn verbose_flag_enables_collab_debug_ids() {
+        let cli = Cli::parse_from(["codex", "--verbose"]);
+        assert!(cli.verbose);
+    }
+
+    #[test]
+    fn collab_debug_ids_alias_enables_verbose_flag() {
+        let cli = Cli::parse_from(["codex", "--collab-debug-ids"]);
+        assert!(cli.verbose);
+    }
 }

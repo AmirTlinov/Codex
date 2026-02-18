@@ -159,6 +159,8 @@ use crate::mentions::build_connector_slug_counts;
 use crate::mentions::build_skill_name_counts;
 use crate::mentions::collect_explicit_app_ids;
 use crate::mentions::collect_tool_mentions_from_messages;
+use crate::orchestration::lifecycle::TeamLifecycleStore;
+use crate::orchestration::wake::WakeCoordinator;
 use crate::project_doc::get_user_instructions;
 use crate::proposed_plan_parser::ProposedPlanParser;
 use crate::proposed_plan_parser::ProposedPlanSegment;
@@ -526,6 +528,8 @@ pub(crate) struct Session {
     pub(crate) active_turn: Mutex<Option<ActiveTurn>>,
     pub(crate) active_plan_dir: Mutex<Option<PathBuf>>,
     collab_waiting_threads: Mutex<HashSet<ThreadId>>,
+    pub(crate) wake_coordinator: Mutex<WakeCoordinator>,
+    pub(crate) team_lifecycle_store: Mutex<TeamLifecycleStore>,
     pub(crate) services: SessionServices,
     js_repl: Arc<JsReplHandle>,
     next_internal_sub_id: AtomicU64,
@@ -602,8 +606,6 @@ pub(crate) struct TurnContext {
     pub(crate) tool_call_gate: Arc<ReadinessFlag>,
     pub(crate) scout_context_ready: Arc<AtomicBool>,
     pub(crate) context_validated: Arc<AtomicBool>,
-    pub(crate) builder_spawned: Arc<AtomicBool>,
-    pub(crate) validator_spawned: Arc<AtomicBool>,
     pub(crate) truncation_policy: TruncationPolicy,
     pub(crate) js_repl: Arc<JsReplHandle>,
     pub(crate) dynamic_tools: Vec<DynamicToolSpec>,
@@ -688,8 +690,6 @@ impl TurnContext {
             tool_call_gate: Arc::new(ReadinessFlag::new()),
             scout_context_ready: self.scout_context_ready.clone(),
             context_validated: self.context_validated.clone(),
-            builder_spawned: self.builder_spawned.clone(),
-            validator_spawned: self.validator_spawned.clone(),
             truncation_policy,
             js_repl: Arc::clone(&self.js_repl),
             dynamic_tools: self.dynamic_tools.clone(),
@@ -1069,8 +1069,6 @@ impl Session {
             tool_call_gate: Arc::new(ReadinessFlag::new()),
             scout_context_ready: Arc::new(AtomicBool::new(false)),
             context_validated: Arc::new(AtomicBool::new(false)),
-            builder_spawned: Arc::new(AtomicBool::new(false)),
-            validator_spawned: Arc::new(AtomicBool::new(false)),
             truncation_policy: model_info.truncation_policy.into(),
             js_repl,
             dynamic_tools: session_configuration.dynamic_tools.clone(),
@@ -1393,6 +1391,8 @@ impl Session {
             active_turn: Mutex::new(None),
             active_plan_dir: Mutex::new(None),
             collab_waiting_threads: Mutex::new(HashSet::new()),
+            wake_coordinator: Mutex::new(WakeCoordinator::default()),
+            team_lifecycle_store: Mutex::new(TeamLifecycleStore::default()),
             services,
             js_repl,
             next_internal_sub_id: AtomicU64::new(0),
@@ -3304,10 +3304,32 @@ async fn submission_loop(sess: Arc<Session>, config: Arc<Config>, rx_sub: Receiv
             Op::Review { review_request } => {
                 handlers::review(&sess, &config, sub.id.clone(), review_request).await;
             }
-            _ => {} // Ignore unknown ops; enum is non_exhaustive to allow extensions.
+            _ => {
+                let op_type = submission_op_type_for_diagnostics(&sub.op);
+                warn!(
+                    submission_id = %sub.id,
+                    op_type,
+                    "unsupported submission operation"
+                );
+                sess.send_event_raw(Event {
+                    id: sub.id.clone(),
+                    msg: EventMsg::Error(ErrorEvent {
+                        message: format!("Unsupported operation `{op_type}`."),
+                        codex_error_info: Some(CodexErrorInfo::BadRequest),
+                    }),
+                })
+                .await;
+            } // Keep wildcard for non_exhaustive Op compatibility.
         }
     }
     debug!("Agent loop exited");
+}
+
+fn submission_op_type_for_diagnostics(op: &Op) -> String {
+    serde_json::to_value(op)
+        .ok()
+        .and_then(|value| value.get("type").and_then(Value::as_str).map(str::to_owned))
+        .unwrap_or_else(|| "unknown".to_string())
 }
 
 /// Operation handlers
@@ -3326,6 +3348,10 @@ mod handlers {
     use crate::mcp::auth::compute_auth_statuses;
     use crate::mcp::collect_mcp_snapshot_from_manager;
     use crate::mcp::effective_mcp_servers;
+    use crate::orchestration::wake::WakeDelivery;
+    use crate::orchestration::wake::WakeEnvelope;
+    use crate::orchestration::wake::WakePriority;
+    use crate::orchestration::wake::WakeResolution;
     use crate::review_prompts::resolve_review_request;
     use crate::rollout::session_index;
     use crate::tasks::CompactTask;
@@ -3355,6 +3381,8 @@ mod handlers {
     use codex_protocol::request_user_input::RequestUserInputResponse;
 
     use crate::context_manager::is_user_turn_boundary;
+    use crate::tools::handlers::collab::build_collab_message_metadata;
+    use crate::tools::handlers::collab::collab_status_label;
     use codex_protocol::ThreadId;
     use codex_protocol::config_types::CollaborationMode;
     use codex_protocol::config_types::ModeKind;
@@ -3375,6 +3403,7 @@ mod handlers {
     use std::path::PathBuf;
     use std::sync::Arc;
     use std::time::Duration;
+    use std::time::Instant;
     use tracing::info;
     use tracing::warn;
 
@@ -3384,6 +3413,49 @@ mod handlers {
 
     pub async fn clean_background_terminals(sess: &Arc<Session>) {
         sess.close_unified_exec_processes().await;
+    }
+
+    fn normalize_intervention_token(token: &str) -> String {
+        token
+            .trim_matches(|ch: char| matches!(ch, ',' | '.' | ':' | ';' | '!' | '?'))
+            .to_ascii_lowercase()
+    }
+
+    pub(super) fn intervention_requires_interrupt(items: &[UserInput]) -> bool {
+        const STOP_TOKENS: [&str; 4] = ["stop", "halt", "pause", "cancel"];
+
+        let mut saw_mention = false;
+        let mut saw_stop_token = false;
+
+        for item in items {
+            match item {
+                UserInput::Text { text, .. } => {
+                    for raw_token in text.split_whitespace() {
+                        let token = normalize_intervention_token(raw_token);
+                        if token.is_empty() {
+                            continue;
+                        }
+                        if token.starts_with('@') {
+                            saw_mention = true;
+                            continue;
+                        }
+                        if STOP_TOKENS.contains(&token.as_str()) {
+                            saw_stop_token = true;
+                        }
+                    }
+                }
+                UserInput::Mention { .. } => {
+                    saw_mention = true;
+                }
+                _ => {}
+            }
+
+            if saw_mention && saw_stop_token {
+                return true;
+            }
+        }
+
+        false
     }
 
     pub async fn collab_send_input(
@@ -3526,9 +3598,11 @@ mod handlers {
 
         let call_id = sub_id.clone();
         let prompt = input_preview(&items);
+        let should_interrupt = intervention_requires_interrupt(&items);
 
         let mut dedup_targets = HashSet::new();
         let mut targets = Vec::with_capacity(receiver_thread_ids.len());
+        let mut wake_ids = HashMap::new();
         for receiver_thread_id in receiver_thread_ids {
             if dedup_targets.insert(receiver_thread_id) {
                 targets.push(receiver_thread_id);
@@ -3536,6 +3610,74 @@ mod handlers {
         }
 
         for receiver_thread_id in &targets {
+            let priority = if should_interrupt {
+                WakePriority::Urgent
+            } else if targets.len() > 1 {
+                WakePriority::High
+            } else {
+                WakePriority::Normal
+            };
+            let wake_id = format!("{call_id}:{receiver_thread_id}");
+            let wake_delivery = {
+                let mut wake_coordinator = sess.wake_coordinator.lock().await;
+                wake_coordinator.enqueue(
+                    WakeEnvelope {
+                        wake_id: wake_id.clone(),
+                        created_at: Instant::now(),
+                        ttl: WAIT_TIMEOUT,
+                        priority,
+                        ack_required: true,
+                        max_attempts: 2,
+                    },
+                    Instant::now(),
+                )
+            };
+            match wake_delivery {
+                WakeDelivery::DeliverNow => {
+                    wake_ids.insert(*receiver_thread_id, wake_id);
+                }
+                WakeDelivery::Duplicate => {
+                    sess.send_event_raw(Event {
+                        id: sub_id.clone(),
+                        msg: EventMsg::Warning(WarningEvent {
+                            message: format!(
+                                "Duplicate wake signal detected for {receiver_thread_id}; skipping duplicate delivery."
+                            ),
+                        }),
+                    })
+                    .await;
+                    continue;
+                }
+                WakeDelivery::Expired => {
+                    sess.send_event_raw(Event {
+                        id: sub_id.clone(),
+                        msg: EventMsg::Warning(WarningEvent {
+                            message: format!(
+                                "Expired wake signal for {receiver_thread_id}; skipping delivery."
+                            ),
+                        }),
+                    })
+                    .await;
+                    continue;
+                }
+            }
+
+            if should_interrupt
+                && let Err(err) = sess
+                    .services
+                    .agent_control
+                    .interrupt_agent(*receiver_thread_id)
+                    .await
+            {
+                warn!(
+                    "failed to interrupt agent {receiver_thread_id} before routing user intervention: {err}"
+                );
+            }
+            let mut begin_message_metadata =
+                build_collab_message_metadata("user", "user", "running", &prompt);
+            if should_interrupt {
+                begin_message_metadata.priority = "urgent".to_string();
+            }
             sess.send_event_raw(Event {
                 id: sub_id.clone(),
                 msg: CollabAgentInteractionBeginEvent {
@@ -3543,6 +3685,7 @@ mod handlers {
                     sender_thread_id: sess.conversation_id,
                     receiver_thread_id: *receiver_thread_id,
                     prompt: prompt.clone(),
+                    message: begin_message_metadata,
                 }
                 .into(),
             })
@@ -3559,6 +3702,15 @@ mod handlers {
                 .agent_control
                 .get_status(*receiver_thread_id)
                 .await;
+            let mut message_metadata = build_collab_message_metadata(
+                "user",
+                "user",
+                collab_status_label(&status),
+                &prompt,
+            );
+            if should_interrupt {
+                message_metadata.priority = "urgent".to_string();
+            }
 
             sess.send_event_raw(Event {
                 id: sub_id.clone(),
@@ -3567,6 +3719,7 @@ mod handlers {
                     sender_thread_id: sess.conversation_id,
                     receiver_thread_id: *receiver_thread_id,
                     prompt: prompt.clone(),
+                    message: message_metadata,
                     status: status.clone(),
                 }
                 .into(),
@@ -3574,6 +3727,23 @@ mod handlers {
             .await;
 
             if let Err(err) = result {
+                if let Some(wake_id) = wake_ids.get(receiver_thread_id) {
+                    let resolution = {
+                        let mut wake_coordinator = sess.wake_coordinator.lock().await;
+                        wake_coordinator.nack(wake_id)
+                    };
+                    if matches!(resolution, WakeResolution::Escalated) {
+                        sess.send_event_raw(Event {
+                            id: sub_id.clone(),
+                            msg: EventMsg::Warning(WarningEvent {
+                                message: format!(
+                                    "Wake signal escalated for {receiver_thread_id} after send failure."
+                                ),
+                            }),
+                        })
+                        .await;
+                    }
+                }
                 sess.send_event_raw(Event {
                     id: sub_id.clone(),
                     msg: EventMsg::Error(ErrorEvent {
@@ -3585,12 +3755,17 @@ mod handlers {
             }
         }
 
+        let mut already_waiting = Vec::new();
         let mut overflow = Vec::new();
         let mut wait_targets = Vec::new();
         {
             let mut guard = sess.collab_waiting_threads.lock().await;
             for receiver_thread_id in &targets {
+                if !wake_ids.contains_key(receiver_thread_id) {
+                    continue;
+                }
                 if guard.contains(receiver_thread_id) {
+                    already_waiting.push(*receiver_thread_id);
                     continue;
                 }
                 if guard.len() >= MAX_ACTIVE_WAITS {
@@ -3600,6 +3775,33 @@ mod handlers {
                 guard.insert(*receiver_thread_id);
                 wait_targets.push(*receiver_thread_id);
             }
+        }
+
+        if !already_waiting.is_empty() || !overflow.is_empty() {
+            let mut wake_coordinator = sess.wake_coordinator.lock().await;
+            for receiver_thread_id in &already_waiting {
+                if let Some(wake_id) = wake_ids.get(receiver_thread_id) {
+                    let _ = wake_coordinator.ack(wake_id);
+                }
+            }
+            for receiver_thread_id in &overflow {
+                if let Some(wake_id) = wake_ids.get(receiver_thread_id) {
+                    let _ = wake_coordinator.ack(wake_id);
+                }
+            }
+        }
+
+        if !already_waiting.is_empty() {
+            sess.send_event_raw(Event {
+                id: sub_id.clone(),
+                msg: EventMsg::Warning(WarningEvent {
+                    message: format!(
+                        "Skipped waits for {} agent(s) already in waiting state.",
+                        already_waiting.len()
+                    ),
+                }),
+            })
+            .await;
         }
 
         if !overflow.is_empty() {
@@ -3634,10 +3836,13 @@ mod handlers {
         let sess = Arc::clone(sess);
         let sub_id = sub_id.clone();
         let call_id = call_id.clone();
+        let wake_ids = wake_ids.clone();
         tokio::spawn(async move {
             let mut futures = FuturesUnordered::new();
             for receiver_thread_id in wait_targets {
                 let sess = Arc::clone(&sess);
+                let wake_id = wake_ids.get(&receiver_thread_id).cloned();
+                let sub_id_for_wait = sub_id.clone();
                 futures.push(async move {
                     let (mut status, timed_out) =
                         wait_for_final_status(&sess, receiver_thread_id, WAIT_TIMEOUT).await;
@@ -3654,6 +3859,33 @@ mod handlers {
                         status = AgentStatus::Errored(format!(
                             "Timed out waiting for response ({latest_label})."
                         ));
+                    }
+
+                    if let Some(wake_id) = wake_id {
+                        let mut timeout_escalated = false;
+                        {
+                            let mut wake_coordinator = sess.wake_coordinator.lock().await;
+                            if timed_out {
+                                let resolution = wake_coordinator.nack(&wake_id);
+                                let escalated_wakes =
+                                    wake_coordinator.poll_timeouts(Instant::now());
+                                timeout_escalated = matches!(resolution, WakeResolution::Escalated)
+                                    || escalated_wakes.iter().any(|id| id == &wake_id);
+                            } else {
+                                let _ = wake_coordinator.ack(&wake_id);
+                            }
+                        }
+                        if timeout_escalated {
+                            sess.send_event_raw(Event {
+                                id: sub_id_for_wait.clone(),
+                                msg: EventMsg::Warning(WarningEvent {
+                                    message: format!(
+                                        "Wake signal escalated for {receiver_thread_id} after timeout."
+                                    ),
+                                }),
+                            })
+                            .await;
+                        }
                     }
 
                     {
@@ -4481,8 +4713,6 @@ async fn spawn_review_thread(
         tool_call_gate: Arc::new(ReadinessFlag::new()),
         scout_context_ready: Arc::new(AtomicBool::new(false)),
         context_validated: Arc::new(AtomicBool::new(false)),
-        builder_spawned: Arc::new(AtomicBool::new(false)),
-        validator_spawned: Arc::new(AtomicBool::new(false)),
         js_repl: Arc::clone(&sess.js_repl),
         dynamic_tools: parent_turn_context.dynamic_tools.clone(),
         truncation_policy: model_info.truncation_policy.into(),
@@ -6092,6 +6322,139 @@ mod tests {
         assert_eq!(*active_plan_dir, None);
     }
 
+    #[test]
+    fn user_intervention_continue_unless_stop() {
+        let continue_items = vec![UserInput::Text {
+            text: "@scout gather remaining context.".to_string(),
+            text_elements: Vec::new(),
+        }];
+        assert!(
+            !handlers::intervention_requires_interrupt(&continue_items),
+            "non-stop interventions should keep execution in continue mode"
+        );
+
+        let stop_items = vec![UserInput::Text {
+            text: "@scout stop and regroup around slice S7.".to_string(),
+            text_elements: Vec::new(),
+        }];
+        assert!(
+            handlers::intervention_requires_interrupt(&stop_items),
+            "explicit stop interventions must interrupt first"
+        );
+
+        let punctuated_stop_items = vec![UserInput::Text {
+            text: "@validator, STOP! re-check this package.".to_string(),
+            text_elements: Vec::new(),
+        }];
+        assert!(
+            handlers::intervention_requires_interrupt(&punctuated_stop_items),
+            "stop detection should tolerate punctuation and casing"
+        );
+
+        let trailing_stop_items = vec![UserInput::Text {
+            text: "@scout continue gathering logs then stop immediately.".to_string(),
+            text_elements: Vec::new(),
+        }];
+        assert!(
+            handlers::intervention_requires_interrupt(&trailing_stop_items),
+            "explicit stop should win even when continuation tokens appear earlier"
+        );
+
+        let stop_before_mention_items = vec![UserInput::Text {
+            text: "STOP right now, @scout.".to_string(),
+            text_elements: Vec::new(),
+        }];
+        assert!(
+            handlers::intervention_requires_interrupt(&stop_before_mention_items),
+            "stop should interrupt even when it appears before @mention"
+        );
+
+        let split_stop_and_mention_items = vec![
+            UserInput::Mention {
+                name: "scout".to_string(),
+                path: "app://scout".to_string(),
+            },
+            UserInput::Text {
+                text: "Please stop and regroup.".to_string(),
+                text_elements: Vec::new(),
+            },
+        ];
+        assert!(
+            handlers::intervention_requires_interrupt(&split_stop_and_mention_items),
+            "structured mentions should combine with stop tokens across items"
+        );
+
+        let split_text_items = vec![
+            UserInput::Text {
+                text: "@validator".to_string(),
+                text_elements: Vec::new(),
+            },
+            UserInput::Text {
+                text: "halt and recheck this.".to_string(),
+                text_elements: Vec::new(),
+            },
+        ];
+        assert!(
+            handlers::intervention_requires_interrupt(&split_text_items),
+            "mention and stop tokens should combine across text items"
+        );
+
+        let stop_without_mention_items = vec![UserInput::Text {
+            text: "Please stop and regroup.".to_string(),
+            text_elements: Vec::new(),
+        }];
+        assert!(
+            !handlers::intervention_requires_interrupt(&stop_without_mention_items),
+            "stop without explicit @mention should not trigger collab interrupt"
+        );
+    }
+
+    #[tokio::test]
+    async fn submission_loop_emits_bad_request_for_unsupported_op() {
+        let (session, turn_context, rx_event) = make_session_and_context_with_rx().await;
+        let (tx_sub, rx_sub) = async_channel::unbounded();
+
+        let submission_loop_task = tokio::spawn(submission_loop(
+            Arc::clone(&session),
+            Arc::clone(&turn_context.config),
+            rx_sub,
+        ));
+
+        let sub_id = "unsupported-op".to_string();
+        tx_sub
+            .send(Submission {
+                id: sub_id.clone(),
+                op: Op::ListModels,
+            })
+            .await
+            .expect("send unsupported op");
+
+        let event = tokio::time::timeout(StdDuration::from_secs(2), rx_event.recv())
+            .await
+            .expect("timeout waiting for unsupported-op diagnostic")
+            .expect("unsupported-op diagnostic event");
+        assert_eq!(event.id, sub_id);
+        let EventMsg::Error(error) = event.msg else {
+            panic!("expected Error event for unsupported op");
+        };
+        assert_eq!(error.message, "Unsupported operation `list_models`.");
+        assert_eq!(error.codex_error_info, Some(CodexErrorInfo::BadRequest));
+
+        tx_sub
+            .send(Submission {
+                id: "shutdown".to_string(),
+                op: Op::Shutdown,
+            })
+            .await
+            .expect("send shutdown op");
+        drop(tx_sub);
+
+        tokio::time::timeout(StdDuration::from_secs(2), submission_loop_task)
+            .await
+            .expect("timeout waiting for submission loop shutdown")
+            .expect("submission loop join");
+    }
+
     fn user_message(text: &str) -> ResponseItem {
         ResponseItem::Message {
             id: None,
@@ -7473,6 +7836,8 @@ mod tests {
             active_turn: Mutex::new(None),
             active_plan_dir: Mutex::new(None),
             collab_waiting_threads: Mutex::new(HashSet::new()),
+            wake_coordinator: Mutex::new(WakeCoordinator::default()),
+            team_lifecycle_store: Mutex::new(TeamLifecycleStore::default()),
             services,
             js_repl,
             next_internal_sub_id: AtomicU64::new(0),
@@ -7621,6 +7986,8 @@ mod tests {
             active_turn: Mutex::new(None),
             active_plan_dir: Mutex::new(None),
             collab_waiting_threads: Mutex::new(HashSet::new()),
+            wake_coordinator: Mutex::new(WakeCoordinator::default()),
+            team_lifecycle_store: Mutex::new(TeamLifecycleStore::default()),
             services,
             js_repl,
             next_internal_sub_id: AtomicU64::new(0),

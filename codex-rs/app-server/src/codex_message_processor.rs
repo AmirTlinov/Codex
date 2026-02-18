@@ -313,11 +313,18 @@ pub(crate) struct CodexMessageProcessor {
     feedback: CodexFeedback,
 }
 
-#[derive(Clone, Copy, Debug, Default)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(crate) enum ApiVersion {
     V1,
     #[default]
     V2,
+}
+
+fn remove_pending_interrupt_request(
+    pending_interrupts: &mut Vec<(ConnectionRequestId, ApiVersion)>,
+    request_id: &ConnectionRequestId,
+) {
+    pending_interrupts.retain(|(pending_request, _)| pending_request != request_id);
 }
 
 pub(crate) struct CodexMessageProcessorArgs {
@@ -4949,16 +4956,26 @@ impl CodexMessageProcessor {
         let request = request_id.clone();
 
         // Record the pending interrupt so we can reply when TurnAborted arrives.
+        let pending_interrupts = self.thread_state_manager.thread_state(conversation_id);
         {
-            let pending_interrupts = self.thread_state_manager.thread_state(conversation_id);
             let mut thread_state = pending_interrupts.lock().await;
             thread_state
                 .pending_interrupts
-                .push((request, ApiVersion::V1));
+                .push((request.clone(), ApiVersion::V1));
         }
 
-        // Submit the interrupt; we'll respond upon TurnAborted.
-        let _ = conversation.submit(Op::Interrupt).await;
+        // Submit the interrupt; on failure respond immediately and remove pending state.
+        if let Err(err) = conversation.submit(Op::Interrupt).await {
+            {
+                let mut thread_state = pending_interrupts.lock().await;
+                remove_pending_interrupt_request(&mut thread_state.pending_interrupts, &request);
+            }
+            self.send_internal_error(
+                request_id,
+                format!("failed to interrupt conversation: {err}"),
+            )
+            .await;
+        }
     }
 
     async fn turn_start(&self, request_id: ConnectionRequestId, params: TurnStartParams) {
@@ -5433,16 +5450,27 @@ impl CodexMessageProcessor {
         let request = request_id.clone();
 
         // Record the pending interrupt so we can reply when TurnAborted arrives.
+        let pending_interrupts = self.thread_state_manager.thread_state(thread_uuid);
         {
-            let thread_state = self.thread_state_manager.thread_state(thread_uuid);
-            let mut thread_state = thread_state.lock().await;
+            let mut thread_state = pending_interrupts.lock().await;
             thread_state
                 .pending_interrupts
-                .push((request, ApiVersion::V2));
+                .push((request.clone(), ApiVersion::V2));
         }
 
-        // Submit the interrupt; we'll respond upon TurnAborted.
-        let _ = thread.submit(Op::Interrupt).await;
+        // Submit the interrupt; on failure respond immediately and remove pending state.
+        if let Err(err) = thread.submit(Op::Interrupt).await {
+            {
+                let mut thread_state = pending_interrupts.lock().await;
+                remove_pending_interrupt_request(&mut thread_state.pending_interrupts, &request);
+            }
+            let error = JSONRPCErrorError {
+                code: INTERNAL_ERROR_CODE,
+                message: format!("failed to interrupt turn: {err}"),
+                data: None,
+            };
+            self.outgoing.send_error(request_id, error).await;
+        }
     }
 
     async fn add_conversation_listener(
@@ -6448,10 +6476,31 @@ pub(crate) fn summary_to_thread(summary: ConversationSummary) -> Thread {
 mod tests {
     use super::*;
     use anyhow::Result;
+    use codex_app_server_protocol::RequestId;
     use codex_protocol::protocol::SessionSource;
     use pretty_assertions::assert_eq;
     use serde_json::json;
     use tempfile::TempDir;
+
+    #[test]
+    fn remove_pending_interrupt_request_removes_only_matching_request() {
+        let request_a = ConnectionRequestId {
+            connection_id: ConnectionId(1),
+            request_id: RequestId::Integer(10),
+        };
+        let request_b = ConnectionRequestId {
+            connection_id: ConnectionId(2),
+            request_id: RequestId::Integer(20),
+        };
+        let mut pending = vec![
+            (request_a.clone(), ApiVersion::V1),
+            (request_b.clone(), ApiVersion::V2),
+        ];
+
+        remove_pending_interrupt_request(&mut pending, &request_a);
+
+        assert_eq!(pending, vec![(request_b, ApiVersion::V2)]);
+    }
 
     #[test]
     fn validate_dynamic_tools_rejects_unsupported_input_schema() {

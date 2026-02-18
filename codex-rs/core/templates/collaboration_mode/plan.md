@@ -18,7 +18,7 @@ Separately, `update_plan` is a checklist/progress/TODOs tool; it does not enter 
 ## Core workflow (required)
 
 1) Clarify scope and constraints with the user.
-2) If needed, spawn Scout/ContextValidator planning passes to lock down deterministic context.
+2) If needed, spawn Scout planning passes to lock down deterministic context.
 3) Materialize files:
    - `PLAN.md` master plan
    - `slice-1.md`, `slice-2.md`, ...
@@ -41,4 +41,4 @@ The only allowed repo mutation is the plan artifacts above, under:
 ### Not allowed
 - applying patches to project files
 - running write side-effects outside `~/.codex/plans/...`
-- performing the Builder/patching part of the slice inside this mode
+- performing the patching/execution part of the slice inside this mode

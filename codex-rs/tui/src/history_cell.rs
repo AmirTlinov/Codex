@@ -132,6 +132,10 @@ pub(crate) trait HistoryCell: std::fmt::Debug + Send + Sync + Any {
     fn transcript_animation_tick(&self) -> Option<u64> {
         None
     }
+
+    fn transcript_feed(&self) -> TranscriptFeed {
+        TranscriptFeed::ReviewAudit
+    }
 }
 
 impl Renderable for Box<dyn HistoryCell> {
@@ -168,6 +172,13 @@ pub(crate) struct UserHistoryCell {
     pub text_elements: Vec<TextElement>,
     #[allow(dead_code)]
     pub local_image_paths: Vec<PathBuf>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum TranscriptFeed {
+    UserMain,
+    AgentMesh,
+    ReviewAudit,
 }
 
 /// Build logical lines for a user message with styled text elements.
@@ -275,6 +286,10 @@ impl HistoryCell for UserHistoryCell {
         lines.push(Line::from("").style(style));
         lines
     }
+
+    fn transcript_feed(&self) -> TranscriptFeed {
+        TranscriptFeed::UserMain
+    }
 }
 
 #[derive(Debug)]
@@ -380,22 +395,39 @@ impl HistoryCell for AgentMessageCell {
     fn is_stream_continuation(&self) -> bool {
         !self.is_first_line
     }
+
+    fn transcript_feed(&self) -> TranscriptFeed {
+        TranscriptFeed::UserMain
+    }
 }
 
 #[derive(Debug)]
 pub(crate) struct PlainHistoryCell {
     lines: Vec<Line<'static>>,
+    feed: TranscriptFeed,
 }
 
 impl PlainHistoryCell {
     pub(crate) fn new(lines: Vec<Line<'static>>) -> Self {
-        Self { lines }
+        Self {
+            lines,
+            feed: TranscriptFeed::ReviewAudit,
+        }
+    }
+
+    pub(crate) fn with_feed(mut self, feed: TranscriptFeed) -> Self {
+        self.feed = feed;
+        self
     }
 }
 
 impl HistoryCell for PlainHistoryCell {
     fn display_lines(&self, _width: u16) -> Vec<Line<'static>> {
         self.lines.clone()
+    }
+
+    fn transcript_feed(&self) -> TranscriptFeed {
+        self.feed
     }
 }
 
@@ -458,6 +490,7 @@ pub(crate) struct PrefixedWrappedHistoryCell {
     text: Text<'static>,
     initial_prefix: Line<'static>,
     subsequent_prefix: Line<'static>,
+    feed: TranscriptFeed,
 }
 
 impl PrefixedWrappedHistoryCell {
@@ -470,7 +503,13 @@ impl PrefixedWrappedHistoryCell {
             text: text.into(),
             initial_prefix: initial_prefix.into(),
             subsequent_prefix: subsequent_prefix.into(),
+            feed: TranscriptFeed::ReviewAudit,
         }
+    }
+
+    pub(crate) fn with_feed(mut self, feed: TranscriptFeed) -> Self {
+        self.feed = feed;
+        self
     }
 }
 
@@ -490,6 +529,10 @@ impl HistoryCell for PrefixedWrappedHistoryCell {
 
     fn desired_height(&self, width: u16) -> u16 {
         self.display_lines(width).len() as u16
+    }
+
+    fn transcript_feed(&self) -> TranscriptFeed {
+        self.feed
     }
 }
 
@@ -790,9 +833,7 @@ pub fn new_approval_decision_cell(
 
 /// Cyan history cell line showing the current review status.
 pub(crate) fn new_review_status_line(message: String) -> PlainHistoryCell {
-    PlainHistoryCell {
-        lines: vec![Line::from(message.cyan())],
-    }
+    PlainHistoryCell::new(vec![Line::from(message.cyan())])
 }
 
 #[derive(Debug)]
@@ -996,7 +1037,7 @@ pub(crate) fn new_session_info(
             ]),
         ];
 
-        parts.push(Box::new(PlainHistoryCell { lines: help_lines }));
+        parts.push(Box::new(PlainHistoryCell::new(help_lines)));
     } else {
         if config.show_tooltips
             && let Some(tooltips) = tooltips::get_tooltip(auth_plan).map(TooltipHistoryCell::new)
@@ -1009,7 +1050,7 @@ pub(crate) fn new_session_info(
                 format!("requested: {requested_model}").into(),
                 format!("used: {model}").into(),
             ];
-            parts.push(Box::new(PlainHistoryCell { lines }));
+            parts.push(Box::new(PlainHistoryCell::new(lines)));
         }
     }
 
@@ -1609,7 +1650,7 @@ pub(crate) fn empty_mcp_output() -> PlainHistoryCell {
         .style(Style::default().add_modifier(Modifier::DIM)),
     ];
 
-    PlainHistoryCell { lines }
+    PlainHistoryCell::new(lines)
 }
 
 /// Render MCP tools grouped by connection using the fully-qualified tool names.
@@ -1775,7 +1816,7 @@ pub(crate) fn new_mcp_tools_output(
         lines.push(Line::from(""));
     }
 
-    PlainHistoryCell { lines }
+    PlainHistoryCell::new(lines)
 }
 pub(crate) fn new_info_event(message: String, hint: Option<String>) -> PlainHistoryCell {
     let mut line = vec!["• ".dim(), message.into()];
@@ -1784,7 +1825,7 @@ pub(crate) fn new_info_event(message: String, hint: Option<String>) -> PlainHist
         line.push(hint.dark_gray());
     }
     let lines: Vec<Line<'static>> = vec![line.into()];
-    PlainHistoryCell { lines }
+    PlainHistoryCell::new(lines)
 }
 
 pub(crate) fn new_error_event(message: String) -> PlainHistoryCell {
@@ -1792,7 +1833,7 @@ pub(crate) fn new_error_event(message: String) -> PlainHistoryCell {
     // before the text. VS16 is intentionally omitted to keep spacing tighter
     // in terminals like Ghostty.
     let lines: Vec<Line<'static>> = vec![vec![format!("■ {message}").red()].into()];
-    PlainHistoryCell { lines }
+    PlainHistoryCell::new(lines)
 }
 
 /// Renders a completed (or interrupted) request_user_input exchange in history.
@@ -2099,7 +2140,7 @@ pub(crate) fn new_patch_apply_failure(stderr: String) -> PlainHistoryCell {
         lines.extend(output.lines);
     }
 
-    PlainHistoryCell { lines }
+    PlainHistoryCell::new(lines)
 }
 
 pub(crate) fn new_view_image_tool_call(path: PathBuf, cwd: &Path) -> PlainHistoryCell {
@@ -2110,7 +2151,7 @@ pub(crate) fn new_view_image_tool_call(path: PathBuf, cwd: &Path) -> PlainHistor
         vec!["  └ ".dim(), display_path.dim()].into(),
     ];
 
-    PlainHistoryCell { lines }
+    PlainHistoryCell::new(lines)
 }
 
 pub(crate) fn new_reasoning_summary_block(full_reasoning_buffer: String) -> Box<dyn HistoryCell> {

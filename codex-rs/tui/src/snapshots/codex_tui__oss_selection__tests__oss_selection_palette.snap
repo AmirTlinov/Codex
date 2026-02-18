@@ -1,0 +1,36 @@
+---
+source: tui/src/oss_selection.rs
+expression: "format!(\"{buf:?}\")"
+---
+Buffer {
+    area: Rect { x: 0, y: 0, width: 72, height: 12 },
+    content: [
+        "? Select an open-source provider                                        ",
+        "                                                                        ",
+        "  Choose which local AI server to use for your session.                 ",
+        "                                                                        ",
+        "  ● LM Studio                                                           ",
+        "  ? Ollama (Responses)                                                  ",
+        "  ? Ollama (Chat)                                                       ",
+        "                                                                        ",
+        "  ● Running  ○ Not Running                                              ",
+        "                                                                        ",
+        "  Press Enter to select • Ctrl+C to exit                                ",
+        " Select provider?                                                       ",
+    ],
+    styles: [
+        x: 0, y: 0, fg: Cyan, bg: Reset, underline: Reset, modifier: NONE,
+        x: 2, y: 0, fg: Reset, bg: Reset, underline: Reset, modifier: BOLD,
+        x: 32, y: 0, fg: Reset, bg: Reset, underline: Reset, modifier: NONE,
+        x: 2, y: 4, fg: Green, bg: Reset, underline: Reset, modifier: NONE,
+        x: 3, y: 4, fg: Reset, bg: Reset, underline: Reset, modifier: NONE,
+        x: 2, y: 5, fg: Cyan, bg: Reset, underline: Reset, modifier: NONE,
+        x: 3, y: 5, fg: Reset, bg: Reset, underline: Reset, modifier: NONE,
+        x: 2, y: 6, fg: Cyan, bg: Reset, underline: Reset, modifier: NONE,
+        x: 3, y: 6, fg: Reset, bg: Reset, underline: Reset, modifier: NONE,
+        x: 0, y: 8, fg: Reset, bg: Reset, underline: Reset, modifier: DIM,
+        x: 26, y: 8, fg: Reset, bg: Reset, underline: Reset, modifier: NONE,
+        x: 0, y: 10, fg: Reset, bg: Reset, underline: Reset, modifier: DIM,
+        x: 40, y: 10, fg: Reset, bg: Reset, underline: Reset, modifier: NONE,
+    ]
+}

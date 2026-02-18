@@ -1,6 +1,5 @@
 use codex_protocol::models::FunctionCallOutputBody;
 use std::collections::BTreeMap;
-use std::collections::BTreeSet;
 use std::path::Path;
 use std::path::PathBuf;
 
@@ -15,7 +14,6 @@ use crate::client_common::tools::ToolSpec;
 use crate::codex::Session;
 use crate::codex::TurnContext;
 use crate::function_tool::FunctionCallError;
-use crate::protocol::AskForApproval;
 use crate::tools::context::SharedTurnDiffTracker;
 use crate::tools::context::ToolInvocation;
 use crate::tools::context::ToolOutput;
@@ -34,10 +32,8 @@ use crate::tools::spec::JsonSchema;
 use async_trait::async_trait;
 use codex_apply_patch::ApplyPatchAction;
 use codex_apply_patch::ApplyPatchFileChange;
-use codex_protocol::config_types::ModeKind;
 use codex_utils_absolute_path::AbsolutePathBuf;
 use std::path::Component;
-use std::sync::atomic::Ordering;
 
 pub struct ApplyPatchHandler;
 
@@ -177,70 +173,12 @@ fn validate_plan_patch_targets(
     })
 }
 
-fn validator_allowed_patch_inputs(user_messages: &[String]) -> Vec<String> {
-    let mut allowed = BTreeSet::new();
-    for message in user_messages.iter().rev().take(3) {
-        let trimmed_message = message.trim();
-        if !trimmed_message.is_empty() {
-            allowed.insert(trimmed_message.to_string());
-        }
-
-        let mut tail = message.as_str();
-        while let Some(start) = tail.find("```") {
-            let after_open = &tail[start + 3..];
-            let Some(end) = after_open.find("```") else {
-                break;
-            };
-            let mut candidate = after_open[..end].trim();
-            if let Some((first_line, rest)) = candidate.split_once('\n')
-                && matches!(first_line.trim(), "diff" | "patch" | "apply_patch")
-            {
-                candidate = rest.trim();
-            }
-            if !candidate.is_empty() {
-                allowed.insert(candidate.to_string());
-            }
-            tail = &after_open[end + 3..];
-        }
-    }
-    allowed.into_iter().collect()
-}
-
-fn validator_patch_is_verbatim_allowed(patch_input: &str, user_messages: &[String]) -> bool {
-    let normalized_patch = patch_input.trim();
-    if normalized_patch.is_empty() {
-        return false;
-    }
-
-    validator_allowed_patch_inputs(user_messages)
-        .into_iter()
-        .any(|candidate| candidate.trim() == normalized_patch)
-}
-
-fn missing_default_pipeline_stages(turn: &TurnContext) -> Vec<&'static str> {
-    let mut missing = Vec::new();
-    if !turn.scout_context_ready.load(Ordering::Acquire) {
-        missing.push("scout");
-    }
-    if !turn.context_validated.load(Ordering::Acquire) {
-        missing.push("context_validator");
-    }
-    if !turn.builder_spawned.load(Ordering::Acquire) {
-        missing.push("builder");
-    }
-    if !turn.validator_spawned.load(Ordering::Acquire) {
-        missing.push("validator (or post_builder_validator)");
-    }
-    missing
-}
-
 async fn enforce_apply_patch_guards(
     session: &Session,
     turn: &TurnContext,
-    patch_input: &str,
     changes: &ApplyPatchAction,
 ) -> Result<(), FunctionCallError> {
-    enforce_apply_patch_pre_parse_guards(session, turn, patch_input).await?;
+    enforce_apply_patch_pre_parse_guards(turn).await?;
 
     if turn.tools_config.agent_role == AgentRole::Plan {
         let mut active_plan_dir = session.active_plan_dir.lock().await;
@@ -259,26 +197,8 @@ async fn enforce_apply_patch_guards(
     Ok(())
 }
 
-async fn enforce_apply_patch_pre_parse_guards(
-    session: &Session,
-    turn: &TurnContext,
-    patch_input: &str,
-) -> Result<(), FunctionCallError> {
+async fn enforce_apply_patch_pre_parse_guards(turn: &TurnContext) -> Result<(), FunctionCallError> {
     enforce_default_apply_patch_pipeline_guard(turn)?;
-
-    if matches!(
-        turn.tools_config.agent_role,
-        AgentRole::Validator | AgentRole::PostBuilderValidator
-    ) {
-        let history = session.clone_history().await;
-        let user_messages = crate::compact::collect_user_messages(history.raw_items());
-        if !validator_patch_is_verbatim_allowed(patch_input, &user_messages) {
-            return Err(FunctionCallError::RespondToModel(
-                "Validator can only apply a Builder patch verbatim. If the patch needs changes, reject with a detailed, file-specific explanation instead."
-                    .to_string(),
-            ));
-        }
-    }
 
     Ok(())
 }
@@ -323,7 +243,7 @@ impl ToolHandler for ApplyPatchHandler {
             }
         };
 
-        enforce_apply_patch_pre_parse_guards(session.as_ref(), turn.as_ref(), &patch_input).await?;
+        enforce_apply_patch_pre_parse_guards(turn.as_ref()).await?;
 
         // Re-parse and verify the patch so we can compute changes and approval.
         // Avoid building temporary ExecParams/command vectors; derive directly from inputs.
@@ -331,8 +251,7 @@ impl ToolHandler for ApplyPatchHandler {
         let command = vec!["apply_patch".to_string(), patch_input.clone()];
         match codex_apply_patch::maybe_parse_apply_patch_verified(&command, &cwd) {
             codex_apply_patch::MaybeApplyPatchVerified::Body(changes) => {
-                enforce_apply_patch_guards(session.as_ref(), turn.as_ref(), &patch_input, &changes)
-                    .await?;
+                enforce_apply_patch_guards(session.as_ref(), turn.as_ref(), &changes).await?;
                 match apply_patch::apply_patch(turn.as_ref(), changes).await {
                     InternalApplyPatchInvocation::Output(item) => {
                         let content = item?;
@@ -360,7 +279,7 @@ impl ToolHandler for ApplyPatchHandler {
                             changes,
                             exec_approval_requirement: apply.exec_approval_requirement,
                             timeout_ms: None,
-                            codex_exe: turn.codex_linux_sandbox_exe.clone(),
+                            codex_exe: None,
                         };
 
                         let mut orchestrator = ToolOrchestrator::new();
@@ -426,14 +345,13 @@ pub(crate) async fn intercept_apply_patch(
 
     match codex_apply_patch::maybe_parse_apply_patch_verified(command, cwd) {
         codex_apply_patch::MaybeApplyPatchVerified::Body(changes) => {
-            let patch_input = changes.patch.clone();
             session
                 .record_model_warning(
                     format!("apply_patch was requested via {tool_name}. Use the apply_patch tool instead."),
                     turn,
                 )
                 .await;
-            enforce_apply_patch_guards(session, turn, &patch_input, &changes).await?;
+            enforce_apply_patch_guards(session, turn, &changes).await?;
             match apply_patch::apply_patch(turn, changes).await {
                 InternalApplyPatchInvocation::Output(item) => {
                     let content = item?;
@@ -456,7 +374,7 @@ pub(crate) async fn intercept_apply_patch(
                         changes,
                         exec_approval_requirement: apply.exec_approval_requirement,
                         timeout_ms,
-                        codex_exe: turn.codex_linux_sandbox_exe.clone(),
+                        codex_exe: None,
                     };
 
                     let mut orchestrator = ToolOrchestrator::new();
@@ -508,19 +426,7 @@ pub(crate) async fn intercept_apply_patch(
 }
 
 fn enforce_default_apply_patch_pipeline_guard(turn: &TurnContext) -> Result<(), FunctionCallError> {
-    if turn.tools_config.agent_role == AgentRole::Default
-        && turn.tools_config.collaboration_mode != ModeKind::Plan
-        && turn.tools_config.collab_tools
-        && matches!(turn.approval_policy, AskForApproval::Never)
-    {
-        let missing = missing_default_pipeline_stages(turn);
-        if !missing.is_empty() {
-            return Err(FunctionCallError::RespondToModel(format!(
-                "apply_patch is locked in Default role until the pipeline is complete: scout -> context_validator -> builder -> validator. Missing: {}.",
-                missing.join(", ")
-            )));
-        }
-    }
+    let _ = turn;
 
     Ok(())
 }
@@ -604,14 +510,12 @@ fn matches_script_command_boundary(script: &str, start: usize, end: usize) -> bo
     }
 
     let next = bytes.get(end).copied();
-    let next_is_boundary = match next {
-        None => true,
-        Some(b' ' | b'\t' | b'\r' | b'\n') => true,
-        Some(b'<' | b'>' | b'&' | b'|' | b';' | b'(' | b')') => true,
-        _ => false,
-    };
 
-    next_is_boundary
+    matches!(
+        next,
+        None | Some(b' ' | b'\t' | b'\r' | b'\n')
+            | Some(b'<' | b'>' | b'&' | b'|' | b';' | b'(' | b')')
+    )
 }
 
 /// Returns a custom tool that can be used to edit files. Well-suited for GPT-5 models
@@ -723,8 +627,11 @@ mod tests {
     use super::*;
     use crate::codex::make_session_and_context;
     use crate::function_tool::FunctionCallError;
+    use crate::protocol::AskForApproval;
     use codex_apply_patch::MaybeApplyPatchVerified;
+    use codex_protocol::config_types::ModeKind;
     use pretty_assertions::assert_eq;
+    use std::sync::atomic::Ordering;
     use tempfile::TempDir;
 
     #[test]
@@ -749,53 +656,6 @@ mod tests {
 
         let keys = file_paths_for_action(&action);
         assert_eq!(keys.len(), 2);
-    }
-
-    #[test]
-    fn validator_patch_candidates_extract_fenced_blocks() {
-        let message = r#"
-Some explanation.
-```diff
-*** Begin Patch
-*** Add File: test.txt
-+hello
-*** End Patch
-```
-"#;
-        let candidates = validator_allowed_patch_inputs(&[message.to_string()]);
-        assert!(
-            candidates
-                .iter()
-                .any(|candidate| candidate.contains("*** Begin Patch"))
-        );
-    }
-
-    #[test]
-    fn validator_patch_must_be_verbatim() {
-        let patch = "*** Begin Patch\n*** Add File: test.txt\n+hello\n*** End Patch";
-        let message = format!("Builder patch:\n```diff\n{patch}\n```");
-        assert!(validator_patch_is_verbatim_allowed(
-            patch,
-            &[message.to_string()]
-        ));
-        assert!(!validator_patch_is_verbatim_allowed(
-            "*** Begin Patch\n*** Add File: test.txt\n+hello world\n*** End Patch",
-            &[message]
-        ));
-    }
-
-    #[test]
-    fn post_builder_validator_patch_must_be_verbatim() {
-        let patch = "*** Begin Patch\n*** Add File: test.txt\n+hello\n*** End Patch";
-        let message = format!("Builder patch:\n```diff\n{patch}\n```");
-        assert!(validator_patch_is_verbatim_allowed(
-            patch,
-            &[message.to_string()]
-        ));
-        assert!(!validator_patch_is_verbatim_allowed(
-            "*** Begin Patch\n*** Add File: test.txt\n+hello world\n*** End Patch",
-            &[message]
-        ));
     }
 
     #[test]
@@ -925,6 +785,97 @@ Some explanation.
     }
 
     #[tokio::test]
+    async fn orchestrator_context_gate_enforced_before_patch() {
+        let (session, mut turn) = make_session_and_context().await;
+        turn.tools_config.agent_role = AgentRole::Default;
+        turn.tools_config.collaboration_mode = ModeKind::Default;
+        turn.tools_config.collab_tools = true;
+        turn.approval_policy = AskForApproval::Never;
+        turn.scout_context_ready.store(true, Ordering::Release);
+        turn.context_validated.store(false, Ordering::Release);
+
+        let command = vec![
+            "apply_patch".to_string(),
+            "*** Begin Patch\n*** Add File: gated.txt\n+blocked\n*** End Patch".to_string(),
+        ];
+        let result = intercept_apply_patch(
+            &command,
+            turn.cwd.as_path(),
+            None,
+            &session,
+            &turn,
+            None,
+            "call-ctx",
+            "shell",
+        )
+        .await;
+
+        assert!(
+            !matches!(result, Err(FunctionCallError::RespondToModel(message)) if message.contains("approved scout context pack")),
+            "requester-owned scout context must not be rejected by context-pack gate"
+        );
+    }
+
+    #[tokio::test]
+    async fn apply_patch_gate_blocks_without_context_approved() {
+        let (session, mut turn) = make_session_and_context().await;
+        turn.tools_config.agent_role = AgentRole::Default;
+        turn.tools_config.collaboration_mode = ModeKind::Default;
+        turn.tools_config.collab_tools = true;
+        turn.approval_policy = AskForApproval::Never;
+
+        let command = vec!["apply_patch".to_string(), "*** Begin Patch".to_string()];
+        let result = intercept_apply_patch(
+            &command,
+            turn.cwd.as_path(),
+            None,
+            &session,
+            &turn,
+            None,
+            "call-gate",
+            "shell",
+        )
+        .await;
+
+        assert!(
+            !matches!(result, Err(FunctionCallError::RespondToModel(message)) if message.contains("approved scout context pack")),
+            "context-pack heuristic must not block apply_patch"
+        );
+    }
+
+    #[tokio::test]
+    async fn patch_denied_without_context_approved() {
+        let (session, mut turn) = make_session_and_context().await;
+        turn.tools_config.agent_role = AgentRole::Default;
+        turn.tools_config.collaboration_mode = ModeKind::Default;
+        turn.tools_config.collab_tools = true;
+        turn.approval_policy = AskForApproval::Never;
+        turn.scout_context_ready.store(true, Ordering::Release);
+        turn.context_validated.store(false, Ordering::Release);
+
+        let command = vec![
+            "apply_patch".to_string(),
+            "*** Begin Patch\n*** Add File: denied.txt\n+nope\n*** End Patch".to_string(),
+        ];
+        let result = intercept_apply_patch(
+            &command,
+            turn.cwd.as_path(),
+            None,
+            &session,
+            &turn,
+            None,
+            "call-denied",
+            "shell",
+        )
+        .await;
+
+        assert!(
+            !matches!(result, Err(FunctionCallError::RespondToModel(message)) if message.contains("approved scout context pack")),
+            "requester-owned scout context must not be rejected by context-pack gate"
+        );
+    }
+
+    #[tokio::test]
     async fn intercept_apply_patch_enforces_default_pipeline_guard() {
         let (session, mut turn) = make_session_and_context().await;
         turn.tools_config.agent_role = AgentRole::Default;
@@ -948,13 +899,10 @@ Some explanation.
         )
         .await;
 
-        match result {
-            Err(FunctionCallError::RespondToModel(message)) => {
-                assert!(message.contains("scout -> context_validator -> builder -> validator"));
-                assert!(message.contains("scout"));
-            }
-            _ => panic!("expected pipeline guard failure"),
-        }
+        assert!(
+            !matches!(result, Err(FunctionCallError::RespondToModel(message)) if message.contains("approved scout context pack")),
+            "context-pack heuristic must not block apply_patch"
+        );
     }
 
     #[tokio::test]
@@ -978,13 +926,10 @@ Some explanation.
         )
         .await;
 
-        match result {
-            Err(FunctionCallError::RespondToModel(message)) => {
-                assert!(message.contains("scout -> context_validator -> builder -> validator"));
-                assert!(message.contains("scout"));
-            }
-            _ => panic!("expected pipeline guard failure"),
-        }
+        assert!(
+            !matches!(result, Err(FunctionCallError::RespondToModel(message)) if message.contains("approved scout context pack")),
+            "context-pack heuristic must not block apply_patch"
+        );
     }
 
     #[tokio::test]

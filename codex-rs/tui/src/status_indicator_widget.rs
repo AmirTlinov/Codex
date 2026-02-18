@@ -32,6 +32,7 @@ use crate::wrapping::word_wrap_lines;
 
 const DETAILS_MAX_LINES: usize = 3;
 const DETAILS_PREFIX: &str = "  └ ";
+const ANIMATION_REDRAW_INTERVAL: Duration = Duration::from_millis(32);
 
 /// Displays a single-line in-progress status with optional wrapped details.
 pub(crate) struct StatusIndicatorWidget {
@@ -175,6 +176,19 @@ impl StatusIndicatorWidget {
         self.elapsed_seconds_at(Instant::now())
     }
 
+    fn redraw_delay(&self, elapsed_duration: Duration) -> Option<Duration> {
+        if self.animations_enabled {
+            return Some(ANIMATION_REDRAW_INTERVAL);
+        }
+        if self.is_paused {
+            return None;
+        }
+        let nanos_into_second = u64::from(elapsed_duration.subsec_nanos());
+        let until_next_second =
+            Duration::from_secs(1).saturating_sub(Duration::from_nanos(nanos_into_second));
+        Some(until_next_second)
+    }
+
     /// Wrap the details text into a fixed width and return the lines, truncating if necessary.
     fn wrapped_details_lines(&self, width: u16) -> Vec<Line<'static>> {
         let Some(details) = self.details.as_deref() else {
@@ -218,11 +232,11 @@ impl Renderable for StatusIndicatorWidget {
             return;
         }
 
-        // Schedule next animation frame.
-        self.frame_requester
-            .schedule_frame_in(Duration::from_millis(32));
         let now = Instant::now();
         let elapsed_duration = self.elapsed_duration_at(now);
+        if let Some(redraw_delay) = self.redraw_delay(elapsed_duration) {
+            self.frame_requester.schedule_frame_in(redraw_delay);
+        }
         let pretty_elapsed = fmt_elapsed_compact(elapsed_duration.as_secs());
 
         let mut spans = Vec::with_capacity(5);
@@ -375,5 +389,28 @@ mod tests {
             last.spans[1].content.as_ref().ends_with("…"),
             "expected ellipsis in last line: {last:?}"
         );
+    }
+
+    #[test]
+    fn redraw_delay_depends_on_animation_and_timer_state() {
+        let (tx_raw, _rx) = unbounded_channel::<AppEvent>();
+        let tx = AppEventSender::new(tx_raw);
+
+        let animated =
+            StatusIndicatorWidget::new(tx.clone(), crate::tui::FrameRequester::test_dummy(), true);
+        assert_eq!(
+            animated.redraw_delay(Duration::from_millis(250)),
+            Some(ANIMATION_REDRAW_INTERVAL)
+        );
+
+        let mut non_animated =
+            StatusIndicatorWidget::new(tx, crate::tui::FrameRequester::test_dummy(), false);
+        assert_eq!(
+            non_animated.redraw_delay(Duration::from_millis(250)),
+            Some(Duration::from_millis(750))
+        );
+
+        non_animated.is_paused = true;
+        assert_eq!(non_animated.redraw_delay(Duration::from_millis(250)), None);
     }
 }

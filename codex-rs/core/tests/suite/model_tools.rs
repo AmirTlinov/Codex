@@ -69,6 +69,10 @@ fn expected_default_tools(shell_tool: &str, tail: &[&str]) -> Vec<String> {
             "resume_agent",
             "wait",
             "close_agent",
+            "team_agent_list",
+            "team_agent_get",
+            "team_agent_upsert",
+            "team_agent_delete",
         ]
         .iter()
         .map(|tool| (*tool).to_string()),

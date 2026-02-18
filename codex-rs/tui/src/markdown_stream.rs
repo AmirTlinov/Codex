@@ -1,3 +1,5 @@
+use std::borrow::Cow;
+
 use ratatui::text::Line;
 
 use crate::markdown;
@@ -33,15 +35,12 @@ impl MarkdownStreamCollector {
     /// since the last commit. When the buffer does not end with a newline, the
     /// final rendered line is considered incomplete and is not emitted.
     pub fn commit_complete_lines(&mut self) -> Vec<Line<'static>> {
-        let source = self.buffer.clone();
-        let last_newline_idx = source.rfind('\n');
-        let source = if let Some(last_newline_idx) = last_newline_idx {
-            source[..=last_newline_idx].to_string()
-        } else {
+        let Some(last_newline_idx) = self.buffer.rfind('\n') else {
             return Vec::new();
         };
+        let source = &self.buffer[..=last_newline_idx];
         let mut rendered: Vec<Line<'static>> = Vec::new();
-        markdown::append_markdown(&source, self.width, &mut rendered);
+        markdown::append_markdown(source, self.width, &mut rendered);
         let mut complete_line_count = rendered.len();
         if complete_line_count > 0
             && crate::render::line_utils::is_blank_line_spaces_only(
@@ -55,11 +54,9 @@ impl MarkdownStreamCollector {
             return Vec::new();
         }
 
-        let out_slice = &rendered[self.committed_line_count..complete_line_count];
-
-        let out = out_slice.to_vec();
+        let start = self.committed_line_count;
         self.committed_line_count = complete_line_count;
-        out
+        rendered.drain(start..complete_line_count).collect()
     }
 
     /// Finalize the stream: emit all remaining lines beyond the last commit.
@@ -67,27 +64,32 @@ impl MarkdownStreamCollector {
     /// for rendering. Optionally unwraps ```markdown language fences in
     /// non-test builds.
     pub fn finalize_and_drain(&mut self) -> Vec<Line<'static>> {
-        let raw_buffer = self.buffer.clone();
-        let mut source: String = raw_buffer.clone();
-        if !source.ends_with('\n') {
-            source.push('\n');
-        }
-        tracing::debug!(
-            raw_len = raw_buffer.len(),
-            source_len = source.len(),
-            "markdown finalize (raw length: {}, rendered length: {})",
-            raw_buffer.len(),
-            source.len()
-        );
-        tracing::trace!("markdown finalize (raw source):\n---\n{source}\n---");
+        let out = {
+            let source: Cow<'_, str> = if self.buffer.ends_with('\n') {
+                Cow::Borrowed(self.buffer.as_str())
+            } else {
+                let mut with_newline = String::with_capacity(self.buffer.len() + 1);
+                with_newline.push_str(&self.buffer);
+                with_newline.push('\n');
+                Cow::Owned(with_newline)
+            };
+            tracing::debug!(
+                raw_len = self.buffer.len(),
+                source_len = source.len(),
+                "markdown finalize (raw length: {}, rendered length: {})",
+                self.buffer.len(),
+                source.len()
+            );
+            tracing::trace!("markdown finalize (raw source):\n---\n{source}\n---");
 
-        let mut rendered: Vec<Line<'static>> = Vec::new();
-        markdown::append_markdown(&source, self.width, &mut rendered);
+            let mut rendered: Vec<Line<'static>> = Vec::new();
+            markdown::append_markdown(source.as_ref(), self.width, &mut rendered);
 
-        let out = if self.committed_line_count >= rendered.len() {
-            Vec::new()
-        } else {
-            rendered[self.committed_line_count..].to_vec()
+            if self.committed_line_count >= rendered.len() {
+                Vec::new()
+            } else {
+                rendered.split_off(self.committed_line_count)
+            }
         };
 
         // Reset collector state for next stream.

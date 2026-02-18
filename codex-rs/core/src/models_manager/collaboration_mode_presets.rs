@@ -1,16 +1,23 @@
 use codex_protocol::config_types::CollaborationModeMask;
 use codex_protocol::config_types::ModeKind;
-use codex_protocol::config_types::TUI_VISIBLE_COLLABORATION_MODES;
 use codex_protocol::openai_models::ReasoningEffort;
 
 const COLLABORATION_MODE_PLAN: &str = include_str!("../../templates/collaboration_mode/plan.md");
 const COLLABORATION_MODE_DEFAULT: &str =
     include_str!("../../templates/collaboration_mode/default.md");
+const COLLABORATION_MODE_ORCHESTRATOR: &str =
+    include_str!("../../templates/collaboration_mode/orchestrator.md");
+const ORCHESTRATOR_MODE_NAME: &str = "Orchestrator";
+const KNOWN_MODE_NAMES: [&str; 3] = [
+    ModeKind::Default.display_name(),
+    ORCHESTRATOR_MODE_NAME,
+    ModeKind::Plan.display_name(),
+];
 const KNOWN_MODE_NAMES_PLACEHOLDER: &str = "{{KNOWN_MODE_NAMES}}";
 const REQUEST_USER_INPUT_AVAILABILITY_PLACEHOLDER: &str = "{{REQUEST_USER_INPUT_AVAILABILITY}}";
 
 pub(crate) fn builtin_collaboration_mode_presets() -> Vec<CollaborationModeMask> {
-    vec![plan_preset(), default_preset()]
+    vec![default_preset(), orchestrator_preset(), plan_preset()]
 }
 
 fn plan_preset() -> CollaborationModeMask {
@@ -33,8 +40,18 @@ fn default_preset() -> CollaborationModeMask {
     }
 }
 
+fn orchestrator_preset() -> CollaborationModeMask {
+    CollaborationModeMask {
+        name: ORCHESTRATOR_MODE_NAME.to_string(),
+        mode: Some(ModeKind::Default),
+        model: None,
+        reasoning_effort: None,
+        developer_instructions: Some(Some(orchestrator_mode_instructions())),
+    }
+}
+
 fn default_mode_instructions() -> String {
-    let known_mode_names = format_mode_names(&TUI_VISIBLE_COLLABORATION_MODES);
+    let known_mode_names = format_mode_names(&KNOWN_MODE_NAMES);
     let request_user_input_availability =
         request_user_input_availability_message(ModeKind::Default);
     COLLABORATION_MODE_DEFAULT
@@ -45,9 +62,17 @@ fn default_mode_instructions() -> String {
         )
 }
 
-fn format_mode_names(modes: &[ModeKind]) -> String {
-    let mode_names: Vec<&str> = modes.iter().map(|mode| mode.display_name()).collect();
-    match mode_names.as_slice() {
+fn orchestrator_mode_instructions() -> String {
+    let request_user_input_availability =
+        request_user_input_availability_message(ModeKind::Default);
+    COLLABORATION_MODE_ORCHESTRATOR.replace(
+        REQUEST_USER_INPUT_AVAILABILITY_PLACEHOLDER,
+        &request_user_input_availability,
+    )
+}
+
+fn format_mode_names(mode_names: &[&str]) -> String {
+    match mode_names {
         [] => "none".to_string(),
         [mode_name] => (*mode_name).to_string(),
         [first, second] => format!("{first} and {second}"),
@@ -75,6 +100,28 @@ mod tests {
     fn preset_names_use_mode_display_names() {
         assert_eq!(plan_preset().name, ModeKind::Plan.display_name());
         assert_eq!(default_preset().name, ModeKind::Default.display_name());
+        assert_eq!(orchestrator_preset().name, ORCHESTRATOR_MODE_NAME);
+    }
+
+    #[test]
+    fn builtin_presets_are_returned_in_tui_cycling_order() {
+        let preset_names: Vec<String> = builtin_collaboration_mode_presets()
+            .into_iter()
+            .map(|preset| preset.name)
+            .collect();
+        assert_eq!(
+            preset_names,
+            vec![
+                ModeKind::Default.display_name().to_string(),
+                ORCHESTRATOR_MODE_NAME.to_string(),
+                ModeKind::Plan.display_name().to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn orchestrator_preset_uses_default_mode() {
+        assert_eq!(orchestrator_preset().mode, Some(ModeKind::Default));
     }
 
     #[test]
@@ -87,12 +134,26 @@ mod tests {
         assert!(!default_instructions.contains(KNOWN_MODE_NAMES_PLACEHOLDER));
         assert!(!default_instructions.contains(REQUEST_USER_INPUT_AVAILABILITY_PLACEHOLDER));
 
-        let known_mode_names = format_mode_names(&TUI_VISIBLE_COLLABORATION_MODES);
+        let known_mode_names = format_mode_names(&KNOWN_MODE_NAMES);
         let expected_snippet = format!("Known mode names are {known_mode_names}.");
         assert!(default_instructions.contains(&expected_snippet));
 
         let expected_availability_message =
             request_user_input_availability_message(ModeKind::Default);
         assert!(default_instructions.contains(&expected_availability_message));
+    }
+
+    #[test]
+    fn orchestrator_mode_instructions_replace_request_user_input_placeholder() {
+        let orchestrator_instructions = orchestrator_preset()
+            .developer_instructions
+            .expect("orchestrator preset should include instructions")
+            .expect("orchestrator instructions should be set");
+
+        assert!(!orchestrator_instructions.contains(REQUEST_USER_INPUT_AVAILABILITY_PLACEHOLDER));
+
+        let expected_availability_message =
+            request_user_input_availability_message(ModeKind::Default);
+        assert!(orchestrator_instructions.contains(&expected_availability_message));
     }
 }

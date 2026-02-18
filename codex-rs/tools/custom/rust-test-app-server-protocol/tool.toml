@@ -1,0 +1,5 @@
+[tool]
+id = "rust-test-app-server-protocol"
+description = "Run codex-app-server-protocol tests"
+command = "cargo"
+args = ["test", "-p", "codex-app-server-protocol"]

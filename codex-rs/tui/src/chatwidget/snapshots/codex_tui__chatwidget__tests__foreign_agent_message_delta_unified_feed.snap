@@ -2,4 +2,4 @@
 source: tui/src/chatwidget/tests.rs
 expression: rendered
 ---
-@scout Streaming line one.
+@validator Streaming line one.

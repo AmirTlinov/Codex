@@ -1,0 +1,9 @@
+flowchart LR
+  %% role_split scout context flow
+  MainConsumer(("Main implementation"))
+  PackGenerator{"scripts/scout_pack.py"}
+  ScoutPrompt["core/templates/agents/scout.md"]
+  SkillContract("skill: scout_context_pack")
+  PackGenerator -->|context_pack.md| MainConsumer
+  ScoutPrompt -->|must follow| SkillContract
+  SkillContract -->|excerpt_spec| PackGenerator

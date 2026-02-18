@@ -349,6 +349,12 @@ impl ThreadEventChannel {
     }
 }
 
+#[derive(Clone, Copy)]
+enum CollabPickerKind {
+    Agents,
+    Scouts,
+}
+
 fn should_show_model_migration_prompt(
     current_model: &str,
     target_model: &str,
@@ -555,6 +561,7 @@ pub(crate) struct App {
     pub(crate) backtrack_render_pending: bool,
     pub(crate) feedback: codex_feedback::CodexFeedback,
     feedback_audience: FeedbackAudience,
+    show_collab_debug_ids: bool,
     /// Set when the user confirms an update; propagated on exit.
     pub(crate) pending_update_action: Option<UpdateAction>,
 
@@ -615,6 +622,7 @@ impl App {
             feedback: self.feedback.clone(),
             is_first_run: false,
             feedback_audience: self.feedback_audience,
+            show_collab_debug_ids: self.show_collab_debug_ids,
             model: Some(self.chat_widget.current_model().to_string()),
             status_line_invalid_items_warned: self.status_line_invalid_items_warned.clone(),
             otel_manager: self.otel_manager.clone(),
@@ -665,6 +673,15 @@ impl App {
         {
             self.record_thread_agent_type(new_thread_id, agent_type);
         }
+    }
+
+    fn retire_thread_agent_type(&mut self, thread_id: ThreadId) {
+        self.thread_agent_types.remove(&thread_id);
+        if Some(thread_id) != self.active_thread_id {
+            self.thread_event_channels.remove(&thread_id);
+        }
+        self.chat_widget.forget_collab_agent_type(thread_id);
+        self.sync_active_agents_footer_chip();
     }
 
     fn restore_chat_widget_collab_agent_types(&mut self) {
@@ -854,6 +871,7 @@ impl App {
             self.primary_session_configured = Some(session.clone());
             self.ensure_thread_channel(thread_id);
             self.activate_thread_channel(thread_id).await;
+            self.sync_active_agents_footer_chip();
 
             let pending = std::mem::take(&mut self.pending_primary_events);
             for pending_event in pending {
@@ -867,6 +885,14 @@ impl App {
     }
 
     async fn open_agent_picker(&mut self) {
+        self.open_collab_picker(CollabPickerKind::Agents).await;
+    }
+
+    async fn open_scout_picker(&mut self) {
+        self.open_collab_picker(CollabPickerKind::Scouts).await;
+    }
+
+    async fn open_collab_picker(&mut self, picker_kind: CollabPickerKind) {
         let thread_ids: Vec<ThreadId> = self.thread_event_channels.keys().cloned().collect();
         for thread_id in thread_ids {
             if self.server.get_thread(thread_id).await.is_err() {
@@ -875,15 +901,27 @@ impl App {
         }
         self.thread_agent_types
             .retain(|thread_id, _| self.thread_event_channels.contains_key(thread_id));
+        self.sync_active_agents_footer_chip();
 
-        if self.thread_event_channels.is_empty() {
-            self.chat_widget
-                .add_info_message("No agents available yet.".to_string(), None);
+        let mut thread_ids: Vec<ThreadId> = self
+            .thread_event_channels
+            .keys()
+            .copied()
+            .filter(|thread_id| match picker_kind {
+                CollabPickerKind::Agents => !self.is_scout_thread(*thread_id),
+                CollabPickerKind::Scouts => self.is_scout_thread(*thread_id),
+            })
+            .collect();
+        thread_ids.sort_by_key(ToString::to_string);
+
+        if thread_ids.is_empty() {
+            let message = match picker_kind {
+                CollabPickerKind::Agents => "No agents available yet.",
+                CollabPickerKind::Scouts => "No scouts available yet.",
+            };
+            self.chat_widget.add_info_message(message.to_string(), None);
             return;
         }
-
-        let mut thread_ids: Vec<ThreadId> = self.thread_event_channels.keys().cloned().collect();
-        thread_ids.sort_by_key(ToString::to_string);
 
         let mut initial_selected_idx = None;
         let items: Vec<SelectionItem> = thread_ids
@@ -941,14 +979,28 @@ impl App {
             })
             .collect();
 
+        let title = match picker_kind {
+            CollabPickerKind::Agents => "Agents",
+            CollabPickerKind::Scouts => "Scouts",
+        };
+
         self.chat_widget.show_selection_view(SelectionViewParams {
-            title: Some("Agents".to_string()),
+            title: Some(title.to_string()),
             subtitle: Some("Select a thread to focus".to_string()),
             footer_hint: Some(standard_popup_hint_line()),
             items,
             initial_selected_idx,
             ..Default::default()
         });
+    }
+
+    fn is_scout_thread(&self, thread_id: ThreadId) -> bool {
+        self.thread_agent_types
+            .get(&thread_id)
+            .is_some_and(|agent_type| {
+                crate::chatwidget::agent_role_from_type(agent_type)
+                    == Some(codex_core::AgentRole::Scout)
+            })
     }
 
     async fn select_agent_thread(&mut self, tui: &mut tui::Tui, thread_id: ThreadId) -> Result<()> {
@@ -990,6 +1042,7 @@ impl App {
         self.reset_for_thread_switch(tui)?;
         self.replay_thread_snapshot(snapshot);
         self.drain_active_thread_events(tui).await?;
+        self.sync_active_agents_footer_chip();
 
         Ok(())
     }
@@ -1013,6 +1066,25 @@ impl App {
         self.active_thread_rx = None;
         self.primary_thread_id = None;
         self.pending_primary_events.clear();
+        self.sync_active_agents_footer_chip();
+    }
+
+    fn sync_active_agents_footer_chip(&mut self) {
+        let mut agents_count = 0usize;
+        let mut scouts_count = 0usize;
+        for thread_id in self.thread_event_channels.keys() {
+            if Some(*thread_id) == self.primary_thread_id {
+                continue;
+            }
+            if self.is_scout_thread(*thread_id) {
+                scouts_count += 1;
+            } else {
+                agents_count += 1;
+            }
+        }
+
+        self.chat_widget
+            .set_active_collab_footer_chip_counts(agents_count, scouts_count);
     }
 
     async fn drain_active_thread_events(&mut self, tui: &mut tui::Tui) -> Result<()> {
@@ -1068,6 +1140,7 @@ impl App {
         feedback: codex_feedback::CodexFeedback,
         is_first_run: bool,
         should_prompt_windows_sandbox_nux_at_startup: bool,
+        show_collab_debug_ids: bool,
     ) -> Result<AppExitInfo> {
         use tokio_stream::StreamExt;
         let (app_event_tx, mut app_event_rx) = unbounded_channel();
@@ -1162,6 +1235,7 @@ impl App {
                     feedback: feedback.clone(),
                     is_first_run,
                     feedback_audience,
+                    show_collab_debug_ids,
                     model: Some(model.clone()),
                     status_line_invalid_items_warned: status_line_invalid_items_warned.clone(),
                     otel_manager: otel_manager.clone(),
@@ -1192,6 +1266,7 @@ impl App {
                     feedback: feedback.clone(),
                     is_first_run,
                     feedback_audience,
+                    show_collab_debug_ids,
                     model: config.model.clone(),
                     status_line_invalid_items_warned: status_line_invalid_items_warned.clone(),
                     otel_manager: otel_manager.clone(),
@@ -1223,6 +1298,7 @@ impl App {
                     feedback: feedback.clone(),
                     is_first_run,
                     feedback_audience,
+                    show_collab_debug_ids,
                     model: config.model.clone(),
                     status_line_invalid_items_warned: status_line_invalid_items_warned.clone(),
                     otel_manager: otel_manager.clone(),
@@ -1262,6 +1338,7 @@ impl App {
             backtrack_render_pending: false,
             feedback: feedback.clone(),
             feedback_audience,
+            show_collab_debug_ids,
             pending_update_action: None,
             suppress_shutdown_complete: false,
             windows_sandbox: WindowsSandboxState::default(),
@@ -1466,6 +1543,7 @@ impl App {
                     feedback: self.feedback.clone(),
                     is_first_run: false,
                     feedback_audience: self.feedback_audience,
+                    show_collab_debug_ids: self.show_collab_debug_ids,
                     model: Some(model),
                     status_line_invalid_items_warned: self.status_line_invalid_items_warned.clone(),
                     otel_manager: self.otel_manager.clone(),
@@ -2171,9 +2249,6 @@ impl App {
                         let role_label = match role {
                             codex_core::AgentRole::Default => "main",
                             codex_core::AgentRole::Scout => "scout",
-                            codex_core::AgentRole::ContextValidator => "context_validator",
-                            codex_core::AgentRole::PostBuilderValidator => "post_builder_validator",
-                            codex_core::AgentRole::Builder => "builder",
                             codex_core::AgentRole::Validator => "validator",
                             codex_core::AgentRole::Plan => "plan",
                         };
@@ -2451,6 +2526,9 @@ impl App {
             AppEvent::OpenAgentPicker => {
                 self.open_agent_picker().await;
             }
+            AppEvent::OpenScoutPicker => {
+                self.open_scout_picker().await;
+            }
             AppEvent::SelectAgentThread(thread_id) => {
                 self.select_agent_thread(tui, thread_id).await?;
             }
@@ -2644,6 +2722,9 @@ impl App {
             EventMsg::CollabAgentSpawnEnd(ev) => {
                 self.sync_thread_agent_type_from_spawn_end(ev);
             }
+            EventMsg::CollabCloseEnd(ev) => {
+                self.retire_thread_agent_type(ev.receiver_thread_id);
+            }
             _ => {}
         }
         if let EventMsg::ListSkillsResponse(response) = &event.msg {
@@ -2666,6 +2747,9 @@ impl App {
             }
             EventMsg::CollabAgentSpawnEnd(ev) => {
                 self.sync_thread_agent_type_from_spawn_end(ev);
+            }
+            EventMsg::CollabCloseEnd(ev) => {
+                self.retire_thread_agent_type(ev.receiver_thread_id);
             }
             _ => {}
         }
@@ -2994,6 +3078,7 @@ mod tests {
     use codex_core::protocol::AgentStatus;
     use codex_core::protocol::AskForApproval;
     use codex_core::protocol::CollabAgentSpawnEndEvent;
+    use codex_core::protocol::CollabCloseEndEvent;
     use codex_core::protocol::Event;
     use codex_core::protocol::EventMsg;
     use codex_core::protocol::SandboxPolicy;
@@ -3004,6 +3089,7 @@ mod tests {
     use codex_otel::OtelManager;
     use codex_protocol::ThreadId;
     use codex_protocol::user_input::TextElement;
+    use crossterm::event::KeyModifiers;
     use insta::assert_snapshot;
     use pretty_assertions::assert_eq;
     use ratatui::buffer::Buffer;
@@ -3096,14 +3182,14 @@ mod tests {
         time::sleep(std::time::Duration::from_millis(1)).await;
         let scout = app.server.start_thread(app.config.clone()).await?;
         time::sleep(std::time::Duration::from_millis(1)).await;
-        let builder = app.server.start_thread(app.config.clone()).await?;
+        let validator = app.server.start_thread(app.config.clone()).await?;
 
         app.thread_event_channels
             .insert(primary.thread_id, ThreadEventChannel::new(1));
         app.thread_event_channels
             .insert(scout.thread_id, ThreadEventChannel::new(1));
         app.thread_event_channels
-            .insert(builder.thread_id, ThreadEventChannel::new(1));
+            .insert(validator.thread_id, ThreadEventChannel::new(1));
 
         app.primary_thread_id = Some(primary.thread_id);
         app.active_thread_id = Some(primary.thread_id);
@@ -3121,12 +3207,12 @@ mod tests {
             }),
         });
         app.handle_codex_event_now(Event {
-            id: "evt_spawn_builder".to_string(),
+            id: "evt_spawn_validator".to_string(),
             msg: EventMsg::CollabAgentSpawnEnd(CollabAgentSpawnEndEvent {
-                call_id: "call_spawn_builder".to_string(),
+                call_id: "call_spawn_validator".to_string(),
                 sender_thread_id: primary.thread_id,
-                new_thread_id: Some(builder.thread_id),
-                agent_type: Some("builder".to_string()),
+                new_thread_id: Some(validator.thread_id),
+                agent_type: Some("validator".to_string()),
                 prompt: String::new(),
                 status: AgentStatus::Completed(None),
             }),
@@ -3140,6 +3226,181 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn footer_shows_active_subagent_count_chip() -> Result<()> {
+        let mut app = make_test_app().await;
+
+        let primary = app.server.start_thread(app.config.clone()).await?;
+        let scout = app.server.start_thread(app.config.clone()).await?;
+        let validator = app.server.start_thread(app.config.clone()).await?;
+
+        app.thread_event_channels
+            .insert(primary.thread_id, ThreadEventChannel::new(1));
+        app.thread_event_channels
+            .insert(scout.thread_id, ThreadEventChannel::new(1));
+        app.thread_event_channels
+            .insert(validator.thread_id, ThreadEventChannel::new(1));
+        app.thread_agent_types
+            .insert(scout.thread_id, String::from("scout"));
+        app.thread_agent_types
+            .insert(validator.thread_id, String::from("validator"));
+        app.primary_thread_id = Some(primary.thread_id);
+        app.active_thread_id = Some(primary.thread_id);
+        app.sync_active_agents_footer_chip();
+
+        let footer = render_bottom_popup(&app.chat_widget, 80);
+        assert!(
+            footer.contains("1 Agents"),
+            "expected footer to show non-scout agent count, got: {footer}",
+        );
+        assert!(
+            footer.contains("1 Scouts"),
+            "expected footer to show scout count separately, got: {footer}",
+        );
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn collab_close_end_retire_closed_thread_from_footer_and_role_map() -> Result<()> {
+        let mut app = make_test_app().await;
+
+        let primary = app.server.start_thread(app.config.clone()).await?;
+        let scout = app.server.start_thread(app.config.clone()).await?;
+
+        app.thread_event_channels
+            .insert(primary.thread_id, ThreadEventChannel::new(1));
+        app.thread_event_channels
+            .insert(scout.thread_id, ThreadEventChannel::new(1));
+        app.thread_agent_types
+            .insert(scout.thread_id, String::from("scout"));
+        app.chat_widget
+            .record_collab_agent_type(scout.thread_id, "scout".to_string());
+        app.primary_thread_id = Some(primary.thread_id);
+        app.active_thread_id = Some(primary.thread_id);
+        app.sync_active_agents_footer_chip();
+
+        app.handle_codex_event_now(Event {
+            id: "evt_close_scout".to_string(),
+            msg: EventMsg::CollabCloseEnd(CollabCloseEndEvent {
+                call_id: "call_close_scout".to_string(),
+                sender_thread_id: primary.thread_id,
+                receiver_thread_id: scout.thread_id,
+                status: AgentStatus::Shutdown,
+            }),
+        });
+
+        assert!(!app.thread_agent_types.contains_key(&scout.thread_id));
+        assert!(!app.thread_event_channels.contains_key(&scout.thread_id));
+        assert_eq!(
+            app.chat_widget
+                .collab_agent_type_for_thread(scout.thread_id),
+            None
+        );
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn footer_agent_chip_down_enter_opens_picker() -> Result<()> {
+        let (mut app, mut app_event_rx, _op_rx) = make_test_app_with_channels().await;
+        let mut tui = tui::Tui::new(crate::tui::Terminal::with_options(
+            ratatui::backend::CrosstermBackend::new(std::io::stdout()),
+        )?);
+
+        let primary = app.server.start_thread(app.config.clone()).await?;
+        let validator = app.server.start_thread(app.config.clone()).await?;
+
+        app.thread_event_channels
+            .insert(primary.thread_id, ThreadEventChannel::new(1));
+        app.thread_event_channels
+            .insert(validator.thread_id, ThreadEventChannel::new(1));
+        app.primary_thread_id = Some(primary.thread_id);
+        app.active_thread_id = Some(primary.thread_id);
+        app.sync_active_agents_footer_chip();
+
+        app.handle_key_event(&mut tui, KeyEvent::new(KeyCode::Down, KeyModifiers::NONE))
+            .await;
+        let footer = render_bottom_popup(&app.chat_widget, 80);
+        assert!(
+            footer.contains("enter"),
+            "expected focused footer chip to expose enter hint, got: {footer}",
+        );
+
+        app.handle_key_event(&mut tui, KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
+            .await;
+
+        let mut saw_open_picker = false;
+        while let Ok(event) = app_event_rx.try_recv() {
+            if matches!(event, AppEvent::OpenAgentPicker) {
+                saw_open_picker = true;
+                app.handle_event(&mut tui, event).await?;
+                break;
+            }
+        }
+        assert!(saw_open_picker, "expected OpenAgentPicker app event");
+
+        let popup = render_bottom_popup(&app.chat_widget, 80);
+        assert!(
+            popup.contains("Select a thread to focus"),
+            "expected agent picker popup after footer action, got: {popup}",
+        );
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn footer_scout_chip_down_enter_opens_scout_picker() -> Result<()> {
+        let (mut app, mut app_event_rx, _op_rx) = make_test_app_with_channels().await;
+        let mut tui = tui::Tui::new(crate::tui::Terminal::with_options(
+            ratatui::backend::CrosstermBackend::new(std::io::stdout()),
+        )?);
+
+        let primary = app.server.start_thread(app.config.clone()).await?;
+        let scout = app.server.start_thread(app.config.clone()).await?;
+
+        app.thread_event_channels
+            .insert(primary.thread_id, ThreadEventChannel::new(1));
+        app.thread_event_channels
+            .insert(scout.thread_id, ThreadEventChannel::new(1));
+        app.thread_agent_types
+            .insert(scout.thread_id, String::from("scout"));
+        app.primary_thread_id = Some(primary.thread_id);
+        app.active_thread_id = Some(primary.thread_id);
+        app.sync_active_agents_footer_chip();
+
+        app.handle_key_event(&mut tui, KeyEvent::new(KeyCode::Down, KeyModifiers::NONE))
+            .await;
+        app.handle_key_event(&mut tui, KeyEvent::new(KeyCode::Down, KeyModifiers::NONE))
+            .await;
+        let footer = render_bottom_popup(&app.chat_widget, 80);
+        assert!(
+            footer.contains("enter"),
+            "expected focused footer chip to expose enter hint, got: {footer}",
+        );
+
+        app.handle_key_event(&mut tui, KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
+            .await;
+
+        let mut saw_open_picker = false;
+        while let Ok(event) = app_event_rx.try_recv() {
+            if matches!(event, AppEvent::OpenScoutPicker) {
+                saw_open_picker = true;
+                app.handle_event(&mut tui, event).await?;
+                break;
+            }
+        }
+        assert!(saw_open_picker, "expected OpenScoutPicker app event");
+
+        let popup = render_bottom_popup(&app.chat_widget, 80);
+        assert!(
+            popup.contains("Scouts"),
+            "expected scout picker popup after footer action, got: {popup}",
+        );
+
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn thread_role_label_persists_when_switching_chat_threads() -> Result<()> {
         let mut app = make_test_app().await;
         let mut tui = tui::Tui::new(crate::tui::Terminal::with_options(
@@ -3148,14 +3409,14 @@ mod tests {
 
         let primary = app.server.start_thread(app.config.clone()).await?;
         let scout = app.server.start_thread(app.config.clone()).await?;
-        let builder = app.server.start_thread(app.config.clone()).await?;
+        let validator = app.server.start_thread(app.config.clone()).await?;
 
         app.thread_event_channels
             .insert(primary.thread_id, ThreadEventChannel::new(1));
         app.thread_event_channels
             .insert(scout.thread_id, ThreadEventChannel::new(1));
         app.thread_event_channels
-            .insert(builder.thread_id, ThreadEventChannel::new(1));
+            .insert(validator.thread_id, ThreadEventChannel::new(1));
 
         app.primary_thread_id = Some(primary.thread_id);
         app.active_thread_id = Some(primary.thread_id);
@@ -3172,12 +3433,12 @@ mod tests {
             }),
         });
         app.handle_codex_event_now(Event {
-            id: "evt_switch_builder".to_string(),
+            id: "evt_switch_validator".to_string(),
             msg: EventMsg::CollabAgentSpawnEnd(CollabAgentSpawnEndEvent {
-                call_id: "call_spawn_builder".to_string(),
+                call_id: "call_spawn_validator".to_string(),
                 sender_thread_id: primary.thread_id,
-                new_thread_id: Some(builder.thread_id),
-                agent_type: Some("builder".to_string()),
+                new_thread_id: Some(validator.thread_id),
+                agent_type: Some("validator".to_string()),
                 prompt: String::new(),
                 status: AgentStatus::Completed(None),
             }),
@@ -3187,29 +3448,30 @@ mod tests {
         app.open_agent_picker().await;
         let after_switch_to_scout = normalize_thread_ids(render_bottom_popup(&app.chat_widget, 80));
         assert!(
-            after_switch_to_scout.contains("Scout"),
-            "scout role should be visible in picker after switching to scout thread: {after_switch_to_scout}",
+            after_switch_to_scout.contains("Validator"),
+            "validator role should be visible in picker after switching to scout thread: {after_switch_to_scout}",
+        );
+        assert!(
+            !after_switch_to_scout.contains("Scout"),
+            "agent picker should not include scout entries: {after_switch_to_scout}",
         );
 
-        app.select_agent_thread(&mut tui, builder.thread_id).await?;
+        app.select_agent_thread(&mut tui, validator.thread_id)
+            .await?;
         app.open_agent_picker().await;
-        let after_switch_to_builder =
+        let after_switch_to_validator =
             normalize_thread_ids(render_bottom_popup(&app.chat_widget, 80));
         assert!(
-            after_switch_to_builder.contains("Builder"),
-            "builder role should be visible after switching to builder thread: {after_switch_to_builder}",
+            after_switch_to_validator.contains("Validator"),
+            "validator role should be visible after switching to validator thread: {after_switch_to_validator}",
         );
 
         app.select_agent_thread(&mut tui, primary.thread_id).await?;
         app.open_agent_picker().await;
         let after_switch_back = normalize_thread_ids(render_bottom_popup(&app.chat_widget, 80));
         assert!(
-            after_switch_back.contains("Builder"),
-            "builder role should still be visible after switching back: {after_switch_back}",
-        );
-        assert!(
-            after_switch_back.contains("Scout"),
-            "scout role should still be visible after switching back: {after_switch_back}",
+            after_switch_back.contains("Validator"),
+            "validator role should still be visible after switching back: {after_switch_back}",
         );
 
         Ok(())
@@ -3223,29 +3485,29 @@ mod tests {
         )?);
 
         let primary = app.server.start_thread(app.config.clone()).await?;
-        let builder = app.server.start_thread(app.config.clone()).await?;
+        let validator = app.server.start_thread(app.config.clone()).await?;
 
         app.thread_event_channels
             .insert(primary.thread_id, ThreadEventChannel::new(1));
         app.thread_event_channels
-            .insert(builder.thread_id, ThreadEventChannel::new(1));
+            .insert(validator.thread_id, ThreadEventChannel::new(1));
         app.primary_thread_id = Some(primary.thread_id);
         app.active_thread_id = Some(primary.thread_id);
         app.thread_agent_types
-            .insert(builder.thread_id, String::from("builder"));
+            .insert(validator.thread_id, String::from("validator"));
 
         {
-            let builder_channel = app
+            let validator_channel = app
                 .thread_event_channels
-                .get_mut(&builder.thread_id)
-                .expect("builder thread channel should exist");
-            let mut store = builder_channel.store.lock().await;
+                .get_mut(&validator.thread_id)
+                .expect("validator thread channel should exist");
+            let mut store = validator_channel.store.lock().await;
             store.push_event(Event {
                 id: "session-configured-overwrite".to_string(),
                 msg: EventMsg::SessionConfigured(session_configured_for_thread(
                     &app.config,
-                    builder.thread_id,
-                    Some(String::from("Builder thread")),
+                    validator.thread_id,
+                    Some(String::from("Validator thread")),
                 )),
             });
         }
@@ -3253,16 +3515,17 @@ mod tests {
         app.open_agent_picker().await;
         let before_switch = normalize_thread_ids(render_bottom_popup(&app.chat_widget, 80));
         assert!(
-            before_switch.contains("Builder"),
-            "builder role should be visible before switching: {before_switch}"
+            before_switch.contains("Validator"),
+            "validator role should be visible before switching: {before_switch}"
         );
 
-        app.select_agent_thread(&mut tui, builder.thread_id).await?;
+        app.select_agent_thread(&mut tui, validator.thread_id)
+            .await?;
         app.open_agent_picker().await;
         let after_switch = normalize_thread_ids(render_bottom_popup(&app.chat_widget, 80));
         assert!(
-            after_switch.contains("Builder"),
-            "builder role should remain after switching: {after_switch}"
+            after_switch.contains("Validator"),
+            "validator role should remain after switching: {after_switch}"
         );
 
         Ok(())
@@ -3277,33 +3540,38 @@ mod tests {
 
         let primary = app.server.start_thread(app.config.clone()).await?;
         let scout = app.server.start_thread(app.config.clone()).await?;
-        let builder = app.server.start_thread(app.config.clone()).await?;
+        let validator = app.server.start_thread(app.config.clone()).await?;
 
         app.thread_event_channels
             .insert(primary.thread_id, ThreadEventChannel::new(1));
         app.thread_event_channels
             .insert(scout.thread_id, ThreadEventChannel::new(1));
         app.thread_event_channels
-            .insert(builder.thread_id, ThreadEventChannel::new(1));
+            .insert(validator.thread_id, ThreadEventChannel::new(1));
         app.primary_thread_id = Some(primary.thread_id);
         app.active_thread_id = Some(primary.thread_id);
 
         app.chat_widget
             .record_collab_agent_type(scout.thread_id, String::from("scout"));
         app.chat_widget
-            .record_collab_agent_type(builder.thread_id, String::from("builder"));
+            .record_collab_agent_type(validator.thread_id, String::from("validator"));
 
-        app.select_agent_thread(&mut tui, builder.thread_id).await?;
+        app.select_agent_thread(&mut tui, validator.thread_id)
+            .await?;
         app.open_agent_picker().await;
-        let popup = normalize_thread_ids(render_bottom_popup(&app.chat_widget, 80));
+        let popup_agents = normalize_thread_ids(render_bottom_popup(&app.chat_widget, 80));
 
         assert!(
-            popup.contains("Scout"),
-            "scout role should be recovered from previous widget cache"
+            popup_agents.contains("Validator"),
+            "validator role should be restored into app-level cache"
         );
+
+        app.open_scout_picker().await;
+        let popup_scouts = normalize_thread_ids(render_bottom_popup(&app.chat_widget, 80));
+
         assert!(
-            popup.contains("Builder"),
-            "builder role should be restored into app-level cache"
+            popup_scouts.contains("Scout"),
+            "scout role should be recovered from previous widget cache"
         );
 
         Ok(())
@@ -3321,7 +3589,7 @@ mod tests {
             msg: EventMsg::SessionConfigured(session_configured_for_thread(
                 &app.config,
                 thread.thread_id,
-                Some("builder".to_string()),
+                Some("validator".to_string()),
             )),
         })
         .await?;
@@ -3333,7 +3601,7 @@ mod tests {
             "primary session should be treated as Main; got: {popup}"
         );
         assert!(
-            !popup.contains("Builder"),
+            !popup.contains("Validator"),
             "thread_name should not be repurposed as role label: {popup}"
         );
 
@@ -3464,6 +3732,7 @@ mod tests {
             backtrack_render_pending: false,
             feedback: codex_feedback::CodexFeedback::new(),
             feedback_audience: FeedbackAudience::External,
+            show_collab_debug_ids: false,
             pending_update_action: None,
             suppress_shutdown_complete: false,
             windows_sandbox: WindowsSandboxState::default(),
@@ -3522,6 +3791,7 @@ mod tests {
                 backtrack_render_pending: false,
                 feedback: codex_feedback::CodexFeedback::new(),
                 feedback_audience: FeedbackAudience::External,
+                show_collab_debug_ids: false,
                 pending_update_action: None,
                 suppress_shutdown_complete: false,
                 windows_sandbox: WindowsSandboxState::default(),

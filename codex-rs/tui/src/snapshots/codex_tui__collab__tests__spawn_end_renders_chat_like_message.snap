@@ -4,4 +4,3 @@ expression: "cell.display_lines(80).iter().map(|line|\nline.spans.iter().map(|sp
 ---
 @main
 Spawned @scout (running)
-Collect context for @scout.

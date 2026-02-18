@@ -161,6 +161,10 @@ impl ToolsConfig {
                     | "resume_agent"
                     | "wait"
                     | "close_agent"
+                    | "team_agent_list"
+                    | "team_agent_get"
+                    | "team_agent_upsert"
+                    | "team_agent_delete"
                     | "list_mcp_resources"
                     | "list_mcp_resource_templates"
                     | "read_mcp_resource"
@@ -184,26 +188,14 @@ impl ToolsConfig {
                     | "resume_agent"
                     | "wait"
                     | "close_agent"
+                    | "team_agent_list"
+                    | "team_agent_get"
+                    | "team_agent_upsert"
+                    | "team_agent_delete"
                     | "request_user_input"
                     | "update_plan"
             ),
-            AgentRole::ContextValidator => matches!(
-                tool_name,
-                "list_mcp_resources"
-                    | "list_mcp_resource_templates"
-                    | "read_mcp_resource"
-                    | "search_tool_bm25"
-                    | "grep_files"
-                    | "read_file"
-                    | "list_dir"
-                    | VIEW_IMAGE_TOOL_NAME
-            ),
-            AgentRole::Builder => matches!(
-                tool_name,
-                "spawn_agent" | "send_input" | "resume_agent" | "wait" | "close_agent"
-            ),
             AgentRole::Validator => matches!(tool_name, "apply_patch"),
-            AgentRole::PostBuilderValidator => matches!(tool_name, "apply_patch"),
             AgentRole::Plan => matches!(
                 tool_name,
                 "apply_patch"
@@ -213,6 +205,10 @@ impl ToolsConfig {
                     | "resume_agent"
                     | "wait"
                     | "close_agent"
+                    | "team_agent_list"
+                    | "team_agent_get"
+                    | "team_agent_upsert"
+                    | "team_agent_delete"
                     | "list_mcp_resources"
                     | "list_mcp_resource_templates"
                     | "read_mcp_resource"
@@ -228,14 +224,14 @@ impl ToolsConfig {
     fn role_allows_web_search(role: AgentRole) -> bool {
         matches!(
             role,
-            AgentRole::Default | AgentRole::Scout | AgentRole::ContextValidator | AgentRole::Plan
+            AgentRole::Default | AgentRole::Scout | AgentRole::Plan
         )
     }
 
     fn role_allows_mcp_and_dynamic_tools(role: AgentRole) -> bool {
         matches!(
             role,
-            AgentRole::Default | AgentRole::Scout | AgentRole::ContextValidator | AgentRole::Plan
+            AgentRole::Default | AgentRole::Scout | AgentRole::Plan
         )
     }
 
@@ -252,6 +248,10 @@ impl ToolsConfig {
                 | "resume_agent"
                 | "wait"
                 | "close_agent"
+                | "team_agent_list"
+                | "team_agent_get"
+                | "team_agent_upsert"
+                | "team_agent_delete"
                 | "list_mcp_resources"
                 | "list_mcp_resource_templates"
                 | "read_mcp_resource"
@@ -290,14 +290,7 @@ mod role_policy_tests {
 
     #[tokio::test]
     async fn non_plan_roles_block_request_user_input_outside_plan_mode() -> anyhow::Result<()> {
-        let roles = [
-            AgentRole::Default,
-            AgentRole::Scout,
-            AgentRole::ContextValidator,
-            AgentRole::Builder,
-            AgentRole::PostBuilderValidator,
-            AgentRole::Validator,
-        ];
+        let roles = [AgentRole::Default, AgentRole::Scout, AgentRole::Validator];
 
         for role in roles {
             let (session, mut turn) = make_session_and_context().await;
@@ -337,7 +330,8 @@ mod role_policy_tests {
     }
 
     #[tokio::test]
-    async fn default_role_apply_patch_requires_scout_context_pipeline() -> anyhow::Result<()> {
+    async fn default_role_apply_patch_is_not_blocked_by_context_pack_heuristic()
+    -> anyhow::Result<()> {
         let (session, mut turn) = make_session_and_context().await;
         turn.tools_config.agent_role = AgentRole::Default;
         turn.tools_config.collab_tools = true;
@@ -371,8 +365,8 @@ mod role_policy_tests {
             ResponseInputItem::FunctionCallOutput { output, .. } => {
                 let content = output.text_content().unwrap_or_default();
                 assert!(
-                    content.contains("pipeline is complete"),
-                    "expected pipeline guard message; got: {content}"
+                    !content.contains("approved scout context pack"),
+                    "context-pack heuristic should not block apply_patch; got: {content}"
                 );
             }
             other => panic!("expected function output, got {other:?}"),
@@ -857,9 +851,54 @@ fn create_spawn_agent_tool() -> ToolSpec {
             "agent_type".to_string(),
             JsonSchema::String {
                 description: Some(format!(
-                    "Optional agent type ({}). Use an explicit type when delegating.",
+                    "Legacy role shorthand. Accepts known roles ({}). For custom Team Mesh handles, use `handle`.",
                     AgentRole::enum_values().join(", ")
                 )),
+            },
+        ),
+        (
+            "role".to_string(),
+            JsonSchema::String {
+                description: Some(format!(
+                    "Explicit runtime role override ({}).",
+                    AgentRole::enum_values().join(", ")
+                )),
+            },
+        ),
+        (
+            "handle".to_string(),
+            JsonSchema::String {
+                description: Some(
+                    "Optional @handle shown in Team Mesh chat (for example `devops-engineer`)."
+                        .to_string(),
+                ),
+            },
+        ),
+        (
+            "display_name".to_string(),
+            JsonSchema::String {
+                description: Some(
+                    "Optional human-friendly display name rendered beside @handle in Team Mesh chat."
+                        .to_string(),
+                ),
+            },
+        ),
+        (
+            "color".to_string(),
+            JsonSchema::String {
+                description: Some(
+                    "Optional Team Mesh color token: red|green|yellow|blue|magenta|cyan."
+                        .to_string(),
+                ),
+            },
+        ),
+        (
+            "team_agent".to_string(),
+            JsonSchema::String {
+                description: Some(
+                    "Optional team agent profile name under .codex/team/{team_agent} or .codex/agents/{team}/{agent}."
+                        .to_string(),
+                ),
             },
         ),
     ]);
@@ -1076,6 +1115,116 @@ fn create_close_agent_tool() -> ToolSpec {
         parameters: JsonSchema::Object {
             properties,
             required: Some(vec!["id".to_string()]),
+            additional_properties: Some(false.into()),
+        },
+    })
+}
+
+fn create_team_agent_list_tool() -> ToolSpec {
+    ToolSpec::Function(ResponsesApiTool {
+        name: "team_agent_list".to_string(),
+        description:
+            "List team agent profiles from .codex/team/, .codex/agents/<team>/<agent>/, and ~/.codex/agents/<team>/<agent>/."
+                .to_string(),
+        strict: false,
+        parameters: JsonSchema::Object {
+            properties: BTreeMap::new(),
+            required: Some(vec![]),
+            additional_properties: Some(false.into()),
+        },
+    })
+}
+
+fn create_team_agent_get_tool() -> ToolSpec {
+    let properties = BTreeMap::from([(
+        "team_agent".to_string(),
+        JsonSchema::String {
+            description: Some(
+                "Team agent profile name under .codex/team/<team_agent>/, .codex/agents/<team>/<agent>/, or ~/.codex/agents/<team>/<agent>/"
+                    .to_string(),
+            ),
+        },
+    )]);
+
+    ToolSpec::Function(ResponsesApiTool {
+        name: "team_agent_get".to_string(),
+        description:
+            "Read team agent profile prompt/config from .codex/team, .codex/agents, or ~/.codex/agents."
+                .to_string(),
+        strict: false,
+        parameters: JsonSchema::Object {
+            properties,
+            required: Some(vec!["team_agent".to_string()]),
+            additional_properties: Some(false.into()),
+        },
+    })
+}
+
+fn create_team_agent_upsert_tool() -> ToolSpec {
+    let properties = BTreeMap::from([
+        (
+            "team_agent".to_string(),
+            JsonSchema::String {
+                description: Some(
+                    "Team agent profile name under .codex/team/<team_agent>/ or .codex/agents/<team>/<agent>/"
+                        .to_string(),
+                ),
+            },
+        ),
+        (
+            "prompt".to_string(),
+            JsonSchema::String {
+                description: Some(
+                    "Prompt text to write into .codex/team/<team_agent>/prompt or .codex/agents/<team>/<agent>/system_prompt.md. Empty string deletes it."
+                        .to_string(),
+                ),
+            },
+        ),
+        (
+            "config_toml".to_string(),
+            JsonSchema::String {
+                description: Some(
+                    "Config TOML to write into .codex/team/<team_agent>/config.toml or .codex/agents/<team>/<agent>/config.toml. Empty string deletes it."
+                        .to_string(),
+                ),
+            },
+        ),
+    ]);
+
+    ToolSpec::Function(ResponsesApiTool {
+        name: "team_agent_upsert".to_string(),
+        description:
+            "Create or update a project-managed team agent profile prompt/config under .codex/team or .codex/agents."
+                .to_string(),
+        strict: false,
+        parameters: JsonSchema::Object {
+            properties,
+            required: Some(vec!["team_agent".to_string()]),
+            additional_properties: Some(false.into()),
+        },
+    })
+}
+
+fn create_team_agent_delete_tool() -> ToolSpec {
+    let properties = BTreeMap::from([(
+        "team_agent".to_string(),
+        JsonSchema::String {
+            description: Some(
+                "Team agent profile name under .codex/team/<team_agent>/, .codex/agents/<team>/<agent>/, or ~/.codex/agents/<team>/<agent>/"
+                    .to_string(),
+            ),
+        },
+    )]);
+
+    ToolSpec::Function(ResponsesApiTool {
+        name: "team_agent_delete".to_string(),
+        description:
+            "Delete a project-managed team agent profile directory under .codex/team or .codex/agents."
+                .to_string(),
+        strict: false,
+        parameters: JsonSchema::Object {
+            properties,
+            required: Some(vec!["team_agent".to_string()]),
             additional_properties: Some(false.into()),
         },
     })
@@ -1899,18 +2048,44 @@ pub(crate) fn build_specs(
         builder.register_handler("view_image", view_image_handler);
     }
 
-    if config.collab_tools && config.role_allows_tool("spawn_agent") {
+    if config.collab_tools {
         let collab_handler = Arc::new(CollabHandler);
-        builder.push_spec(create_spawn_agent_tool());
-        builder.push_spec(create_send_input_tool());
-        builder.push_spec(create_resume_agent_tool());
-        builder.push_spec(create_wait_tool());
-        builder.push_spec(create_close_agent_tool());
-        builder.register_handler("spawn_agent", collab_handler.clone());
-        builder.register_handler("send_input", collab_handler.clone());
-        builder.register_handler("resume_agent", collab_handler.clone());
-        builder.register_handler("wait", collab_handler.clone());
-        builder.register_handler("close_agent", collab_handler);
+        if config.role_allows_tool("spawn_agent") {
+            builder.push_spec(create_spawn_agent_tool());
+            builder.register_handler("spawn_agent", collab_handler.clone());
+        }
+        if config.role_allows_tool("send_input") {
+            builder.push_spec(create_send_input_tool());
+            builder.register_handler("send_input", collab_handler.clone());
+        }
+        if config.role_allows_tool("resume_agent") {
+            builder.push_spec(create_resume_agent_tool());
+            builder.register_handler("resume_agent", collab_handler.clone());
+        }
+        if config.role_allows_tool("wait") {
+            builder.push_spec(create_wait_tool());
+            builder.register_handler("wait", collab_handler.clone());
+        }
+        if config.role_allows_tool("close_agent") {
+            builder.push_spec(create_close_agent_tool());
+            builder.register_handler("close_agent", collab_handler.clone());
+        }
+        if config.role_allows_tool("team_agent_list") {
+            builder.push_spec(create_team_agent_list_tool());
+            builder.register_handler("team_agent_list", collab_handler.clone());
+        }
+        if config.role_allows_tool("team_agent_get") {
+            builder.push_spec(create_team_agent_get_tool());
+            builder.register_handler("team_agent_get", collab_handler.clone());
+        }
+        if config.role_allows_tool("team_agent_upsert") {
+            builder.push_spec(create_team_agent_upsert_tool());
+            builder.register_handler("team_agent_upsert", collab_handler.clone());
+        }
+        if config.role_allows_tool("team_agent_delete") {
+            builder.push_spec(create_team_agent_delete_tool());
+            builder.register_handler("team_agent_delete", collab_handler);
+        }
     }
 
     if ToolsConfig::role_allows_mcp_and_dynamic_tools(config.agent_role)
@@ -2182,6 +2357,10 @@ mod tests {
             create_resume_agent_tool(),
             create_wait_tool(),
             create_close_agent_tool(),
+            create_team_agent_list_tool(),
+            create_team_agent_get_tool(),
+            create_team_agent_upsert_tool(),
+            create_team_agent_delete_tool(),
         ] {
             expected.insert(tool_name(&spec).to_string(), spec);
         }
@@ -2223,12 +2402,16 @@ mod tests {
                 "resume_agent",
                 "wait",
                 "close_agent",
+                "team_agent_list",
+                "team_agent_get",
+                "team_agent_upsert",
+                "team_agent_delete",
             ],
         );
     }
 
     #[test]
-    fn spawn_agent_tool_lists_supported_agent_roles() {
+    fn spawn_agent_tool_lists_public_agent_roles() {
         let ToolSpec::Function(tool) = create_spawn_agent_tool() else {
             panic!("spawn_agent must be a function tool");
         };
@@ -2244,45 +2427,25 @@ mod tests {
 
         assert!(description.contains("default"));
         assert!(description.contains("scout"));
-        assert!(description.contains("builder"));
-        assert!(description.contains("context_validator"));
-        assert!(description.contains("post_builder_validator"));
         assert!(description.contains("validator"));
         assert!(description.contains("plan"));
     }
 
     #[test]
-    fn builder_role_exposes_collab_tools_only() {
-        let config = test_config();
-        let model_info =
-            ModelsManager::construct_model_info_offline_for_tests("gpt-5-codex", &config);
-        let mut features = Features::with_defaults();
-        features.enable(Feature::Collab);
-        features.enable(Feature::CollaborationModes);
-        features.enable(Feature::ApplyPatchFreeform);
-
-        let mut tools_config = ToolsConfig::new(&ToolsConfigParams {
-            model_info: &model_info,
-            features: &features,
-            web_search_mode: Some(WebSearchMode::Live),
-        });
-        tools_config.agent_role = AgentRole::Builder;
-
-        let (tools, _) = build_specs(&tools_config, None, &[]).build();
-        let mut names: Vec<_> = tools
-            .iter()
-            .map(|tool| tool.spec.name().to_string())
-            .collect();
-        names.sort();
-        assert_eq!(
-            names,
-            vec![
-                "close_agent".to_string(),
-                "resume_agent".to_string(),
-                "send_input".to_string(),
-                "spawn_agent".to_string(),
-                "wait".to_string(),
-            ]
+    fn spawn_agent_tool_exposes_team_profile_parameters() {
+        let ToolSpec::Function(tool) = create_spawn_agent_tool() else {
+            panic!("spawn_agent must be a function tool");
+        };
+        let JsonSchema::Object { properties, .. } = tool.parameters else {
+            panic!("spawn_agent parameters must be an object");
+        };
+        assert!(
+            properties.contains_key("team_agent"),
+            "spawn_agent tool should expose `team_agent` parameter"
+        );
+        assert!(
+            !properties.contains_key("team"),
+            "spawn_agent tool should not expose deprecated `team` parameter"
         );
     }
 
@@ -2318,38 +2481,11 @@ mod tests {
         );
         assert!(!names.contains(&"apply_patch".to_string()));
         assert!(!names.contains(&"spawn_agent".to_string()));
+        assert!(!names.contains(&"team_agent_list".to_string()));
+        assert!(!names.contains(&"team_agent_get".to_string()));
+        assert!(!names.contains(&"team_agent_upsert".to_string()));
+        assert!(!names.contains(&"team_agent_delete".to_string()));
         assert!(!names.contains(&"request_user_input".to_string()));
-    }
-
-    #[test]
-    fn context_validator_role_does_not_expose_patch_or_collab_tools() {
-        let config = test_config();
-        let model_info =
-            ModelsManager::construct_model_info_offline_for_tests("gpt-5-codex", &config);
-        let mut features = Features::with_defaults();
-        features.enable(Feature::Collab);
-        features.enable(Feature::CollaborationModes);
-        features.enable(Feature::ApplyPatchFreeform);
-
-        let mut tools_config = ToolsConfig::new(&ToolsConfigParams {
-            model_info: &model_info,
-            features: &features,
-            web_search_mode: Some(WebSearchMode::Live),
-        });
-        tools_config.agent_role = AgentRole::ContextValidator;
-
-        let (tools, _) = build_specs(&tools_config, None, &[]).build();
-        let names: Vec<_> = tools
-            .iter()
-            .map(|tool| tool.spec.name().to_string())
-            .collect();
-
-        assert!(!names.contains(&"apply_patch".to_string()));
-        assert!(!names.contains(&"spawn_agent".to_string()));
-        assert!(!names.contains(&"request_user_input".to_string()));
-        assert!(!names.contains(&"shell".to_string()));
-        assert!(!names.contains(&"exec_command".to_string()));
-        assert!(!names.contains(&"write_stdin".to_string()));
     }
 
     #[test]
@@ -2381,6 +2517,10 @@ mod tests {
         assert!(names.contains(&"send_input".to_string()));
         assert!(names.contains(&"wait".to_string()));
         assert!(names.contains(&"close_agent".to_string()));
+        assert!(names.contains(&"team_agent_list".to_string()));
+        assert!(names.contains(&"team_agent_get".to_string()));
+        assert!(names.contains(&"team_agent_upsert".to_string()));
+        assert!(names.contains(&"team_agent_delete".to_string()));
         assert!(names.contains(&"request_user_input".to_string()));
         assert!(!names.contains(&"shell".to_string()));
         assert!(!names.contains(&"exec_command".to_string()));
@@ -2402,35 +2542,6 @@ mod tests {
             web_search_mode: Some(WebSearchMode::Live),
         });
         tools_config.agent_role = AgentRole::Validator;
-
-        let (tools, _) = build_specs(&tools_config, None, &[]).build();
-        let names: Vec<_> = tools
-            .iter()
-            .map(|tool| tool.spec.name().to_string())
-            .collect();
-
-        assert!(names.contains(&"apply_patch".to_string()));
-        assert!(!names.contains(&"spawn_agent".to_string()));
-        assert!(!names.contains(&"shell".to_string()));
-        assert!(!names.contains(&"exec_command".to_string()));
-    }
-
-    #[test]
-    fn post_builder_validator_role_blocks_shell_and_collab_tools() {
-        let config = test_config();
-        let model_info =
-            ModelsManager::construct_model_info_offline_for_tests("gpt-5-codex", &config);
-        let mut features = Features::with_defaults();
-        features.enable(Feature::Collab);
-        features.enable(Feature::CollaborationModes);
-        features.enable(Feature::ApplyPatchFreeform);
-
-        let mut tools_config = ToolsConfig::new(&ToolsConfigParams {
-            model_info: &model_info,
-            features: &features,
-            web_search_mode: Some(WebSearchMode::Live),
-        });
-        tools_config.agent_role = AgentRole::PostBuilderValidator;
 
         let (tools, _) = build_specs(&tools_config, None, &[]).build();
         let names: Vec<_> = tools
@@ -2548,20 +2659,19 @@ mod tests {
     }
 
     #[test]
-    fn role_filter_keeps_builder_collab_tools_visible_to_model() {
+    fn role_filter_keeps_validator_patch_tool_visible_to_model() {
         let config = test_config();
         let model_info =
             ModelsManager::construct_model_info_offline_for_tests("gpt-5-codex", &config);
         let mut features = Features::with_defaults();
         features.enable(Feature::ApplyPatchFreeform);
-        features.enable(Feature::Collab);
 
         let mut tools_config = ToolsConfig::new(&ToolsConfigParams {
             model_info: &model_info,
             features: &features,
             web_search_mode: Some(WebSearchMode::Cached),
         });
-        tools_config.agent_role = AgentRole::Builder;
+        tools_config.agent_role = AgentRole::Validator;
 
         let (tools, _) = build_specs(&tools_config, None, &[]).build();
         let filtered = filter_tools_for_model(
@@ -2569,21 +2679,11 @@ mod tests {
             &tools_config,
         );
 
-        let mut names: Vec<_> = filtered
+        let names: Vec<_> = filtered
             .iter()
             .map(|tool| tool_name(tool).to_string())
             .collect();
-        names.sort();
-        assert_eq!(
-            names,
-            vec![
-                "close_agent".to_string(),
-                "resume_agent".to_string(),
-                "send_input".to_string(),
-                "spawn_agent".to_string(),
-                "wait".to_string(),
-            ]
-        );
+        assert_eq!(names, vec!["apply_patch".to_string()]);
     }
 
     #[test]
@@ -2668,6 +2768,10 @@ mod tests {
                 "resume_agent",
                 "wait",
                 "close_agent",
+                "team_agent_list",
+                "team_agent_get",
+                "team_agent_upsert",
+                "team_agent_delete",
             ]);
         }
         assert_model_tools(model_slug, features, web_search_mode, &expected);
@@ -2785,6 +2889,10 @@ mod tests {
                 "resume_agent",
                 "wait",
                 "close_agent",
+                "team_agent_list",
+                "team_agent_get",
+                "team_agent_upsert",
+                "team_agent_delete",
             ],
         );
     }
@@ -2813,6 +2921,10 @@ mod tests {
                 "resume_agent",
                 "wait",
                 "close_agent",
+                "team_agent_list",
+                "team_agent_get",
+                "team_agent_upsert",
+                "team_agent_delete",
             ],
         );
     }
@@ -2924,6 +3036,10 @@ mod tests {
                 "resume_agent",
                 "wait",
                 "close_agent",
+                "team_agent_list",
+                "team_agent_get",
+                "team_agent_upsert",
+                "team_agent_delete",
             ],
         );
     }

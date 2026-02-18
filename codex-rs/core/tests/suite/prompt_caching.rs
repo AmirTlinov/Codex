@@ -158,6 +158,10 @@ async fn prompt_tools_are_consistent_across_requests() -> anyhow::Result<()> {
         "resume_agent",
         "wait",
         "close_agent",
+        "team_agent_list",
+        "team_agent_get",
+        "team_agent_upsert",
+        "team_agent_delete",
     ]);
     let body0 = req1.single_request().body_json();
 

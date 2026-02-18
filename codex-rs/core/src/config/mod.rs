@@ -1164,14 +1164,8 @@ pub struct AgentsToml {
     pub main_model: Option<String>,
     /// Model override for the scout role.
     pub scout_model: Option<String>,
-    /// Model override for the builder role.
-    pub builder_model: Option<String>,
-    /// Model override for the context validator role.
-    pub context_validator_model: Option<String>,
     /// Model override for the validator role.
     pub validator_model: Option<String>,
-    /// Model override for the post-builder validator role.
-    pub post_builder_validator_model: Option<String>,
     /// Model override for the plan role.
     pub plan_model: Option<String>,
 }
@@ -1185,16 +1179,9 @@ impl AgentsToml {
             max_threads: profile_agents.max_threads.or(config_agents.max_threads),
             main_model: profile_agents.main_model.or(config_agents.main_model),
             scout_model: profile_agents.scout_model.or(config_agents.scout_model),
-            builder_model: profile_agents.builder_model.or(config_agents.builder_model),
-            context_validator_model: profile_agents
-                .context_validator_model
-                .or(config_agents.context_validator_model),
             validator_model: profile_agents
                 .validator_model
                 .or(config_agents.validator_model),
-            post_builder_validator_model: profile_agents
-                .post_builder_validator_model
-                .or(config_agents.post_builder_validator_model),
             plan_model: profile_agents.plan_model.or(config_agents.plan_model),
         }
     }
@@ -1467,7 +1454,7 @@ impl Config {
         Self::load_config_with_layer_stack(cfg, overrides, codex_home, config_layer_stack)
     }
 
-    fn load_config_with_layer_stack(
+    pub(crate) fn load_config_with_layer_stack(
         cfg: ConfigToml,
         overrides: ConfigOverrides,
         codex_home: PathBuf,
@@ -4284,7 +4271,6 @@ model = "o3"
 
 [profiles.profile.agents]
 main_model = "profile-main"
-builder_model = "profile-builder"
 plan_model = "profile-plan"
 "#;
         let cfg =
@@ -4307,10 +4293,7 @@ plan_model = "profile-plan"
                 max_threads: Some(4),
                 main_model: Some("profile-main".to_string()),
                 scout_model: Some("global-scout".to_string()),
-                builder_model: Some("profile-builder".to_string()),
-                context_validator_model: None,
                 validator_model: None,
-                post_builder_validator_model: None,
                 plan_model: Some("profile-plan".to_string()),
             }
         );

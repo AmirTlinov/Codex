@@ -292,6 +292,8 @@ pub(crate) struct ChatComposer {
     footer_mode: FooterMode,
     footer_hint_override: Option<Vec<(String, String)>>,
     footer_flash: Option<FooterFlash>,
+    agent_footer_chip: Option<FooterChip>,
+    scout_footer_chip: Option<FooterChip>,
     context_window_percent: Option<i64>,
     context_window_used_tokens: Option<i64>,
     skills: Option<Vec<SkillMetadata>>,
@@ -315,6 +317,18 @@ pub(crate) struct ChatComposer {
 struct FooterFlash {
     line: Line<'static>,
     expires_at: Instant,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct FooterChip {
+    count: usize,
+    focused: bool,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum FooterChipKind {
+    Agents,
+    Scouts,
 }
 
 #[derive(Clone, Debug)]
@@ -391,6 +405,8 @@ impl ChatComposer {
             footer_mode: FooterMode::ComposerEmpty,
             footer_hint_override: None,
             footer_flash: None,
+            agent_footer_chip: None,
+            scout_footer_chip: None,
             context_window_percent: None,
             context_window_used_tokens: None,
             skills: None,
@@ -744,6 +760,68 @@ impl ChatComposer {
     /// `None` restores the default shortcut footer.
     pub(crate) fn set_footer_hint_override(&mut self, items: Option<Vec<(String, String)>>) {
         self.footer_hint_override = items;
+    }
+
+    pub(crate) fn set_collab_footer_chip_counts(
+        &mut self,
+        agents_count: usize,
+        scouts_count: usize,
+    ) -> bool {
+        let focused_kind = self.focused_footer_chip_kind();
+        let mut next_agent_chip = if agents_count == 0 {
+            None
+        } else {
+            Some(FooterChip {
+                count: agents_count,
+                focused: focused_kind == Some(FooterChipKind::Agents),
+            })
+        };
+        let mut next_scout_chip = if scouts_count == 0 {
+            None
+        } else {
+            Some(FooterChip {
+                count: scouts_count,
+                focused: focused_kind == Some(FooterChipKind::Scouts),
+            })
+        };
+
+        if focused_kind == Some(FooterChipKind::Agents)
+            && next_agent_chip.is_none()
+            && let Some(chip) = next_scout_chip.as_mut()
+        {
+            chip.focused = true;
+        }
+        if focused_kind == Some(FooterChipKind::Scouts)
+            && next_scout_chip.is_none()
+            && let Some(chip) = next_agent_chip.as_mut()
+        {
+            chip.focused = true;
+        }
+
+        let changed =
+            self.agent_footer_chip != next_agent_chip || self.scout_footer_chip != next_scout_chip;
+        self.agent_footer_chip = next_agent_chip;
+        self.scout_footer_chip = next_scout_chip;
+        changed
+    }
+
+    fn focused_footer_chip_kind(&self) -> Option<FooterChipKind> {
+        if self.agent_footer_chip.is_some_and(|chip| chip.focused) {
+            return Some(FooterChipKind::Agents);
+        }
+        if self.scout_footer_chip.is_some_and(|chip| chip.focused) {
+            return Some(FooterChipKind::Scouts);
+        }
+        None
+    }
+
+    fn set_footer_chip_focus(&mut self, focused_kind: Option<FooterChipKind>) {
+        if let Some(chip) = self.agent_footer_chip.as_mut() {
+            chip.focused = focused_kind == Some(FooterChipKind::Agents);
+        }
+        if let Some(chip) = self.scout_footer_chip.as_mut() {
+            chip.focused = focused_kind == Some(FooterChipKind::Scouts);
+        }
     }
 
     #[cfg(test)]
@@ -2361,6 +2439,9 @@ impl ChatComposer {
         } else {
             self.footer_mode = reset_mode_after_activity(self.footer_mode);
         }
+        if self.handle_collab_footer_chip_key(key_event) {
+            return (InputResult::None, true);
+        }
         match key_event {
             KeyEvent {
                 code: KeyCode::Char('d'),
@@ -2425,6 +2506,113 @@ impl ChatComposer {
                 self.handle_submission(should_queue)
             }
             input => self.handle_input_basic(input),
+        }
+    }
+
+    fn handle_collab_footer_chip_key(&mut self, key_event: KeyEvent) -> bool {
+        if !self.input_enabled {
+            return false;
+        }
+        let has_agents = self.agent_footer_chip.is_some();
+        let has_scouts = self.scout_footer_chip.is_some();
+        if !has_agents && !has_scouts {
+            return false;
+        }
+
+        if !self.is_empty() {
+            if self.focused_footer_chip_kind().is_some() {
+                self.set_footer_chip_focus(None);
+            }
+            return false;
+        }
+
+        let mut order = Vec::with_capacity(2);
+        if has_agents {
+            order.push(FooterChipKind::Agents);
+        }
+        if has_scouts {
+            order.push(FooterChipKind::Scouts);
+        }
+
+        let focused_kind = self.focused_footer_chip_kind();
+
+        match key_event {
+            KeyEvent {
+                code: KeyCode::Down | KeyCode::Right,
+                modifiers: KeyModifiers::NONE,
+                kind: KeyEventKind::Press | KeyEventKind::Repeat,
+                ..
+            } => {
+                let next_focus = match focused_kind {
+                    None => order.first().copied(),
+                    Some(kind) if order.len() == 1 => Some(kind),
+                    Some(kind) => {
+                        let idx = order
+                            .iter()
+                            .position(|candidate| *candidate == kind)
+                            .unwrap_or(0);
+                        Some(order[(idx + 1) % order.len()])
+                    }
+                };
+                if next_focus != focused_kind {
+                    self.set_footer_chip_focus(next_focus);
+                }
+                true
+            }
+            KeyEvent {
+                code: KeyCode::Up | KeyCode::Left,
+                modifiers: KeyModifiers::NONE,
+                kind: KeyEventKind::Press | KeyEventKind::Repeat,
+                ..
+            } => {
+                let next_focus = match focused_kind {
+                    None => order.last().copied(),
+                    Some(kind) if order.len() == 1 => Some(kind),
+                    Some(kind) => {
+                        let idx = order
+                            .iter()
+                            .position(|candidate| *candidate == kind)
+                            .unwrap_or(0);
+                        Some(order[(idx + order.len() - 1) % order.len()])
+                    }
+                };
+                if next_focus != focused_kind {
+                    self.set_footer_chip_focus(next_focus);
+                }
+                true
+            }
+            KeyEvent {
+                code: KeyCode::Enter,
+                modifiers: KeyModifiers::NONE,
+                kind: KeyEventKind::Press,
+                ..
+            } => {
+                let Some(kind) = focused_kind else {
+                    return false;
+                };
+                self.set_footer_chip_focus(None);
+                match kind {
+                    FooterChipKind::Agents => self.app_event_tx.send(AppEvent::OpenAgentPicker),
+                    FooterChipKind::Scouts => self.app_event_tx.send(AppEvent::OpenScoutPicker),
+                }
+                true
+            }
+            KeyEvent {
+                code: KeyCode::Esc,
+                kind: KeyEventKind::Press | KeyEventKind::Repeat,
+                ..
+            } if focused_kind.is_some() => {
+                self.set_footer_chip_focus(None);
+                true
+            }
+            KeyEvent {
+                kind: KeyEventKind::Press,
+                ..
+            } if focused_kind.is_some() => {
+                self.set_footer_chip_focus(None);
+                false
+            }
+            _ => false,
         }
     }
 
@@ -3363,6 +3551,8 @@ impl ChatComposer {
                 } else {
                     self.collaboration_mode_indicator
                 };
+                let collab_footer_line =
+                    collab_footer_chip_line(self.agent_footer_chip, self.scout_footer_chip);
                 let mut left_width = if self.footer_flash_visible() {
                     self.footer_flash
                         .as_ref()
@@ -3370,6 +3560,8 @@ impl ChatComposer {
                         .unwrap_or(0)
                 } else if let Some(items) = self.footer_hint_override.as_ref() {
                     footer_hint_items_width(items)
+                } else if let Some(line) = collab_footer_line.as_ref() {
+                    line.width() as u16
                 } else if status_line_active {
                     truncated_status_line
                         .as_ref()
@@ -3413,8 +3605,9 @@ impl ChatComposer {
                 }
                 let can_show_left_and_context =
                     can_show_left_with_context(hint_rect, left_width, right_width);
-                let has_override =
-                    self.footer_flash_visible() || self.footer_hint_override.is_some();
+                let has_override = self.footer_flash_visible()
+                    || self.footer_hint_override.is_some()
+                    || collab_footer_line.is_some();
                 let single_line_layout = if has_override {
                     None
                 } else {
@@ -3492,6 +3685,8 @@ impl ChatComposer {
                     }
                 } else if let Some(items) = self.footer_hint_override.as_ref() {
                     render_footer_hint_items(hint_rect, buf, items);
+                } else if let Some(line) = collab_footer_line {
+                    render_footer_line(hint_rect, buf, line);
                 } else if status_line_active {
                     if let Some(line) = truncated_status_line {
                         render_footer_line(hint_rect, buf, line);
@@ -3554,6 +3749,50 @@ impl ChatComposer {
     }
 }
 
+fn collab_footer_chip_line(
+    agent_chip: Option<FooterChip>,
+    scout_chip: Option<FooterChip>,
+) -> Option<Line<'static>> {
+    let mut chips = Vec::with_capacity(2);
+    if let Some(chip) = agent_chip {
+        chips.push((chip, "Agents", false));
+    }
+    if let Some(chip) = scout_chip {
+        chips.push((chip, "Scouts", true));
+    }
+    if chips.is_empty() {
+        return None;
+    }
+
+    let mut spans: Vec<Span<'static>> = vec![" ".into()];
+    for (idx, (chip, label, is_scout)) in chips.iter().enumerate() {
+        if idx > 0 {
+            spans.push("  ".into());
+        }
+        let chip_label = format!(" {} {} ", chip.count, label);
+        if chip.focused {
+            spans.push(chip_label.on_cyan().bold());
+            continue;
+        }
+
+        spans.push("↓".dim());
+        spans.push(" ".into());
+        let label_span = if *is_scout {
+            chip_label.magenta().bold()
+        } else {
+            chip_label.cyan().bold()
+        };
+        spans.push(label_span);
+    }
+
+    if chips.iter().any(|(chip, _, _)| chip.focused) {
+        spans.push(" ".into());
+        spans.push("enter".dim());
+    }
+
+    Some(Line::from(spans))
+}
+
 fn prompt_selection_action(
     prompt: &CustomPrompt,
     first_line: &str,
@@ -3613,6 +3852,9 @@ fn prompt_selection_action(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crossterm::event::KeyCode;
+    use crossterm::event::KeyEvent;
+    use crossterm::event::KeyModifiers;
     use image::ImageBuffer;
     use image::Rgba;
     use pretty_assertions::assert_eq;
@@ -3761,6 +4003,86 @@ mod tests {
             !bottom_row.contains("FLASH"),
             "expected expired flash to be hidden, saw: {bottom_row:?}",
         );
+    }
+
+    #[test]
+    fn collab_footer_chip_snapshot() {
+        snapshot_composer_state("footer_agents_chip", true, |composer| {
+            composer.set_collab_footer_chip_counts(5, 0);
+        });
+
+        snapshot_composer_state("footer_agents_chip_focused", true, |composer| {
+            composer.set_collab_footer_chip_counts(5, 2);
+            let _ = composer.handle_key_event(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+        });
+    }
+
+    #[test]
+    fn agent_footer_chip_down_then_enter_opens_agent_picker() {
+        let (tx, mut rx) = unbounded_channel::<AppEvent>();
+        let sender = AppEventSender::new(tx);
+        let mut composer = ChatComposer::new(
+            true,
+            sender,
+            true,
+            "Ask Codex to do anything".to_string(),
+            false,
+        );
+        composer.set_collab_footer_chip_counts(3, 0);
+
+        let (result, consumed) =
+            composer.handle_key_event(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+        assert_eq!(result, InputResult::None);
+        assert!(consumed);
+        assert!(
+            composer
+                .agent_footer_chip
+                .is_some_and(|agent_footer_chip| agent_footer_chip.focused)
+        );
+
+        let (result, consumed) =
+            composer.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert_eq!(result, InputResult::None);
+        assert!(consumed);
+        assert!(
+            composer
+                .agent_footer_chip
+                .is_some_and(|agent_footer_chip| !agent_footer_chip.focused)
+        );
+        assert!(matches!(rx.try_recv(), Ok(AppEvent::OpenAgentPicker)));
+    }
+
+    #[test]
+    fn scout_footer_chip_down_down_then_enter_opens_scout_picker() {
+        let (tx, mut rx) = unbounded_channel::<AppEvent>();
+        let sender = AppEventSender::new(tx);
+        let mut composer = ChatComposer::new(
+            true,
+            sender,
+            true,
+            "Ask Codex to do anything".to_string(),
+            false,
+        );
+        composer.set_collab_footer_chip_counts(3, 2);
+
+        let _ = composer.handle_key_event(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+        assert_eq!(
+            composer.focused_footer_chip_kind(),
+            Some(FooterChipKind::Agents)
+        );
+
+        let _ = composer.handle_key_event(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+        assert_eq!(
+            composer.focused_footer_chip_kind(),
+            Some(FooterChipKind::Scouts)
+        );
+
+        let (result, consumed) =
+            composer.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert_eq!(result, InputResult::None);
+        assert!(consumed);
+        assert_eq!(composer.focused_footer_chip_kind(), None);
+        assert!(matches!(rx.try_recv(), Ok(AppEvent::OpenScoutPicker)));
     }
 
     fn snapshot_composer_state_with_width<F>(

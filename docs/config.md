@@ -14,10 +14,7 @@ You can set a separate model for each agent role:
 [agents]
 main_model = "gpt-5-mini"            # defaults used by all roles if role-specific model missing
 scout_model = "gpt-5-mini"           # context scout
-context_validator_model = "gpt-5-mini" # context validation before build
-builder_model = "gpt-4.1-mini"       # patch-focused role
-post_builder_validator_model = "gpt-5" # patch review after build
-validator_model = "gpt-5"            # compatibility/fallback validation role
+validator_model = "gpt-5"            # patch review + patch application role
 plan_model = "gpt-5-mini"            # slice-first planning role
 ```
 
@@ -34,19 +31,15 @@ Role resolution order:
 3. top-level `model`
 
 Runtime behavior defaults:
-- `scout` and `context_validator` force a read-only sandbox policy.
-- `builder` is read-only and cannot call mutating tools; it can use collaboration tools to coordinate and spawn Scout sub-agents.
-- `post_builder_validator` (and `validator` fallback) can apply accepted patches verbatim; patch application still requires a writable sandbox policy for the session.
+- `scout` forces a read-only sandbox policy.
+- `validator` can apply accepted patches verbatim; patch application still requires a writable sandbox policy for the session.
 - `plan` does not force read-only. When the session uses a writable sandbox policy, `plan` is additionally allowed to write plan artifacts under `~/.codex/plans/...`.
 - Tool policy is role-aware:
-  - `scout`: read-only context tools only (no shell, no `apply_patch`, no sub-agent spawning)
-  - `context_validator`: read-only context validation only (same restrictions as `scout`)
-  - `builder`: collaboration tools only (`spawn_agent`/`send_input`/`wait`/`resume_agent`/`close_agent`)
-  - `builder` can only spawn `scout` agents (all other `agent_type` values are rejected)
-  - `post_builder_validator`: validation-oriented tools + `apply_patch` (no shell, no sub-agent spawning)
-  - `validator`: compatibility role, same behavior as `post_builder_validator`
+  - `scout`: read-only context tools (no shell, no `apply_patch`, no sub-agent spawning)
+  - `validator`: validation-oriented tools + `apply_patch` (no shell, no sub-agent spawning)
+  - non-`default` sub-agents can only spawn `scout` agents (all other `agent_type` values are rejected)
   - `plan`: planning tools + constrained `apply_patch` for `PLAN.md` / `slice-*.md` artifacts
-  - validator-style roles apply only verbatim Builder patch text; otherwise they must reject with detailed feedback
+  - `default` orchestrates the scout-first pipeline and can execute only after context approval gates are satisfied
 
 ### Review configuration (`/review`)
 

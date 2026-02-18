@@ -20,10 +20,16 @@ use crate::codex::Session;
 use crate::codex::TurnContext;
 use crate::codex_delegate::run_codex_thread_one_shot;
 use crate::config::Constrained;
+use crate::orchestration::lifecycle::RunbookMemoryRecord;
+use crate::orchestration::pr_package::ReviewChannels;
+use crate::orchestration::pr_package::enforce_review_mode_gate;
 use crate::review_format::format_review_findings_block;
 use crate::review_format::render_review_output_text;
 use crate::state::TaskKind;
 use codex_protocol::user_input::UserInput;
+use std::time::Duration;
+use std::time::Instant;
+use tracing::warn;
 
 use super::SessionTask;
 use super::SessionTaskContext;
@@ -57,14 +63,43 @@ impl SessionTask for ReviewTask {
             .counter("codex.task.review", 1, &[]);
 
         let review_mode = ctx.config.review_mode;
-        let output = match review_mode {
+        let remote_trigger = ctx
+            .config
+            .review_remote
+            .trigger
+            .as_deref()
+            .unwrap_or("@codex review");
+        let remote_review_requested = remote_review_trigger_requested(&input, remote_trigger);
+        {
+            let now = Instant::now();
+            let record_id = format!("review-{}", ctx.sub_id);
+            let session_handle = session.clone_session();
+            let mut lifecycle = session_handle.team_lifecycle_store.lock().await;
+            let record = RunbookMemoryRecord {
+                record_id,
+                owner: "review-task".to_string(),
+                payload: format!("mode={review_mode:?};turn={}", ctx.sub_id),
+                expires_at: now + Duration::from_secs(1),
+                archived_at: None,
+            };
+            if let Err(err) = lifecycle.put_runbook_memory(record) {
+                warn!("failed to persist review lifecycle record: {err}");
+            }
+            let archived_ids = lifecycle.sweep_expired_runbook_memory(now + Duration::from_secs(1));
+            if let Some(first_archived_id) = archived_ids.first() {
+                let _ = lifecycle.archived_record(first_archived_id);
+            }
+        }
+
+        let mut local_review_completed = false;
+        let mut output = match review_mode {
             ReviewMode::Remote => Some(ReviewOutputEvent {
                 overall_explanation: remote_review_instructions(ctx.config.as_ref()),
                 ..Default::default()
             }),
             ReviewMode::Local | ReviewMode::Hybrid => {
                 // Start sub-codex conversation and get the receiver for events.
-                let mut out = match start_review_conversation(
+                let (mut out, completed) = match start_review_conversation(
                     session.clone(),
                     ctx.clone(),
                     input,
@@ -75,8 +110,9 @@ impl SessionTask for ReviewTask {
                     Some(receiver) => {
                         process_review_events(session.clone(), ctx.clone(), receiver).await
                     }
-                    None => None,
+                    None => (None, false),
                 };
+                local_review_completed = completed;
 
                 if matches!(review_mode, ReviewMode::Hybrid) {
                     let remote_note = remote_review_instructions(ctx.config.as_ref());
@@ -105,6 +141,22 @@ impl SessionTask for ReviewTask {
                 out
             }
         };
+        let channels = ReviewChannels {
+            local_pass: matches!(review_mode, ReviewMode::Local | ReviewMode::Hybrid)
+                && local_review_completed,
+            remote_pass: remote_review_requested,
+        };
+        if let Err(err) =
+            enforce_review_mode_gate(review_mode, ctx.config.review_hybrid_policy, channels)
+        {
+            warn!("review mode gate check failed: {err}");
+            output = Some(attach_review_gate_failure(
+                output.take(),
+                &err,
+                channels,
+                remote_trigger,
+            ));
+        }
         if !cancellation_token.is_cancelled() {
             exit_review_mode(session.clone_session(), output.clone(), ctx.clone()).await;
         }
@@ -161,7 +213,7 @@ async fn process_review_events(
     session: Arc<SessionTaskContext>,
     ctx: Arc<TurnContext>,
     receiver: async_channel::Receiver<Event>,
-) -> Option<ReviewOutputEvent> {
+) -> (Option<ReviewOutputEvent>, bool) {
     let mut prev_agent_message: Option<Event> = None;
     while let Ok(event) = receiver.recv().await {
         match event.clone().msg {
@@ -189,11 +241,11 @@ async fn process_review_events(
                     .last_agent_message
                     .as_deref()
                     .map(parse_review_output_event);
-                return out;
+                return (out, true);
             }
             EventMsg::TurnAborted(_) => {
                 // Cancellation or abort: consumer will finalize with None.
-                return None;
+                return (None, false);
             }
             other => {
                 session
@@ -204,7 +256,63 @@ async fn process_review_events(
         }
     }
     // Channel closed without TurnComplete: treat as interrupted.
-    None
+    (None, false)
+}
+
+fn remote_review_trigger_requested(input: &[UserInput], trigger: &str) -> bool {
+    let trigger = trigger.trim();
+    if trigger.is_empty() {
+        return false;
+    }
+
+    input.iter().any(|item| match item {
+        UserInput::Text { text, .. } => text.contains(trigger),
+        _ => false,
+    })
+}
+
+fn attach_review_gate_failure(
+    output: Option<ReviewOutputEvent>,
+    gate_error: &str,
+    channels: ReviewChannels,
+    remote_trigger: &str,
+) -> ReviewOutputEvent {
+    let local_state = if channels.local_pass {
+        "pass"
+    } else {
+        "missing"
+    };
+    let remote_state = if channels.remote_pass {
+        "requested"
+    } else {
+        "missing"
+    };
+    let failure_note = format!(
+        "Review gate failed: {gate_error}\nlocal_pass={local_state}; remote_request={remote_state} (trigger `{remote_trigger}`)."
+    );
+
+    match output {
+        Some(mut existing) => {
+            if existing.overall_explanation.trim().is_empty() {
+                existing.overall_explanation = failure_note;
+            } else {
+                existing.overall_explanation = format!(
+                    "{}\n\n{}",
+                    existing.overall_explanation.trim_end(),
+                    failure_note
+                );
+            }
+            existing.overall_correctness = "review_gate_failed".to_string();
+            existing.overall_confidence_score = existing.overall_confidence_score.min(0.2);
+            existing
+        }
+        None => ReviewOutputEvent {
+            overall_correctness: "review_gate_failed".to_string(),
+            overall_explanation: failure_note,
+            overall_confidence_score: 0.0,
+            ..Default::default()
+        },
+    }
 }
 
 /// Parse a ReviewOutputEvent from a text blob returned by the reviewer model.
@@ -236,9 +344,10 @@ fn remote_review_instructions(config: &crate::config::Config) -> String {
         .as_deref()
         .unwrap_or("@codex review");
     // Provider is currently informational only; remote execution is handled outside of `/review`.
-    // Keep this message deterministic and non-blocking.
+    // Keep this message deterministic and require explicit trigger markup so gate checks
+    // can fail-closed when remote review was not actually requested.
     format!(
-        "Remote review mode: request an external review (e.g. on a GitHub PR) and trigger it with `{trigger}`."
+        "Remote review mode: request an external review (e.g. on a GitHub PR), then re-run `/review` with `{trigger}` in the request body to mark the remote review request as submitted."
     )
 }
 
@@ -311,4 +420,60 @@ pub(crate) async fn exit_review_mode(
     // materialize rollout persistence. Do this after emitting review output so
     // file creation + git metadata collection cannot delay client-facing items.
     session.ensure_rollout_materialized().await;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use pretty_assertions::assert_eq;
+
+    #[test]
+    fn remote_review_trigger_requested_matches_text_items_only() {
+        let input = vec![
+            UserInput::Mention {
+                name: "codex".to_string(),
+                path: "app://github".to_string(),
+            },
+            UserInput::Text {
+                text: "Please run @codex review on PR #1".to_string(),
+                text_elements: Vec::new(),
+            },
+        ];
+
+        assert!(remote_review_trigger_requested(&input, "@codex review"));
+        assert!(!remote_review_trigger_requested(&input, "@codex approve"));
+    }
+
+    #[test]
+    fn attach_review_gate_failure_marks_output_as_failed() {
+        let output = ReviewOutputEvent {
+            overall_explanation: "Local review completed.".to_string(),
+            overall_correctness: "ok".to_string(),
+            overall_confidence_score: 0.91,
+            ..Default::default()
+        };
+
+        let failed = attach_review_gate_failure(
+            Some(output),
+            "review.mode=remote requires remote review PASS",
+            ReviewChannels {
+                local_pass: false,
+                remote_pass: false,
+            },
+            "@codex review",
+        );
+
+        assert_eq!(failed.overall_correctness, "review_gate_failed");
+        assert!(
+            failed
+                .overall_explanation
+                .contains("review.mode=remote requires remote review PASS")
+        );
+        assert!(
+            failed
+                .overall_explanation
+                .contains("remote_request=missing")
+        );
+        assert_eq!(failed.overall_confidence_score, 0.2);
+    }
 }

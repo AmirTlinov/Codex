@@ -555,32 +555,48 @@ impl ModelClientSession {
         // extension of the previous known input. Server-returned output items are treated as part
         // of the baseline so we do not resend them.
         let previous_request = self.websocket_last_request.as_ref()?;
-        let mut previous_without_input = previous_request.clone();
-        previous_without_input.input.clear();
-        let mut request_without_input = request.clone();
-        request_without_input.input.clear();
-        if previous_without_input != request_without_input {
-            trace!(
-                "incremental request failed, properties didn't match {previous_without_input:?} != {request_without_input:?}"
-            );
+        if !Self::same_request_metadata(previous_request, request) {
+            trace!("incremental request failed, properties didn't match");
             return None;
         }
 
-        let mut baseline = previous_request.input.clone();
-        if let Some(last_response) = last_response {
-            baseline.extend(last_response.items_added.clone());
+        if !request.input.starts_with(&previous_request.input) {
+            trace!("incremental request failed, items didn't match");
+            return None;
         }
 
-        let baseline_len = baseline.len();
-        if baseline_len > 0
-            && request.input.starts_with(&baseline)
-            && baseline_len < request.input.len()
-        {
-            Some(request.input[baseline_len..].to_vec())
-        } else {
-            trace!("incremental request failed, items didn't match");
-            None
+        let mut baseline_len = previous_request.input.len();
+        if let Some(last_response) = last_response {
+            if !request.input[baseline_len..].starts_with(&last_response.items_added) {
+                trace!("incremental request failed, items didn't match");
+                return None;
+            }
+            baseline_len += last_response.items_added.len();
         }
+
+        if baseline_len == 0 || baseline_len >= request.input.len() {
+            trace!("incremental request failed, items didn't match");
+            return None;
+        }
+
+        Some(request.input[baseline_len..].to_vec())
+    }
+
+    fn same_request_metadata(
+        previous_request: &ResponsesApiRequest,
+        request: &ResponsesApiRequest,
+    ) -> bool {
+        previous_request.model == request.model
+            && previous_request.instructions == request.instructions
+            && previous_request.tools == request.tools
+            && previous_request.tool_choice == request.tool_choice
+            && previous_request.parallel_tool_calls == request.parallel_tool_calls
+            && previous_request.reasoning == request.reasoning
+            && previous_request.store == request.store
+            && previous_request.stream == request.stream
+            && previous_request.include == request.include
+            && previous_request.prompt_cache_key == request.prompt_cache_key
+            && previous_request.text == request.text
     }
 
     fn get_last_response(&mut self) -> Option<LastResponse> {
@@ -1161,9 +1177,13 @@ impl WebsocketTelemetry for ApiTelemetry {
 
 #[cfg(test)]
 mod tests {
+    use super::LastResponse;
     use super::ModelClient;
+    use codex_api::ResponsesApiRequest;
     use codex_otel::OtelManager;
     use codex_protocol::ThreadId;
+    use codex_protocol::models::ContentItem;
+    use codex_protocol::models::ResponseItem;
     use codex_protocol::openai_models::ModelInfo;
     use codex_protocol::protocol::SessionSource;
     use codex_protocol::protocol::SubAgentSource;
@@ -1233,6 +1253,35 @@ mod tests {
         )
     }
 
+    fn response_item_message(text: &str) -> ResponseItem {
+        ResponseItem::Message {
+            id: None,
+            role: "user".to_string(),
+            content: vec![ContentItem::InputText {
+                text: text.to_string(),
+            }],
+            end_turn: None,
+            phase: None,
+        }
+    }
+
+    fn base_request(input: Vec<ResponseItem>) -> ResponsesApiRequest {
+        ResponsesApiRequest {
+            model: "gpt-test".to_string(),
+            instructions: "instructions".to_string(),
+            input,
+            tools: Vec::new(),
+            tool_choice: "auto".to_string(),
+            parallel_tool_calls: false,
+            reasoning: None,
+            store: false,
+            stream: true,
+            include: Vec::new(),
+            prompt_cache_key: Some("cache-key".to_string()),
+            text: None,
+        }
+    }
+
     #[test]
     fn build_subagent_headers_sets_other_subagent_label() {
         let client = test_model_client(SessionSource::SubAgent(SubAgentSource::Other(
@@ -1256,5 +1305,57 @@ mod tests {
             .await
             .expect("empty summarize request should succeed");
         assert_eq!(output.len(), 0);
+    }
+
+    #[test]
+    fn get_incremental_items_returns_append_tail_for_valid_prefix() {
+        let client = test_model_client(SessionSource::Cli);
+        let mut session = client.new_session();
+        let previous_items = vec![
+            response_item_message("first"),
+            response_item_message("second"),
+        ];
+        session.websocket_last_request = Some(base_request(previous_items.clone()));
+        let last_response_item = response_item_message("response-output");
+        let append_item = response_item_message("append");
+        let request = base_request(vec![
+            previous_items[0].clone(),
+            previous_items[1].clone(),
+            last_response_item.clone(),
+            append_item.clone(),
+        ]);
+
+        let incremental_items = session.get_incremental_items(
+            &request,
+            Some(&LastResponse {
+                response_id: "resp".to_string(),
+                items_added: vec![last_response_item],
+                can_append: true,
+            }),
+        );
+
+        assert_eq!(incremental_items, Some(vec![append_item]));
+    }
+
+    #[test]
+    fn get_incremental_items_returns_none_when_request_metadata_changes() {
+        let client = test_model_client(SessionSource::Cli);
+        let mut session = client.new_session();
+        let previous_items = vec![
+            response_item_message("first"),
+            response_item_message("second"),
+        ];
+        session.websocket_last_request = Some(base_request(previous_items.clone()));
+        let append_item = response_item_message("append");
+        let mut request = base_request(vec![
+            previous_items[0].clone(),
+            previous_items[1].clone(),
+            append_item,
+        ]);
+        request.tool_choice = "required".to_string();
+
+        let incremental_items = session.get_incremental_items(&request, None);
+
+        assert_eq!(incremental_items, None);
     }
 }

@@ -1150,12 +1150,11 @@ try {
                 turn,
                 tracker,
                 JsReplArgs {
-                    code: format!(
-                        r#"
-void codex.tool("shell_command", {{ command: "cat /dev/zero | head -c 1000000000 | wc -c" }});
+                    code: r#"
+void codex.tool("shell_command", { command: "cat /dev/zero | head -c 1000000000 | wc -c" });
 console.log("cell-complete");
 "#
-                    ),
+                    .to_string(),
                     timeout_ms: Some(10_000),
                 },
             )

@@ -2,4 +2,4 @@
 source: tui/src/chatwidget/tests.rs
 expression: rendered
 ---
-@scout I deployed the project and I'm waiting for @review.
+@validator I deployed the project and I'm waiting for @review.
