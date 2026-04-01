@@ -116,6 +116,18 @@ Run it once in a fresh clone to:
   `git start-downstream-branch` aliases;
 - create local `amir/main` from `origin/amir/main` when that branch exists.
 
+## Reflective sidecar working memory
+
+This repo also has a repo-level emulation of a dynamic side-thought window via
+`.agents/skills/reflective-sidecar/SKILL.md`.
+
+- `.agents/context/` is transient working memory and stays gitignored;
+- reflective notes should help the current task, not become a second permanent
+  memory dump;
+- anything durable or validated must be promoted into `AGENTS.md`,
+  `.agents/skills/*`, `docs/*`, or actual code/tests instead of living there
+  forever.
+
 ## Practical rule of thumb
 
 If the feature is "my environment behaves differently", keep it outside this

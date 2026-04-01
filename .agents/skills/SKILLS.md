@@ -13,3 +13,8 @@
 - `runtime-extensions` — use for config, MCP, plugin, skill, AGENTS, or other
   extension-surface work that should stay as far away from core upstream logic
   as possible.
+- `reflective-sidecar` — overlay / second-pass helper for cognitively heavy
+  tasks. Use it in addition to the owning domain skill when the main lane may
+  miss non-obvious details, hidden assumptions, alternative hypotheses, or
+  integration risks. This is the current repo-level emulation of a dynamic
+  side-thought window.

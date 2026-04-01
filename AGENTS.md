@@ -26,7 +26,12 @@ This fork is maintained as a downstream customization layer over
   - config / MCP / plugin / skill runtime work ->
     `.agents/skills/runtime-extensions/SKILL.md`
   - branch and sync flow -> `.agents/skills/upstream-sync/SKILL.md`
+- For cognitively heavy or ambiguity-rich work, `reflective-sidecar` is an
+  overlay / second-pass helper, not a replacement for the owning domain skill.
+  Use it on top of the current main lane when subtle details, hidden
+  assumptions, or alternative hypotheses may matter.
 - Treat `.agents/mcp/` as transient local state. Never commit it.
+- Treat `.agents/context/` as transient working memory. Never commit it.
 - For repo-specific workflows, read `.agents/skills/SKILLS.md`.
 - When the downstream workflow changes, update the matching repo truth in the
   same change: `AGENTS.md`, `.agents/skills/*`, and `docs/fork-maintenance.md`.
