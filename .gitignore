@@ -68,6 +68,7 @@ coverage/
 
 # personal files
 personal/
+.agents/mcp/
 
 # os
 .DS_Store
@@ -91,4 +92,3 @@ CHANGELOG.ignore.md
 # Python bytecode files
 __pycache__/
 *.pyc
-

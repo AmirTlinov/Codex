@@ -84,6 +84,17 @@ someone accidentally put custom work on the mirror branch.
 It also refuses to rewrite `main` if that branch is currently checked out in a
 different worktree.
 
+## Starting new downstream work
+
+To start a new downstream feature branch from the current `amir/main` base:
+
+```bash
+scripts/start-downstream-branch.sh <feature-name>
+```
+
+If you pass `tui-shortcuts`, the script creates `amir/tui-shortcuts`.
+If you pass `amir/tui-shortcuts`, it uses that exact branch name.
+
 ## Practical rule of thumb
 
 If the feature is "my environment behaves differently", keep it outside this

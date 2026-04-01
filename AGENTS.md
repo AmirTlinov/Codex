@@ -1,5 +1,31 @@
 # Rust/codex-rs
 
+## Amir downstream AI-first overlay
+
+This fork is maintained as a downstream customization layer over
+`openai/codex`.
+
+- Treat `upstream/main`, local `main`, and `origin/main` as mirror branches.
+  Do not land custom commits there.
+- Do custom work on `amir/main` or `amir/*` branches created from `amir/main`.
+- If the task is "pull the latest official Codex", use
+  `git sync-upstream-main` from the repo root.
+- If you are already on a custom branch and need the latest upstream base, use
+  `git sync-upstream-main --rebase-current`.
+- Prefer customization surfaces in this order before patching shared upstream
+  code:
+  1. repo-owned docs, AGENTS, and repo-local skills;
+  2. MCP wiring, wrappers, sidecar scripts, and external runtime glue;
+  3. isolated new modules, crates, or commands;
+  4. edits to shared core paths only when the feature truly requires it.
+- Keep custom changes additive and isolated. Avoid editing hot upstream files
+  when a narrower surface works.
+- Treat `.agents/mcp/` as transient local state. Never commit it.
+- For repo-specific workflows, read `.agents/skills/SKILLS.md`.
+- When the downstream workflow changes, update the matching repo truth in the
+  same change: `AGENTS.md`, `.agents/skills/*`, and `docs/fork-maintenance.md`.
+- Keep durable intent and workflow truth in repo files, not only in chat.
+
 In the codex-rs folder where the rust code lives:
 
 - Crate names are prefixed with `codex-`. For example, the `core` folder's crate is named `codex-core`

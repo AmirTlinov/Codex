@@ -86,12 +86,14 @@ upstream_ref="refs/remotes/upstream/main"
 local_main_ref="refs/heads/main"
 upstream_sha="$(git rev-parse "$upstream_ref")"
 current_branch="$(git branch --show-current)"
-
-git show-ref --verify --quiet "$local_main_ref" || fail "local main branch is missing"
-local_main_sha="$(git rev-parse "$local_main_ref")"
-
-if ! git merge-base --is-ancestor "$local_main_sha" "$upstream_sha"; then
-  fail "local main has commits not in upstream/main; inspect main before syncing"
+if git show-ref --verify --quiet "$local_main_ref"; then
+  local_main_sha="$(git rev-parse "$local_main_ref")"
+  if ! git merge-base --is-ancestor "$local_main_sha" "$upstream_sha"; then
+    fail "local main has commits not in upstream/main; inspect main before syncing"
+  fi
+else
+  echo "==> creating missing local main from upstream/main"
+  git branch main "$upstream_sha" >/dev/null
 fi
 
 echo "==> syncing local main to upstream/main"
