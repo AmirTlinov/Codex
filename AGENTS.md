@@ -20,6 +20,12 @@ This fork is maintained as a downstream customization layer over
   4. edits to shared core paths only when the feature truly requires it.
 - Keep custom changes additive and isolated. Avoid editing hot upstream files
   when a narrower surface works.
+- Start with the narrowest repo-local skill that matches the task:
+  - TUI work -> `.agents/skills/tui-downstream/SKILL.md`
+  - app-server / protocol work -> `.agents/skills/app-server-downstream/SKILL.md`
+  - config / MCP / plugin / skill runtime work ->
+    `.agents/skills/runtime-extensions/SKILL.md`
+  - branch and sync flow -> `.agents/skills/upstream-sync/SKILL.md`
 - Treat `.agents/mcp/` as transient local state. Never commit it.
 - For repo-specific workflows, read `.agents/skills/SKILLS.md`.
 - When the downstream workflow changes, update the matching repo truth in the

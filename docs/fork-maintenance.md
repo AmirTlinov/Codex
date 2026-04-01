@@ -100,6 +100,22 @@ scripts/start-downstream-branch.sh <feature-name>
 If you pass `tui-shortcuts`, the script creates `amir/tui-shortcuts`.
 If you pass `amir/tui-shortcuts`, it uses that exact branch name.
 
+## Bootstrap a fresh clone
+
+This repo also includes:
+
+```bash
+scripts/bootstrap-downstream-clone.sh
+```
+
+Run it once in a fresh clone to:
+
+- ensure `upstream` points to `openai/codex`;
+- enable `rerere`;
+- install the local `git sync-upstream-main` and
+  `git start-downstream-branch` aliases;
+- create local `amir/main` from `origin/amir/main` when that branch exists.
+
 ## Practical rule of thumb
 
 If the feature is "my environment behaves differently", keep it outside this
