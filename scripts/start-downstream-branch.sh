@@ -42,6 +42,8 @@ cd "$repo_root"
 ensure_clean
 
 git remote get-url origin >/dev/null 2>&1 || fail "missing origin remote"
+git ls-remote --exit-code origin refs/heads/amir/main >/dev/null 2>&1 || \
+  fail "origin/amir/main is missing; run bootstrap or push amir/main first"
 
 echo "==> fetching origin/amir/main"
 git fetch origin amir/main --prune

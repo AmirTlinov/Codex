@@ -51,11 +51,11 @@ git config alias.sync-upstream-main '!f(){ repo_root=$(git rev-parse --show-topl
 git config alias.start-downstream-branch '!f(){ repo_root=$(git rev-parse --show-toplevel) && bash "$repo_root/scripts/start-downstream-branch.sh" "$@"; }; f'
 
 echo "==> fetching origin and upstream"
-git fetch origin main --prune
+git fetch origin main --prune >/dev/null
 if git ls-remote --exit-code origin refs/heads/amir/main >/dev/null 2>&1; then
-  git fetch origin amir/main --prune
+  git fetch origin amir/main --prune >/dev/null
 fi
-git fetch upstream main --prune
+git fetch upstream main --prune >/dev/null
 
 if git show-ref --verify --quiet refs/remotes/origin/amir/main && ! git show-ref --verify --quiet refs/heads/amir/main; then
   echo "==> creating local amir/main from origin/amir/main"
