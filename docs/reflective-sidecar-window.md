@@ -1,5 +1,8 @@
 # Reflective sidecar window
 
+This document captures the **concept** plus the current repo-level emulation.
+For the native Codex runtime design, see `docs/native-reflective-window.md`.
+
 ## Problem
 
 When the main agent tries to hold:
