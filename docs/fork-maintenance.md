@@ -116,6 +116,26 @@ Run it once in a fresh clone to:
   `git start-downstream-branch` aliases;
 - create local `amir/main` from `origin/amir/main` when that branch exists.
 
+## Install this fork as `claudex`
+
+If you want a separate PATH command for this downstream fork without replacing
+whatever `codex` already resolves to on the machine, run:
+
+```bash
+scripts/install-claudex.sh
+```
+
+What it does:
+
+- builds `codex-rs/target/release/codex`;
+- installs `~/.local/bin/claudex` by default;
+- keeps `codex` untouched, so the stock command and the downstream fork can
+  coexist.
+
+`claudex` is intentionally a thin machine-local wrapper around this clone's
+release binary. If you move the clone or clean the release target, rerun the
+installer.
+
 ## Reflective sidecar working memory
 
 This repo also has a repo-level emulation of a dynamic side-thought window via

@@ -30,6 +30,9 @@ description: Downstream workflow for config, MCP, plugin, skill, AGENTS, and wra
 - Prefer MCP/plugin/config surfaces before protocol or orchestration changes.
 - Keep local workflow truth in repo files so future agents can continue without
   chat archaeology.
+- For machine-local launch ergonomics of this fork, prefer a thin install rail
+  like `scripts/install-claudex.sh` over patching core code or replacing the
+  upstream `codex` command.
 - If a behavior is machine-local rather than repo-owned, keep it in
   `~/.codex/config.toml` or another external runtime surface.
 

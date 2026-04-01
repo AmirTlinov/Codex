@@ -33,6 +33,9 @@ This fork is maintained as a downstream customization layer over
 - Treat `.agents/mcp/` as transient local state. Never commit it.
 - Treat `.agents/context/` as transient working memory. Never commit it.
 - For repo-specific workflows, read `.agents/skills/SKILLS.md`.
+- If the task is to make this downstream fork invokable from system PATH, use
+  `scripts/install-claudex.sh`; it builds the release binary from this clone and
+  installs `~/.local/bin/claudex` by default.
 - When the downstream workflow changes, update the matching repo truth in the
   same change: `AGENTS.md`, `.agents/skills/*`, and `docs/fork-maintenance.md`.
 - Keep durable intent and workflow truth in repo files, not only in chat.
