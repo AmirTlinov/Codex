@@ -380,11 +380,13 @@ async fn responses_websocket_preconnect_is_reused_even_with_header_changes() {
         .stream(
             &prompt,
             &harness.model_info,
+            std::path::Path::new("."),
             &harness.session_telemetry,
             harness.effort,
             harness.summary,
             /*service_tier*/ None,
             /*turn_metadata_header*/ None,
+            tokio_util::sync::CancellationToken::new(),
         )
         .await
         .expect("websocket stream failed");
@@ -430,11 +432,13 @@ async fn responses_websocket_request_prewarm_is_reused_even_with_header_changes(
         .stream(
             &prompt,
             &harness.model_info,
+            std::path::Path::new("."),
             &harness.session_telemetry,
             harness.effort,
             harness.summary,
             /*service_tier*/ None,
             /*turn_metadata_header*/ None,
+            tokio_util::sync::CancellationToken::new(),
         )
         .await
         .expect("websocket stream failed");
@@ -832,11 +836,13 @@ async fn responses_websocket_emits_reasoning_included_event() {
         .stream(
             &prompt,
             &harness.model_info,
+            std::path::Path::new("."),
             &harness.session_telemetry,
             harness.effort,
             harness.summary,
             /*service_tier*/ None,
             /*turn_metadata_header*/ None,
+            tokio_util::sync::CancellationToken::new(),
         )
         .await
         .expect("websocket stream failed");
@@ -905,11 +911,13 @@ async fn responses_websocket_emits_rate_limit_events() {
         .stream(
             &prompt,
             &harness.model_info,
+            std::path::Path::new("."),
             &harness.session_telemetry,
             harness.effort,
             harness.summary,
             /*service_tier*/ None,
             /*turn_metadata_header*/ None,
+            tokio_util::sync::CancellationToken::new(),
         )
         .await
         .expect("websocket stream failed");
@@ -1485,11 +1493,13 @@ async fn responses_websocket_v2_after_error_uses_full_create_without_previous_re
         .stream(
             &prompt_two,
             &harness.model_info,
+            std::path::Path::new("."),
             &harness.session_telemetry,
             harness.effort,
             harness.summary,
             /*service_tier*/ None,
             /*turn_metadata_header*/ None,
+            tokio_util::sync::CancellationToken::new(),
         )
         .await
         .expect("websocket stream failed");
@@ -1572,11 +1582,13 @@ async fn responses_websocket_v2_surfaces_terminal_error_without_close_handshake(
         .stream(
             &prompt_two,
             &harness.model_info,
+            std::path::Path::new("."),
             &harness.session_telemetry,
             harness.effort,
             harness.summary,
             /*service_tier*/ None,
             /*turn_metadata_header*/ None,
+            tokio_util::sync::CancellationToken::new(),
         )
         .await
         .expect("websocket stream failed");
@@ -1757,6 +1769,7 @@ async fn websocket_harness_with_provider_options(
         /*auth_manager*/ None,
         conversation_id,
         provider.clone(),
+        codex_core::config::ClaudeCliConfig::default(),
         SessionSource::Exec,
         config.model_verbosity,
         /*enable_request_compression*/ false,
@@ -1816,11 +1829,13 @@ async fn stream_until_complete_with_turn_metadata(
         .stream(
             prompt,
             &harness.model_info,
+            std::path::Path::new("."),
             &harness.session_telemetry,
             harness.effort,
             harness.summary,
             service_tier,
             turn_metadata_header,
+            tokio_util::sync::CancellationToken::new(),
         )
         .await
         .expect("websocket stream failed");

@@ -287,6 +287,11 @@ async fn new_uses_configured_openai_provider_for_model_refresh() {
         .get_mut("openai")
         .expect("openai provider should exist")
         .base_url = Some(server.uri());
+    config.model_provider = config
+        .model_providers
+        .get("openai")
+        .cloned()
+        .expect("openai provider should exist");
 
     let auth_manager =
         AuthManager::from_auth_for_testing(CodexAuth::create_dummy_chatgpt_auth_for_testing());
@@ -302,6 +307,38 @@ async fn new_uses_configured_openai_provider_for_model_refresh() {
 
     let _ = manager.list_models(RefreshStrategy::Online).await;
     assert_eq!(models_mock.requests().len(), 1);
+}
+
+#[tokio::test]
+async fn new_uses_configured_claude_provider_for_model_catalog() {
+    let temp_dir = tempdir().expect("tempdir");
+    let mut config = test_config();
+    config.codex_home = temp_dir.path().join("codex-home");
+    config.cwd = config.codex_home.abs();
+    std::fs::create_dir_all(&config.codex_home).expect("create codex home");
+    config.model_catalog = None;
+    config.model_provider = crate::model_provider_info::create_claude_cli_provider();
+
+    let auth_manager =
+        AuthManager::from_auth_for_testing(CodexAuth::create_dummy_chatgpt_auth_for_testing());
+    let manager = ThreadManager::new(
+        &config,
+        auth_manager,
+        SessionSource::Exec,
+        CollaborationModesConfig::default(),
+        Arc::new(codex_exec_server::EnvironmentManager::new(
+            /*exec_server_url*/ None,
+        )),
+    );
+
+    let models = manager.list_models(RefreshStrategy::Offline).await;
+    assert_eq!(
+        models
+            .iter()
+            .map(|model| model.model.as_str())
+            .collect::<Vec<_>>(),
+        vec!["claude-opus-4-6", "claude-sonnet-4-6", "haiku"]
+    );
 }
 
 #[test]

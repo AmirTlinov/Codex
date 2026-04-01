@@ -130,11 +130,23 @@ What it does:
 - builds `codex-rs/target/release/codex`;
 - installs `~/.local/bin/claudex` by default;
 - keeps `codex` untouched, so the stock command and the downstream fork can
-  coexist.
+  coexist;
+- starts this fork with downstream Claude defaults for the main session,
+  model picker, and subagents.
 
-`claudex` is intentionally a thin machine-local wrapper around this clone's
-release binary. If you move the clone or clean the release target, rerun the
-installer.
+The wrapper currently injects:
+
+- `model_provider=claude_cli`
+- `model=claude-opus-4-6`
+- `agent_backend=claude_cli`
+- `claude_cli.permission_mode=acceptEdits`
+- `claude_cli.tools=["default"]`
+
+That keeps the stock `codex` command untouched while making `claudex` behave
+like the Claude-backed downstream flavor of this fork. If you move the clone or
+clean the release target, rerun the installer.
+
+See `docs/claudex.md` for the runtime boundary and current limitations.
 
 ## Reflective sidecar working memory
 

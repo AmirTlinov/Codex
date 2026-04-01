@@ -90,6 +90,7 @@ use codex_app_server_protocol::TurnCompletedNotification;
 use codex_app_server_protocol::TurnPlanStepStatus;
 use codex_app_server_protocol::TurnStatus;
 use codex_chatgpt::connectors;
+use codex_core::WireApi;
 use codex_core::config::Config;
 use codex_core::config::Constrained;
 use codex_core::config::ConstraintResult;
@@ -8051,7 +8052,7 @@ impl ChatWidget {
         let current_label = presets
             .iter()
             .find(|preset| preset.model.as_str() == current_model)
-            .map(|preset| preset.model.to_string())
+            .map(|preset| preset.display_name.to_string())
             .unwrap_or_else(|| self.model_display_name().to_string());
 
         let (mut auto_presets, other_presets): (Vec<ModelPreset>, Vec<ModelPreset>) = presets
@@ -8162,7 +8163,7 @@ impl ChatWidget {
                 });
             })];
             items.push(SelectionItem {
-                name: preset.model.clone(),
+                name: preset.display_name.clone(),
                 description,
                 is_current,
                 is_default: preset.is_default,
@@ -8172,10 +8173,15 @@ impl ChatWidget {
             });
         }
 
-        let header = self.model_menu_header(
-            "Select Model and Effort",
-            "Access legacy models by running codex -m <model_name> or in your config.toml",
-        );
+        let subtitle = match self.config.model_provider.wire_api {
+            WireApi::ClaudeCli => {
+                "Pick the Claude model for this session, or override it with claudex -m <model_name>."
+            }
+            WireApi::Responses => {
+                "Access legacy models by running codex -m <model_name> or in your config.toml"
+            }
+        };
+        let header = self.model_menu_header("Select Model and Effort", subtitle);
         self.bottom_pane.show_selection_view(SelectionViewParams {
             footer_hint: Some("Press enter to select reasoning effort, or esc to dismiss.".into()),
             items,

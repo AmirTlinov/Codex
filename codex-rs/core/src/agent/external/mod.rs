@@ -358,6 +358,7 @@ pub(crate) fn default_claude_model(model: Option<&str>) -> String {
     match model {
         Some(model)
             if model == "opus"
+                || model == "haiku"
                 || model == "sonnet"
                 || model.starts_with("claude-")
                 || model.starts_with("claude_") =>

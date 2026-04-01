@@ -1965,6 +1965,13 @@
             "responses"
           ],
           "type": "string"
+        },
+        {
+          "description": "The local Claude Code CLI invoked as a turn-scoped subprocess.",
+          "enum": [
+            "claude_cli"
+          ],
+          "type": "string"
         }
       ]
     }

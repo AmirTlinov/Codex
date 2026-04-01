@@ -117,6 +117,18 @@ wire_api = "chat"
 }
 
 #[test]
+fn test_deserialize_claude_cli_wire_api() {
+    let provider_toml = r#"
+name = "Claude Code CLI"
+wire_api = "claude_cli"
+        "#;
+
+    let provider: ModelProviderInfo = toml::from_str(provider_toml).unwrap();
+    assert_eq!(provider.wire_api, WireApi::ClaudeCli);
+    assert_eq!(provider.wire_api.to_string(), "claude_cli");
+}
+
+#[test]
 fn test_deserialize_websocket_connect_timeout() {
     let provider_toml = r#"
 name = "OpenAI"

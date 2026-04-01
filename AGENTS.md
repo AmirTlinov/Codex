@@ -35,7 +35,8 @@ This fork is maintained as a downstream customization layer over
 - For repo-specific workflows, read `.agents/skills/SKILLS.md`.
 - If the task is to make this downstream fork invokable from system PATH, use
   `scripts/install-claudex.sh`; it builds the release binary from this clone and
-  installs `~/.local/bin/claudex` by default.
+  installs `~/.local/bin/claudex` by default with Claude-backed session and
+  subagent defaults.
 - When the downstream workflow changes, update the matching repo truth in the
   same change: `AGENTS.md`, `.agents/skills/*`, and `docs/fork-maintenance.md`.
 - Keep durable intent and workflow truth in repo files, not only in chat.

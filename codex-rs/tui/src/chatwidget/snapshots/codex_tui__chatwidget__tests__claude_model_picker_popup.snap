@@ -1,0 +1,15 @@
+---
+source: tui/src/chatwidget/tests/popups_and_settings.rs
+expression: popup
+---
+  Select Model and Effort
+  Pick the Claude model for this session, or override it with claudex -m <mode
+
+› 1. Claude Opus 4.6 (current)  Claude flagship model for the deepest
+                                reflective and coding work.
+  2. Claude Sonnet 4.6          Balanced Claude model for everyday coding and
+                                long-running task execution.
+  3. Claude Haiku               Fast Claude model for quick iterations, narrow
+                                fixes, and lightweight turns.
+
+  Press enter to select reasoning effort, or esc to dismiss.

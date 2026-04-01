@@ -11,6 +11,7 @@ use crate::default_client::build_reqwest_client;
 use crate::error::CodexErr;
 use crate::error::Result as CoreResult;
 use crate::model_provider_info::ModelProviderInfo;
+use crate::model_provider_info::WireApi;
 use crate::models_manager::collaboration_mode_presets::CollaborationModesConfig;
 use crate::models_manager::collaboration_mode_presets::builtin_collaboration_mode_presets;
 use crate::models_manager::model_info;
@@ -25,9 +26,15 @@ use codex_api::ReqwestTransport;
 use codex_api::TransportError;
 use codex_otel::TelemetryAuthMode;
 use codex_protocol::config_types::CollaborationModeMask;
+use codex_protocol::config_types::ReasoningSummary;
+use codex_protocol::openai_models::ConfigShellToolType;
+use codex_protocol::openai_models::InputModality;
 use codex_protocol::openai_models::ModelInfo;
 use codex_protocol::openai_models::ModelPreset;
+use codex_protocol::openai_models::ModelVisibility;
 use codex_protocol::openai_models::ModelsResponse;
+use codex_protocol::openai_models::TruncationPolicyConfig;
+use codex_protocol::openai_models::WebSearchToolType;
 use http::HeaderMap;
 use std::fmt;
 use std::path::PathBuf;
@@ -224,8 +231,8 @@ impl ModelsManager {
         let remote_models = model_catalog
             .map(|catalog| catalog.models)
             .unwrap_or_else(|| {
-                Self::load_remote_models_from_file()
-                    .unwrap_or_else(|err| panic!("failed to load bundled models.json: {err}"))
+                Self::load_bundled_models(&provider)
+                    .unwrap_or_else(|err| panic!("failed to load bundled model catalog: {err}"))
             });
         Self {
             remote_models: RwLock::new(remote_models),
@@ -397,6 +404,9 @@ impl ModelsManager {
         if matches!(self.catalog_mode, CatalogMode::Custom) {
             return Ok(());
         }
+        if self.provider.wire_api != WireApi::Responses {
+            return Ok(());
+        }
 
         if self.auth_manager.auth_mode() != Some(AuthMode::Chatgpt)
             && !self.provider.has_command_auth()
@@ -490,10 +500,105 @@ impl ModelsManager {
         *self.remote_models.write().await = existing_models;
     }
 
+    fn load_bundled_models(provider: &ModelProviderInfo) -> Result<Vec<ModelInfo>, std::io::Error> {
+        match provider.wire_api {
+            WireApi::Responses => Self::load_remote_models_from_file(),
+            WireApi::ClaudeCli => Self::load_bundled_claude_models(),
+        }
+    }
+
     fn load_remote_models_from_file() -> Result<Vec<ModelInfo>, std::io::Error> {
         let file_contents = include_str!("../../models.json");
         let response: ModelsResponse = serde_json::from_str(file_contents)?;
         Ok(response.models)
+    }
+
+    fn load_bundled_claude_models() -> Result<Vec<ModelInfo>, std::io::Error> {
+        Ok(vec![
+            Self::claude_model(
+                "claude-opus-4-6",
+                "Claude Opus 4.6",
+                "Claude flagship model for the deepest reflective and coding work.",
+                codex_protocol::openai_models::ReasoningEffort::High,
+                /*priority*/ 0,
+                /*context_window*/ 200_000,
+            ),
+            Self::claude_model(
+                "claude-sonnet-4-6",
+                "Claude Sonnet 4.6",
+                "Balanced Claude model for everyday coding and long-running task execution.",
+                codex_protocol::openai_models::ReasoningEffort::Medium,
+                /*priority*/ 1,
+                /*context_window*/ 200_000,
+            ),
+            Self::claude_model(
+                "haiku",
+                "Claude Haiku",
+                "Fast Claude model for quick iterations, narrow fixes, and lightweight turns.",
+                codex_protocol::openai_models::ReasoningEffort::Low,
+                /*priority*/ 2,
+                /*context_window*/ 200_000,
+            ),
+        ])
+    }
+
+    fn claude_model(
+        slug: &str,
+        display_name: &str,
+        description: &str,
+        default_reasoning_level: codex_protocol::openai_models::ReasoningEffort,
+        priority: i32,
+        context_window: i64,
+    ) -> ModelInfo {
+        ModelInfo {
+            slug: slug.to_string(),
+            display_name: display_name.to_string(),
+            description: Some(description.to_string()),
+            default_reasoning_level: Some(default_reasoning_level),
+            supported_reasoning_levels: vec![
+                codex_protocol::openai_models::ReasoningEffortPreset {
+                    effort: codex_protocol::openai_models::ReasoningEffort::Low,
+                    description: "Fast responses with lighter reasoning".to_string(),
+                },
+                codex_protocol::openai_models::ReasoningEffortPreset {
+                    effort: codex_protocol::openai_models::ReasoningEffort::Medium,
+                    description: "Balances speed and reasoning depth for everyday tasks"
+                        .to_string(),
+                },
+                codex_protocol::openai_models::ReasoningEffortPreset {
+                    effort: codex_protocol::openai_models::ReasoningEffort::High,
+                    description: "Greater reasoning depth for complex problems".to_string(),
+                },
+                codex_protocol::openai_models::ReasoningEffortPreset {
+                    effort: codex_protocol::openai_models::ReasoningEffort::XHigh,
+                    description: "Maximum Claude effort for the hardest tasks".to_string(),
+                },
+            ],
+            shell_type: ConfigShellToolType::ShellCommand,
+            visibility: ModelVisibility::List,
+            supported_in_api: true,
+            priority,
+            availability_nux: None,
+            upgrade: None,
+            base_instructions: model_info::BASE_INSTRUCTIONS.to_string(),
+            model_messages: None,
+            supports_reasoning_summaries: false,
+            default_reasoning_summary: ReasoningSummary::None,
+            support_verbosity: false,
+            default_verbosity: None,
+            apply_patch_tool_type: None,
+            web_search_tool_type: WebSearchToolType::Text,
+            truncation_policy: TruncationPolicyConfig::tokens(/*limit*/ 10_000),
+            supports_parallel_tool_calls: false,
+            supports_image_detail_original: false,
+            context_window: Some(context_window),
+            auto_compact_token_limit: None,
+            effective_context_window_percent: 95,
+            experimental_supported_tools: Vec::new(),
+            input_modalities: vec![InputModality::Text],
+            used_fallback_model_metadata: false,
+            supports_search_tool: false,
+        }
     }
 
     /// Attempt to satisfy the refresh from the cache when it matches the provider and TTL.

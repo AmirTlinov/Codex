@@ -400,11 +400,13 @@ async fn drain_to_completed(
         .stream(
             prompt,
             &turn_context.model_info,
+            &turn_context.cwd,
             &turn_context.session_telemetry,
             turn_context.reasoning_effort,
             turn_context.reasoning_summary,
             turn_context.config.service_tier,
             turn_metadata_header,
+            tokio_util::sync::CancellationToken::new(),
         )
         .await?;
     loop {

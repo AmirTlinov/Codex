@@ -253,6 +253,7 @@ fn test_model_client_session() -> crate::client::ModelClientSession {
         crate::model_provider_info::ModelProviderInfo::create_openai_provider(
             /* base_url */ /*base_url*/ None,
         ),
+        crate::config::ClaudeCliConfig::default(),
         codex_protocol::protocol::SessionSource::Exec,
         /*model_verbosity*/ None,
         /*enable_request_compression*/ false,
@@ -2774,6 +2775,7 @@ pub(crate) async fn make_session_and_context() -> (Session, TurnContext) {
             Some(auth_manager.clone()),
             conversation_id,
             session_configuration.provider.clone(),
+            crate::config::ClaudeCliConfig::default(),
             session_configuration.session_source.clone(),
             config.model_verbosity,
             config.features.enabled(Feature::EnableRequestCompression),
@@ -3617,6 +3619,7 @@ pub(crate) async fn make_session_and_context_with_dynamic_tools_and_rx(
             Some(Arc::clone(&auth_manager)),
             conversation_id,
             session_configuration.provider.clone(),
+            crate::config::ClaudeCliConfig::default(),
             session_configuration.session_source.clone(),
             config.model_verbosity,
             config.features.enabled(Feature::EnableRequestCompression),

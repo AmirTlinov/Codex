@@ -33,6 +33,8 @@ description: Downstream workflow for config, MCP, plugin, skill, AGENTS, and wra
 - For machine-local launch ergonomics of this fork, prefer a thin install rail
   like `scripts/install-claudex.sh` over patching core code or replacing the
   upstream `codex` command.
+- If `scripts/install-claudex.sh` changes behavior, keep the wrapper, `AGENTS.md`,
+  and `docs/fork-maintenance.md` / `docs/claudex.md` aligned in the same slice.
 - If a behavior is machine-local rather than repo-owned, keep it in
   `~/.codex/config.toml` or another external runtime surface.
 

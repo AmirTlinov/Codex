@@ -2,6 +2,7 @@ use std::path::PathBuf;
 use std::process::Stdio;
 
 use anyhow::Context;
+use codex_utils_pty::process_group::kill_child_process_group;
 use tokio::io::AsyncReadExt;
 use tokio::io::AsyncWriteExt;
 use tokio::process::Command;
@@ -33,6 +34,7 @@ pub(crate) async fn run_claude_cli(
         .unwrap_or_else(|| PathBuf::from("claude"));
     let mut command = Command::new(&executable);
     command
+        .kill_on_drop(true)
         .current_dir(&request.cwd)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -48,6 +50,8 @@ pub(crate) async fn run_claude_cli(
         .arg(&request.system_prompt)
         .arg("--model")
         .arg(&request.model);
+    #[cfg(unix)]
+    command.process_group(0);
 
     let effort = request.effort.or(config.effort);
     if let Some(effort) = effort {
@@ -97,11 +101,17 @@ pub(crate) async fn run_claude_cli(
         Ok::<Vec<u8>, std::io::Error>(stderr)
     });
 
-    let cancelled = tokio::select! {
+    tokio::select! {
         biased;
         _ = cancellation_token.cancelled() => {
             terminate_child(&mut child).await?;
-            true
+            stdin_task.abort();
+            stdout_task.abort();
+            stderr_task.abort();
+            let _ = stdin_task.await;
+            let _ = stdout_task.await;
+            let _ = stderr_task.await;
+            anyhow::bail!("Claude CLI run cancelled")
         }
         status = child.wait() => {
             let status = status.context("wait for Claude CLI")?;
@@ -109,16 +119,9 @@ pub(crate) async fn run_claude_cli(
             stdin_result.context("write Claude CLI stdin")?;
             let stdout = stdout_task.await.context("join Claude stdout task")??;
             let stderr = stderr_task.await.context("join Claude stderr task")??;
-            return finalize_claude_cli_output(status, stdout, stderr);
+            finalize_claude_cli_output(status, stdout, stderr)
         }
-    };
-    let _ = stdin_task.await;
-    let _ = stdout_task.await;
-    let _ = stderr_task.await;
-    if cancelled {
-        anyhow::bail!("Claude CLI run cancelled")
     }
-    unreachable!("Claude CLI run should either finish or cancel")
 }
 
 fn finalize_claude_cli_output(
@@ -145,6 +148,7 @@ fn finalize_claude_cli_output(
 }
 
 async fn terminate_child(child: &mut tokio::process::Child) -> anyhow::Result<()> {
+    kill_child_process_group(child).context("kill Claude CLI process group")?;
     child.start_kill().context("kill Claude CLI")?;
     let _ = child.wait().await;
     Ok(())

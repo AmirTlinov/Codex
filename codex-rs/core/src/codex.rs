@@ -26,6 +26,7 @@ use crate::compact_remote::run_inline_remote_auto_compact_task;
 use crate::config::ManagedFeatures;
 use crate::connectors;
 use crate::exec_policy::ExecPolicyManager;
+use crate::model_provider_info::WireApi;
 #[cfg(test)]
 use crate::models_manager::collaboration_mode_presets::CollaborationModesConfig;
 use crate::models_manager::manager::ModelsManager;
@@ -1898,6 +1899,7 @@ impl Session {
                 Some(Arc::clone(&auth_manager)),
                 conversation_id,
                 session_configuration.provider.clone(),
+                config.claude_cli.clone(),
                 session_configuration.session_source.clone(),
                 config.model_verbosity,
                 config.features.enabled(Feature::EnableRequestCompression),
@@ -7363,11 +7365,13 @@ async fn try_run_sampling_request(
         .stream(
             prompt,
             &turn_context.model_info,
+            &turn_context.cwd,
             &turn_context.session_telemetry,
             turn_context.reasoning_effort,
             turn_context.reasoning_summary,
             turn_context.config.service_tier,
             turn_metadata_header,
+            cancellation_token.child_token(),
         )
         .instrument(trace_span!("stream_request"))
         .or_cancel(&cancellation_token)
@@ -7557,6 +7561,9 @@ async fn try_run_sampling_request(
                 .await;
                 sess.update_token_usage_info(&turn_context, token_usage.as_ref())
                     .await;
+                if token_usage.is_none() && turn_context.provider.wire_api == WireApi::ClaudeCli {
+                    sess.recompute_token_usage(turn_context.as_ref()).await;
+                }
                 should_emit_turn_diff = true;
 
                 needs_follow_up |= sess.has_pending_input().await;

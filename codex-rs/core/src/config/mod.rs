@@ -40,6 +40,7 @@ use crate::config_loader::ResidencyRequirement;
 use crate::config_loader::Sourced;
 use crate::config_loader::load_config_layers_state;
 use crate::memories::memory_root;
+use crate::model_provider_info::CLAUDE_CLI_PROVIDER_ID;
 use crate::model_provider_info::LEGACY_OLLAMA_CHAT_PROVIDER_ID;
 use crate::model_provider_info::LMSTUDIO_OSS_PROVIDER_ID;
 use crate::model_provider_info::ModelProviderInfo;
@@ -154,7 +155,8 @@ pub(crate) const DEFAULT_AGENT_JOB_MAX_RUNTIME_SECONDS: Option<u64> = None;
 
 pub const CONFIG_TOML_FILE: &str = "config.toml";
 const OPENAI_BASE_URL_ENV_VAR: &str = "OPENAI_BASE_URL";
-const RESERVED_MODEL_PROVIDER_IDS: [&str; 3] = [
+const RESERVED_MODEL_PROVIDER_IDS: [&str; 4] = [
+    CLAUDE_CLI_PROVIDER_ID,
     OPENAI_PROVIDER_ID,
     OLLAMA_OSS_PROVIDER_ID,
     LMSTUDIO_OSS_PROVIDER_ID,

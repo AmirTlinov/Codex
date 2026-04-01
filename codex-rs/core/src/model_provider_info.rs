@@ -42,12 +42,17 @@ pub enum WireApi {
     /// The Responses API exposed by OpenAI at `/v1/responses`.
     #[default]
     Responses,
+    /// The local Claude Code CLI invoked as a turn-scoped subprocess.
+    #[serde(rename = "claude_cli")]
+    #[schemars(rename = "claude_cli")]
+    ClaudeCli,
 }
 
 impl fmt::Display for WireApi {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let value = match self {
             Self::Responses => "responses",
+            Self::ClaudeCli => "claude_cli",
         };
         f.write_str(value)
     }
@@ -61,8 +66,12 @@ impl<'de> Deserialize<'de> for WireApi {
         let value = String::deserialize(deserializer)?;
         match value.as_str() {
             "responses" => Ok(Self::Responses),
+            "claude_cli" => Ok(Self::ClaudeCli),
             "chat" => Err(serde::de::Error::custom(CHAT_WIRE_API_REMOVED_ERROR)),
-            _ => Err(serde::de::Error::unknown_variant(&value, &["responses"])),
+            _ => Err(serde::de::Error::unknown_variant(
+                &value,
+                &["responses", "claude_cli"],
+            )),
         }
     }
 }
@@ -323,6 +332,7 @@ pub const DEFAULT_OLLAMA_PORT: u16 = 11434;
 
 pub const LMSTUDIO_OSS_PROVIDER_ID: &str = "lmstudio";
 pub const OLLAMA_OSS_PROVIDER_ID: &str = "ollama";
+pub const CLAUDE_CLI_PROVIDER_ID: &str = "claude_cli";
 
 /// Built-in default provider list.
 pub fn built_in_model_providers(
@@ -345,10 +355,32 @@ pub fn built_in_model_providers(
             LMSTUDIO_OSS_PROVIDER_ID,
             create_oss_provider(DEFAULT_LMSTUDIO_PORT, WireApi::Responses),
         ),
+        (CLAUDE_CLI_PROVIDER_ID, create_claude_cli_provider()),
     ]
     .into_iter()
     .map(|(k, v)| (k.to_string(), v))
     .collect()
+}
+
+pub fn create_claude_cli_provider() -> ModelProviderInfo {
+    ModelProviderInfo {
+        name: "Claude Code CLI".into(),
+        base_url: None,
+        env_key: None,
+        env_key_instructions: None,
+        experimental_bearer_token: None,
+        auth: None,
+        wire_api: WireApi::ClaudeCli,
+        query_params: None,
+        http_headers: None,
+        env_http_headers: None,
+        request_max_retries: None,
+        stream_max_retries: None,
+        stream_idle_timeout_ms: None,
+        websocket_connect_timeout_ms: None,
+        requires_openai_auth: false,
+        supports_websockets: false,
+    }
 }
 
 pub fn create_oss_provider(default_provider_port: u16, wire_api: WireApi) -> ModelProviderInfo {

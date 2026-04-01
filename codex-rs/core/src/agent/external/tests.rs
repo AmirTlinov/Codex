@@ -187,6 +187,7 @@ fn default_claude_model_prefers_claude_names_and_falls_back_to_opus_46() {
         default_claude_model(Some("claude-sonnet-4-6")),
         "claude-sonnet-4-6"
     );
+    assert_eq!(default_claude_model(Some("haiku")), "haiku");
     assert_eq!(default_claude_model(Some("gpt-5.4")), "claude-opus-4-6");
     assert_eq!(default_claude_model(/*model*/ None), "claude-opus-4-6");
 }

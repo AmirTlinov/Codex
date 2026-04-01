@@ -855,6 +855,7 @@ async fn send_provider_auth_request(server: &MockServer, auth: ModelProviderAuth
         ))),
         conversation_id,
         provider,
+        codex_core::config::ClaudeCliConfig::default(),
         SessionSource::Exec,
         config.model_verbosity,
         /*enable_request_compression*/ false,
@@ -877,11 +878,13 @@ async fn send_provider_auth_request(server: &MockServer, auth: ModelProviderAuth
         .stream(
             &prompt,
             &model_info,
+            std::path::Path::new("."),
             &session_telemetry,
             effort,
             summary.unwrap_or(ReasoningSummary::Auto),
             /*service_tier*/ None,
             /*turn_metadata_header*/ None,
+            tokio_util::sync::CancellationToken::new(),
         )
         .await
         .expect("responses stream to start");
@@ -2074,6 +2077,7 @@ async fn azure_responses_request_includes_store_and_reasoning_ids() {
         /*auth_manager*/ None,
         conversation_id,
         provider.clone(),
+        codex_core::config::ClaudeCliConfig::default(),
         SessionSource::Exec,
         config.model_verbosity,
         /*enable_request_compression*/ false,
@@ -2150,11 +2154,13 @@ async fn azure_responses_request_includes_store_and_reasoning_ids() {
         .stream(
             &prompt,
             &model_info,
+            std::path::Path::new("."),
             &session_telemetry,
             effort,
             summary.unwrap_or(ReasoningSummary::Auto),
             /*service_tier*/ None,
             /*turn_metadata_header*/ None,
+            tokio_util::sync::CancellationToken::new(),
         )
         .await
         .expect("responses stream to start");

@@ -8,7 +8,12 @@ use crate::model_provider_info::WireApi;
 use base64::Engine as _;
 use chrono::Utc;
 use codex_api::TransportError;
+use codex_protocol::config_types::ReasoningSummary;
+use codex_protocol::openai_models::ConfigShellToolType;
+use codex_protocol::openai_models::InputModality;
+use codex_protocol::openai_models::ModelVisibility;
 use codex_protocol::openai_models::ModelsResponse;
+use codex_protocol::openai_models::TruncationMode;
 use core_test_support::responses::mount_models_once;
 use http::HeaderMap;
 use http::StatusCode;
@@ -100,6 +105,51 @@ fn provider_for(base_url: String) -> ModelProviderInfo {
         requires_openai_auth: false,
         supports_websockets: false,
     }
+}
+
+#[tokio::test]
+async fn claude_cli_provider_uses_bundled_claude_catalog() {
+    let codex_home = TempDir::new().expect("create temp dir");
+    let auth_manager = crate::test_support::auth_manager_from_auth(
+        CodexAuth::create_dummy_chatgpt_auth_for_testing(),
+    );
+    let manager = ModelsManager::new_with_provider(
+        codex_home.path().to_path_buf(),
+        auth_manager,
+        /*model_catalog*/ None,
+        CollaborationModesConfig::default(),
+        crate::model_provider_info::create_claude_cli_provider(),
+    );
+
+    let presets = manager.list_models(RefreshStrategy::Offline).await;
+    let preset_ids = presets
+        .iter()
+        .map(|preset| preset.model.as_str())
+        .collect::<Vec<_>>();
+
+    assert_eq!(
+        preset_ids,
+        vec!["claude-opus-4-6", "claude-sonnet-4-6", "haiku"]
+    );
+    assert_eq!(presets[0].display_name, "Claude Opus 4.6");
+    assert_eq!(presets[1].display_name, "Claude Sonnet 4.6");
+    assert_eq!(presets[2].display_name, "Claude Haiku");
+
+    let remote_models = manager.get_remote_models().await;
+    let opus = remote_models
+        .iter()
+        .find(|model| model.slug == "claude-opus-4-6")
+        .expect("Claude Opus 4.6 should exist in the bundled catalog");
+    assert_eq!(
+        opus.base_instructions,
+        crate::models_manager::model_info::BASE_INSTRUCTIONS
+    );
+    assert_eq!(opus.model_messages, None);
+    assert_eq!(opus.shell_type, ConfigShellToolType::ShellCommand);
+    assert_eq!(opus.visibility, ModelVisibility::List);
+    assert_eq!(opus.default_reasoning_summary, ReasoningSummary::None);
+    assert_eq!(opus.truncation_policy.mode, TruncationMode::Tokens);
+    assert_eq!(opus.input_modalities, vec![InputModality::Text]);
 }
 
 struct ProviderAuthScript {

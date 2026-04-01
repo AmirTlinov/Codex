@@ -23,6 +23,8 @@
 //! WebSocket prewarm is treated as the first websocket connection attempt for a turn. If it
 //! fails, normal stream retry/fallback logic handles recovery on the same turn.
 
+mod claude_cli;
+
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::Mutex as StdMutex;
@@ -87,6 +89,7 @@ use tokio::sync::oneshot;
 use tokio::sync::oneshot::error::TryRecvError;
 use tokio_tungstenite::tungstenite::Error;
 use tokio_tungstenite::tungstenite::Message;
+use tokio_util::sync::CancellationToken;
 use tracing::instrument;
 use tracing::trace;
 use tracing::warn;
@@ -98,6 +101,7 @@ use crate::auth::RefreshTokenError;
 use crate::client_common::Prompt;
 use crate::client_common::ResponseEvent;
 use crate::client_common::ResponseStream;
+use crate::config::ClaudeCliConfig;
 use crate::default_client::build_reqwest_client;
 use crate::error::CodexErr;
 use crate::error::Result;
@@ -112,6 +116,7 @@ use crate::response_debug_context::telemetry_transport_error_message;
 use crate::util::FeedbackRequestTags;
 use crate::util::emit_feedback_auth_recovery_tags;
 use crate::util::emit_feedback_request_tags_with_auth_env;
+use claude_cli::stream_claude_cli_turn;
 
 pub const OPENAI_BETA_HEADER: &str = "OpenAI-Beta";
 pub const X_CODEX_TURN_STATE_HEADER: &str = "x-codex-turn-state";
@@ -133,6 +138,7 @@ pub(crate) const WEBSOCKET_CONNECT_TIMEOUT: Duration =
 #[derive(Debug)]
 struct ModelClientState {
     auth_manager: Option<Arc<AuthManager>>,
+    claude_cli: ClaudeCliConfig,
     conversation_id: ThreadId,
     provider: ModelProviderInfo,
     auth_env_telemetry: AuthEnvTelemetry,
@@ -256,6 +262,7 @@ impl ModelClient {
         auth_manager: Option<Arc<AuthManager>>,
         conversation_id: ThreadId,
         provider: ModelProviderInfo,
+        claude_cli: ClaudeCliConfig,
         session_source: SessionSource,
         model_verbosity: Option<VerbosityConfig>,
         enable_request_compression: bool,
@@ -270,6 +277,7 @@ impl ModelClient {
         Self {
             state: Arc::new(ModelClientState {
                 auth_manager,
+                claude_cli,
                 conversation_id,
                 provider,
                 auth_env_telemetry,
@@ -1296,11 +1304,13 @@ impl ModelClientSession {
         &mut self,
         prompt: &Prompt,
         model_info: &ModelInfo,
+        cwd: &std::path::Path,
         session_telemetry: &SessionTelemetry,
         effort: Option<ReasoningEffortConfig>,
         summary: ReasoningSummaryConfig,
         service_tier: Option<ServiceTier>,
         turn_metadata_header: Option<&str>,
+        cancellation_token: CancellationToken,
     ) -> Result<ResponseStream> {
         let wire_api = self.client.state.provider.wire_api;
         match wire_api {
@@ -1336,6 +1346,17 @@ impl ModelClientSession {
                     summary,
                     service_tier,
                     turn_metadata_header,
+                )
+                .await
+            }
+            WireApi::ClaudeCli => {
+                stream_claude_cli_turn(
+                    &self.client.state.claude_cli,
+                    prompt,
+                    model_info,
+                    cwd,
+                    effort,
+                    cancellation_token,
                 )
                 .await
             }

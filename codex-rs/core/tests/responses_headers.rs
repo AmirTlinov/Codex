@@ -91,6 +91,7 @@ async fn responses_stream_includes_subagent_header_on_review() {
         /*auth_manager*/ None,
         conversation_id,
         provider.clone(),
+        codex_core::config::ClaudeCliConfig::default(),
         session_source,
         config.model_verbosity,
         /*enable_request_compression*/ false,
@@ -114,11 +115,13 @@ async fn responses_stream_includes_subagent_header_on_review() {
         .stream(
             &prompt,
             &model_info,
+            std::path::Path::new("."),
             &session_telemetry,
             effort,
             summary.unwrap_or(model_info.default_reasoning_summary),
             /*service_tier*/ None,
             /*turn_metadata_header*/ None,
+            tokio_util::sync::CancellationToken::new(),
         )
         .await
         .expect("stream failed");
@@ -205,6 +208,7 @@ async fn responses_stream_includes_subagent_header_on_other() {
         /*auth_manager*/ None,
         conversation_id,
         provider.clone(),
+        codex_core::config::ClaudeCliConfig::default(),
         session_source,
         config.model_verbosity,
         /*enable_request_compression*/ false,
@@ -228,11 +232,13 @@ async fn responses_stream_includes_subagent_header_on_other() {
         .stream(
             &prompt,
             &model_info,
+            std::path::Path::new("."),
             &session_telemetry,
             effort,
             summary.unwrap_or(model_info.default_reasoning_summary),
             /*service_tier*/ None,
             /*turn_metadata_header*/ None,
+            tokio_util::sync::CancellationToken::new(),
         )
         .await
         .expect("stream failed");
@@ -318,6 +324,7 @@ async fn responses_respects_model_info_overrides_from_config() {
         /*auth_manager*/ None,
         conversation_id,
         provider.clone(),
+        codex_core::config::ClaudeCliConfig::default(),
         session_source,
         config.model_verbosity,
         /*enable_request_compression*/ false,
@@ -341,11 +348,13 @@ async fn responses_respects_model_info_overrides_from_config() {
         .stream(
             &prompt,
             &model_info,
+            std::path::Path::new("."),
             &session_telemetry,
             effort,
             summary.unwrap_or(model_info.default_reasoning_summary),
             /*service_tier*/ None,
             /*turn_metadata_header*/ None,
+            tokio_util::sync::CancellationToken::new(),
         )
         .await
         .expect("stream failed");

@@ -12,6 +12,7 @@ What it does:
   - builds `codex-rs/target/release/codex`
   - installs `~/.local/bin/claudex` by default
   - makes `claudex` point at this clone's release binary
+  - defaults the session, model picker, and subagents to Claude CLI
 
 Environment:
   CLAUDEX_INSTALL_DIR   Override the target bin directory (default: ~/.local/bin)
@@ -57,7 +58,13 @@ if [[ ! -x "\$release_binary" ]]; then
   echo "rerun $repo_root/scripts/install-claudex.sh from this clone" >&2
   exit 1
 fi
-exec "\$release_binary" "\$@"
+exec "\$release_binary" \
+  -c model_provider=claude_cli \
+  -c model=claude-opus-4-6 \
+  -c agent_backend=claude_cli \
+  -c claude_cli.permission_mode=acceptEdits \
+  -c 'claude_cli.tools=["default"]' \
+  "\$@"
 WRAPPER
 chmod 0755 "$wrapper_path"
 

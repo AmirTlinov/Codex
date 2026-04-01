@@ -4,11 +4,17 @@ use super::PendingUnauthorizedRetry;
 use super::UnauthorizedRecoveryExecution;
 use codex_otel::SessionTelemetry;
 use codex_protocol::ThreadId;
+use codex_protocol::config_types::ReasoningSummary;
+use codex_protocol::models::ContentItem;
+use codex_protocol::models::ResponseItem;
 use codex_protocol::openai_models::ModelInfo;
 use codex_protocol::protocol::SessionSource;
 use codex_protocol::protocol::SubAgentSource;
+use futures::StreamExt;
 use pretty_assertions::assert_eq;
 use serde_json::json;
+use tempfile::TempDir;
+use tokio_util::sync::CancellationToken;
 
 fn test_model_client(session_source: SessionSource) -> ModelClient {
     let provider = crate::model_provider_info::create_oss_provider_with_base_url(
@@ -19,6 +25,7 @@ fn test_model_client(session_source: SessionSource) -> ModelClient {
         /*auth_manager*/ None,
         ThreadId::new(),
         provider,
+        crate::config::ClaudeCliConfig::default(),
         session_source,
         /*model_verbosity*/ None,
         /*enable_request_compression*/ false,
@@ -55,6 +62,13 @@ fn test_model_info() -> ModelInfo {
         "experimental_supported_tools": []
     }))
     .expect("deserialize test model info")
+}
+
+fn test_model_info_with_slug(slug: &str) -> ModelInfo {
+    let mut model_info = test_model_info();
+    model_info.slug = slug.to_string();
+    model_info.display_name = slug.to_string();
+    model_info
 }
 
 fn test_session_telemetry() -> SessionTelemetry {
@@ -119,4 +133,194 @@ fn auth_request_telemetry_context_tracks_attached_auth_and_retry_phase() {
     assert!(auth_context.retry_after_unauthorized);
     assert_eq!(auth_context.recovery_mode, Some("managed"));
     assert_eq!(auth_context.recovery_phase, Some("refresh_token"));
+}
+
+fn write_mock_claude_script(
+    root: &TempDir,
+) -> (std::path::PathBuf, std::path::PathBuf, std::path::PathBuf) {
+    let script_path = root.path().join("mock-claude.sh");
+    let stdin_log_path = root.path().join("stdin.log");
+    let args_log_path = root.path().join("args.log");
+    std::fs::write(
+        &script_path,
+        format!(
+            "#!/usr/bin/env bash\nset -euo pipefail\nstdin_payload=$(cat)\nprintf '%s' \"$stdin_payload\" > '{}'\nprintf '%s\\n' \"$@\" > '{}'\nprintf 'claude-main-ok'\n",
+            stdin_log_path.display(),
+            args_log_path.display(),
+        ),
+    )
+    .expect("write mock claude script");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mut permissions = std::fs::metadata(&script_path)
+            .expect("mock claude metadata")
+            .permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(&script_path, permissions).expect("chmod mock claude");
+    }
+    (script_path, stdin_log_path, args_log_path)
+}
+
+#[tokio::test]
+async fn stream_routes_main_turns_to_claude_cli_provider() {
+    let root = TempDir::new().expect("create temp dir");
+    let (script_path, stdin_log_path, args_log_path) = write_mock_claude_script(&root);
+    let client = ModelClient::new(
+        /*auth_manager*/ None,
+        ThreadId::new(),
+        crate::model_provider_info::create_claude_cli_provider(),
+        crate::config::ClaudeCliConfig {
+            path: Some(script_path),
+            ..Default::default()
+        },
+        SessionSource::Cli,
+        /*model_verbosity*/ None,
+        /*enable_request_compression*/ false,
+        /*include_timing_metrics*/ false,
+        /*beta_features_header*/ None,
+    );
+    let mut client_session = client.new_session();
+    let mut prompt = crate::Prompt::default();
+    prompt.base_instructions.text = "Follow repo truth".to_string();
+    prompt.input = vec![ResponseItem::Message {
+        id: None,
+        role: "user".to_string(),
+        content: vec![ContentItem::InputText {
+            text: "Say hello from Claude.".to_string(),
+        }],
+        end_turn: None,
+        phase: None,
+    }];
+
+    let mut stream = client_session
+        .stream(
+            &prompt,
+            &test_model_info_with_slug("claude-opus-4-6"),
+            root.path(),
+            &test_session_telemetry(),
+            /*effort*/ None,
+            ReasoningSummary::None,
+            /*service_tier*/ None,
+            /*turn_metadata_header*/ None,
+            CancellationToken::new(),
+        )
+        .await
+        .expect("claude stream should succeed");
+
+    let mut saw_message = false;
+    while let Some(event) = stream.next().await {
+        match event.expect("stream event") {
+            crate::client_common::ResponseEvent::OutputItemDone(ResponseItem::Message {
+                content,
+                ..
+            }) => {
+                assert_eq!(
+                    content,
+                    vec![ContentItem::OutputText {
+                        text: "claude-main-ok".to_string()
+                    }]
+                );
+                saw_message = true;
+            }
+            crate::client_common::ResponseEvent::Completed { .. } => break,
+            _ => {}
+        }
+    }
+
+    assert!(
+        saw_message,
+        "expected Claude stream to emit an assistant message"
+    );
+    let stdin_log = std::fs::read_to_string(stdin_log_path).expect("read stdin log");
+    assert!(stdin_log.contains("Say hello from Claude."));
+    let args_log = std::fs::read_to_string(args_log_path).expect("read args log");
+    assert!(args_log.contains("Follow repo truth"));
+    assert!(args_log.contains("claude-opus-4-6"));
+}
+
+#[tokio::test]
+async fn stream_cancels_in_flight_claude_cli_subprocess() {
+    let root = TempDir::new().expect("create temp dir");
+    let script_path = root.path().join("mock-claude-sleep.sh");
+    std::fs::write(
+        &script_path,
+        "#!/usr/bin/env bash\nset -euo pipefail\ncat >/dev/null\nsleep 30\n",
+    )
+    .expect("write slow mock claude script");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mut permissions = std::fs::metadata(&script_path)
+            .expect("slow mock claude metadata")
+            .permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(&script_path, permissions).expect("chmod slow mock claude");
+    }
+
+    let client = ModelClient::new(
+        /*auth_manager*/ None,
+        ThreadId::new(),
+        crate::model_provider_info::create_claude_cli_provider(),
+        crate::config::ClaudeCliConfig {
+            path: Some(script_path),
+            ..Default::default()
+        },
+        SessionSource::Cli,
+        /*model_verbosity*/ None,
+        /*enable_request_compression*/ false,
+        /*include_timing_metrics*/ false,
+        /*beta_features_header*/ None,
+    );
+    let mut client_session = client.new_session();
+    let prompt = crate::Prompt {
+        input: vec![ResponseItem::Message {
+            id: None,
+            role: "user".to_string(),
+            content: vec![ContentItem::InputText {
+                text: "Wait until cancelled.".to_string(),
+            }],
+            end_turn: None,
+            phase: None,
+        }],
+        ..Default::default()
+    };
+
+    let cancellation_token = CancellationToken::new();
+    let cancel_child = cancellation_token.child_token();
+    let cancel_handle = tokio::spawn({
+        let cancellation_token = cancellation_token.clone();
+        async move {
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+            cancellation_token.cancel();
+        }
+    });
+
+    let stream_result = tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        client_session.stream(
+            &prompt,
+            &test_model_info_with_slug("claude-opus-4-6"),
+            root.path(),
+            &test_session_telemetry(),
+            /*effort*/ None,
+            ReasoningSummary::None,
+            /*service_tier*/ None,
+            /*turn_metadata_header*/ None,
+            cancel_child,
+        ),
+    )
+    .await
+    .expect("Claude stream cancellation should finish promptly");
+    cancel_handle.await.expect("join cancel task");
+
+    let err = match stream_result {
+        Ok(_stream) => panic!("Claude stream should abort on cancellation"),
+        Err(err) => err,
+    };
+
+    let crate::error::CodexErr::Stream(message, _response_id) = err else {
+        panic!("expected stream error, got {err:?}");
+    };
+    assert_eq!(message, "Claude CLI run cancelled");
 }
