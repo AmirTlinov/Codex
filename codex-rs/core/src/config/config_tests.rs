@@ -4432,6 +4432,9 @@ fn test_precedence_fixture_with_o3_profile() -> std::io::Result<()> {
             tool_output_token_limit: None,
             agent_max_threads: DEFAULT_AGENT_MAX_THREADS,
             agent_max_depth: DEFAULT_AGENT_MAX_DEPTH,
+            agent_backend: AgentBackend::Codex,
+            reflective_window_agent_type: None,
+            claude_cli: ClaudeCliConfig::default(),
             agent_roles: BTreeMap::new(),
             memories: MemoriesConfig::default(),
             agent_job_max_runtime_seconds: DEFAULT_AGENT_JOB_MAX_RUNTIME_SECONDS,
@@ -4524,6 +4527,88 @@ fn metrics_exporter_defaults_to_statsig_when_missing() -> std::io::Result<()> {
 }
 
 #[test]
+fn load_config_supports_claude_cli_external_agents() -> anyhow::Result<()> {
+    let fixture = create_test_fixture()?;
+    let claude_path = fixture.codex_home().join("bin/claude");
+    std::fs::create_dir_all(
+        claude_path
+            .parent()
+            .expect("claude path should have a parent directory"),
+    )?;
+    std::fs::write(&claude_path, "#!/usr/bin/env bash\n")?;
+    let add_dir = fixture.cwd().join("sandbox")?;
+    std::fs::create_dir_all(add_dir.as_path())?;
+
+    let config = Config::load_from_base_config_with_overrides(
+        ConfigToml {
+            agent_backend: Some(AgentBackend::ClaudeCli),
+            reflective_window_agent_type: Some("claude_reflector".to_string()),
+            claude_cli: Some(ClaudeCliToml {
+                path: Some(AbsolutePathBuf::try_from(claude_path.clone())?),
+                permission_mode: Some(ClaudeCliPermissionMode::Plan),
+                effort: Some(ClaudeCliEffort::High),
+                tools: Some(vec![
+                    " Read ".to_string(),
+                    " ".to_string(),
+                    "Write".to_string(),
+                ]),
+                add_dirs: Some(vec![add_dir.clone()]),
+            }),
+            ..ConfigToml::default()
+        },
+        ConfigOverrides {
+            cwd: Some(fixture.cwd_path()),
+            ..Default::default()
+        },
+        fixture.codex_home(),
+    )?;
+
+    assert_eq!(config.agent_backend, AgentBackend::ClaudeCli);
+    assert_eq!(
+        config.reflective_window_agent_type.as_deref(),
+        Some("claude_reflector")
+    );
+    assert_eq!(config.claude_cli.path, Some(claude_path));
+    assert_eq!(
+        config.claude_cli.permission_mode,
+        ClaudeCliPermissionMode::Plan
+    );
+    assert_eq!(config.claude_cli.effort, Some(ClaudeCliEffort::High));
+    assert_eq!(
+        config.claude_cli.tools,
+        Some(vec!["Read".to_string(), "Write".to_string()])
+    );
+    assert_eq!(
+        config.claude_cli.add_dirs,
+        vec![add_dir.as_path().to_path_buf()]
+    );
+    Ok(())
+}
+
+#[test]
+fn load_config_warns_when_reflective_window_agent_type_is_unknown() -> anyhow::Result<()> {
+    let fixture = create_test_fixture()?;
+    let config = Config::load_from_base_config_with_overrides(
+        ConfigToml {
+            reflective_window_agent_type: Some("missing_reflector".to_string()),
+            ..ConfigToml::default()
+        },
+        ConfigOverrides {
+            cwd: Some(fixture.cwd_path()),
+            ..Default::default()
+        },
+        fixture.codex_home(),
+    )?;
+
+    assert!(
+        config.startup_warnings.iter().any(|warning| {
+            warning.contains("reflective_window_agent_type `missing_reflector`")
+        })
+    );
+    Ok(())
+}
+
+#[test]
 fn test_precedence_fixture_with_gpt3_profile() -> std::io::Result<()> {
     let fixture = create_test_fixture()?;
 
@@ -4574,6 +4659,9 @@ fn test_precedence_fixture_with_gpt3_profile() -> std::io::Result<()> {
         tool_output_token_limit: None,
         agent_max_threads: DEFAULT_AGENT_MAX_THREADS,
         agent_max_depth: DEFAULT_AGENT_MAX_DEPTH,
+        agent_backend: AgentBackend::Codex,
+        reflective_window_agent_type: None,
+        claude_cli: ClaudeCliConfig::default(),
         agent_roles: BTreeMap::new(),
         memories: MemoriesConfig::default(),
         agent_job_max_runtime_seconds: DEFAULT_AGENT_JOB_MAX_RUNTIME_SECONDS,
@@ -4714,6 +4802,9 @@ fn test_precedence_fixture_with_zdr_profile() -> std::io::Result<()> {
         tool_output_token_limit: None,
         agent_max_threads: DEFAULT_AGENT_MAX_THREADS,
         agent_max_depth: DEFAULT_AGENT_MAX_DEPTH,
+        agent_backend: AgentBackend::Codex,
+        reflective_window_agent_type: None,
+        claude_cli: ClaudeCliConfig::default(),
         agent_roles: BTreeMap::new(),
         memories: MemoriesConfig::default(),
         agent_job_max_runtime_seconds: DEFAULT_AGENT_JOB_MAX_RUNTIME_SECONDS,
@@ -4840,6 +4931,9 @@ fn test_precedence_fixture_with_gpt5_profile() -> std::io::Result<()> {
         tool_output_token_limit: None,
         agent_max_threads: DEFAULT_AGENT_MAX_THREADS,
         agent_max_depth: DEFAULT_AGENT_MAX_DEPTH,
+        agent_backend: AgentBackend::Codex,
+        reflective_window_agent_type: None,
+        claude_cli: ClaudeCliConfig::default(),
         agent_roles: BTreeMap::new(),
         memories: MemoriesConfig::default(),
         agent_job_max_runtime_seconds: DEFAULT_AGENT_JOB_MAX_RUNTIME_SECONDS,

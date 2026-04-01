@@ -35,6 +35,7 @@ struct ActiveAgents {
 #[derive(Clone, Debug, Default)]
 pub(crate) struct AgentMetadata {
     pub(crate) agent_id: Option<ThreadId>,
+    pub(crate) parent_thread_id: Option<ThreadId>,
     pub(crate) agent_path: Option<AgentPath>,
     pub(crate) agent_nickname: Option<String>,
     pub(crate) agent_role: Option<String>,
@@ -250,6 +251,7 @@ impl AgentRegistry {
             ))),
             Entry::Vacant(entry) => {
                 entry.insert(AgentMetadata {
+                    parent_thread_id: None,
                     agent_path: Some(agent_path.clone()),
                     ..Default::default()
                 });

@@ -6,6 +6,13 @@
       "description": "A path that is guaranteed to be absolute and normalized (though it is not guaranteed to be canonicalized or exist on the filesystem).\n\nIMPORTANT: When deserializing an `AbsolutePathBuf`, a base path must be set using [AbsolutePathBufGuard::new]. If no base path is set, the deserialization will fail unless the path being deserialized is already absolute.",
       "type": "string"
     },
+    "AgentBackend": {
+      "enum": [
+        "codex",
+        "claude_cli"
+      ],
+      "type": "string"
+    },
     "AgentRoleToml": {
       "additionalProperties": false,
       "properties": {
@@ -298,6 +305,70 @@
         "enabled": {
           "default": true,
           "type": "boolean"
+        }
+      },
+      "type": "object"
+    },
+    "ClaudeCliEffort": {
+      "enum": [
+        "low",
+        "medium",
+        "high",
+        "max"
+      ],
+      "type": "string"
+    },
+    "ClaudeCliPermissionMode": {
+      "enum": [
+        "accept_edits",
+        "bypass_permissions",
+        "default",
+        "dont_ask",
+        "plan",
+        "auto"
+      ],
+      "type": "string"
+    },
+    "ClaudeCliToml": {
+      "additionalProperties": false,
+      "properties": {
+        "add_dirs": {
+          "description": "Additional directories to expose to Claude when tools are enabled.",
+          "items": {
+            "$ref": "#/definitions/AbsolutePathBuf"
+          },
+          "type": "array"
+        },
+        "effort": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/ClaudeCliEffort"
+            }
+          ],
+          "description": "Claude Code effort level passed to `claude --effort`."
+        },
+        "path": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/AbsolutePathBuf"
+            }
+          ],
+          "description": "Optional absolute path to the `claude` executable. When unset, Codex resolves `claude` from PATH."
+        },
+        "permission_mode": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/ClaudeCliPermissionMode"
+            }
+          ],
+          "description": "Claude Code permission mode passed to `claude --permission-mode`."
+        },
+        "tools": {
+          "description": "Optional built-in Claude tool set to expose. When unset, Codex disables Claude tools and uses the backend as a text-only sidecar.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
         }
       },
       "type": "object"
@@ -1900,6 +1971,14 @@
   },
   "description": "Base config deserialized from ~/.codex/config.toml.",
   "properties": {
+    "agent_backend": {
+      "allOf": [
+        {
+          "$ref": "#/definitions/AgentBackend"
+        }
+      ],
+      "description": "Runtime backend used for spawned sub-agents."
+    },
     "agents": {
       "allOf": [
         {
@@ -1967,6 +2046,14 @@
     "check_for_update_on_startup": {
       "description": "When `true`, checks for Codex updates on startup and surfaces update prompts. Set to `false` only if your Codex updates are centrally managed. Defaults to `true`.",
       "type": "boolean"
+    },
+    "claude_cli": {
+      "allOf": [
+        {
+          "$ref": "#/definitions/ClaudeCliToml"
+        }
+      ],
+      "description": "Claude Code CLI integration settings for `agent_backend = \"claude_cli\"`."
     },
     "cli_auth_credentials_store": {
       "allOf": [
@@ -2502,6 +2589,10 @@
       ],
       "default": null,
       "description": "Experimental / do not use. Realtime websocket session selection. `version` controls v1/v2 and `type` controls conversational/transcription."
+    },
+    "reflective_window_agent_type": {
+      "description": "Optional agent role to use when refreshing the reflective window.",
+      "type": "string"
     },
     "review_model": {
       "description": "Review model override used by the `/review` feature.",

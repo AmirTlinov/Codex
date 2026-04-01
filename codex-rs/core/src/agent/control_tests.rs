@@ -69,6 +69,11 @@ struct AgentControlHarness {
     control: AgentControl,
 }
 
+struct MockClaudeScript {
+    script_path: std::path::PathBuf,
+    stdin_log_path: std::path::PathBuf,
+}
+
 impl AgentControlHarness {
     async fn new() -> Self {
         let (home, config) = test_config().await;
@@ -96,6 +101,36 @@ impl AgentControlHarness {
             .await
             .expect("start thread");
         (new_thread.thread_id, new_thread.thread)
+    }
+}
+
+fn mock_claude_script(root: &TempDir) -> MockClaudeScript {
+    let script_path = root.path().join("mock-control-claude.sh");
+    let stdin_log_path = root.path().join("control-claude.stdin.log");
+    let count_path = root.path().join("control-claude.count");
+    std::fs::write(
+        &script_path,
+        format!(
+            "#!/usr/bin/env bash\nset -euo pipefail\nstdin_payload=$(cat)\nprintf '%s\\n--\\n' \"$stdin_payload\" >> '{}'\ncount=0\nif [[ -f '{}' ]]; then\n  count=$(cat '{}')\nfi\ncount=$((count + 1))\nprintf '%s' \"$count\" > '{}'\nprintf 'run-%s' \"$count\"\n",
+            stdin_log_path.display(),
+            count_path.display(),
+            count_path.display(),
+            count_path.display(),
+        ),
+    )
+    .expect("write mock Claude script");
+    let mut permissions = std::fs::metadata(&script_path)
+        .expect("mock Claude metadata")
+        .permissions();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(&script_path, permissions).expect("chmod mock Claude");
+    }
+    MockClaudeScript {
+        script_path,
+        stdin_log_path,
     }
 }
 
@@ -207,6 +242,44 @@ async fn wait_for_live_thread_spawn_children(
     })
     .await
     .expect("expected persisted child tree");
+}
+
+async fn wait_for_final_agent_status(control: &AgentControl, thread_id: ThreadId) -> AgentStatus {
+    timeout(Duration::from_secs(5), async {
+        loop {
+            let status = control.get_status(thread_id).await;
+            if matches!(
+                status,
+                AgentStatus::Completed(_)
+                    | AgentStatus::Errored(_)
+                    | AgentStatus::Interrupted
+                    | AgentStatus::Shutdown
+            ) {
+                break status;
+            }
+            sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("agent should reach a final status")
+}
+
+async fn wait_for_agent_status_change(
+    control: &AgentControl,
+    thread_id: ThreadId,
+    previous_status: &AgentStatus,
+) -> AgentStatus {
+    timeout(Duration::from_secs(5), async {
+        loop {
+            let status = control.get_status(thread_id).await;
+            if &status != previous_status {
+                break status;
+            }
+            sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("agent status should change")
 }
 
 #[tokio::test]
@@ -468,6 +541,58 @@ async fn send_inter_agent_communication_without_turn_queues_message_without_trig
         &history_items,
         &communication
     ));
+}
+
+#[tokio::test]
+async fn send_inter_agent_communication_routes_to_external_claude_agent() {
+    let harness = AgentControlHarness::new().await;
+    let mock_claude = mock_claude_script(&harness._home);
+    let mut config = harness.config.clone();
+    config.agent_backend = crate::config::AgentBackend::ClaudeCli;
+    config.claude_cli.path = Some(mock_claude.script_path.clone());
+
+    let thread_id = harness
+        .control
+        .spawn_agent(
+            config,
+            text_input("initial external task"),
+            /*session_source*/ None,
+        )
+        .await
+        .expect("spawn external Claude agent");
+    let status = wait_for_final_agent_status(&harness.control, thread_id).await;
+    assert_eq!(status, AgentStatus::Completed(Some("run-1".to_string())));
+
+    let communication = InterAgentCommunication::new(
+        AgentPath::root(),
+        AgentPath::try_from("/root/claude_worker").expect("agent path"),
+        Vec::new(),
+        "delegated follow-up".to_string(),
+        /*trigger_turn*/ false,
+    );
+    let submission_id = harness
+        .control
+        .send_inter_agent_communication(thread_id, communication)
+        .await
+        .expect("external inter-agent communication should succeed");
+    assert!(!submission_id.is_empty());
+
+    let status = wait_for_agent_status_change(
+        &harness.control,
+        thread_id,
+        &AgentStatus::Completed(Some("run-1".to_string())),
+    )
+    .await;
+    let status = if matches!(status, AgentStatus::Completed(_)) {
+        status
+    } else {
+        wait_for_final_agent_status(&harness.control, thread_id).await
+    };
+    assert_eq!(status, AgentStatus::Completed(Some("run-2".to_string())));
+
+    let stdin_log =
+        std::fs::read_to_string(&mock_claude.stdin_log_path).expect("read Claude stdin log");
+    assert!(stdin_log.contains("delegated follow-up"));
 }
 
 #[tokio::test]

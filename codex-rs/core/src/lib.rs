@@ -19,6 +19,7 @@ mod realtime_conversation;
 pub use codex::SteerInputError;
 mod codex_thread;
 mod compact_remote;
+mod compact_transcript;
 pub use codex_thread::CodexThread;
 pub use codex_thread::ThreadConfigSnapshot;
 mod agent;

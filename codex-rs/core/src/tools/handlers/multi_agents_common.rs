@@ -282,6 +282,16 @@ pub(crate) async fn apply_requested_spawn_agent_model_overrides(
         return Ok(());
     }
 
+    if config.agent_backend.is_claude_cli() {
+        if let Some(requested_model) = requested_model {
+            config.model = Some(requested_model.to_string());
+        }
+        if let Some(reasoning_effort) = requested_reasoning_effort {
+            config.model_reasoning_effort = Some(reasoning_effort);
+        }
+        return Ok(());
+    }
+
     if let Some(requested_model) = requested_model {
         let available_models = session
             .services

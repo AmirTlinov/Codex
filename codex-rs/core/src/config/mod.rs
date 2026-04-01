@@ -106,6 +106,7 @@ use toml_edit::DocumentMut;
 
 pub(crate) mod agent_roles;
 pub mod edit;
+pub(crate) mod external_agents;
 mod managed_features;
 mod network_proxy_spec;
 mod permissions;
@@ -118,6 +119,11 @@ pub use codex_config::ConstraintError;
 pub use codex_config::ConstraintResult;
 pub use codex_network_proxy::NetworkProxyAuditMetadata;
 pub use codex_sandboxing::system_bwrap_warning;
+pub use external_agents::AgentBackend;
+pub use external_agents::ClaudeCliConfig;
+pub use external_agents::ClaudeCliEffort;
+pub use external_agents::ClaudeCliPermissionMode;
+pub use external_agents::ClaudeCliToml;
 pub use managed_features::ManagedFeatures;
 pub use network_proxy_spec::NetworkProxySpec;
 pub use network_proxy_spec::StartedNetworkProxy;
@@ -409,6 +415,15 @@ pub struct Config {
 
     /// User-defined role declarations keyed by role name.
     pub agent_roles: BTreeMap<String, AgentRoleConfig>,
+
+    /// Runtime backend used for spawned sub-agents.
+    pub agent_backend: AgentBackend,
+
+    /// Optional agent role to use when refreshing the reflective window.
+    pub reflective_window_agent_type: Option<String>,
+
+    /// Claude Code CLI integration settings for `agent_backend = "claude_cli"`.
+    pub claude_cli: ClaudeCliConfig,
 
     /// Memories subsystem settings.
     pub memories: MemoriesConfig,
@@ -1323,6 +1338,15 @@ pub struct ConfigToml {
 
     /// Additional discoverable tools that can be suggested for installation.
     pub tool_suggest: Option<ToolSuggestConfig>,
+
+    /// Runtime backend used for spawned sub-agents.
+    pub agent_backend: Option<AgentBackend>,
+
+    /// Optional agent role to use when refreshing the reflective window.
+    pub reflective_window_agent_type: Option<String>,
+
+    /// Claude Code CLI integration settings for `agent_backend = "claude_cli"`.
+    pub claude_cli: Option<ClaudeCliToml>,
 
     /// Agent-related settings (thread limits, etc.).
     pub agents: Option<AgentsToml>,
@@ -2330,6 +2354,12 @@ impl Config {
             .as_ref()
             .and_then(|agents| agents.job_max_runtime_seconds)
             .or(DEFAULT_AGENT_JOB_MAX_RUNTIME_SECONDS);
+        let agent_backend = cfg.agent_backend.unwrap_or_default();
+        let reflective_window_agent_type = cfg.reflective_window_agent_type.and_then(|value| {
+            let trimmed = value.trim();
+            (!trimmed.is_empty()).then(|| trimmed.to_string())
+        });
+        let claude_cli = cfg.claude_cli.unwrap_or_default().into();
         if agent_job_max_runtime_seconds == Some(0) {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::InvalidInput,
@@ -2616,6 +2646,9 @@ impl Config {
             agent_max_threads,
             agent_max_depth,
             agent_roles,
+            agent_backend,
+            reflective_window_agent_type,
+            claude_cli,
             memories: cfg.memories.unwrap_or_default().into(),
             agent_job_max_runtime_seconds,
             codex_home,
@@ -2743,6 +2776,17 @@ impl Config {
                 }
             },
         };
+        let mut config = config;
+        if let Some(reflective_agent_type) = config.reflective_window_agent_type.clone()
+            && crate::agent::role::resolve_role_config(&config, reflective_agent_type.as_str())
+                .is_none()
+        {
+            let message = format!(
+                "Configured reflective_window_agent_type `{reflective_agent_type}` does not match any available agent role; reflective sidecar refresh will stay disabled until the role is fixed"
+            );
+            tracing::warn!("{message}");
+            config.startup_warnings.push(message);
+        }
         Ok(config)
     }
 

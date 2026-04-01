@@ -14,6 +14,25 @@ lane while a bounded internal reflective sidecar periodically scans for:
 The sidecar must not become a second always-on main agent. Its job is to
 produce a **small, fresh reflective window** that improves the next real turn.
 
+## Current downstream implementation status
+
+This fork now has a working native downstream slice for two things:
+
+1. the reflective window can run through the internal Codex one-shot path or
+   through `claude` CLI;
+2. spawned subagents can run through `claude` CLI, including
+   `claude-opus-4-6`.
+
+Important boundaries of the current slice:
+
+- external Claude agents are session-local, not resumable from rollout;
+- they are text-only by default unless `[claude_cli].tools` is configured;
+- reflective Claude runs are forced toolless and read-only;
+- reflective Claude scopes its transcript to a bounded recent window and keeps
+  an omission marker instead of replaying the whole session forever;
+- large delegated prompts are streamed over stdin instead of argv so forked
+  parent context and reflective transcripts do not hit `spawn E2BIG`.
+
 ## What this is not
 
 This is **not**:
@@ -384,30 +403,80 @@ Goal:
 - configurable model/effort/cooldown,
 - metrics for cost vs value.
 
-## Recommended config shape
+## Current config surface
 
-Do not start with a giant config surface.
-
-Small v1 candidate:
+Keep the main lane on Codex/OpenAI and point only the reflective sidecar at
+Claude:
 
 ```toml
 [features]
 reflective_window = true
 
-[reflective_window]
-model = "gpt-5.4-mini"
-reasoning_effort = "high"
-summary = "concise"
-cooldown_turns = 2
-max_observations = 5
-max_input_tokens = 12000
+reflective_window_agent_type = "claude_reflector"
+
+[agent_roles.claude_reflector]
+description = "Claude reflective sidecar"
+config_file = "~/.codex/agents/claude-reflector.toml"
+
+[claude_cli]
+path = "/home/amir/.npm-global/bin/claude"
+permission_mode = "plan"
 ```
+
+`~/.codex/agents/claude-reflector.toml`:
+
+```toml
+agent_backend = "claude_cli"
+model = "claude-opus-4-6"
+model_reasoning_effort = "high"
+```
+
+If you want all spawned subagents to use Claude by default:
+
+```toml
+agent_backend = "claude_cli"
+
+[claude_cli]
+path = "/home/amir/.npm-global/bin/claude"
+permission_mode = "plan"
+tools = ["Read", "Glob", "Grep"]
+add_dirs = ["/absolute/project/path"]
+```
+
+If you want the main lane to stay on Codex/OpenAI but still be able to raise a
+specific Claude Opus 4.6 subagent on demand, define a role and spawn that role:
+
+```toml
+[agent_roles.claude_worker]
+description = "Claude Opus worker for bounded delegated tasks"
+config_file = "~/.codex/agents/claude-worker.toml"
+```
+
+`~/.codex/agents/claude-worker.toml`:
+
+```toml
+agent_backend = "claude_cli"
+model = "claude-opus-4-6"
+
+[claude_cli]
+permission_mode = "plan"
+tools = ["Read", "Glob", "Grep"]
+```
+
+Then spawn it with `agent_type = "claude_worker"`.
 
 Notes:
 
-- feature flag controls rollout;
-- config stays explicit and bounded;
-- use named settings, not opaque booleans beyond enable/disable.
+- `reflective_window_agent_type` is the narrow switch for "Claude only for the
+  reflective sidecar";
+- a bad `reflective_window_agent_type` now emits a startup warning instead of
+  quietly degrading into a runtime-only no-op;
+- root `agent_backend = "claude_cli"` switches normal spawned subagents too;
+- `tools` is opt-in for external Claude agents; when omitted they stay
+  text-only;
+- `add_dirs` should stay narrow and absolute;
+- `claude-opus-4-6` is the downstream default fallback model when a Claude
+  backend is selected without an explicit Claude model.
 
 ## Failure modes to avoid
 

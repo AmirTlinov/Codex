@@ -127,6 +127,44 @@ async fn apply_role_returns_unavailable_for_invalid_user_role_toml() {
 }
 
 #[tokio::test]
+async fn apply_role_can_switch_to_claude_cli_backend() {
+    let (home, mut config) = test_config_with_cli_overrides(Vec::new()).await;
+    let before_layers = session_flags_layer_count(&config);
+    let role_path = write_role_config(
+        &home,
+        "claude-reflector.toml",
+        r#"
+agent_backend = "claude_cli"
+model = "claude-opus-4-6"
+
+[claude_cli]
+permission_mode = "plan"
+"#,
+    )
+    .await;
+    config.agent_roles.insert(
+        "claude_reflector".to_string(),
+        AgentRoleConfig {
+            description: Some("Use Claude for reflective work.".to_string()),
+            config_file: Some(role_path),
+            nickname_candidates: None,
+        },
+    );
+
+    apply_role_to_config(&mut config, Some("claude_reflector"))
+        .await
+        .expect("Claude reflector role should apply");
+
+    assert_eq!(config.agent_backend, crate::config::AgentBackend::ClaudeCli);
+    assert_eq!(config.model.as_deref(), Some("claude-opus-4-6"));
+    assert_eq!(
+        config.claude_cli.permission_mode,
+        crate::config::ClaudeCliPermissionMode::Plan
+    );
+    assert_eq!(session_flags_layer_count(&config), before_layers + 1);
+}
+
+#[tokio::test]
 async fn apply_role_ignores_agent_metadata_fields_in_user_role_file() {
     let (home, mut config) = test_config_with_cli_overrides(Vec::new()).await;
     let role_path = write_role_config(
