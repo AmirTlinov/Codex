@@ -66,6 +66,7 @@ pub use utils::path_utils;
 pub mod personality_migration;
 pub mod plugins;
 mod provider_auth;
+mod reflective;
 pub(crate) mod mentions {
     pub(crate) use crate::plugins::build_connector_slug_counts;
     pub(crate) use crate::plugins::build_skill_name_counts;

@@ -13,6 +13,8 @@ pub(crate) const TURN_ABORTED_OPEN_TAG: &str = "<turn_aborted>";
 pub(crate) const TURN_ABORTED_CLOSE_TAG: &str = "</turn_aborted>";
 pub(crate) const SUBAGENT_NOTIFICATION_OPEN_TAG: &str = "<subagent_notification>";
 pub(crate) const SUBAGENT_NOTIFICATION_CLOSE_TAG: &str = "</subagent_notification>";
+pub(crate) const REFLECTIVE_WINDOW_OPEN_TAG: &str = "<reflective_window>";
+pub(crate) const REFLECTIVE_WINDOW_CLOSE_TAG: &str = "</reflective_window>";
 
 pub(crate) const ENVIRONMENT_CONTEXT_FRAGMENT: ContextualUserFragmentDefinition =
     ContextualUserFragmentDefinition::new(
@@ -31,11 +33,14 @@ pub(crate) const SUBAGENT_NOTIFICATION_FRAGMENT: ContextualUserFragmentDefinitio
         SUBAGENT_NOTIFICATION_OPEN_TAG,
         SUBAGENT_NOTIFICATION_CLOSE_TAG,
     );
+pub(crate) const REFLECTIVE_WINDOW_FRAGMENT: ContextualUserFragmentDefinition =
+    ContextualUserFragmentDefinition::new(REFLECTIVE_WINDOW_OPEN_TAG, REFLECTIVE_WINDOW_CLOSE_TAG);
 
 const CONTEXTUAL_USER_FRAGMENTS: &[ContextualUserFragmentDefinition] = &[
     AGENTS_MD_FRAGMENT,
     ENVIRONMENT_CONTEXT_FRAGMENT,
     SKILL_FRAGMENT,
+    REFLECTIVE_WINDOW_FRAGMENT,
     USER_SHELL_COMMAND_FRAGMENT,
     TURN_ABORTED_FRAGMENT,
     SUBAGENT_NOTIFICATION_FRAGMENT,

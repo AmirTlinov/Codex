@@ -12,6 +12,7 @@ use crate::context_manager::ContextManager;
 use crate::protocol::RateLimitSnapshot;
 use crate::protocol::TokenUsage;
 use crate::protocol::TokenUsageInfo;
+use crate::reflective::ReflectiveWindowState;
 use crate::session_startup_prewarm::SessionStartupPrewarmHandle;
 use codex_protocol::protocol::TurnContextItem;
 use codex_utils_output_truncation::TruncationPolicy;
@@ -33,6 +34,9 @@ pub(crate) struct SessionState {
     pub(crate) active_connector_selection: HashSet<String>,
     pub(crate) pending_session_start_source: Option<codex_hooks::SessionStartSource>,
     granted_permissions: Option<PermissionProfile>,
+    reflective_window: Option<ReflectiveWindowState>,
+    history_epoch: u64,
+    latest_completed_regular_turn_id: Option<String>,
 }
 
 impl SessionState {
@@ -51,6 +55,9 @@ impl SessionState {
             active_connector_selection: HashSet::new(),
             pending_session_start_source: None,
             granted_permissions: None,
+            reflective_window: None,
+            history_epoch: 0,
+            latest_completed_regular_turn_id: None,
         }
     }
 
@@ -61,6 +68,7 @@ impl SessionState {
         I::Item: std::ops::Deref<Target = ResponseItem>,
     {
         self.history.record_items(items, policy);
+        self.history_epoch = self.history_epoch.saturating_add(1);
     }
 
     pub(crate) fn previous_turn_settings(&self) -> Option<PreviousTurnSettings> {
@@ -85,6 +93,9 @@ impl SessionState {
         self.history.replace(items);
         self.history
             .set_reference_context_item(reference_context_item);
+        self.reflective_window = None;
+        self.latest_completed_regular_turn_id = None;
+        self.history_epoch = self.history_epoch.saturating_add(1);
     }
 
     pub(crate) fn set_token_info(&mut self, info: Option<TokenUsageInfo>) {
@@ -213,6 +224,32 @@ impl SessionState {
 
     pub(crate) fn granted_permissions(&self) -> Option<PermissionProfile> {
         self.granted_permissions.clone()
+    }
+
+    pub(crate) fn reflective_window(&self) -> Option<ReflectiveWindowState> {
+        self.reflective_window.clone()
+    }
+
+    pub(crate) fn set_reflective_window(
+        &mut self,
+        reflective_window: Option<ReflectiveWindowState>,
+    ) {
+        self.reflective_window = reflective_window;
+    }
+
+    pub(crate) fn history_epoch(&self) -> u64 {
+        self.history_epoch
+    }
+
+    pub(crate) fn latest_completed_regular_turn_id(&self) -> Option<String> {
+        self.latest_completed_regular_turn_id.clone()
+    }
+
+    pub(crate) fn set_latest_completed_regular_turn_id(
+        &mut self,
+        latest_completed_regular_turn_id: Option<String>,
+    ) {
+        self.latest_completed_regular_turn_id = latest_completed_regular_turn_id;
     }
 }
 

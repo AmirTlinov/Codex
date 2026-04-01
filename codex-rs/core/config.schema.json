@@ -437,6 +437,9 @@
             "realtime_conversation": {
               "type": "boolean"
             },
+            "reflective_window": {
+              "type": "boolean"
+            },
             "remote_models": {
               "type": "boolean"
             },
@@ -2132,6 +2135,9 @@
           "type": "boolean"
         },
         "realtime_conversation": {
+          "type": "boolean"
+        },
+        "reflective_window": {
           "type": "boolean"
         },
         "remote_models": {

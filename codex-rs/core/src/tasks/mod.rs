@@ -334,17 +334,25 @@ impl Session {
         let mut should_clear_active_turn = false;
         let mut token_usage_at_turn_start = None;
         let mut turn_tool_calls = 0_u64;
+        let mut turn_total_tokens = 0_i64;
+        let mut completed_task_kind = None;
         let turn_state = {
             let mut active = self.active_turn.lock().await;
-            if let Some(at) = active.as_mut()
-                && at.remove_task(&turn_context.sub_id)
-            {
-                should_clear_active_turn = true;
-                let turn_state = Arc::clone(&at.turn_state);
-                if should_clear_active_turn {
-                    *active = None;
+            if let Some(at) = active.as_mut() {
+                let task_kind = at.tasks.get(&turn_context.sub_id).map(|task| task.kind);
+                if let Some(task_kind) = task_kind {
+                    completed_task_kind = Some(task_kind);
                 }
-                Some(turn_state)
+                if at.remove_task(&turn_context.sub_id) {
+                    should_clear_active_turn = true;
+                    let turn_state = Arc::clone(&at.turn_state);
+                    if should_clear_active_turn {
+                        *active = None;
+                    }
+                    Some(turn_state)
+                } else {
+                    None
+                }
             } else {
                 None
             }
@@ -422,6 +430,7 @@ impl Session {
                     - token_usage_at_turn_start.total_tokens)
                     .max(0),
             };
+            turn_total_tokens = turn_token_usage.total_tokens;
             self.services.session_telemetry.histogram(
                 TURN_TOKEN_USAGE_METRIC,
                 turn_token_usage.total_tokens,
@@ -448,11 +457,25 @@ impl Session {
                 &[("token_type", "reasoning_output"), tmp_mem],
             );
         }
+        let reflective_last_agent_message = last_agent_message.clone();
         let event = EventMsg::TurnComplete(TurnCompleteEvent {
             turn_id: turn_context.sub_id.clone(),
             last_agent_message,
         });
         self.send_event(turn_context.as_ref(), event).await;
+
+        if should_clear_active_turn && completed_task_kind == Some(TaskKind::Regular) {
+            self.set_reflective_window(/*reflective_window*/ None).await;
+            self.set_latest_completed_regular_turn_id(Some(turn_context.sub_id.clone()))
+                .await;
+            crate::reflective::spawn_after_regular_turn(
+                Arc::clone(self),
+                Arc::clone(&turn_context),
+                turn_tool_calls,
+                turn_total_tokens,
+                reflective_last_agent_message,
+            );
+        }
 
         if should_clear_active_turn {
             let session = Arc::clone(self);

@@ -1255,6 +1255,85 @@ async fn fork_startup_context_then_first_turn_diff_snapshot() -> anyhow::Result<
 }
 
 #[tokio::test]
+async fn build_sampling_request_input_includes_reflective_window_context_when_present() {
+    let (session, turn_context) = make_session_and_context().await;
+    session
+        .set_reflective_window(Some(crate::reflective::test_window("turn-1")))
+        .await;
+
+    let request =
+        build_sampling_request_input(&session, &turn_context.model_info.input_modalities).await;
+    assert!(
+        request.iter().any(|item| match item {
+            ResponseItem::Message { role, content, .. } if role == "user" => content
+                .iter()
+                .filter_map(|content| match content {
+                    ContentItem::InputText { text } => Some(text.as_str()),
+                    _ => None,
+                })
+                .any(|text| text.contains("<reflective_window>") && text.contains("turn-1")),
+            _ => false,
+        }),
+        "expected reflective window contextual user message in request: {request:?}"
+    );
+}
+
+#[tokio::test]
+async fn build_sampling_request_input_inserts_reflective_window_before_current_turn_items() {
+    let (session, turn_context) = make_session_and_context().await;
+    session
+        .replace_history(
+            vec![
+                assistant_message("previous answer"),
+                DeveloperInstructions::new(
+                    "<permissions instructions>\nctx\n</permissions instructions>",
+                )
+                .into(),
+                user_message("current request"),
+            ],
+            Some(turn_context.to_turn_context_item()),
+        )
+        .await;
+    session
+        .set_reflective_window(Some(crate::reflective::test_window("turn-1")))
+        .await;
+
+    let request =
+        build_sampling_request_input(&session, &turn_context.model_info.input_modalities).await;
+    let reflective_index = request
+        .iter()
+        .position(|item| match item {
+            ResponseItem::Message { role, content, .. } if role == "user" => content
+                .iter()
+                .filter_map(|content| match content {
+                    ContentItem::InputText { text } => Some(text.as_str()),
+                    _ => None,
+                })
+                .any(|text| text.contains("<reflective_window>")),
+            _ => false,
+        })
+        .expect("reflective window item");
+    let current_user_index = request
+        .iter()
+        .position(|item| match item {
+            ResponseItem::Message { role, content, .. } if role == "user" => content
+                .iter()
+                .filter_map(|content| match content {
+                    ContentItem::InputText { text } => Some(text.as_str()),
+                    _ => None,
+                })
+                .any(|text| text == "current request"),
+            _ => false,
+        })
+        .expect("current user item");
+
+    assert!(
+        reflective_index < current_user_index,
+        "expected reflective window before current-turn user input: {request:?}"
+    );
+}
+
+#[tokio::test]
 async fn record_initial_history_forked_hydrates_previous_turn_settings() {
     let (session, turn_context) = make_session_and_context().await;
     let previous_model = "forked-rollout-model";
@@ -4163,6 +4242,83 @@ async fn record_context_updates_and_set_reference_context_item_reinjects_full_co
 }
 
 #[tokio::test]
+async fn replace_history_clears_reflective_window_and_advances_history_epoch() {
+    let (session, turn_context) = make_session_and_context().await;
+    session
+        .set_reflective_window(Some(crate::reflective::test_window("turn-1")))
+        .await;
+    session
+        .set_latest_completed_regular_turn_id(Some("turn-1".to_string()))
+        .await;
+
+    let previous_epoch = session.history_epoch().await;
+    session
+        .replace_history(
+            vec![user_message("replacement history")],
+            Some(turn_context.to_turn_context_item()),
+        )
+        .await;
+
+    assert_eq!(session.history_epoch().await, previous_epoch + 1);
+    assert_eq!(session.reflective_window().await, None);
+    assert!(
+        !session
+            .can_apply_reflective_window(previous_epoch, "turn-1")
+            .await
+    );
+}
+
+#[tokio::test]
+async fn replace_compacted_history_preserves_reflective_window() {
+    let (session, turn_context) = make_session_and_context().await;
+    let reflective_window = crate::reflective::test_window("turn-1");
+    session
+        .set_reflective_window(Some(reflective_window.clone()))
+        .await;
+    session
+        .set_latest_completed_regular_turn_id(Some("turn-1".to_string()))
+        .await;
+
+    let previous_epoch = session.history_epoch().await;
+    session
+        .replace_compacted_history(
+            vec![assistant_message("compacted replacement")],
+            Some(turn_context.to_turn_context_item()),
+            CompactedItem {
+                message: "compacted".to_string(),
+                replacement_history: None,
+            },
+        )
+        .await;
+
+    assert_eq!(session.history_epoch().await, previous_epoch + 1);
+    assert_eq!(session.reflective_window().await, Some(reflective_window));
+    assert!(
+        !session
+            .can_apply_reflective_window(previous_epoch, "turn-1")
+            .await
+    );
+}
+
+#[tokio::test]
+async fn can_apply_reflective_window_requires_matching_epoch_and_latest_turn() {
+    let (session, turn_context) = make_session_and_context().await;
+    session
+        .set_latest_completed_regular_turn_id(Some("turn-1".to_string()))
+        .await;
+
+    let epoch = session.history_epoch().await;
+    assert!(session.can_apply_reflective_window(epoch, "turn-1").await);
+    assert!(!session.can_apply_reflective_window(epoch, "turn-2").await);
+
+    session
+        .record_into_history(&[assistant_message("later history")], &turn_context)
+        .await;
+
+    assert!(!session.can_apply_reflective_window(epoch, "turn-1").await);
+}
+
+#[tokio::test]
 async fn record_context_updates_and_set_reference_context_item_persists_baseline_without_emitting_diffs()
  {
     let (session, previous_context) = make_session_and_context().await;
@@ -4584,6 +4740,31 @@ async fn task_finish_emits_turn_item_lifecycle_for_leftover_pending_user_input()
             last_agent_message: None,
         }) if turn_id == tc.sub_id
     ));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn regular_task_finish_clears_stale_reflective_window_when_no_refresh_runs() {
+    let (sess, tc, _rx) = make_session_and_context_with_rx().await;
+    sess.set_reflective_window(Some(crate::reflective::test_window("turn-0")))
+        .await;
+
+    sess.spawn_task(
+        Arc::clone(&tc),
+        vec![UserInput::Text {
+            text: "hello".to_string(),
+            text_elements: Vec::new(),
+        }],
+        NeverEndingTask {
+            kind: TaskKind::Regular,
+            listen_to_cancellation_token: false,
+        },
+    )
+    .await;
+
+    sess.on_task_finished(Arc::clone(&tc), Some("done".to_string()))
+        .await;
+
+    assert_eq!(sess.reflective_window().await, None);
 }
 
 #[tokio::test]

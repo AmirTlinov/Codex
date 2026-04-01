@@ -97,6 +97,12 @@ fn guardian_approval_is_experimental_and_user_toggleable() {
 }
 
 #[test]
+fn reflective_window_is_under_development() {
+    assert_eq!(Feature::ReflectiveWindow.stage(), Stage::UnderDevelopment);
+    assert_eq!(Feature::ReflectiveWindow.default_enabled(), false);
+}
+
+#[test]
 fn request_permissions_is_under_development() {
     assert_eq!(
         Feature::ExecPermissionApprovals.stage(),

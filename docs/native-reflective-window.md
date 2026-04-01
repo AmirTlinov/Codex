@@ -50,16 +50,18 @@ These show three important facts:
 
 That is the right base for a reflective sidecar.
 
-### 2. Codex already has a model-visible contextual reinjection surface
+### 2. Codex already has a model-visible contextual-fragment surface
 
 The main thread already rebuilds model-visible contextual input in:
 
-- `codex-rs/core/src/codex.rs` -> `build_initial_context`
+- `codex-rs/core/src/codex.rs` -> request assembly in `run_turn`
 - `codex-rs/core/src/contextual_user_message.rs`
 - `codex-rs/core/src/environment_context.rs`
 
 So the reflective window should be injected as another bounded contextual
-fragment, not as random ad-hoc text appended all over the history.
+fragment, not as random ad-hoc text appended all over the history. In v1 that
+is best done as a request-local synthetic contextual fragment instead of a
+history-persisted reinjection item.
 
 ### 3. Compaction already separates durable baseline from raw history
 
@@ -250,8 +252,9 @@ ancestor of the active thread state, discard the report instead of applying it.
 
 ## 7. Model-visible injection
 
-When the window is non-empty, inject one bounded contextual fragment during
-`build_initial_context`.
+When the window is non-empty, inject one bounded contextual fragment into the
+next sampling request input, anchored at the start of the new turn rather than
+appended after the live user request.
 
 Recommended shape:
 
@@ -296,7 +299,11 @@ history surviving.
 For v1:
 
 - keep the authoritative window in `SessionState`;
-- re-inject it through `build_initial_context` after compaction.
+- preserve it across compaction in `SessionState`;
+- clear the live window when a new regular turn finishes, then let the next
+  reflective refresh repopulate it if still useful;
+- insert it again as a synthetic contextual fragment at the current-turn
+  boundary on later sampling requests.
 
 For rollback / undo:
 

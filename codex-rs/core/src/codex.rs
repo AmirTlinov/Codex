@@ -370,6 +370,7 @@ use codex_protocol::models::ContentItem;
 use codex_protocol::models::DeveloperInstructions;
 use codex_protocol::models::ResponseInputItem;
 use codex_protocol::models::ResponseItem;
+use codex_protocol::openai_models::InputModality;
 use codex_protocol::openai_models::ReasoningEffort as ReasoningEffortConfig;
 use codex_protocol::protocol::CodexErrorInfo;
 use codex_protocol::protocol::InitialHistory;
@@ -3492,7 +3493,17 @@ impl Session {
         reference_context_item: Option<TurnContextItem>,
         compacted_item: CompactedItem,
     ) {
+        let (reflective_window, latest_completed_regular_turn_id) = {
+            let state = self.state.lock().await;
+            (
+                state.reflective_window(),
+                state.latest_completed_regular_turn_id(),
+            )
+        };
         self.replace_history(items, reference_context_item.clone())
+            .await;
+        self.set_reflective_window(reflective_window).await;
+        self.set_latest_completed_regular_turn_id(latest_completed_regular_turn_id)
             .await;
 
         self.persist_rollout_items(&[RolloutItem::Compacted(compacted_item)])
@@ -3725,6 +3736,51 @@ impl Session {
     pub(crate) async fn clone_history(&self) -> ContextManager {
         let state = self.state.lock().await;
         state.clone_history()
+    }
+
+    pub(crate) async fn reflective_window(
+        &self,
+    ) -> Option<crate::reflective::ReflectiveWindowState> {
+        let state = self.state.lock().await;
+        state.reflective_window()
+    }
+
+    pub(crate) async fn set_reflective_window(
+        &self,
+        reflective_window: Option<crate::reflective::ReflectiveWindowState>,
+    ) {
+        let mut state = self.state.lock().await;
+        state.set_reflective_window(reflective_window);
+    }
+
+    pub(crate) async fn history_epoch(&self) -> u64 {
+        let state = self.state.lock().await;
+        state.history_epoch()
+    }
+
+    pub(crate) async fn set_latest_completed_regular_turn_id(
+        &self,
+        latest_completed_regular_turn_id: Option<String>,
+    ) {
+        let mut state = self.state.lock().await;
+        state.set_latest_completed_regular_turn_id(latest_completed_regular_turn_id);
+    }
+
+    pub(crate) async fn can_apply_reflective_window(
+        &self,
+        history_epoch: u64,
+        source_turn_id: &str,
+    ) -> bool {
+        if self.has_active_turn().await
+            || self.has_pending_input().await
+            || self.has_queued_response_items_for_next_turn().await
+        {
+            return false;
+        }
+
+        let state = self.state.lock().await;
+        state.history_epoch() == history_epoch
+            && state.latest_completed_regular_turn_id().as_deref() == Some(source_turn_id)
     }
 
     pub(crate) async fn reference_context_item(&self) -> Option<TurnContextItem> {
@@ -4108,6 +4164,10 @@ impl Session {
 
     pub(crate) async fn has_queued_response_items_for_next_turn(&self) -> bool {
         !self.idle_pending_input.lock().await.is_empty()
+    }
+
+    pub(crate) async fn has_active_turn(&self) -> bool {
+        self.active_turn.lock().await.is_some()
     }
 
     pub async fn has_pending_input(&self) -> bool {
@@ -5925,11 +5985,9 @@ pub(crate) async fn run_turn(
         }
 
         // Construct the input that we will send to the model.
-        let sampling_request_input: Vec<ResponseItem> = {
-            sess.clone_history()
-                .await
-                .for_prompt(&turn_context.model_info.input_modalities)
-        };
+        let sampling_request_input =
+            build_sampling_request_input(sess.as_ref(), &turn_context.model_info.input_modalities)
+                .await;
 
         let sampling_request_input_messages = sampling_request_input
             .iter()
@@ -6142,6 +6200,44 @@ pub(crate) async fn run_turn(
     }
 
     last_agent_message
+}
+
+pub(crate) async fn build_sampling_request_input(
+    session: &Session,
+    input_modalities: &[InputModality],
+) -> Vec<ResponseItem> {
+    let mut sampling_request_input = session.clone_history().await.for_prompt(input_modalities);
+    if let Some(reflective_window) = crate::reflective::current_prompt_item(session).await {
+        let insert_at = reflective_window_insert_index(&sampling_request_input);
+        sampling_request_input.insert(insert_at, reflective_window);
+    }
+    sampling_request_input
+}
+
+fn reflective_window_insert_index(items: &[ResponseItem]) -> usize {
+    items
+        .iter()
+        .rposition(is_reflective_window_turn_boundary_item)
+        .map_or(items.len(), |index| index + 1)
+}
+
+fn is_reflective_window_turn_boundary_item(item: &ResponseItem) -> bool {
+    match item {
+        ResponseItem::Message { role, .. } => role == "assistant",
+        ResponseItem::Reasoning { .. }
+        | ResponseItem::LocalShellCall { .. }
+        | ResponseItem::FunctionCall { .. }
+        | ResponseItem::ToolSearchCall { .. }
+        | ResponseItem::FunctionCallOutput { .. }
+        | ResponseItem::CustomToolCall { .. }
+        | ResponseItem::CustomToolCallOutput { .. }
+        | ResponseItem::ToolSearchOutput { .. }
+        | ResponseItem::WebSearchCall { .. }
+        | ResponseItem::ImageGenerationCall { .. }
+        | ResponseItem::GhostSnapshot { .. }
+        | ResponseItem::Compaction { .. } => true,
+        ResponseItem::Other => false,
+    }
 }
 
 async fn run_pre_sampling_compact(

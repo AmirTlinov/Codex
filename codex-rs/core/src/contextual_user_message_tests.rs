@@ -27,6 +27,13 @@ fn detects_subagent_notification_fragment_case_insensitively() {
 }
 
 #[test]
+fn detects_reflective_window_fragment() {
+    assert!(is_contextual_user_fragment(&ContentItem::InputText {
+        text: "<reflective_window>\n<note>watch this edge</note>\n</reflective_window>".to_string(),
+    }));
+}
+
+#[test]
 fn ignores_regular_user_text() {
     assert!(!is_contextual_user_fragment(&ContentItem::InputText {
         text: "hello".to_string(),
@@ -50,6 +57,10 @@ fn classifies_memory_excluded_fragments() {
         ),
         (
             "<subagent_notification>{\"agent_id\":\"a\",\"status\":\"completed\"}</subagent_notification>",
+            false,
+        ),
+        (
+            "<reflective_window>\n<note>watch this edge</note>\n</reflective_window>",
             false,
         ),
     ];
