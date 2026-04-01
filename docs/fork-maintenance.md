@@ -16,11 +16,16 @@ will eventually become conflict-heavy.
 Use this split:
 
 1. `main` is a clean mirror branch. Do not put custom commits there.
-2. Create custom branches from `upstream/main`, for example:
+2. Keep `amir/main` as the downstream integration branch.
+3. Create custom branches from `amir/main` when they depend on existing fork
+   customizations, for example:
    - `amir/mcp-surface`
    - `amir/tui-tweaks`
    - `amir/custom-runtime`
-3. Rebase those custom branches onto fresh `upstream/main` as upstream evolves.
+4. If a branch is intentionally standalone and does not depend on current fork
+   customizations, branching directly from `upstream/main` is also acceptable.
+5. Rebase `amir/main` onto fresh `upstream/main` as upstream evolves, then
+   rebase dependent `amir/*` branches onto the refreshed `amir/main`.
 
 If you need one long-lived downstream line that assembles several custom changes,
 create a separate integration branch such as `amir/main` or `custom/main` and

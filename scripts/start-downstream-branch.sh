@@ -47,7 +47,11 @@ echo "==> fetching origin/amir/main"
 git fetch origin amir/main --prune
 
 echo "==> refreshing local amir/main"
-git switch amir/main >/dev/null
+if git show-ref --verify --quiet refs/heads/amir/main; then
+  git switch amir/main >/dev/null
+else
+  git switch -c amir/main --track refs/remotes/origin/amir/main >/dev/null
+fi
 git merge --ff-only refs/remotes/origin/amir/main
 
 if git show-ref --verify --quiet "refs/heads/$branch_name"; then
