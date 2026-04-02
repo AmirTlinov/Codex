@@ -134,8 +134,10 @@ What it does:
 - makes `claudex` prefer the newest local `target/debug/codex` over release
   unless `CLAUDEX_PROFILE=release` is set;
 - gives `claudex` its own `CODEX_HOME` at `~/.claudex` by default so config,
-  auth, memories, logs, and sessions stay separate from stock `codex`
-  (override with `CLAUDEX_HOME`);
+  auth, memories, logs, and sessions stay separate from stock `codex`; on a
+  fresh or empty target home it first copies the current `~/.codex` there
+  without touching the source home (override destination with `CLAUDEX_HOME`
+  and source with `CLAUDEX_SOURCE_HOME`);
 - starts this fork with downstream Claude defaults for the main session,
   subagents, and a Claude-first model picker that still exposes paired OpenAI
   GPT entries when the OpenAI provider is available.

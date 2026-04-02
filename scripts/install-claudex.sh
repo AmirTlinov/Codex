@@ -18,6 +18,8 @@ What it does:
 Environment:
   CLAUDEX_INSTALL_DIR   Override the target bin directory (default: ~/.local/bin)
   CLAUDEX_HOME          Override the Codex home for claudex (default: ~/.claudex)
+  CLAUDEX_SOURCE_HOME   Override the source home copied into a fresh claudex home
+                        (default: ~/.codex)
   CLAUDEX_PROFILE       `auto` (default), `release`, or `debug`
 USAGE
 }
@@ -61,8 +63,44 @@ release_binary="$release_binary"
 debug_binary="$debug_binary"
 profile="\${CLAUDEX_PROFILE:-auto}"
 claudex_home="\${CLAUDEX_HOME:-$HOME/.claudex}"
+source_home="\${CLAUDEX_SOURCE_HOME:-$HOME/.codex}"
 
-mkdir -p "\$claudex_home"
+dir_has_entries() {
+  local dir="\$1"
+  [[ -d "\$dir" ]] || return 1
+  find "\$dir" -mindepth 1 -maxdepth 1 -print -quit | grep -q .
+}
+
+canonicalize_path() {
+  realpath -m -- "\$1"
+}
+
+seed_home_if_needed() {
+  local canonical_claudex_home canonical_source_home
+  if dir_has_entries "\$claudex_home"; then
+    return
+  fi
+
+  mkdir -p "\$claudex_home"
+
+  canonical_claudex_home="\$(canonicalize_path "\$claudex_home")"
+  canonical_source_home="\$(canonicalize_path "\$source_home")"
+
+  if [[ "\$canonical_claudex_home" == "\$canonical_source_home" ]]; then
+    return
+  fi
+
+  if [[ "\$canonical_claudex_home" == "\$canonical_source_home"/* ]]; then
+    echo "CLAUDEX_HOME must not be nested under CLAUDEX_SOURCE_HOME when seeding a fresh home" >&2
+    exit 1
+  fi
+
+  if dir_has_entries "\$source_home"; then
+    cp -a "\$source_home"/. "\$claudex_home"/
+  fi
+}
+
+seed_home_if_needed
 export CODEX_HOME="\$claudex_home"
 
 choose_binary() {

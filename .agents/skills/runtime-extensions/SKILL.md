@@ -34,7 +34,9 @@ description: Downstream workflow for config, MCP, plugin, skill, AGENTS, and wra
   like `scripts/install-claudex.sh` over patching core code or replacing the
   upstream `codex` command. Keep `claudex` runtime isolation there too: the
   installed wrapper should own its separate `CODEX_HOME` (`~/.claudex` by
-  default, override with `CLAUDEX_HOME`).
+  default, override with `CLAUDEX_HOME`) and seed a fresh or empty target by
+  copying `~/.codex` without mutating the source home (override the copy source
+  with `CLAUDEX_SOURCE_HOME`).
 - If `scripts/install-claudex.sh` changes behavior, keep the wrapper, `AGENTS.md`,
   and `docs/fork-maintenance.md` / `docs/claudex.md` aligned in the same slice.
 - If a behavior is machine-local rather than repo-owned, keep it in
