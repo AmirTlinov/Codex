@@ -7,7 +7,10 @@ Claude-backed Codex session.
 
 The installer at `scripts/install-claudex.sh` builds this clone's release
 binary and installs a machine-local wrapper that starts Codex with downstream
-Claude defaults:
+Claude defaults. The wrapper picks the newest local binary automatically: it
+uses `target/debug/codex` when that build is newer than release, otherwise it
+uses `target/release/codex`. You can force a choice with
+`CLAUDEX_PROFILE=debug|release`.
 
 - `model_provider=claude_cli`
 - `model=claude-opus-4-6`

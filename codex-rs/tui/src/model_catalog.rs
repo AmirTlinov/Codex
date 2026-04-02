@@ -4,24 +4,65 @@ use codex_protocol::config_types::CollaborationModeMask;
 use codex_protocol::openai_models::ModelPreset;
 use std::convert::Infallible;
 
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct ModelCatalogEntry {
+    pub(crate) provider_id: String,
+    pub(crate) provider_name: String,
+    pub(crate) preset: ModelPreset,
+}
+
+impl From<ModelPreset> for ModelCatalogEntry {
+    fn from(preset: ModelPreset) -> Self {
+        Self {
+            provider_id: String::new(),
+            provider_name: String::new(),
+            preset,
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub(crate) struct ModelCatalog {
-    models: Vec<ModelPreset>,
+    models: Vec<ModelCatalogEntry>,
     collaboration_modes_config: CollaborationModesConfig,
 }
 
 impl ModelCatalog {
-    pub(crate) fn new(
-        models: Vec<ModelPreset>,
+    pub(crate) fn new<T>(
+        models: Vec<T>,
         collaboration_modes_config: CollaborationModesConfig,
-    ) -> Self {
+    ) -> Self
+    where
+        T: Into<ModelCatalogEntry>,
+    {
         Self {
-            models,
+            models: models.into_iter().map(Into::into).collect(),
             collaboration_modes_config,
         }
     }
 
-    pub(crate) fn try_list_models(&self) -> Result<Vec<ModelPreset>, Infallible> {
+    pub(crate) fn try_list_models_for_provider(
+        &self,
+        provider_id: &str,
+    ) -> Result<Vec<ModelPreset>, Infallible> {
+        let models = self
+            .models
+            .iter()
+            .filter(|entry| entry.provider_id == provider_id)
+            .map(|entry| entry.preset.clone())
+            .collect::<Vec<_>>();
+        if models.is_empty() {
+            return Ok(self
+                .models
+                .iter()
+                .filter(|entry| entry.provider_id.is_empty())
+                .map(|entry| entry.preset.clone())
+                .collect());
+        }
+        Ok(models)
+    }
+
+    pub(crate) fn try_list_picker_models(&self) -> Result<Vec<ModelCatalogEntry>, Infallible> {
         Ok(self.models.clone())
     }
 
@@ -40,7 +81,7 @@ mod tests {
         let collaboration_modes_config = CollaborationModesConfig {
             default_mode_request_user_input: true,
         };
-        let catalog = ModelCatalog::new(Vec::new(), collaboration_modes_config);
+        let catalog = ModelCatalog::new(Vec::<ModelPreset>::new(), collaboration_modes_config);
 
         assert_eq!(
             catalog.list_collaboration_modes(),

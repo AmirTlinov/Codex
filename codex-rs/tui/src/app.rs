@@ -918,6 +918,7 @@ async fn handle_model_migration_prompt_if_needed(
                 app_event_tx.send(AppEvent::UpdateReasoningEffort(mapped_effort));
                 app_event_tx.send(AppEvent::PersistModelSelection {
                     model: target_model.clone(),
+                    provider_id: config.model_provider_id.clone(),
                     effort: mapped_effort,
                 });
             }
@@ -1393,6 +1394,7 @@ impl App {
                 sandbox_policy_override,
                 /*windows_sandbox_level*/ None,
                 /*model*/ None,
+                /*model_provider*/ None,
                 /*effort*/ None,
                 /*summary*/ None,
                 /*service_tier*/ None,
@@ -1421,6 +1423,7 @@ impl App {
                         #[cfg(target_os = "windows")]
                         Some(windows_sandbox_level),
                         /*model*/ None,
+                        /*model_provider*/ None,
                         /*effort*/ None,
                         /*summary*/ None,
                         /*service_tier*/ None,
@@ -2257,6 +2260,7 @@ impl App {
                                 .unwrap_or(self.chat_widget.config_ref().approvals_reviewer),
                             sandbox_policy.clone(),
                             model.to_string(),
+                            self.chat_widget.current_model_provider_id().to_string(),
                             effort,
                             *summary,
                             *service_tier,
@@ -3545,7 +3549,7 @@ impl App {
             model = updated_model;
         }
         let model_catalog = Arc::new(ModelCatalog::new(
-            available_models.clone(),
+            bootstrap.picker_models.clone(),
             CollaborationModesConfig {
                 default_mode_request_user_input: config
                     .features
@@ -4404,6 +4408,9 @@ impl App {
             AppEvent::UpdateModel(model) => {
                 self.chat_widget.set_model(&model);
             }
+            AppEvent::ApplyModelProvider { model, provider_id } => {
+                self.apply_model_provider(model, provider_id);
+            }
             AppEvent::UpdateCollaborationMode(mask) => {
                 self.chat_widget.set_collaboration_mask(mask);
             }
@@ -4416,9 +4423,13 @@ impl App {
             AppEvent::OpenReasoningPopup { model } => {
                 self.chat_widget.open_reasoning_popup(model);
             }
-            AppEvent::OpenPlanReasoningScopePrompt { model, effort } => {
+            AppEvent::OpenPlanReasoningScopePrompt {
+                model,
+                provider_id,
+                effort,
+            } => {
                 self.chat_widget
-                    .open_plan_reasoning_scope_prompt(model, effort);
+                    .open_plan_reasoning_scope_prompt(model, provider_id, effort);
             }
             AppEvent::OpenAllModelsPopup { models } => {
                 self.chat_widget.open_all_models_popup(models);
@@ -4726,6 +4737,7 @@ impl App {
                                         #[cfg(target_os = "windows")]
                                         Some(windows_sandbox_level),
                                         /*model*/ None,
+                                        /*model_provider*/ None,
                                         /*effort*/ None,
                                         /*summary*/ None,
                                         /*service_tier*/ None,
@@ -4752,6 +4764,7 @@ impl App {
                                         #[cfg(target_os = "windows")]
                                         Some(windows_sandbox_level),
                                         /*model*/ None,
+                                        /*model_provider*/ None,
                                         /*effort*/ None,
                                         /*summary*/ None,
                                         /*service_tier*/ None,
@@ -4791,11 +4804,23 @@ impl App {
                     let _ = (preset, mode);
                 }
             }
-            AppEvent::PersistModelSelection { model, effort } => {
+            AppEvent::PersistModelSelection {
+                model,
+                provider_id,
+                effort,
+            } => {
                 let profile = self.active_profile.as_deref();
                 match ConfigEditsBuilder::new(&self.config.codex_home)
                     .with_profile(profile)
-                    .set_model(Some(model.as_str()), effort)
+                    .with_edits(vec![
+                        ConfigEdit::SetModelProvider {
+                            provider_id: Some(provider_id.clone()),
+                        },
+                        ConfigEdit::SetModel {
+                            model: Some(model.clone()),
+                            effort,
+                        },
+                    ])
                     .apply()
                     .await
                 {
@@ -4803,8 +4828,14 @@ impl App {
                         let effort_label = effort
                             .map(|selected_effort| selected_effort.to_string())
                             .unwrap_or_else(|| "default".to_string());
-                        tracing::info!("Selected model: {model}, Selected effort: {effort_label}");
-                        let mut message = format!("Model changed to {model}");
+                        tracing::info!(
+                            "Selected provider: {provider_id}, Selected model: {model}, Selected effort: {effort_label}"
+                        );
+                        let mut message = if provider_id == self.config.model_provider_id {
+                            format!("Model changed to {model}")
+                        } else {
+                            format!("Model changed to {model} via {provider_id}")
+                        };
                         if let Some(label) = Self::reasoning_label_for(&model, effort) {
                             message.push(' ');
                             message.push_str(label);
@@ -5672,6 +5703,27 @@ impl App {
 
     pub(crate) fn token_usage(&self) -> codex_protocol::protocol::TokenUsage {
         self.chat_widget.token_usage()
+    }
+
+    fn apply_model_provider(&mut self, model: String, provider_id: String) {
+        let Some(provider) = self
+            .config
+            .model_providers
+            .get(provider_id.as_str())
+            .cloned()
+        else {
+            self.chat_widget.add_error_message(format!(
+                "Unknown model provider `{provider_id}`; the selection was not applied."
+            ));
+            return;
+        };
+
+        self.config.model = Some(model.clone());
+        self.config.model_provider_id = provider_id.clone();
+        self.config.model_provider = provider.clone();
+        self.chat_widget
+            .set_model_provider(provider_id.as_str(), provider);
+        self.chat_widget.set_model(&model);
     }
 
     fn on_update_reasoning_effort(&mut self, effort: Option<ReasoningEffortConfig>) {
@@ -7708,6 +7760,7 @@ mod tests {
                 sandbox_policy: Some(guardian_approvals.sandbox_policy.clone()),
                 windows_sandbox_level: None,
                 model: None,
+                model_provider: None,
                 effort: None,
                 summary: None,
                 service_tier: None,
@@ -7799,6 +7852,7 @@ mod tests {
                 sandbox_policy: None,
                 windows_sandbox_level: None,
                 model: None,
+                model_provider: None,
                 effort: None,
                 summary: None,
                 service_tier: None,
@@ -7878,6 +7932,7 @@ mod tests {
                 sandbox_policy: Some(guardian_approvals.sandbox_policy.clone()),
                 windows_sandbox_level: None,
                 model: None,
+                model_provider: None,
                 effort: None,
                 summary: None,
                 service_tier: None,
@@ -7935,6 +7990,7 @@ mod tests {
                 sandbox_policy: None,
                 windows_sandbox_level: None,
                 model: None,
+                model_provider: None,
                 effort: None,
                 summary: None,
                 service_tier: None,
@@ -7994,6 +8050,7 @@ mod tests {
                 sandbox_policy: Some(guardian_approvals.sandbox_policy.clone()),
                 windows_sandbox_level: None,
                 model: None,
+                model_provider: None,
                 effort: None,
                 summary: None,
                 service_tier: None,
@@ -8081,6 +8138,7 @@ guardian_approval = true
                 sandbox_policy: None,
                 windows_sandbox_level: None,
                 model: None,
+                model_provider: None,
                 effort: None,
                 summary: None,
                 service_tier: None,

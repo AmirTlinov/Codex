@@ -32,6 +32,25 @@ model_reasoning_effort = "high"
 }
 
 #[test]
+fn blocking_set_model_provider_top_level() {
+    let tmp = tempdir().expect("tmpdir");
+    let codex_home = tmp.path();
+
+    apply_blocking(
+        codex_home,
+        /*profile*/ None,
+        &[ConfigEdit::SetModelProvider {
+            provider_id: Some("claude_cli".to_string()),
+        }],
+    )
+    .expect("persist");
+
+    let contents = std::fs::read_to_string(codex_home.join(CONFIG_TOML_FILE)).expect("read config");
+    let expected = "model_provider = \"claude_cli\"\n";
+    assert_eq!(contents, expected);
+}
+
+#[test]
 fn builder_with_edits_applies_custom_paths() {
     let tmp = tempdir().expect("tmpdir");
     let codex_home = tmp.path();

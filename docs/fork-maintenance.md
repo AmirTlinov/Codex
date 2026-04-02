@@ -131,6 +131,8 @@ What it does:
 - installs `~/.local/bin/claudex` by default;
 - keeps `codex` untouched, so the stock command and the downstream fork can
   coexist;
+- makes `claudex` prefer the newest local `target/debug/codex` over release
+  unless `CLAUDEX_PROFILE=release` is set;
 - starts this fork with downstream Claude defaults for the main session,
   model picker, and subagents.
 

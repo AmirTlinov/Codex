@@ -1681,6 +1681,98 @@ async fn claude_model_picker_popup_snapshot() {
 }
 
 #[tokio::test]
+async fn mixed_provider_model_picker_popup_snapshot() {
+    let (mut chat, _rx, _op_rx) = make_chatwidget_manual(Some("claude-opus-4-6")).await;
+    chat.set_model_provider("claude_cli", codex_core::create_claude_cli_provider());
+    chat.set_model("claude-opus-4-6");
+
+    let preset = |model: &str,
+                  display_name: &str,
+                  description: &str,
+                  default_effort: ReasoningEffortConfig| {
+        ModelPreset {
+            id: model.to_string(),
+            model: model.to_string(),
+            display_name: display_name.to_string(),
+            description: description.to_string(),
+            default_reasoning_effort: default_effort,
+            supported_reasoning_efforts: vec![
+                ReasoningEffortPreset {
+                    effort: ReasoningEffortConfig::Low,
+                    description: "Fast responses with lighter reasoning".to_string(),
+                },
+                ReasoningEffortPreset {
+                    effort: ReasoningEffortConfig::Medium,
+                    description: "Balances speed and reasoning depth for everyday tasks"
+                        .to_string(),
+                },
+                ReasoningEffortPreset {
+                    effort: ReasoningEffortConfig::High,
+                    description: "Greater reasoning depth for complex problems".to_string(),
+                },
+                ReasoningEffortPreset {
+                    effort: ReasoningEffortConfig::XHigh,
+                    description: "Extra high reasoning depth for complex problems".to_string(),
+                },
+            ],
+            supports_personality: false,
+            is_default: false,
+            upgrade: None,
+            show_in_picker: true,
+            availability_nux: None,
+            supported_in_api: true,
+            input_modalities: vec![codex_protocol::openai_models::InputModality::Text],
+        }
+    };
+
+    chat.open_all_models_popup(vec![
+        crate::model_catalog::ModelCatalogEntry {
+            provider_id: "claude_cli".to_string(),
+            provider_name: "Claude CLI".to_string(),
+            preset: preset(
+                "claude-opus-4-6",
+                "Claude Opus 4.6",
+                "Claude flagship model for the deepest reflective and coding work.",
+                ReasoningEffortConfig::High,
+            ),
+        },
+        crate::model_catalog::ModelCatalogEntry {
+            provider_id: "claude_cli".to_string(),
+            provider_name: "Claude CLI".to_string(),
+            preset: preset(
+                "claude-sonnet-4-6",
+                "Claude Sonnet 4.6",
+                "Balanced Claude model for everyday coding and long-running task execution.",
+                ReasoningEffortConfig::Medium,
+            ),
+        },
+        crate::model_catalog::ModelCatalogEntry {
+            provider_id: "openai".to_string(),
+            provider_name: "OpenAI".to_string(),
+            preset: preset(
+                "gpt-5.4",
+                "gpt-5.4",
+                "Latest frontier agentic coding model.",
+                ReasoningEffortConfig::Medium,
+            ),
+        },
+        crate::model_catalog::ModelCatalogEntry {
+            provider_id: "openai".to_string(),
+            provider_name: "OpenAI".to_string(),
+            preset: preset(
+                "gpt-5.4-mini",
+                "gpt-5.4-mini",
+                "Smaller frontier agentic coding model.",
+                ReasoningEffortConfig::Medium,
+            ),
+        },
+    ]);
+
+    let popup = render_bottom_popup(&chat, /*width*/ 80);
+    assert_chatwidget_snapshot!("mixed_provider_model_picker_popup", popup);
+}
+
+#[tokio::test]
 async fn server_overloaded_error_does_not_switch_models() {
     let (mut chat, mut rx, mut op_rx) = make_chatwidget_manual(Some("gpt-5.2-codex")).await;
     chat.set_model("gpt-5.2-codex");

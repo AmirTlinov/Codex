@@ -682,6 +682,7 @@ async fn run_exec_session(args: ExecRunArgs) -> anyhow::Result<()> {
                         approvals_reviewer: None,
                         sandbox_policy: Some(default_sandbox_policy.clone().into()),
                         model: None,
+                        model_provider: None,
                         service_tier: None,
                         effort: default_effort,
                         summary: None,

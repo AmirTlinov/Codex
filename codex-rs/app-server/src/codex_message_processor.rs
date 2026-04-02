@@ -10,6 +10,8 @@ use crate::fuzzy_file_search::FuzzyFileSearchSession;
 use crate::fuzzy_file_search::run_fuzzy_file_search;
 use crate::fuzzy_file_search::start_fuzzy_file_search_session;
 use crate::models::supported_models;
+use crate::models::supported_models_for_providers;
+use crate::models::validate_model_selection;
 use crate::outgoing_message::ConnectionId;
 use crate::outgoing_message::ConnectionRequestId;
 use crate::outgoing_message::OutgoingMessageSender;
@@ -845,11 +847,12 @@ impl CodexMessageProcessor {
             }
             ClientRequest::ModelList { request_id, params } => {
                 let outgoing = self.outgoing.clone();
+                let config = self.config.clone();
                 let thread_manager = self.thread_manager.clone();
                 let request_id = to_connection_request_id(request_id);
 
                 tokio::spawn(async move {
-                    Self::list_models(outgoing, thread_manager, request_id, params).await;
+                    Self::list_models(outgoing, config, thread_manager, request_id, params).await;
                 });
             }
             ClientRequest::ExperimentalFeatureList { request_id, params } => {
@@ -4656,6 +4659,7 @@ impl CodexMessageProcessor {
 
     async fn list_models(
         outgoing: Arc<OutgoingMessageSender>,
+        config: Arc<Config>,
         thread_manager: Arc<ThreadManager>,
         request_id: ConnectionRequestId,
         params: ModelListParams,
@@ -4664,8 +4668,48 @@ impl CodexMessageProcessor {
             limit,
             cursor,
             include_hidden,
+            providers,
         } = params;
-        let models = supported_models(thread_manager, include_hidden.unwrap_or(false)).await;
+        let models = if providers.is_some() {
+            match supported_models_for_providers(
+                config.as_ref(),
+                thread_manager,
+                include_hidden.unwrap_or(false),
+                providers.as_deref(),
+            )
+            .await
+            {
+                Ok(models) => models,
+                Err(message) => {
+                    let error = JSONRPCErrorError {
+                        code: INVALID_PARAMS_ERROR_CODE,
+                        message,
+                        data: None,
+                    };
+                    outgoing.send_error(request_id, error).await;
+                    return;
+                }
+            }
+        } else {
+            match supported_models(
+                config.as_ref(),
+                thread_manager,
+                include_hidden.unwrap_or(false),
+            )
+            .await
+            {
+                Ok(models) => models,
+                Err(message) => {
+                    let error = JSONRPCErrorError {
+                        code: INVALID_PARAMS_ERROR_CODE,
+                        message,
+                        data: None,
+                    };
+                    outgoing.send_error(request_id, error).await;
+                    return;
+                }
+            }
+        };
         let total = models.len();
 
         if total == 0 {
@@ -6346,6 +6390,34 @@ impl CodexMessageProcessor {
             return;
         }
 
+        let config_snapshot = thread.config_snapshot().await;
+        if let Some(selected_provider) = params.model_provider.as_deref() {
+            let selected_model = params
+                .model
+                .as_deref()
+                .unwrap_or(config_snapshot.model.as_str());
+            if let Err(message) = validate_model_selection(
+                self.config.as_ref(),
+                Arc::clone(&self.thread_manager),
+                selected_provider,
+                selected_model,
+            )
+            .await
+            {
+                self.outgoing
+                    .send_error(
+                        request_id,
+                        JSONRPCErrorError {
+                            code: INVALID_PARAMS_ERROR_CODE,
+                            message,
+                            data: None,
+                        },
+                    )
+                    .await;
+                return;
+            }
+        }
+
         let collaboration_modes_config = CollaborationModesConfig {
             default_mode_request_user_input: thread.enabled(Feature::DefaultModeRequestUserInput),
         };
@@ -6364,6 +6436,7 @@ impl CodexMessageProcessor {
             || params.approval_policy.is_some()
             || params.approvals_reviewer.is_some()
             || params.sandbox_policy.is_some()
+            || params.model_provider.is_some()
             || params.model.is_some()
             || params.service_tier.is_some()
             || params.effort.is_some()
@@ -6385,6 +6458,7 @@ impl CodexMessageProcessor {
                             .map(codex_app_server_protocol::ApprovalsReviewer::to_core),
                         sandbox_policy: params.sandbox_policy.map(|p| p.to_core()),
                         windows_sandbox_level: None,
+                        model_provider: params.model_provider,
                         model: params.model,
                         effort: params.effort.map(Some),
                         summary: params.summary,

@@ -468,6 +468,7 @@ async fn turn_start_emits_notifications_and_accepts_model_override() -> Result<(
                 text_elements: Vec::new(),
             }],
             model: Some("mock-model-override".to_string()),
+            model_provider: None,
             ..Default::default()
         })
         .await?;
@@ -562,6 +563,7 @@ async fn turn_start_accepts_collaboration_mode_override_v2() -> Result<()> {
                 text_elements: Vec::new(),
             }],
             model: Some("mock-model-override".to_string()),
+            model_provider: None,
             effort: Some(ReasoningEffort::Low),
             summary: Some(ReasoningSummary::Auto),
             output_schema: None,
@@ -649,6 +651,7 @@ async fn turn_start_uses_thread_feature_overrides_for_collaboration_mode_instruc
                 text_elements: Vec::new(),
             }],
             model: Some("mock-model-override".to_string()),
+            model_provider: None,
             effort: Some(ReasoningEffort::Low),
             summary: Some(ReasoningSummary::Auto),
             output_schema: None,
@@ -1149,6 +1152,7 @@ async fn turn_start_exec_approval_toggle_v2() -> Result<()> {
             approval_policy: Some(codex_app_server_protocol::AskForApproval::Never),
             sandbox_policy: Some(codex_app_server_protocol::SandboxPolicy::DangerFullAccess),
             model: Some("mock-model".to_string()),
+            model_provider: None,
             effort: Some(ReasoningEffort::Medium),
             summary: Some(ReasoningSummary::Auto),
             ..Default::default()
@@ -1388,6 +1392,7 @@ async fn turn_start_updates_sandbox_and_cwd_between_turns_v2() -> Result<()> {
                 exclude_slash_tmp: false,
             }),
             model: Some("mock-model".to_string()),
+            model_provider: None,
             effort: Some(ReasoningEffort::Medium),
             summary: Some(ReasoningSummary::Auto),
             service_tier: None,
@@ -1421,6 +1426,7 @@ async fn turn_start_updates_sandbox_and_cwd_between_turns_v2() -> Result<()> {
             approvals_reviewer: None,
             sandbox_policy: Some(codex_app_server_protocol::SandboxPolicy::DangerFullAccess),
             model: Some("mock-model".to_string()),
+            model_provider: None,
             effort: Some(ReasoningEffort::Medium),
             summary: Some(ReasoningSummary::Auto),
             service_tier: None,
@@ -2524,6 +2530,149 @@ async fn command_execution_notifications_include_process_id() -> Result<()> {
 }
 
 // Helper to create a config.toml pointing at the mock model server.
+#[tokio::test]
+async fn turn_start_with_model_provider_override_routes_request_to_selected_provider() -> Result<()>
+{
+    let responses = vec![create_final_assistant_message_sse_response("Done")?];
+    let server = create_mock_responses_server_sequence_unchecked(responses).await;
+
+    let codex_home = TempDir::new()?;
+    std::fs::write(
+        codex_home.path().join("config.toml"),
+        format!(
+            r#"
+model = "mock-model"
+approval_policy = "never"
+sandbox_mode = "read-only"
+model_provider = "mock_provider"
+openai_base_url = "{}/openai/v1"
+
+[model_providers.mock_provider]
+name = "Mock provider for test"
+base_url = "{}/mock/v1"
+wire_api = "responses"
+request_max_retries = 0
+stream_max_retries = 0
+"#,
+            server.uri(),
+            server.uri(),
+        ),
+    )?;
+
+    let mut mcp = McpProcess::new(codex_home.path()).await?;
+    timeout(DEFAULT_READ_TIMEOUT, mcp.initialize()).await??;
+
+    let thread_req = mcp
+        .send_thread_start_request(ThreadStartParams {
+            model: Some("mock-model".to_string()),
+            ..Default::default()
+        })
+        .await?;
+    let thread_resp: JSONRPCResponse = timeout(
+        DEFAULT_READ_TIMEOUT,
+        mcp.read_stream_until_response_message(RequestId::Integer(thread_req)),
+    )
+    .await??;
+    let ThreadStartResponse { thread, .. } = to_response::<ThreadStartResponse>(thread_resp)?;
+
+    let turn_req = mcp
+        .send_turn_start_request(TurnStartParams {
+            thread_id: thread.id,
+            input: vec![V2UserInput::Text {
+                text: "Hello".to_string(),
+                text_elements: Vec::new(),
+            }],
+            model: Some("gpt-5.4".to_string()),
+            model_provider: Some("openai".to_string()),
+            ..Default::default()
+        })
+        .await?;
+    timeout(
+        DEFAULT_READ_TIMEOUT,
+        mcp.read_stream_until_response_message(RequestId::Integer(turn_req)),
+    )
+    .await??;
+    timeout(
+        DEFAULT_READ_TIMEOUT,
+        mcp.read_stream_until_notification_message("turn/completed"),
+    )
+    .await??;
+
+    let requests = server
+        .received_requests()
+        .await
+        .expect("failed to fetch received requests");
+    let request = requests
+        .last()
+        .expect("expected at least one responses request");
+    assert_eq!(request.url.path(), "/openai/v1/responses");
+    assert!(body_contains(request, "gpt-5.4"));
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn turn_start_rejects_model_provider_pair_when_model_is_not_available() -> Result<()> {
+    let codex_home = TempDir::new()?;
+    std::fs::write(
+        codex_home.path().join("config.toml"),
+        r#"
+model = "claude-opus-4-6"
+approval_policy = "never"
+sandbox_mode = "read-only"
+model_provider = "claude_cli"
+"#,
+    )?;
+
+    let mut mcp = McpProcess::new(codex_home.path()).await?;
+    timeout(DEFAULT_READ_TIMEOUT, mcp.initialize()).await??;
+
+    let thread_req = mcp
+        .send_thread_start_request(ThreadStartParams {
+            model: Some("claude-opus-4-6".to_string()),
+            ..Default::default()
+        })
+        .await?;
+    let thread_resp: JSONRPCResponse = timeout(
+        DEFAULT_READ_TIMEOUT,
+        mcp.read_stream_until_response_message(RequestId::Integer(thread_req)),
+    )
+    .await??;
+    let ThreadStartResponse { thread, .. } = to_response::<ThreadStartResponse>(thread_resp)?;
+
+    let turn_req = mcp
+        .send_turn_start_request(TurnStartParams {
+            thread_id: thread.id,
+            input: vec![V2UserInput::Text {
+                text: "Hello".to_string(),
+                text_elements: Vec::new(),
+            }],
+            model: Some("gpt-5.4".to_string()),
+            model_provider: Some("claude_cli".to_string()),
+            ..Default::default()
+        })
+        .await?;
+    let err: JSONRPCError = timeout(
+        DEFAULT_READ_TIMEOUT,
+        mcp.read_stream_until_error_message(RequestId::Integer(turn_req)),
+    )
+    .await??;
+
+    assert_eq!(err.error.code, INVALID_PARAMS_ERROR_CODE);
+    assert!(
+        err.error.message.contains("invalid value for `model`"),
+        "unexpected error message: {}",
+        err.error.message
+    );
+    assert!(
+        err.error.message.contains("claude_cli"),
+        "unexpected error message: {}",
+        err.error.message
+    );
+
+    Ok(())
+}
+
 fn create_config_toml(
     codex_home: &Path,
     server_uri: &str,

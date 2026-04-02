@@ -19,7 +19,6 @@ use codex_app_server_protocol::PluginUninstallResponse;
 use codex_chatgpt::connectors::AppInfo;
 use codex_file_search::FileMatch;
 use codex_protocol::ThreadId;
-use codex_protocol::openai_models::ModelPreset;
 use codex_protocol::protocol::GetHistoryEntryResponseEvent;
 use codex_protocol::protocol::Op;
 use codex_protocol::protocol::RateLimitSnapshot;
@@ -30,6 +29,7 @@ use crate::bottom_pane::ApprovalRequest;
 use crate::bottom_pane::StatusLineItem;
 use crate::bottom_pane::TerminalTitleItem;
 use crate::history_cell::HistoryCell;
+use crate::model_catalog::ModelCatalogEntry;
 
 use codex_core::config::types::ApprovalsReviewer;
 use codex_features::Feature;
@@ -285,6 +285,12 @@ pub(crate) enum AppEvent {
     /// Update the current model slug in the running app and widget.
     UpdateModel(String),
 
+    /// Update the running app and widget to use a specific model/provider pair.
+    ApplyModelProvider {
+        model: String,
+        provider_id: String,
+    },
+
     /// Update the active collaboration mask in the running app and widget.
     UpdateCollaborationMode(CollaborationModeMask),
 
@@ -294,6 +300,7 @@ pub(crate) enum AppEvent {
     /// Persist the selected model and reasoning effort to the appropriate config.
     PersistModelSelection {
         model: String,
+        provider_id: String,
         effort: Option<ReasoningEffort>,
     },
 
@@ -329,18 +336,19 @@ pub(crate) enum AppEvent {
 
     /// Open the reasoning selection popup after picking a model.
     OpenReasoningPopup {
-        model: ModelPreset,
+        model: ModelCatalogEntry,
     },
 
     /// Open the Plan-mode reasoning scope prompt for the selected model/effort.
     OpenPlanReasoningScopePrompt {
         model: String,
+        provider_id: String,
         effort: Option<ReasoningEffort>,
     },
 
     /// Open the full model picker (non-auto models).
     OpenAllModelsPopup {
-        models: Vec<ModelPreset>,
+        models: Vec<ModelCatalogEntry>,
     },
 
     /// Open the confirmation prompt before enabling full access mode.

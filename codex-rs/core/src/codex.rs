@@ -23,11 +23,11 @@ use crate::compact::InitialContextInjection;
 use crate::compact::run_inline_auto_compact_task;
 use crate::compact::should_use_remote_compact_task;
 use crate::compact_remote::run_inline_remote_auto_compact_task;
+use crate::config::ConstraintError;
 use crate::config::ManagedFeatures;
 use crate::connectors;
 use crate::exec_policy::ExecPolicyManager;
 use crate::model_provider_info::WireApi;
-#[cfg(test)]
 use crate::models_manager::collaboration_mode_presets::CollaborationModesConfig;
 use crate::models_manager::manager::ModelsManager;
 use crate::models_manager::manager::RefreshStrategy;
@@ -61,6 +61,7 @@ use codex_analytics::InvocationType;
 use codex_analytics::build_track_events_context;
 use codex_app_server_protocol::McpServerElicitationRequest;
 use codex_app_server_protocol::McpServerElicitationRequestParams;
+use codex_config::RequirementSource;
 use codex_exec_server::Environment;
 use codex_exec_server::EnvironmentManager;
 use codex_features::FEATURES;
@@ -98,6 +99,7 @@ use codex_protocol::models::BaseInstructions;
 use codex_protocol::models::PermissionProfile;
 use codex_protocol::models::format_allow_prefixes;
 use codex_protocol::openai_models::ModelInfo;
+use codex_protocol::openai_models::ModelsResponse;
 use codex_protocol::permissions::FileSystemSandboxPolicy;
 use codex_protocol::permissions::NetworkSandboxPolicy;
 use codex_protocol::protocol::FileChange;
@@ -614,6 +616,7 @@ impl Codex {
             },
         };
         let session_configuration = SessionConfiguration {
+            provider_id: config.model_provider_id.clone(),
             provider: config.model_provider.clone(),
             collaboration_mode,
             model_reasoning_summary: config.model_reasoning_summary,
@@ -1066,6 +1069,9 @@ fn local_time_context() -> (String, String) {
 #[derive(Clone)]
 pub(crate) struct SessionConfiguration {
     /// Provider identifier ("openai", "openrouter", ...).
+    provider_id: String,
+
+    /// Provider definition for the active session.
     provider: ModelProviderInfo,
 
     collaboration_mode: CollaborationMode,
@@ -1127,7 +1133,7 @@ impl SessionConfiguration {
     fn thread_config_snapshot(&self) -> ThreadConfigSnapshot {
         ThreadConfigSnapshot {
             model: self.collaboration_mode.model().to_string(),
-            model_provider_id: self.original_config_do_not_use.model_provider_id.clone(),
+            model_provider_id: self.provider_id.clone(),
             service_tier: self.service_tier,
             approval_policy: self.approval_policy.value(),
             approvals_reviewer: self.approvals_reviewer,
@@ -1147,6 +1153,30 @@ impl SessionConfiguration {
                 self.sandbox_policy.get(),
                 &self.cwd,
             );
+        if let Some(model_provider_id) = updates.model_provider.as_ref() {
+            let Some(provider) = self
+                .original_config_do_not_use
+                .model_providers
+                .get(model_provider_id.as_str())
+                .cloned()
+            else {
+                let allowed = self
+                    .original_config_do_not_use
+                    .model_providers
+                    .keys()
+                    .cloned()
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                return Err(ConstraintError::InvalidValue {
+                    field_name: "model_provider",
+                    candidate: model_provider_id.clone(),
+                    allowed,
+                    requirement_source: RequirementSource::Unknown,
+                });
+            };
+            next_configuration.provider_id = model_provider_id.clone();
+            next_configuration.provider = provider;
+        }
         if let Some(collaboration_mode) = updates.collaboration_mode.clone() {
             next_configuration.collaboration_mode = collaboration_mode;
         }
@@ -1215,6 +1245,7 @@ pub(crate) struct SessionSettingsUpdate {
     pub(crate) approvals_reviewer: Option<ApprovalsReviewer>,
     pub(crate) sandbox_policy: Option<SandboxPolicy>,
     pub(crate) windows_sandbox_level: Option<WindowsSandboxLevel>,
+    pub(crate) model_provider: Option<String>,
     pub(crate) collaboration_mode: Option<CollaborationMode>,
     pub(crate) reasoning_summary: Option<ReasoningSummaryConfig>,
     pub(crate) service_tier: Option<Option<ServiceTier>>,
@@ -1295,6 +1326,8 @@ impl Session {
         let config = session_configuration.original_config_do_not_use.clone();
         let mut per_turn_config = (*config).clone();
         per_turn_config.cwd = session_configuration.cwd.clone();
+        per_turn_config.model_provider_id = session_configuration.provider_id.clone();
+        per_turn_config.model_provider = session_configuration.provider.clone();
         per_turn_config.model_reasoning_effort =
             session_configuration.collaboration_mode.reasoning_effort();
         per_turn_config.model_reasoning_summary = session_configuration.model_reasoning_summary;
@@ -1319,6 +1352,134 @@ impl Session {
         }
         per_turn_config.features = config.features.clone();
         per_turn_config
+    }
+
+    fn models_manager_for_session_configuration(
+        &self,
+        session_configuration: &SessionConfiguration,
+    ) -> Arc<ModelsManager> {
+        if session_configuration.provider_id
+            == session_configuration
+                .original_config_do_not_use
+                .model_provider_id
+        {
+            return Arc::clone(&self.services.models_manager);
+        }
+
+        Arc::new(ModelsManager::new_with_provider(
+            session_configuration.codex_home.clone(),
+            Arc::clone(&self.services.auth_manager),
+            Self::model_catalog_for_session_configuration(session_configuration),
+            CollaborationModesConfig {
+                default_mode_request_user_input: self
+                    .features
+                    .enabled(Feature::DefaultModeRequestUserInput),
+            },
+            session_configuration.provider.clone(),
+        ))
+    }
+
+    fn model_catalog_for_session_configuration(
+        session_configuration: &SessionConfiguration,
+    ) -> Option<ModelsResponse> {
+        (session_configuration.provider_id
+            == session_configuration
+                .original_config_do_not_use
+                .model_provider_id)
+            .then(|| {
+                session_configuration
+                    .original_config_do_not_use
+                    .model_catalog
+                    .clone()
+            })
+            .flatten()
+    }
+
+    fn validate_provider_model_pair(
+        &self,
+        updates: &SessionSettingsUpdate,
+        session_configuration: &SessionConfiguration,
+    ) -> ConstraintResult<()> {
+        if updates.model_provider.is_none() {
+            return Ok(());
+        }
+
+        let models_manager = ModelsManager::new_with_provider(
+            session_configuration.codex_home.clone(),
+            Arc::clone(&self.services.auth_manager),
+            Self::model_catalog_for_session_configuration(session_configuration),
+            CollaborationModesConfig {
+                default_mode_request_user_input: self
+                    .features
+                    .enabled(Feature::DefaultModeRequestUserInput),
+            },
+            session_configuration.provider.clone(),
+        );
+        let selected_model = session_configuration.collaboration_mode.model().to_string();
+        let available_models = models_manager.try_list_models().unwrap_or_default();
+        if available_models
+            .iter()
+            .any(|preset| preset.model == selected_model)
+        {
+            return Ok(());
+        }
+
+        let allowed_models = available_models
+            .iter()
+            .map(|preset| preset.model.clone())
+            .collect::<Vec<_>>();
+        let allowed = if allowed_models.is_empty() {
+            format!(
+                "models available from provider `{}`: [none]",
+                session_configuration.provider_id
+            )
+        } else {
+            format!(
+                "models available from provider `{}`: {}",
+                session_configuration.provider_id,
+                allowed_models.join(", ")
+            )
+        };
+        Err(ConstraintError::InvalidValue {
+            field_name: "model",
+            candidate: selected_model,
+            allowed,
+            requirement_source: RequirementSource::Unknown,
+        })
+    }
+
+    fn validated_session_configuration(
+        &self,
+        current: &SessionConfiguration,
+        updates: &SessionSettingsUpdate,
+    ) -> ConstraintResult<SessionConfiguration> {
+        let next = current.apply(updates)?;
+        self.validate_provider_model_pair(updates, &next)?;
+        Ok(next)
+    }
+
+    fn model_client_for_turn(&self, turn_context: &TurnContext) -> ModelClient {
+        if self.services.model_client.provider() == &turn_context.provider {
+            return self.services.model_client.clone();
+        }
+
+        ModelClient::new(
+            Some(Arc::clone(&self.services.auth_manager)),
+            self.conversation_id,
+            turn_context.provider.clone(),
+            turn_context.config.claude_cli.clone(),
+            turn_context.session_source.clone(),
+            turn_context.config.model_verbosity,
+            turn_context
+                .config
+                .features
+                .enabled(Feature::EnableRequestCompression),
+            turn_context
+                .config
+                .features
+                .enabled(Feature::RuntimeMetrics),
+            Self::build_model_client_beta_features_header(turn_context.config.as_ref()),
+        )
     }
 
     pub(crate) async fn codex_home(&self) -> PathBuf {
@@ -2337,7 +2498,7 @@ impl Session {
     ) -> ConstraintResult<()> {
         let mut state = self.state.lock().await;
 
-        match state.session_configuration.apply(&updates) {
+        match self.validated_session_configuration(&state.session_configuration, &updates) {
             Ok(updated) => {
                 let previous_cwd = state.session_configuration.cwd.clone();
                 let next_cwd = updated.cwd.clone();
@@ -2375,7 +2536,7 @@ impl Session {
             session_source,
         ) = {
             let mut state = self.state.lock().await;
-            match state.session_configuration.clone().apply(&updates) {
+            match self.validated_session_configuration(&state.session_configuration, &updates) {
                 Ok(next) => {
                     let previous_cwd = state.session_configuration.cwd.clone();
                     let sandbox_policy_changed =
@@ -2456,9 +2617,8 @@ impl Session {
             }
         }
 
-        let model_info = self
-            .services
-            .models_manager
+        let models_manager = self.models_manager_for_session_configuration(&session_configuration);
+        let model_info = models_manager
             .get_model_info(
                 session_configuration.collaboration_mode.model(),
                 &per_turn_config,
@@ -2486,7 +2646,7 @@ impl Session {
             self.services.main_execve_wrapper_exe.as_ref(),
             per_turn_config,
             model_info,
-            &self.services.models_manager,
+            &models_manager,
             self.services
                 .network_proxy
                 .as_ref()
@@ -4468,6 +4628,7 @@ async fn submission_loop(sess: Arc<Session>, config: Arc<Config>, rx_sub: Receiv
                     sandbox_policy,
                     windows_sandbox_level,
                     model,
+                    model_provider,
                     effort,
                     summary,
                     service_tier,
@@ -4493,6 +4654,7 @@ async fn submission_loop(sess: Arc<Session>, config: Arc<Config>, rx_sub: Receiv
                             approvals_reviewer,
                             sandbox_policy,
                             windows_sandbox_level,
+                            model_provider,
                             collaboration_mode: Some(collaboration_mode),
                             reasoning_summary: summary,
                             service_tier,
@@ -4780,6 +4942,7 @@ mod handlers {
                         approvals_reviewer,
                         sandbox_policy: Some(sandbox_policy),
                         windows_sandbox_level: None,
+                        model_provider: None,
                         collaboration_mode,
                         reasoning_summary: summary,
                         service_tier,
@@ -5931,10 +6094,16 @@ pub(crate) async fn run_turn(
     let turn_diff_tracker = Arc::new(tokio::sync::Mutex::new(TurnDiffTracker::new()));
     let mut server_model_warning_emitted_for_turn = false;
 
+    let model_client = sess.model_client_for_turn(turn_context.as_ref());
+    let reuse_prewarmed_session = turn_context.provider == *sess.services.model_client.provider();
+
     // `ModelClientSession` is turn-scoped and caches WebSocket + sticky routing state, so we reuse
     // one instance across retries within this turn.
-    let mut client_session =
-        prewarmed_client_session.unwrap_or_else(|| sess.services.model_client.new_session());
+    let mut client_session = if reuse_prewarmed_session {
+        prewarmed_client_session.unwrap_or_else(|| model_client.new_session())
+    } else {
+        model_client.new_session()
+    };
 
     loop {
         if run_pending_session_start_hooks(&sess, &turn_context).await {
@@ -6004,6 +6173,7 @@ pub(crate) async fn run_turn(
             Arc::clone(&sess),
             Arc::clone(&turn_context),
             Arc::clone(&turn_diff_tracker),
+            &model_client,
             &mut client_session,
             turn_metadata_header.as_deref(),
             sampling_request_input,
@@ -6533,6 +6703,7 @@ async fn run_sampling_request(
     sess: Arc<Session>,
     turn_context: Arc<TurnContext>,
     turn_diff_tracker: SharedTurnDiffTracker,
+    model_client: &ModelClient,
     client_session: &mut ModelClientSession,
     turn_metadata_header: Option<&str>,
     input: Vec<ResponseItem>,
@@ -6645,7 +6816,7 @@ async fn run_sampling_request(
             // transient reconnect messages. In debug builds, keep full visibility for diagnosis.
             let report_error = retries > 1
                 || cfg!(debug_assertions)
-                || !sess.services.model_client.responses_websocket_enabled();
+                || !model_client.responses_websocket_enabled();
             if report_error {
                 // Surface retry information to any UI/front‑end so the
                 // user understands what is happening instead of staring

@@ -1,4 +1,5 @@
 use crate::bottom_pane::FeedbackAudience;
+use crate::model_catalog::ModelCatalogEntry;
 use crate::status::StatusAccountDisplay;
 use crate::status::plan_type_display_name;
 use codex_app_server_client::AppServerClient;
@@ -98,6 +99,7 @@ pub(crate) struct AppServerBootstrap {
     pub(crate) feedback_audience: FeedbackAudience,
     pub(crate) has_chatgpt_account: bool,
     pub(crate) available_models: Vec<ModelPreset>,
+    pub(crate) picker_models: Vec<ModelCatalogEntry>,
     pub(crate) rate_limit_snapshots: Vec<RateLimitSnapshot>,
 }
 
@@ -178,18 +180,29 @@ impl AppServerSession {
                     cursor: None,
                     limit: None,
                     include_hidden: Some(true),
+                    providers: requested_picker_providers(config, self.is_remote()),
                 },
             })
             .await
             .wrap_err("model/list failed during TUI bootstrap")?;
-        let available_models = models
+        let picker_models = models
             .data
             .into_iter()
-            .map(model_preset_from_api_model)
+            .map(model_catalog_entry_from_api_model)
+            .collect::<Vec<_>>();
+        let available_models = picker_models
+            .iter()
+            .filter(|entry| entry.provider_id == config.model_provider_id)
+            .map(|entry| entry.preset.clone())
             .collect::<Vec<_>>();
         let default_model = config
             .model
             .clone()
+            .filter(|model| {
+                available_models
+                    .iter()
+                    .any(|preset| preset.model.as_str() == model.as_str())
+            })
             .or_else(|| {
                 available_models
                     .iter()
@@ -197,6 +210,11 @@ impl AppServerSession {
                     .map(|model| model.model.clone())
             })
             .or_else(|| available_models.first().map(|model| model.model.clone()))
+            .or_else(|| {
+                picker_models
+                    .first()
+                    .map(|entry| entry.preset.model.clone())
+            })
             .wrap_err("model/list returned no models for TUI bootstrap")?;
 
         let (
@@ -276,6 +294,7 @@ impl AppServerSession {
             feedback_audience,
             has_chatgpt_account,
             available_models,
+            picker_models,
             rate_limit_snapshots,
         })
     }
@@ -403,6 +422,7 @@ impl AppServerSession {
         approvals_reviewer: codex_protocol::config_types::ApprovalsReviewer,
         sandbox_policy: SandboxPolicy,
         model: String,
+        model_provider: String,
         effort: Option<codex_protocol::openai_models::ReasoningEffort>,
         summary: Option<codex_protocol::config_types::ReasoningSummary>,
         service_tier: Option<Option<codex_protocol::config_types::ServiceTier>>,
@@ -422,6 +442,7 @@ impl AppServerSession {
                     approvals_reviewer: Some(approvals_reviewer.into()),
                     sandbox_policy: Some(sandbox_policy.into()),
                     model: Some(model),
+                    model_provider: Some(model_provider),
                     service_tier,
                     effort,
                     summary,
@@ -760,8 +781,32 @@ pub(crate) fn feedback_audience_from_account_email(
     }
 }
 
+fn requested_picker_providers(config: &Config, is_remote: bool) -> Option<Vec<String>> {
+    if is_remote {
+        return None;
+    }
+
+    let mut provider_ids = config
+        .model_providers
+        .keys()
+        .filter(|provider_id| provider_id.as_str() != config.model_provider_id)
+        .cloned()
+        .collect::<Vec<_>>();
+    provider_ids.sort();
+    provider_ids.insert(0, config.model_provider_id.clone());
+    Some(provider_ids)
+}
+
+fn model_catalog_entry_from_api_model(model: ApiModel) -> ModelCatalogEntry {
+    ModelCatalogEntry {
+        provider_id: model.provider_id.clone(),
+        provider_name: model.provider_name.clone(),
+        preset: model_preset_from_api_model(model),
+    }
+}
+
 fn model_preset_from_api_model(model: ApiModel) -> ModelPreset {
-    let upgrade = model.upgrade.map(|upgrade_id| {
+    let upgrade = model.upgrade.clone().map(|upgrade_id| {
         let upgrade_info = model.upgrade_info.clone();
         ModelUpgrade {
             id: upgrade_id,
@@ -1127,6 +1172,35 @@ mod tests {
             .build()
             .await
             .expect("config should build")
+    }
+
+    #[tokio::test]
+    async fn requested_picker_providers_include_active_provider_first_for_embedded_sessions() {
+        let temp_dir = tempfile::tempdir().expect("tempdir");
+        let mut config = build_config(&temp_dir).await;
+        config.model_provider_id = "claude_cli".to_string();
+        config.model_provider = config
+            .model_providers
+            .get("claude_cli")
+            .cloned()
+            .expect("built-in claude provider");
+
+        let providers =
+            requested_picker_providers(&config, /*is_remote*/ false).expect("provider list");
+
+        assert_eq!(providers.first().map(String::as_str), Some("claude_cli"));
+        assert!(providers.iter().any(|provider_id| provider_id == "openai"));
+    }
+
+    #[tokio::test]
+    async fn requested_picker_providers_omit_local_overrides_for_remote_sessions() {
+        let temp_dir = tempfile::tempdir().expect("tempdir");
+        let config = build_config(&temp_dir).await;
+
+        assert_eq!(
+            requested_picker_providers(&config, /*is_remote*/ true),
+            None
+        );
     }
 
     #[tokio::test]

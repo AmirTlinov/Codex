@@ -87,8 +87,9 @@ async fn reasoning_selection_in_plan_mode_opens_scope_prompt_event() {
         event,
         AppEvent::OpenPlanReasoningScopePrompt {
             model,
+            provider_id,
             effort: Some(_)
-        } if model == "gpt-5.1-codex-max"
+        } if model == "gpt-5.1-codex-max" && provider_id == "openai"
     );
 }
 
@@ -114,7 +115,8 @@ async fn reasoning_selection_in_plan_mode_without_effort_change_does_not_open_sc
     assert!(
         events.iter().any(|event| matches!(
             event,
-            AppEvent::UpdateModel(model) if model == "gpt-5.1-codex-max"
+            AppEvent::ApplyModelProvider { model, provider_id }
+                if model == "gpt-5.1-codex-max" && provider_id == "openai"
         )),
         "expected model update event; events: {events:?}"
     );
@@ -152,8 +154,9 @@ async fn reasoning_selection_in_plan_mode_matching_plan_effort_but_different_glo
         event,
         AppEvent::OpenPlanReasoningScopePrompt {
             model,
+            provider_id,
             effort: Some(ReasoningEffortConfig::Medium)
-        } if model == "gpt-5.1-codex-max"
+        } if model == "gpt-5.1-codex-max" && provider_id == "openai"
     );
 }
 
@@ -199,7 +202,8 @@ async fn reasoning_selection_in_plan_mode_model_switch_does_not_open_scope_promp
     assert!(
         events.iter().any(|event| matches!(
             event,
-            AppEvent::UpdateModel(model) if model == "gpt-5"
+            AppEvent::ApplyModelProvider { model, provider_id }
+                if model == "gpt-5" && provider_id == "openai"
         )),
         "expected model update event; events: {events:?}"
     );
@@ -212,10 +216,56 @@ async fn reasoning_selection_in_plan_mode_model_switch_does_not_open_scope_promp
 }
 
 #[tokio::test]
+async fn reasoning_selection_in_plan_mode_same_model_different_provider_does_not_open_scope_prompt()
+{
+    let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(Some("gpt-5.1-codex-max")).await;
+    chat.thread_id = Some(ThreadId::new());
+    chat.set_feature_enabled(Feature::CollaborationModes, /*enabled*/ true);
+    let plan_mask = collaboration_modes::plan_mask(chat.model_catalog.as_ref())
+        .expect("expected plan collaboration mode");
+    chat.set_collaboration_mask(plan_mask);
+    let _ = drain_insert_history(&mut rx);
+    set_chatgpt_auth(&mut chat);
+    chat.set_reasoning_effort(Some(ReasoningEffortConfig::High));
+
+    let preset = get_available_model(&chat, "gpt-5.1-codex-max");
+    let mut mock_provider = codex_core::built_in_model_providers(
+        /* openai_base_url */ /*openai_base_url*/ None,
+    )["openai"]
+        .clone();
+    mock_provider.name = "Mock provider".to_string();
+    chat.set_model_provider("mock-provider", mock_provider);
+
+    chat.open_reasoning_popup(crate::model_catalog::ModelCatalogEntry {
+        provider_id: "openai".to_string(),
+        provider_name: "OpenAI".to_string(),
+        preset,
+    });
+    chat.handle_key_event(KeyEvent::from(KeyCode::Enter));
+
+    let events = std::iter::from_fn(|| rx.try_recv().ok()).collect::<Vec<_>>();
+    assert!(
+        events
+            .iter()
+            .all(|event| !matches!(event, AppEvent::OpenPlanReasoningScopePrompt { .. })),
+        "did not expect scope prompt for provider switch; events: {events:?}"
+    );
+    assert!(
+        events.iter().any(|event| matches!(
+            event,
+            AppEvent::ApplyModelProvider { model, provider_id }
+                if model == "gpt-5.1-codex-max" && provider_id == "openai"
+        )),
+        "expected provider switch event; events: {events:?}"
+    );
+}
+
+#[tokio::test]
 async fn plan_reasoning_scope_popup_all_modes_persists_global_and_plan_override() {
     let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(Some("gpt-5.1-codex-max")).await;
     chat.open_plan_reasoning_scope_prompt(
         "gpt-5.1-codex-max".to_string(),
+        "test-provider".to_string(),
         Some(ReasoningEffortConfig::High),
     );
 
@@ -240,8 +290,11 @@ async fn plan_reasoning_scope_popup_all_modes_persists_global_and_plan_override(
     assert!(
         events.iter().any(|event| matches!(
             event,
-            AppEvent::PersistModelSelection { model, effort: Some(ReasoningEffortConfig::High) }
-                if model == "gpt-5.1-codex-max"
+            AppEvent::PersistModelSelection {
+                model,
+                provider_id,
+                effort: Some(ReasoningEffortConfig::High),
+            } if model == "gpt-5.1-codex-max" && provider_id == "test-provider"
         )),
         "expected global model reasoning selection persistence; events: {events:?}"
     );
@@ -304,6 +357,7 @@ async fn open_plan_reasoning_scope_prompt_sets_pending_notification() {
 
     chat.open_plan_reasoning_scope_prompt(
         "gpt-5.1-codex-max".to_string(),
+        "test-provider".to_string(),
         Some(ReasoningEffortConfig::High),
     );
 
@@ -396,6 +450,7 @@ async fn plan_reasoning_scope_popup_mentions_selected_reasoning() {
     chat.set_plan_mode_reasoning_effort(Some(ReasoningEffortConfig::Low));
     chat.open_plan_reasoning_scope_prompt(
         "gpt-5.1-codex-max".to_string(),
+        "test-provider".to_string(),
         Some(ReasoningEffortConfig::Medium),
     );
 
@@ -412,6 +467,7 @@ async fn plan_reasoning_scope_popup_mentions_built_in_plan_default_when_no_overr
     let (mut chat, _rx, _op_rx) = make_chatwidget_manual(Some("gpt-5.1-codex-max")).await;
     chat.open_plan_reasoning_scope_prompt(
         "gpt-5.1-codex-max".to_string(),
+        "test-provider".to_string(),
         Some(ReasoningEffortConfig::Medium),
     );
 
@@ -424,6 +480,7 @@ async fn plan_reasoning_scope_popup_plan_only_does_not_update_all_modes_reasonin
     let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(Some("gpt-5.1-codex-max")).await;
     chat.open_plan_reasoning_scope_prompt(
         "gpt-5.1-codex-max".to_string(),
+        "test-provider".to_string(),
         Some(ReasoningEffortConfig::High),
     );
 

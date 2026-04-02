@@ -607,6 +607,7 @@ async fn turn_start_jsonrpc_span_parents_core_turn_spans() -> Result<()> {
                     sandbox_policy: None,
                     approvals_reviewer: None,
                     model: None,
+                    model_provider: None,
                     service_tier: None,
                     effort: None,
                     summary: None,

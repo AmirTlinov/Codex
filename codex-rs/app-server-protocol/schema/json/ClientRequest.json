@@ -1293,6 +1293,16 @@
             "integer",
             "null"
           ]
+        },
+        "providers": {
+          "description": "Optional provider ids to include. When omitted, the active provider is used.",
+          "items": {
+            "type": "string"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
         }
       },
       "type": "object"
@@ -3193,6 +3203,13 @@
         },
         "model": {
           "description": "Override the model for this turn and subsequent turns.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "modelProvider": {
+          "description": "Override the model provider for this turn and subsequent turns.",
           "type": [
             "string",
             "null"

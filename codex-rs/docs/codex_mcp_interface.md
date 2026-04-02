@@ -62,11 +62,12 @@ Fetch the catalog of models available in the current Codex build with `model/lis
 
 - `limit` - number of models to return (defaults to a server-selected value)
 - `cursor` - opaque string from the previous response's `nextCursor`
+- `providers` - optional provider ids to include; when omitted, the active provider is used
 
 Each response yields:
 
 - `data` - ordered list of models. A model includes:
-  - `id`, `model`, `displayName`, `description`
+  - `id`, `model`, `providerId`, `providerName`, `displayName`, `description`
   - `supportedReasoningEfforts` - array of objects with:
     - `reasoningEffort` - one of `none|minimal|low|medium|high|xhigh`
     - `description` - human-friendly label for the effort
@@ -88,6 +89,8 @@ Fetch the built-in collaboration mode presets with `collaborationMode/list`. Thi
 
 - `data` - ordered list of collaboration mode masks (partial settings to apply on top of the base mode)
   - For tri-state fields like `reasoning_effort` and `developer_instructions`, omit the field to keep the current value, set it to `null` to clear it, or set a concrete value to update it.
+
+When sending `turn/start`, you can also override `model` and `modelProvider` for subsequent turns on that thread.
 
 When sending `turn/start` with `collaborationMode`, `settings.developer_instructions: null` means "use built-in instructions for the selected mode".
 

@@ -1212,6 +1212,7 @@ async fn fork_startup_context_then_first_turn_diff_snapshot() -> anyhow::Result<
             sandbox_policy: None,
             windows_sandbox_level: None,
             model: None,
+            model_provider: None,
             effort: None,
             summary: None,
             service_tier: None,
@@ -1875,6 +1876,7 @@ async fn set_rate_limits_retains_previous_credits() {
         },
     };
     let session_configuration = SessionConfiguration {
+        provider_id: config.model_provider_id.clone(),
         provider: config.model_provider.clone(),
         collaboration_mode,
         model_reasoning_summary: config.model_reasoning_summary,
@@ -1973,6 +1975,7 @@ async fn set_rate_limits_updates_plan_type_when_present() {
         },
     };
     let session_configuration = SessionConfiguration {
+        provider_id: config.model_provider_id.clone(),
         provider: config.model_provider.clone(),
         collaboration_mode,
         model_reasoning_summary: config.model_reasoning_summary,
@@ -2317,6 +2320,7 @@ pub(crate) async fn make_session_configuration_for_tests() -> SessionConfigurati
     };
 
     SessionConfiguration {
+        provider_id: config.model_provider_id.clone(),
         provider: config.model_provider.clone(),
         collaboration_mode,
         model_reasoning_summary: config.model_reasoning_summary,
@@ -2579,6 +2583,7 @@ async fn session_new_fails_when_zsh_fork_enabled_without_zsh_path() {
         },
     };
     let session_configuration = SessionConfiguration {
+        provider_id: config.model_provider_id.clone(),
         provider: config.model_provider.clone(),
         collaboration_mode,
         model_reasoning_summary: config.model_reasoning_summary,
@@ -2676,6 +2681,7 @@ pub(crate) async fn make_session_and_context() -> (Session, TurnContext) {
         },
     };
     let session_configuration = SessionConfiguration {
+        provider_id: config.model_provider_id.clone(),
         provider: config.model_provider.clone(),
         collaboration_mode,
         model_reasoning_summary: config.model_reasoning_summary,
@@ -3143,6 +3149,7 @@ fn op_kind_distinguishes_turn_ops() {
             sandbox_policy: None,
             windows_sandbox_level: None,
             model: None,
+            model_provider: None,
             effort: None,
             summary: None,
             service_tier: None,
@@ -3520,6 +3527,7 @@ pub(crate) async fn make_session_and_context_with_dynamic_tools_and_rx(
         },
     };
     let session_configuration = SessionConfiguration {
+        provider_id: config.model_provider_id.clone(),
         provider: config.model_provider.clone(),
         collaboration_mode,
         model_reasoning_summary: config.model_reasoning_summary,

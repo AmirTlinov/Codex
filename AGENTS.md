@@ -36,7 +36,8 @@ This fork is maintained as a downstream customization layer over
 - If the task is to make this downstream fork invokable from system PATH, use
   `scripts/install-claudex.sh`; it builds the release binary from this clone and
   installs `~/.local/bin/claudex` by default with Claude-backed session and
-  subagent defaults.
+  subagent defaults. The installed wrapper prefers the newest local debug build
+  over release unless `CLAUDEX_PROFILE=release` is set.
 - When the downstream workflow changes, update the matching repo truth in the
   same change: `AGENTS.md`, `.agents/skills/*`, and `docs/fork-maintenance.md`.
 - Keep durable intent and workflow truth in repo files, not only in chat.

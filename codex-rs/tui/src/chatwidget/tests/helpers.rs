@@ -604,7 +604,7 @@ pub(super) fn active_blob(chat: &ChatWidget) -> String {
 pub(super) fn get_available_model(chat: &ChatWidget, model: &str) -> ModelPreset {
     let models = chat
         .model_catalog
-        .try_list_models()
+        .try_list_models_for_provider(chat.current_model_provider_id())
         .expect("models lock available");
     models
         .iter()

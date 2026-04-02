@@ -63,6 +63,12 @@
         "model": {
           "type": "string"
         },
+        "providerId": {
+          "type": "string"
+        },
+        "providerName": {
+          "type": "string"
+        },
         "supportedReasoningEfforts": {
           "items": {
             "$ref": "#/definitions/ReasoningEffortOption"
@@ -98,6 +104,8 @@
         "id",
         "isDefault",
         "model",
+        "providerId",
+        "providerName",
         "supportedReasoningEfforts"
       ],
       "type": "object"

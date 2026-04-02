@@ -5889,6 +5889,12 @@
         "model": {
           "type": "string"
         },
+        "providerId": {
+          "type": "string"
+        },
+        "providerName": {
+          "type": "string"
+        },
         "supportedReasoningEfforts": {
           "items": {
             "$ref": "#/definitions/ReasoningEffortOption"
@@ -5924,6 +5930,8 @@
         "id",
         "isDefault",
         "model",
+        "providerId",
+        "providerName",
         "supportedReasoningEfforts"
       ],
       "type": "object"
@@ -5962,6 +5970,16 @@
           "minimum": 0.0,
           "type": [
             "integer",
+            "null"
+          ]
+        },
+        "providers": {
+          "description": "Optional provider ids to include. When omitted, the active provider is used.",
+          "items": {
+            "type": "string"
+          },
+          "type": [
+            "array",
             "null"
           ]
         }
@@ -12210,6 +12228,13 @@
         },
         "model": {
           "description": "Override the model for this turn and subsequent turns.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "modelProvider": {
+          "description": "Override the model provider for this turn and subsequent turns.",
           "type": [
             "string",
             "null"

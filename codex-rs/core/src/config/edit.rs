@@ -28,6 +28,8 @@ pub enum ConfigEdit {
         model: Option<String>,
         effort: Option<ReasoningEffort>,
     },
+    /// Update the active (or default) model provider.
+    SetModelProvider { provider_id: Option<String> },
     /// Update the service tier preference for future turns.
     SetServiceTier { service_tier: Option<ServiceTier> },
     /// Update the active (or default) model personality.
@@ -377,6 +379,12 @@ impl ConfigDocument {
                 );
                 mutated
             }),
+            ConfigEdit::SetModelProvider { provider_id } => Ok(self.write_profile_value(
+                &["model_provider"],
+                provider_id
+                    .as_ref()
+                    .map(|provider_id_value| value(provider_id_value.clone())),
+            )),
             ConfigEdit::SetServiceTier { service_tier } => Ok(self.write_profile_value(
                 &["service_tier"],
                 service_tier.map(|service_tier| value(service_tier.to_string())),

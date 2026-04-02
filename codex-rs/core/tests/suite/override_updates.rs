@@ -1,18 +1,18 @@
 use anyhow::Result;
 use codex_core::config::Constrained;
-use codex_protocol::protocol::AskForApproval;
-use codex_protocol::protocol::COLLABORATION_MODE_CLOSE_TAG;
-use codex_protocol::protocol::COLLABORATION_MODE_OPEN_TAG;
-use codex_protocol::protocol::EventMsg;
-use codex_protocol::protocol::Op;
-use codex_protocol::protocol::RolloutItem;
-use codex_protocol::protocol::RolloutLine;
-use codex_protocol::protocol::ENVIRONMENT_CONTEXT_OPEN_TAG;
 use codex_protocol::config_types::CollaborationMode;
 use codex_protocol::config_types::ModeKind;
 use codex_protocol::config_types::Settings;
 use codex_protocol::models::ContentItem;
 use codex_protocol::models::ResponseItem;
+use codex_protocol::protocol::AskForApproval;
+use codex_protocol::protocol::COLLABORATION_MODE_CLOSE_TAG;
+use codex_protocol::protocol::COLLABORATION_MODE_OPEN_TAG;
+use codex_protocol::protocol::ENVIRONMENT_CONTEXT_OPEN_TAG;
+use codex_protocol::protocol::EventMsg;
+use codex_protocol::protocol::Op;
+use codex_protocol::protocol::RolloutItem;
+use codex_protocol::protocol::RolloutLine;
 use core_test_support::responses::start_mock_server;
 use core_test_support::skip_if_no_network;
 use core_test_support::test_codex::test_codex;
@@ -61,8 +61,7 @@ fn rollout_developer_texts(text: &str) -> Vec<String> {
             Ok(rollout) => rollout,
             Err(_) => continue,
         };
-        if let RolloutItem::ResponseItem(ResponseItem::Message { role, content, .. }) =
-            rollout.item
+        if let RolloutItem::ResponseItem(ResponseItem::Message { role, content, .. }) = rollout.item
             && role == "developer"
         {
             for item in content {
@@ -86,8 +85,7 @@ fn rollout_environment_texts(text: &str) -> Vec<String> {
             Ok(rollout) => rollout,
             Err(_) => continue,
         };
-        if let RolloutItem::ResponseItem(ResponseItem::Message { role, content, .. }) =
-            rollout.item
+        if let RolloutItem::ResponseItem(ResponseItem::Message { role, content, .. }) = rollout.item
             && role == "user"
         {
             for item in content {
@@ -103,7 +101,8 @@ fn rollout_environment_texts(text: &str) -> Vec<String> {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn override_turn_context_without_user_turn_does_not_record_permissions_update() -> Result<()> {
+async fn override_turn_context_without_user_turn_does_not_record_permissions_update() -> Result<()>
+{
     skip_if_no_network!(Ok(()));
 
     let server = start_mock_server().await;
@@ -120,6 +119,7 @@ async fn override_turn_context_without_user_turn_does_not_record_permissions_upd
             sandbox_policy: None,
             windows_sandbox_level: None,
             model: None,
+            model_provider: None,
             effort: None,
             summary: None,
             service_tier: None,
@@ -147,7 +147,8 @@ async fn override_turn_context_without_user_turn_does_not_record_permissions_upd
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn override_turn_context_without_user_turn_does_not_record_environment_update() -> Result<()> {
+async fn override_turn_context_without_user_turn_does_not_record_environment_update() -> Result<()>
+{
     skip_if_no_network!(Ok(()));
 
     let server = start_mock_server().await;
@@ -162,6 +163,7 @@ async fn override_turn_context_without_user_turn_does_not_record_environment_upd
             sandbox_policy: None,
             windows_sandbox_level: None,
             model: None,
+            model_provider: None,
             effort: None,
             summary: None,
             service_tier: None,
@@ -185,7 +187,8 @@ async fn override_turn_context_without_user_turn_does_not_record_environment_upd
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn override_turn_context_without_user_turn_does_not_record_collaboration_update() -> Result<()> {
+async fn override_turn_context_without_user_turn_does_not_record_collaboration_update() -> Result<()>
+{
     skip_if_no_network!(Ok(()));
 
     let server = start_mock_server().await;
@@ -201,6 +204,7 @@ async fn override_turn_context_without_user_turn_does_not_record_collaboration_u
             sandbox_policy: None,
             windows_sandbox_level: None,
             model: None,
+            model_provider: None,
             effort: None,
             summary: None,
             service_tier: None,
@@ -221,6 +225,51 @@ async fn override_turn_context_without_user_turn_does_not_record_collaboration_u
         .filter(|text| text.as_str() == collab_text.as_str())
         .count();
     assert_eq!(collab_count, 0);
+
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn override_turn_context_rejects_invalid_model_provider_pair() -> Result<()> {
+    let server = start_mock_server().await;
+    let mut builder = test_codex().with_config(|config| {
+        config.model = Some("claude-opus-4-6".to_string());
+        config.model_provider_id = "claude_cli".to_string();
+        config.model_provider = codex_core::create_claude_cli_provider();
+    });
+    let test = builder.build(&server).await?;
+
+    test.codex
+        .submit(Op::OverrideTurnContext {
+            cwd: None,
+            approval_policy: None,
+            approvals_reviewer: None,
+            sandbox_policy: None,
+            windows_sandbox_level: None,
+            model: Some("gpt-5.4".to_string()),
+            model_provider: Some("claude_cli".to_string()),
+            effort: None,
+            summary: None,
+            service_tier: None,
+            collaboration_mode: None,
+            personality: None,
+        })
+        .await?;
+
+    let error_event = wait_for_event(&test.codex, |ev| matches!(ev, EventMsg::Error(_))).await;
+    let EventMsg::Error(error_event) = error_event else {
+        unreachable!();
+    };
+    assert!(
+        error_event.message.contains("invalid value for `model`"),
+        "unexpected error message: {}",
+        error_event.message
+    );
+    assert!(
+        error_event.message.contains("claude_cli"),
+        "unexpected error message: {}",
+        error_event.message
+    );
 
     Ok(())
 }

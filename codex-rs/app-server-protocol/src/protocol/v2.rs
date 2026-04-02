@@ -1750,6 +1750,9 @@ pub struct ModelListParams {
     /// When true, include models that are hidden from the default picker list.
     #[ts(optional = nullable)]
     pub include_hidden: Option<bool>,
+    /// Optional provider ids to include. When omitted, the active provider is used.
+    #[ts(optional = nullable)]
+    pub providers: Option<Vec<String>>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, JsonSchema, TS)]
@@ -1773,6 +1776,8 @@ impl From<CoreModelAvailabilityNux> for ModelAvailabilityNux {
 pub struct Model {
     pub id: String,
     pub model: String,
+    pub provider_id: String,
+    pub provider_name: String,
     pub upgrade: Option<String>,
     pub upgrade_info: Option<ModelUpgradeInfo>,
     pub availability_nux: Option<ModelAvailabilityNux>,
@@ -3954,6 +3959,9 @@ pub struct TurnStartParams {
     /// Override the model for this turn and subsequent turns.
     #[ts(optional = nullable)]
     pub model: Option<String>,
+    /// Override the model provider for this turn and subsequent turns.
+    #[ts(optional = nullable)]
+    pub model_provider: Option<String>,
     /// Override the service tier for this turn and subsequent turns.
     #[serde(
         default,
@@ -8072,6 +8080,7 @@ mod tests {
             approvals_reviewer: None,
             sandbox_policy: None,
             model: None,
+            model_provider: None,
             service_tier: None,
             effort: None,
             summary: None,

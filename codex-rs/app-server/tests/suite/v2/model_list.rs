@@ -24,6 +24,8 @@ fn model_from_preset(preset: &ModelPreset) -> Model {
     Model {
         id: preset.id.clone(),
         model: preset.model.clone(),
+        provider_id: "openai".to_string(),
+        provider_name: "OpenAI".to_string(),
         upgrade: preset.upgrade.as_ref().map(|upgrade| upgrade.id.clone()),
         upgrade_info: preset.upgrade.as_ref().map(|upgrade| ModelUpgradeInfo {
             model: upgrade.id.clone(),
@@ -84,6 +86,7 @@ async fn list_models_returns_all_models_with_large_limit() -> Result<()> {
             limit: Some(100),
             cursor: None,
             include_hidden: None,
+            providers: None,
         })
         .await?;
 
@@ -106,6 +109,56 @@ async fn list_models_returns_all_models_with_large_limit() -> Result<()> {
 }
 
 #[tokio::test]
+async fn list_models_can_request_multiple_providers() -> Result<()> {
+    let codex_home = TempDir::new()?;
+    write_models_cache(codex_home.path())?;
+    std::fs::write(
+        codex_home.path().join("config.toml"),
+        r#"
+model = "claude-opus-4-6"
+model_provider = "claude_cli"
+approval_policy = "never"
+sandbox_mode = "read-only"
+"#,
+    )?;
+    let mut mcp = McpProcess::new(codex_home.path()).await?;
+
+    timeout(DEFAULT_TIMEOUT, mcp.initialize()).await??;
+
+    let request_id = mcp
+        .send_list_models_request(ModelListParams {
+            limit: Some(200),
+            cursor: None,
+            include_hidden: None,
+            providers: Some(vec!["claude_cli".to_string(), "openai".to_string()]),
+        })
+        .await?;
+
+    let response: JSONRPCResponse = timeout(
+        DEFAULT_TIMEOUT,
+        mcp.read_stream_until_response_message(RequestId::Integer(request_id)),
+    )
+    .await??;
+
+    let ModelListResponse {
+        data: items,
+        next_cursor,
+    } = to_response::<ModelListResponse>(response)?;
+
+    assert!(
+        items.iter().any(|item| item.provider_id == "claude_cli"),
+        "expected Claude models in picker response: {items:#?}"
+    );
+    assert!(
+        items.iter().any(|item| item.provider_id == "openai"),
+        "expected GPT models in picker response: {items:#?}"
+    );
+    assert!(items.iter().any(|item| item.model.starts_with("gpt-")));
+    assert!(next_cursor.is_none());
+    Ok(())
+}
+
+#[tokio::test]
 async fn list_models_includes_hidden_models() -> Result<()> {
     let codex_home = TempDir::new()?;
     write_models_cache(codex_home.path())?;
@@ -118,6 +171,7 @@ async fn list_models_includes_hidden_models() -> Result<()> {
             limit: Some(100),
             cursor: None,
             include_hidden: Some(true),
+            providers: None,
         })
         .await?;
 
@@ -155,6 +209,7 @@ async fn list_models_pagination_works() -> Result<()> {
                 limit: Some(1),
                 cursor: cursor.clone(),
                 include_hidden: None,
+                providers: None,
             })
             .await?;
 
@@ -199,6 +254,7 @@ async fn list_models_rejects_invalid_cursor() -> Result<()> {
             limit: None,
             cursor: Some("invalid".to_string()),
             include_hidden: None,
+            providers: None,
         })
         .await?;
 

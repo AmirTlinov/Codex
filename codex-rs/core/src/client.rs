@@ -304,6 +304,10 @@ impl ModelClient {
         }
     }
 
+    pub(crate) fn provider(&self) -> &ModelProviderInfo {
+        &self.state.provider
+    }
+
     pub(crate) fn auth_manager(&self) -> Option<Arc<AuthManager>> {
         self.state.auth_manager.clone()
     }
