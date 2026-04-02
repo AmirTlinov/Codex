@@ -1,0 +1,12 @@
+---
+source: tui/src/chatwidget/tests/popups_and_settings.rs
+expression: popup
+---
+  Select Model
+  Pick a quick auto mode or browse models by provider.
+
+  1. codex-auto-fast      Claude Code CLI · Quick automatic mode.
+› 2. Anthropic (current)  Browse 1 model from Anthropic.
+  3. OpenAI               Browse 1 model from OpenAI.
+
+  Press enter to confirm or esc to go back

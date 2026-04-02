@@ -56,6 +56,8 @@ use crate::mention_codec::LinkedMention;
 use crate::mention_codec::encode_history_mentions;
 use crate::model_catalog::ModelCatalog;
 use crate::model_catalog::ModelCatalogEntry;
+use crate::model_catalog::ModelProviderGroup;
+use crate::model_catalog::group_picker_models_by_provider;
 use crate::multi_agents;
 use crate::status::RateLimitWindowDisplay;
 use crate::status::StatusAccountDisplay;
@@ -91,7 +93,6 @@ use codex_app_server_protocol::TurnCompletedNotification;
 use codex_app_server_protocol::TurnPlanStepStatus;
 use codex_app_server_protocol::TurnStatus;
 use codex_chatgpt::connectors;
-use codex_core::WireApi;
 use codex_core::config::Config;
 use codex_core::config::Constrained;
 use codex_core::config::ConstraintResult;
@@ -8086,11 +8087,7 @@ impl ChatWidget {
             .map(|entry| entry.preset.display_name.to_string())
             .unwrap_or_else(|| self.model_display_name().to_string());
 
-        let provider_count = entries
-            .iter()
-            .map(|entry| entry.provider_id.as_str())
-            .collect::<std::collections::BTreeSet<_>>()
-            .len();
+        let provider_count = group_picker_models_by_provider(entries.clone()).len();
         let (mut auto_presets, other_presets): (Vec<ModelCatalogEntry>, Vec<ModelCatalogEntry>) =
             entries
                 .into_iter()
@@ -8133,32 +8130,65 @@ impl ChatWidget {
             .collect();
 
         if !other_presets.is_empty() {
-            let all_models = other_presets;
-            let actions: Vec<SelectionAction> = vec![Box::new(move |tx| {
-                tx.send(AppEvent::OpenAllModelsPopup {
-                    models: all_models.clone(),
+            if provider_count > 1 {
+                let current_provider_id = current_provider_id.to_string();
+                let current_is_auto = items.iter().any(|item| item.is_current);
+                items.extend(
+                    group_picker_models_by_provider(other_presets)
+                        .into_iter()
+                        .map(|group| {
+                            let group_label = group.label.clone();
+                            let model_count = group.entries.len();
+                            let noun = if model_count == 1 { "model" } else { "models" };
+                            let actions: Vec<SelectionAction> = vec![Box::new(move |tx| {
+                                tx.send(AppEvent::OpenAllModelsPopup {
+                                    models: group.entries.clone(),
+                                });
+                            })];
+
+                            SelectionItem {
+                                name: group_label.clone(),
+                                description: Some(format!(
+                                    "Browse {model_count} {noun} from {group_label}."
+                                )),
+                                is_current: !current_is_auto
+                                    && group.provider_id == current_provider_id,
+                                actions,
+                                dismiss_on_select: true,
+                                ..Default::default()
+                            }
+                        }),
+                );
+            } else {
+                let all_models = other_presets;
+                let actions: Vec<SelectionAction> = vec![Box::new(move |tx| {
+                    tx.send(AppEvent::OpenAllModelsPopup {
+                        models: all_models.clone(),
+                    });
+                })];
+
+                let is_current = !items.iter().any(|item| item.is_current);
+                let description = Some(format!(
+                    "Choose a specific model and reasoning level (current: {current_label})"
+                ));
+
+                items.push(SelectionItem {
+                    name: "All models".to_string(),
+                    description,
+                    is_current,
+                    actions,
+                    dismiss_on_select: true,
+                    ..Default::default()
                 });
-            })];
-
-            let is_current = !items.iter().any(|item| item.is_current);
-            let description = Some(format!(
-                "Choose a specific model and reasoning level (current: {current_label})"
-            ));
-
-            items.push(SelectionItem {
-                name: "All models".to_string(),
-                description,
-                is_current,
-                actions,
-                dismiss_on_select: true,
-                ..Default::default()
-            });
+            }
         }
 
-        let header = self.model_menu_header(
-            "Select Model",
-            "Pick a quick auto mode or browse all models.",
-        );
+        let subtitle = if provider_count > 1 {
+            "Pick a quick auto mode or browse models by provider."
+        } else {
+            "Pick a quick auto mode or browse all models."
+        };
+        let header = self.model_menu_header("Select Model", subtitle);
         self.bottom_pane.show_selection_view(SelectionViewParams {
             footer_hint: Some(standard_popup_hint_line()),
             items,
@@ -8189,15 +8219,26 @@ impl ChatWidget {
             return;
         }
 
+        let provider_groups = group_picker_models_by_provider(entries.clone());
+        if provider_groups.len() > 1 {
+            self.open_model_provider_popup(provider_groups);
+            return;
+        }
+
         let current_provider_id = self.current_model_provider_id();
-        let provider_count = entries
-            .iter()
-            .map(|entry| entry.provider_id.as_str())
-            .collect::<std::collections::BTreeSet<_>>()
-            .len();
+        let provider_label = provider_groups
+            .first()
+            .map(|group| {
+                if group.label == "Other" && group.provider_id.is_empty() {
+                    self.config.model_provider.name.clone()
+                } else {
+                    group.label.clone()
+                }
+            })
+            .unwrap_or_else(|| self.config.model_provider.name.clone());
         let mut items: Vec<SelectionItem> = Vec::new();
         for entry in entries.iter().cloned() {
-            let description = Self::picker_description(&entry, provider_count > 1);
+            let description = Self::picker_description(&entry, /*show_provider*/ false);
             let is_current = entry.provider_id == current_provider_id
                 && entry.preset.model.as_str() == self.current_model();
             let single_supported_effort = entry.preset.supported_reasoning_efforts.len() == 1;
@@ -8218,21 +8259,45 @@ impl ChatWidget {
             });
         }
 
-        let subtitle = if provider_count > 1 {
-            "Pick a model from any configured provider and choose its reasoning level."
-        } else {
-            match self.config.model_provider.wire_api {
-                WireApi::ClaudeCli => {
-                    "Pick the Claude model for this session, or override it with claudex -m <model_name>."
-                }
-                WireApi::Responses => {
-                    "Access legacy models by running codex -m <model_name> or in your config.toml"
-                }
-            }
-        };
-        let header = self.model_menu_header("Select Model and Effort", subtitle);
+        let subtitle =
+            format!("Pick a model from {provider_label} and choose its reasoning level.");
+        let header = self.model_menu_header("Select Model and Effort", &subtitle);
         self.bottom_pane.show_selection_view(SelectionViewParams {
             footer_hint: Some("Press enter to select reasoning effort, or esc to dismiss.".into()),
+            items,
+            header,
+            ..Default::default()
+        });
+    }
+
+    fn open_model_provider_popup(&mut self, provider_groups: Vec<ModelProviderGroup>) {
+        let current_provider_id = self.current_model_provider_id().to_string();
+        let mut items = Vec::new();
+        for group in provider_groups {
+            let label = group.label.clone();
+            let model_count = group.entries.len();
+            let noun = if model_count == 1 { "model" } else { "models" };
+            let actions: Vec<SelectionAction> = vec![Box::new(move |tx| {
+                tx.send(AppEvent::OpenAllModelsPopup {
+                    models: group.entries.clone(),
+                });
+            })];
+            items.push(SelectionItem {
+                name: label.clone(),
+                description: Some(format!("Browse {model_count} {noun} from {label}.")),
+                is_current: group.provider_id == current_provider_id,
+                actions,
+                dismiss_on_select: true,
+                ..Default::default()
+            });
+        }
+
+        let header = self.model_menu_header(
+            "Select Provider",
+            "Choose Anthropic or OpenAI, then pick a model and reasoning level.",
+        );
+        self.bottom_pane.show_selection_view(SelectionViewParams {
+            footer_hint: Some("Press enter to browse a provider, or esc to dismiss.".into()),
             items,
             header,
             ..Default::default()

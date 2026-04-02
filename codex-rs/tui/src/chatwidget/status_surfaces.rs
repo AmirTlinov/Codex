@@ -19,7 +19,7 @@ pub(super) const TERMINAL_TITLE_SPINNER_FRAMES: [&str; 10] =
 pub(super) const TERMINAL_TITLE_SPINNER_INTERVAL: Duration = Duration::from_millis(100);
 
 fn default_terminal_title_items(distribution: &DistributionInfo) -> &'static [&'static str] {
-    if distribution.uses_custom_branding() {
+    if distribution.product_name != "OpenAI Codex" {
         &CUSTOM_BRANDED_TERMINAL_TITLE_ITEMS
     } else {
         &DEFAULT_TERMINAL_TITLE_ITEMS

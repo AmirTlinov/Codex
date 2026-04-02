@@ -1,9 +1,9 @@
 ---
-source: tui/src/chatwidget/tests.rs
+source: tui/src/chatwidget/tests/popups_and_settings.rs
 expression: popup
 ---
   Select Model and Effort
-  Access legacy models by running codex -m <model_name> or in your config.toml
+  Pick a model from OpenAI and choose its reasoning level.
 
 › 1. gpt-5.3-codex (default)  Latest frontier agentic coding model.
   2. gpt-5.4                  Latest frontier agentic coding model.

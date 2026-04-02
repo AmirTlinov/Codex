@@ -1,18 +1,11 @@
 ---
 source: tui/src/chatwidget/tests/popups_and_settings.rs
-assertion_line: 1771
 expression: popup
 ---
-  Select Model and Effort
-  Pick a model from any configured provider and choose its reasoning level.
+  Select Provider
+  Choose Anthropic or OpenAI, then pick a model and reasoning level.
 
-› 1. Claude Opus 4.6 (current)  Claude CLI · Claude flagship model for the
-                                deepest reflective and coding work.
-  2. Claude Sonnet 4.6          Claude CLI · Balanced Claude model for
-                                everyday coding and long-running task
-                                execution.
-  3. gpt-5.4                    OpenAI · Latest frontier agentic coding model.
-  4. gpt-5.4-mini               OpenAI · Smaller frontier agentic coding
-                                model.
+› 1. Anthropic (current)  Browse 2 models from Anthropic.
+  2. OpenAI               Browse 2 models from OpenAI.
 
-  Press enter to select reasoning effort, or esc to dismiss.
+  Press enter to browse a provider, or esc to dismiss.

@@ -3,7 +3,7 @@ source: tui/src/chatwidget/tests/popups_and_settings.rs
 expression: popup
 ---
   Select Model and Effort
-  Pick the Claude model for this session, or override it with claudex -m <mode
+  Pick a model from Anthropic and choose its reasoning level.
 
 › 1. Claude Opus 4.6 (current)  Claude flagship model for the deepest
                                 reflective and coding work.
