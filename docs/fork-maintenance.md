@@ -143,8 +143,9 @@ What it does:
 - starts this fork with downstream Claude defaults for the main session,
   subagents, and a Claude-first model picker that still exposes paired OpenAI
   GPT entries when the OpenAI provider is available;
-- brands the runtime as `Claudex` and points its update checks at the fork's
-  `origin` remote + current branch, so the update banner/version identity are
+- brands the runtime as `Claudex`, makes `claudex --version` report the
+  current downstream short SHA, and points update checks at the fork's
+  `origin` remote + current branch, so the update banner/version identity stay
   separate from upstream `openai/codex` releases.
 
 The wrapper currently injects:

@@ -41,10 +41,11 @@ This fork is maintained as a downstream customization layer over
   copying `~/.codex` without mutating the source home, repairs copied
   home-local absolute paths inside `config.toml` and `agents/*.toml` so the
   target points at itself (override that source with `CLAUDEX_SOURCE_HOME`),
-  brands the TUI as `Claudex`, routes update checks against the fork remote +
-  current branch instead of the upstream OpenAI release channel, and prefers
-  the newest local debug build over release unless `CLAUDEX_PROFILE=release`
-  is set.
+  brands the TUI as `Claudex`, makes `claudex --version` report the current
+  downstream short SHA, routes update checks against the fork remote + current
+  branch instead of the upstream OpenAI release channel, and prefers the
+  newest local debug build over release unless `CLAUDEX_PROFILE=release` is
+  set.
 - When the downstream workflow changes, update the matching repo truth in the
   same change: `AGENTS.md`, `.agents/skills/*`, and `docs/fork-maintenance.md`.
 - Keep durable intent and workflow truth in repo files, not only in chat.

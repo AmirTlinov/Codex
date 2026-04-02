@@ -242,6 +242,11 @@ if [[ ! -x "\$chosen_binary" ]]; then
   exit 1
 fi
 
+if ((\$# > 0)) && [[ "\$1" == "--version" || "\$1" == "-V" ]]; then
+  printf 'claudex %s\n' "\$current_sha"
+  exit 0
+fi
+
 exec "\$chosen_binary" \
   -c model_provider=claude_cli \
   -c model=claude-opus-4-6 \

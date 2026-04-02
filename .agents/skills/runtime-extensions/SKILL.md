@@ -39,8 +39,9 @@ description: Downstream workflow for config, MCP, plugin, skill, AGENTS, and wra
   home-local absolute paths inside `config.toml` and `agents/*.toml` so the
   target points at itself (override the copy source with
   `CLAUDEX_SOURCE_HOME`). If the wrapper changes downstream branding or update
-  behavior, keep `Claudex` branding and the fork-branch update channel there
-  instead of baking those machine-local defaults into the stock `codex` path.
+  behavior, keep `Claudex` branding, `claudex --version`, and the fork-branch
+  update channel there instead of baking those machine-local defaults into the
+  stock `codex` path.
 - If `scripts/install-claudex.sh` changes behavior, keep the wrapper, `AGENTS.md`,
   and `docs/fork-maintenance.md` / `docs/claudex.md` aligned in the same slice.
 - If a behavior is machine-local rather than repo-owned, keep it in

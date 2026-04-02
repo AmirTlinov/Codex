@@ -36,7 +36,8 @@ This means:
 - the TUI brands itself as `Claudex` instead of `OpenAI Codex`;
 - `claudex` carries its own downstream version identity and update feed based on
   the current branch tip of this fork's `origin` remote, not the upstream
-  `openai/codex` release channel.
+  `openai/codex` release channel; `claudex --version` prints that downstream
+  short SHA too.
 
 ## Current boundaries
 
