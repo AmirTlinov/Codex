@@ -1,4 +1,5 @@
 use crate::bottom_pane::FeedbackAudience;
+use crate::distribution::DistributionInfo;
 use crate::model_catalog::ModelCatalogEntry;
 use crate::status::StatusAccountDisplay;
 use crate::status::plan_type_display_name;
@@ -64,6 +65,8 @@ use codex_app_server_protocol::TurnStartParams;
 use codex_app_server_protocol::TurnStartResponse;
 use codex_app_server_protocol::TurnSteerParams;
 use codex_app_server_protocol::TurnSteerResponse;
+use codex_core::CLAUDE_CLI_PROVIDER_ID;
+use codex_core::OPENAI_PROVIDER_ID;
 use codex_core::config::Config;
 use codex_core::message_history;
 use codex_core::model_picker_provider_ids;
@@ -783,14 +786,31 @@ pub(crate) fn feedback_audience_from_account_email(
 }
 
 fn requested_picker_providers(config: &Config, is_remote: bool) -> Option<Vec<String>> {
+    requested_picker_providers_for_distribution(config, is_remote, DistributionInfo::current())
+}
+
+fn requested_picker_providers_for_distribution(
+    config: &Config,
+    is_remote: bool,
+    distribution: &DistributionInfo,
+) -> Option<Vec<String>> {
     if is_remote {
         return None;
     }
 
-    Some(model_picker_provider_ids(
-        &config.model_providers,
-        &config.model_provider_id,
-    ))
+    let mut providers =
+        model_picker_provider_ids(&config.model_providers, &config.model_provider_id);
+    if distribution.uses_custom_branding()
+        && config.model_provider_id == OPENAI_PROVIDER_ID
+        && config.model_providers.contains_key(CLAUDE_CLI_PROVIDER_ID)
+        && !providers
+            .iter()
+            .any(|provider| provider == CLAUDE_CLI_PROVIDER_ID)
+    {
+        providers.push(CLAUDE_CLI_PROVIDER_ID.to_string());
+    }
+
+    Some(providers)
 }
 
 fn model_catalog_entry_from_api_model(model: ApiModel) -> ModelCatalogEntry {
@@ -1155,6 +1175,7 @@ fn app_server_credits_snapshot_to_core(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::distribution::UpdateChannel;
     use codex_app_server_protocol::ThreadStatus;
     use codex_app_server_protocol::Turn;
     use codex_app_server_protocol::TurnStatus;
@@ -1170,8 +1191,19 @@ mod tests {
             .expect("config should build")
     }
 
+    fn sample_distribution(product_name: &str) -> DistributionInfo {
+        DistributionInfo {
+            product_name: product_name.to_string(),
+            display_version: "0.0.0".to_string(),
+            install_url: "https://example.invalid/install".to_string(),
+            release_notes_url: "https://example.invalid/releases".to_string(),
+            announcement_tip_url: None,
+            update_channel: UpdateChannel::Disabled,
+        }
+    }
+
     #[tokio::test]
-    async fn requested_picker_providers_include_only_openai_pairing_for_claudex_sessions() {
+    async fn requested_picker_providers_include_openai_pairing_for_claudex_sessions() {
         let temp_dir = tempfile::tempdir().expect("tempdir");
         let mut config = build_config(&temp_dir).await;
         config.model_provider_id = "claude_cli".to_string();
@@ -1181,8 +1213,12 @@ mod tests {
             .cloned()
             .expect("built-in claude provider");
 
-        let providers =
-            requested_picker_providers(&config, /*is_remote*/ false).expect("provider list");
+        let providers = requested_picker_providers_for_distribution(
+            &config,
+            /*is_remote*/ false,
+            &sample_distribution("Claudex"),
+        )
+        .expect("provider list");
 
         assert_eq!(
             providers,
@@ -1191,12 +1227,34 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn requested_picker_providers_include_claude_pairing_for_claudex_openai_sessions() {
+        let temp_dir = tempfile::tempdir().expect("tempdir");
+        let config = build_config(&temp_dir).await;
+
+        let providers = requested_picker_providers_for_distribution(
+            &config,
+            /*is_remote*/ false,
+            &sample_distribution("Claudex"),
+        )
+        .expect("provider list");
+
+        assert_eq!(
+            providers,
+            vec!["openai".to_string(), "claude_cli".to_string()]
+        );
+    }
+
+    #[tokio::test]
     async fn requested_picker_providers_leave_stock_openai_sessions_unchanged() {
         let temp_dir = tempfile::tempdir().expect("tempdir");
         let config = build_config(&temp_dir).await;
 
-        let providers =
-            requested_picker_providers(&config, /*is_remote*/ false).expect("provider list");
+        let providers = requested_picker_providers_for_distribution(
+            &config,
+            /*is_remote*/ false,
+            &sample_distribution("OpenAI Codex"),
+        )
+        .expect("provider list");
 
         assert_eq!(providers, vec!["openai".to_string()]);
     }

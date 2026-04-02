@@ -34,7 +34,8 @@ This means:
 - the model picker keeps the Claude catalog front-and-center while also exposing
   paired OpenAI GPT entries for quick fallback in `claudex` when the OpenAI provider is available;
   when both providers are present, the full `/model` browser now separates them
-  into `Anthropic` and `OpenAI` before showing the concrete models;
+  into `Anthropic` and `OpenAI` before showing the concrete models, even if the
+  current session is already on a GPT/OpenAI model;
 - the TUI brands itself as `Claudex` instead of `OpenAI Codex`, keeps
   the default terminal title downstream-branded too, and non-TUI
   human-output/update copy follows the same product name;
