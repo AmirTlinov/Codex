@@ -8,6 +8,8 @@ use super::*;
 /// Items shown in the terminal title when the user has not configured a
 /// custom selection. Intentionally minimal: spinner + project name.
 pub(super) const DEFAULT_TERMINAL_TITLE_ITEMS: [&str; 2] = ["spinner", "project"];
+pub(super) const CUSTOM_BRANDED_TERMINAL_TITLE_ITEMS: [&str; 3] =
+    ["spinner", "app-name", "project"];
 
 /// Braille-pattern dot-spinner frames for the terminal title animation.
 pub(super) const TERMINAL_TITLE_SPINNER_FRAMES: [&str; 10] =
@@ -15,6 +17,43 @@ pub(super) const TERMINAL_TITLE_SPINNER_FRAMES: [&str; 10] =
 
 /// Time between spinner frame advances in the terminal title.
 pub(super) const TERMINAL_TITLE_SPINNER_INTERVAL: Duration = Duration::from_millis(100);
+
+fn default_terminal_title_items(distribution: &DistributionInfo) -> &'static [&'static str] {
+    if distribution.uses_custom_branding() {
+        &CUSTOM_BRANDED_TERMINAL_TITLE_ITEMS
+    } else {
+        &DEFAULT_TERMINAL_TITLE_ITEMS
+    }
+}
+
+fn uses_legacy_stock_terminal_title(items: &[String]) -> bool {
+    matches!(items, [first, second] if {
+        (first == "spinner" && second == "project")
+            || (first == "project" && second == "spinner")
+    })
+}
+
+fn effective_terminal_title_items(
+    configured: Option<Vec<String>>,
+    distribution: &DistributionInfo,
+) -> Vec<String> {
+    match configured {
+        Some(items)
+            if distribution.uses_custom_branding()
+                && uses_legacy_stock_terminal_title(&items)
+                && !items.iter().any(|item| item == "app-name") =>
+        {
+            let mut branded = vec!["app-name".to_string()];
+            branded.extend(items);
+            branded
+        }
+        Some(items) => items,
+        None => default_terminal_title_items(distribution)
+            .iter()
+            .map(ToString::to_string)
+            .collect(),
+    }
+}
 
 /// Compact runtime states that can be rendered into the terminal title.
 ///
@@ -297,12 +336,10 @@ impl ChatWidget {
 
     /// Returns the configured terminal-title ids, or the default ordering when unset.
     pub(super) fn configured_terminal_title_items(&self) -> Vec<String> {
-        self.config.tui_terminal_title.clone().unwrap_or_else(|| {
-            DEFAULT_TERMINAL_TITLE_ITEMS
-                .iter()
-                .map(ToString::to_string)
-                .collect()
-        })
+        effective_terminal_title_items(
+            self.config.tui_terminal_title.clone(),
+            DistributionInfo::current(),
+        )
     }
 
     fn status_line_cwd(&self) -> &Path {
@@ -513,7 +550,9 @@ impl ChatWidget {
         now: Instant,
     ) -> Option<String> {
         match item {
-            TerminalTitleItem::AppName => Some("codex".to_string()),
+            TerminalTitleItem::AppName => {
+                Some(DistributionInfo::current().short_product_name().to_string())
+            }
             TerminalTitleItem::Project => self.terminal_title_project_name(),
             TerminalTitleItem::Spinner => self.terminal_title_spinner_text_at(now),
             TerminalTitleItem::Status => Some(self.terminal_title_status_text()),
@@ -661,4 +700,53 @@ where
         }
     }
     (items, invalid)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::distribution::UpdateChannel;
+    use pretty_assertions::assert_eq;
+
+    fn sample_distribution(product_name: &str, display_version: &str) -> DistributionInfo {
+        DistributionInfo {
+            product_name: product_name.to_string(),
+            display_version: display_version.to_string(),
+            install_url: "https://example.invalid/install".to_string(),
+            release_notes_url: "https://example.invalid/releases".to_string(),
+            announcement_tip_url: None,
+            update_channel: UpdateChannel::Disabled,
+        }
+    }
+
+    #[test]
+    fn default_terminal_title_items_stay_minimal_for_stock_codex() {
+        assert_eq!(
+            default_terminal_title_items(&sample_distribution("OpenAI Codex", "0.0.0")),
+            &DEFAULT_TERMINAL_TITLE_ITEMS
+        );
+    }
+
+    #[test]
+    fn default_terminal_title_items_include_app_name_for_custom_branding() {
+        assert_eq!(
+            default_terminal_title_items(&sample_distribution("Claudex", "07e1b3241202")),
+            &CUSTOM_BRANDED_TERMINAL_TITLE_ITEMS
+        );
+    }
+
+    #[test]
+    fn copied_stock_terminal_title_is_promoted_for_custom_branding() {
+        assert_eq!(
+            effective_terminal_title_items(
+                Some(vec!["project".to_string(), "spinner".to_string()]),
+                &sample_distribution("Claudex", "07e1b3241202"),
+            ),
+            vec![
+                "app-name".to_string(),
+                "project".to_string(),
+                "spinner".to_string(),
+            ]
+        );
+    }
 }

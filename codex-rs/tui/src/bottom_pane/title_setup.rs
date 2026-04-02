@@ -22,6 +22,7 @@ use crate::bottom_pane::CancellationEvent;
 use crate::bottom_pane::bottom_pane_view::BottomPaneView;
 use crate::bottom_pane::multi_select_picker::MultiSelectItem;
 use crate::bottom_pane::multi_select_picker::MultiSelectPicker;
+use crate::distribution::DistributionInfo;
 use crate::render::renderable::Renderable;
 
 /// Available items that can be displayed in the terminal title.
@@ -53,7 +54,7 @@ pub(crate) enum TerminalTitleItem {
 impl TerminalTitleItem {
     pub(crate) fn description(self) -> &'static str {
         match self {
-            TerminalTitleItem::AppName => "Codex app name",
+            TerminalTitleItem::AppName => "App name",
             TerminalTitleItem::Project => "Project name (falls back to current directory name)",
             TerminalTitleItem::Spinner => {
                 "Animated task spinner (omitted while idle or when animations are off)"
@@ -72,16 +73,18 @@ impl TerminalTitleItem {
     ///
     /// These are illustrative sample values, not live data from the current
     /// session.
-    pub(crate) fn preview_example(self) -> &'static str {
+    pub(crate) fn preview_example(self) -> String {
         match self {
-            TerminalTitleItem::AppName => "codex",
-            TerminalTitleItem::Project => "my-project",
-            TerminalTitleItem::Spinner => "⠋",
-            TerminalTitleItem::Status => "Working",
-            TerminalTitleItem::Thread => "Investigate flaky test",
-            TerminalTitleItem::GitBranch => "feat/awesome-feature",
-            TerminalTitleItem::Model => "gpt-5.2-codex",
-            TerminalTitleItem::TaskProgress => "Tasks 2/5",
+            TerminalTitleItem::AppName => {
+                DistributionInfo::current().short_product_name().to_string()
+            }
+            TerminalTitleItem::Project => "my-project".to_string(),
+            TerminalTitleItem::Spinner => "⠋".to_string(),
+            TerminalTitleItem::Status => "Working".to_string(),
+            TerminalTitleItem::Thread => "Investigate flaky test".to_string(),
+            TerminalTitleItem::GitBranch => "feat/awesome-feature".to_string(),
+            TerminalTitleItem::Model => "gpt-5.2-codex".to_string(),
+            TerminalTitleItem::TaskProgress => "Tasks 2/5".to_string(),
         }
     }
 
@@ -172,7 +175,7 @@ impl TerminalTitleSetupView {
                 let mut previous = None;
                 for item in items.iter().copied() {
                     preview.push_str(item.separator_from_previous(previous));
-                    preview.push_str(item.preview_example());
+                    preview.push_str(&item.preview_example());
                     previous = Some(item);
                 }
                 if preview.is_empty() {

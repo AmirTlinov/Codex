@@ -33,8 +33,9 @@ This means:
 - spawned subagents default to the Claude CLI backend too;
 - the model picker keeps the Claude catalog front-and-center while also exposing
   paired OpenAI GPT entries for quick fallback in `claudex` when the OpenAI provider is available;
-- the TUI brands itself as `Claudex` instead of `OpenAI Codex`, and
-  non-TUI human-output/update copy follows the same downstream product name;
+- the TUI brands itself as `Claudex` instead of `OpenAI Codex`, keeps
+  the default terminal title downstream-branded too, and non-TUI
+  human-output/update copy follows the same product name;
 - `claudex` carries its own downstream version identity and update feed based on
   the current branch tip of this fork's `origin` remote, not the upstream
   `openai/codex` release channel; `claudex --version` prints that downstream
