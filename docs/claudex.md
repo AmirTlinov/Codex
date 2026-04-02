@@ -22,8 +22,8 @@ This means:
 
 - the main session runs through Claude Code CLI instead of the Responses API;
 - spawned subagents default to the Claude CLI backend too;
-- the model picker shows the bundled Claude catalog (`Claude Opus 4.6`,
-  `Claude Sonnet 4.6`, `Claude Haiku`).
+- the model picker keeps the Claude catalog front-and-center while also exposing
+  paired OpenAI GPT entries for quick fallback in `claudex` when the OpenAI provider is available.
 
 ## Current boundaries
 

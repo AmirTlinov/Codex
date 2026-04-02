@@ -134,7 +134,8 @@ What it does:
 - makes `claudex` prefer the newest local `target/debug/codex` over release
   unless `CLAUDEX_PROFILE=release` is set;
 - starts this fork with downstream Claude defaults for the main session,
-  model picker, and subagents.
+  subagents, and a Claude-first model picker that still exposes paired OpenAI
+  GPT entries when the OpenAI provider is available.
 
 The wrapper currently injects:
 

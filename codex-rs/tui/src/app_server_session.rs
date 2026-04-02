@@ -64,6 +64,8 @@ use codex_app_server_protocol::TurnStartParams;
 use codex_app_server_protocol::TurnStartResponse;
 use codex_app_server_protocol::TurnSteerParams;
 use codex_app_server_protocol::TurnSteerResponse;
+use codex_core::CLAUDE_CLI_PROVIDER_ID;
+use codex_core::OPENAI_PROVIDER_ID;
 use codex_core::config::Config;
 use codex_core::message_history;
 use codex_otel::TelemetryAuthMode;
@@ -786,14 +788,13 @@ fn requested_picker_providers(config: &Config, is_remote: bool) -> Option<Vec<St
         return None;
     }
 
-    let mut provider_ids = config
-        .model_providers
-        .keys()
-        .filter(|provider_id| provider_id.as_str() != config.model_provider_id)
-        .cloned()
-        .collect::<Vec<_>>();
-    provider_ids.sort();
-    provider_ids.insert(0, config.model_provider_id.clone());
+    let mut provider_ids = vec![config.model_provider_id.clone()];
+    if config.model_provider_id == CLAUDE_CLI_PROVIDER_ID
+        && config.model_providers.contains_key(OPENAI_PROVIDER_ID)
+    {
+        provider_ids.push(OPENAI_PROVIDER_ID.to_string());
+    }
+
     Some(provider_ids)
 }
 
@@ -1175,7 +1176,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn requested_picker_providers_include_active_provider_first_for_embedded_sessions() {
+    async fn requested_picker_providers_include_only_openai_pairing_for_claudex_sessions() {
         let temp_dir = tempfile::tempdir().expect("tempdir");
         let mut config = build_config(&temp_dir).await;
         config.model_provider_id = "claude_cli".to_string();
@@ -1188,8 +1189,21 @@ mod tests {
         let providers =
             requested_picker_providers(&config, /*is_remote*/ false).expect("provider list");
 
-        assert_eq!(providers.first().map(String::as_str), Some("claude_cli"));
-        assert!(providers.iter().any(|provider_id| provider_id == "openai"));
+        assert_eq!(
+            providers,
+            vec!["claude_cli".to_string(), "openai".to_string()]
+        );
+    }
+
+    #[tokio::test]
+    async fn requested_picker_providers_leave_stock_openai_sessions_unchanged() {
+        let temp_dir = tempfile::tempdir().expect("tempdir");
+        let config = build_config(&temp_dir).await;
+
+        let providers =
+            requested_picker_providers(&config, /*is_remote*/ false).expect("provider list");
+
+        assert_eq!(providers, vec!["openai".to_string()]);
     }
 
     #[tokio::test]
