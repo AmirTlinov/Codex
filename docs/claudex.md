@@ -54,7 +54,9 @@ This downstream slice is intentionally honest and narrow:
 - the bundled Claude catalog is text-only right now, so image inputs are not
   supported in the main Claude lane;
 - `Claude Haiku 4.6` currently maps to Claude CLI's stable `haiku` alias on
-  purpose, while Opus and Sonnet stay pinned to explicit `4.6` slugs;
+  purpose, while Opus and Sonnet stay pinned to explicit `4.6` slugs; Opus
+  exposes `Low/Medium/High/Max`, Sonnet stops at `High`, and Haiku skips the
+  reasoning picker entirely.
 - if you want a different Claude default model, pass `claudex -m <model>` or
   override it in config.
 

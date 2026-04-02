@@ -519,7 +519,26 @@ impl ModelsManager {
                 "claude-opus-4-6",
                 "Claude Opus 4.6",
                 "Claude flagship model for the deepest reflective and coding work.",
-                codex_protocol::openai_models::ReasoningEffort::High,
+                Some(codex_protocol::openai_models::ReasoningEffort::High),
+                vec![
+                    codex_protocol::openai_models::ReasoningEffortPreset {
+                        effort: codex_protocol::openai_models::ReasoningEffort::Low,
+                        description: "Fast responses with lighter reasoning".to_string(),
+                    },
+                    codex_protocol::openai_models::ReasoningEffortPreset {
+                        effort: codex_protocol::openai_models::ReasoningEffort::Medium,
+                        description: "Balances speed and reasoning depth for everyday tasks"
+                            .to_string(),
+                    },
+                    codex_protocol::openai_models::ReasoningEffortPreset {
+                        effort: codex_protocol::openai_models::ReasoningEffort::High,
+                        description: "Greater reasoning depth for complex problems".to_string(),
+                    },
+                    codex_protocol::openai_models::ReasoningEffortPreset {
+                        effort: codex_protocol::openai_models::ReasoningEffort::XHigh,
+                        description: "Maximum effort for the hardest tasks".to_string(),
+                    },
+                ],
                 /*priority*/ 0,
                 /*context_window*/ 200_000,
             ),
@@ -527,7 +546,22 @@ impl ModelsManager {
                 "claude-sonnet-4-6",
                 "Claude Sonnet 4.6",
                 "Balanced Claude model for everyday coding and long-running task execution.",
-                codex_protocol::openai_models::ReasoningEffort::Medium,
+                Some(codex_protocol::openai_models::ReasoningEffort::Medium),
+                vec![
+                    codex_protocol::openai_models::ReasoningEffortPreset {
+                        effort: codex_protocol::openai_models::ReasoningEffort::Low,
+                        description: "Fast responses with lighter reasoning".to_string(),
+                    },
+                    codex_protocol::openai_models::ReasoningEffortPreset {
+                        effort: codex_protocol::openai_models::ReasoningEffort::Medium,
+                        description: "Balances speed and reasoning depth for everyday tasks"
+                            .to_string(),
+                    },
+                    codex_protocol::openai_models::ReasoningEffortPreset {
+                        effort: codex_protocol::openai_models::ReasoningEffort::High,
+                        description: "Greater reasoning depth for complex problems".to_string(),
+                    },
+                ],
                 /*priority*/ 1,
                 /*context_window*/ 200_000,
             ),
@@ -535,7 +569,8 @@ impl ModelsManager {
                 "haiku",
                 "Claude Haiku 4.6",
                 "Fast Claude model for quick iterations, narrow fixes, and lightweight turns.",
-                codex_protocol::openai_models::ReasoningEffort::Low,
+                Some(codex_protocol::openai_models::ReasoningEffort::Low),
+                Vec::new(),
                 /*priority*/ 2,
                 /*context_window*/ 200_000,
             ),
@@ -546,7 +581,8 @@ impl ModelsManager {
         slug: &str,
         display_name: &str,
         description: &str,
-        default_reasoning_level: codex_protocol::openai_models::ReasoningEffort,
+        default_reasoning_level: Option<codex_protocol::openai_models::ReasoningEffort>,
+        supported_reasoning_levels: Vec<codex_protocol::openai_models::ReasoningEffortPreset>,
         priority: i32,
         context_window: i64,
     ) -> ModelInfo {
@@ -554,26 +590,8 @@ impl ModelsManager {
             slug: slug.to_string(),
             display_name: display_name.to_string(),
             description: Some(description.to_string()),
-            default_reasoning_level: Some(default_reasoning_level),
-            supported_reasoning_levels: vec![
-                codex_protocol::openai_models::ReasoningEffortPreset {
-                    effort: codex_protocol::openai_models::ReasoningEffort::Low,
-                    description: "Fast responses with lighter reasoning".to_string(),
-                },
-                codex_protocol::openai_models::ReasoningEffortPreset {
-                    effort: codex_protocol::openai_models::ReasoningEffort::Medium,
-                    description: "Balances speed and reasoning depth for everyday tasks"
-                        .to_string(),
-                },
-                codex_protocol::openai_models::ReasoningEffortPreset {
-                    effort: codex_protocol::openai_models::ReasoningEffort::High,
-                    description: "Greater reasoning depth for complex problems".to_string(),
-                },
-                codex_protocol::openai_models::ReasoningEffortPreset {
-                    effort: codex_protocol::openai_models::ReasoningEffort::XHigh,
-                    description: "Maximum Claude effort for the hardest tasks".to_string(),
-                },
-            ],
+            default_reasoning_level,
+            supported_reasoning_levels,
             shell_type: ConfigShellToolType::ShellCommand,
             visibility: ModelVisibility::List,
             supported_in_api: true,

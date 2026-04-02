@@ -2015,6 +2015,108 @@ async fn reasoning_popup_shows_extra_high_with_space() {
 }
 
 #[tokio::test]
+async fn claude_opus_reasoning_popup_uses_max_label() {
+    let (mut chat, _rx, _op_rx) = make_chatwidget_manual(Some("claude-opus-4-6")).await;
+    chat.set_model_provider("claude_cli", codex_core::create_claude_cli_provider());
+
+    let preset = ModelPreset {
+        id: "claude-opus-4-6".to_string(),
+        model: "claude-opus-4-6".to_string(),
+        display_name: "Claude Opus 4.6".to_string(),
+        description: "Claude flagship model for the deepest reflective and coding work."
+            .to_string(),
+        default_reasoning_effort: ReasoningEffortConfig::High,
+        supported_reasoning_efforts: vec![
+            ReasoningEffortPreset {
+                effort: ReasoningEffortConfig::Low,
+                description: "Fast responses with lighter reasoning".to_string(),
+            },
+            ReasoningEffortPreset {
+                effort: ReasoningEffortConfig::Medium,
+                description: "Balances speed and reasoning depth for everyday tasks".to_string(),
+            },
+            ReasoningEffortPreset {
+                effort: ReasoningEffortConfig::High,
+                description: "Greater reasoning depth for complex problems".to_string(),
+            },
+            ReasoningEffortPreset {
+                effort: ReasoningEffortConfig::XHigh,
+                description: "Maximum effort for the hardest tasks".to_string(),
+            },
+        ],
+        supports_personality: false,
+        is_default: false,
+        upgrade: None,
+        show_in_picker: true,
+        availability_nux: None,
+        supported_in_api: true,
+        input_modalities: default_input_modalities(),
+    };
+    chat.open_reasoning_popup(crate::model_catalog::ModelCatalogEntry {
+        provider_id: "claude_cli".to_string(),
+        provider_name: "Claude Code CLI".to_string(),
+        preset,
+    });
+
+    let popup = render_bottom_popup(&chat, /*width*/ 80);
+    assert!(
+        popup.contains("Max"),
+        "expected popup to include 'Max'; popup: {popup}"
+    );
+    assert!(
+        !popup.contains("Extra high"),
+        "expected popup not to include 'Extra high'; popup: {popup}"
+    );
+}
+
+#[tokio::test]
+async fn claude_haiku_reasoning_popup_skips_selection() {
+    let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(Some("haiku")).await;
+    chat.set_model_provider("claude_cli", codex_core::create_claude_cli_provider());
+
+    let preset = ModelPreset {
+        id: "haiku".to_string(),
+        model: "haiku".to_string(),
+        display_name: "Claude Haiku 4.6".to_string(),
+        description: "Fast Claude model for quick iterations, narrow fixes, and lightweight turns."
+            .to_string(),
+        default_reasoning_effort: ReasoningEffortConfig::Low,
+        supported_reasoning_efforts: Vec::new(),
+        supports_personality: false,
+        is_default: false,
+        upgrade: None,
+        show_in_picker: true,
+        availability_nux: None,
+        supported_in_api: true,
+        input_modalities: default_input_modalities(),
+    };
+    chat.open_reasoning_popup(crate::model_catalog::ModelCatalogEntry {
+        provider_id: "claude_cli".to_string(),
+        provider_name: "Claude Code CLI".to_string(),
+        preset,
+    });
+
+    let popup = render_bottom_popup(&chat, /*width*/ 80);
+    assert!(
+        !popup.contains("Select Reasoning Level"),
+        "expected reasoning selection popup to be skipped for Haiku"
+    );
+
+    let mut events = Vec::new();
+    while let Ok(ev) = rx.try_recv() {
+        events.push(ev);
+    }
+
+    assert!(
+        events.iter().any(|ev| matches!(
+            ev,
+            AppEvent::UpdateReasoningEffort(Some(effort)) if *effort == ReasoningEffortConfig::Low
+        )),
+        "expected Haiku reasoning effort to apply automatically; events: {events:?}"
+    );
+}
+
+#[tokio::test]
 async fn single_reasoning_option_skips_selection() {
     let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
 

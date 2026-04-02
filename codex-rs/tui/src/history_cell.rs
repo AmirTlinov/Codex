@@ -1310,6 +1310,7 @@ impl SessionHeaderHistoryCell {
             ReasoningEffortConfig::Low => "low",
             ReasoningEffortConfig::Medium => "medium",
             ReasoningEffortConfig::High => "high",
+            ReasoningEffortConfig::XHigh if self.model == "claude-opus-4-6" => "max",
             ReasoningEffortConfig::XHigh => "xhigh",
             ReasoningEffortConfig::None => "none",
         })

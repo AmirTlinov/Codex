@@ -7527,12 +7527,21 @@ impl ChatWidget {
         Some(format!("{label} {remaining:.0}%"))
     }
 
-    fn status_line_reasoning_effort_label(effort: Option<ReasoningEffortConfig>) -> &'static str {
+    fn status_line_reasoning_effort_label(
+        &self,
+        effort: Option<ReasoningEffortConfig>,
+    ) -> &'static str {
         match effort {
             Some(ReasoningEffortConfig::Minimal) => "minimal",
             Some(ReasoningEffortConfig::Low) => "low",
             Some(ReasoningEffortConfig::Medium) => "medium",
             Some(ReasoningEffortConfig::High) => "high",
+            Some(ReasoningEffortConfig::XHigh)
+                if self.current_model_provider_id() == "claude_cli"
+                    && self.current_model() == "claude-opus-4-6" =>
+            {
+                "max"
+            }
             Some(ReasoningEffortConfig::XHigh) => "xhigh",
             None | Some(ReasoningEffortConfig::None) => "default",
         }
@@ -8241,7 +8250,7 @@ impl ChatWidget {
             let description = Self::picker_description(&entry, /*show_provider*/ false);
             let is_current = entry.provider_id == current_provider_id
                 && entry.preset.model.as_str() == self.current_model();
-            let single_supported_effort = entry.preset.supported_reasoning_efforts.len() == 1;
+            let single_supported_effort = entry.preset.supported_reasoning_efforts.len() <= 1;
             let entry_for_action = entry.clone();
             let actions: Vec<SelectionAction> = vec![Box::new(move |tx| {
                 tx.send(AppEvent::OpenReasoningPopup {
@@ -8427,7 +8436,12 @@ impl ChatWidget {
             Some(selected_effort) => {
                 format!(
                     "{} reasoning",
-                    Self::reasoning_effort_label(selected_effort).to_lowercase()
+                    Self::reasoning_effort_label_for_model(
+                        model.as_str(),
+                        provider_id.as_str(),
+                        selected_effort,
+                    )
+                    .to_lowercase()
                 )
             }
             None => "the selected reasoning".to_string(),
@@ -8438,14 +8452,24 @@ impl ChatWidget {
         {
             format!(
                 "user-chosen Plan override ({})",
-                Self::reasoning_effort_label(plan_override).to_lowercase()
+                Self::reasoning_effort_label_for_model(
+                    self.current_model(),
+                    self.current_model_provider_id(),
+                    plan_override,
+                )
+                .to_lowercase()
             )
         } else if let Some(plan_mask) = collaboration_modes::plan_mask(self.model_catalog.as_ref())
         {
             match plan_mask.reasoning_effort.flatten() {
                 Some(plan_effort) => format!(
                     "built-in Plan default ({})",
-                    Self::reasoning_effort_label(plan_effort).to_lowercase()
+                    Self::reasoning_effort_label_for_model(
+                        self.current_model(),
+                        self.current_model_provider_id(),
+                        plan_effort,
+                    )
+                    .to_lowercase()
                 ),
                 None => "built-in Plan default (no reasoning)".to_string(),
             }
@@ -8542,7 +8566,11 @@ impl ChatWidget {
             None
         };
         let warning_text = warn_effort.map(|effort| {
-            let effort_label = Self::reasoning_effort_label(effort);
+            let effort_label = Self::reasoning_effort_label_for_model(
+                entry.preset.model.as_str(),
+                entry.provider_id.as_str(),
+                effort,
+            );
             format!("⚠ {effort_label} reasoning effort can quickly consume Plus plan rate limits.")
         });
         let warn_for_model = entry.preset.model.starts_with("gpt-5.1-codex")
@@ -8598,6 +8626,7 @@ impl ChatWidget {
             .or(Some(default_effort));
 
         let model_slug = entry.preset.model.to_string();
+        let model_display_name = entry.preset.display_name.to_string();
         let is_current_model = entry.provider_id == self.current_model_provider_id()
             && self.current_model() == entry.preset.model.as_str();
         let highlight_choice = if is_current_model {
@@ -8622,7 +8651,12 @@ impl ChatWidget {
         let mut items: Vec<SelectionItem> = Vec::new();
         for choice in choices.iter() {
             let effort = choice.display;
-            let mut effort_label = Self::reasoning_effort_label(effort).to_string();
+            let mut effort_label = Self::reasoning_effort_label_for_model(
+                entry.preset.model.as_str(),
+                entry.provider_id.as_str(),
+                effort,
+            )
+            .to_string();
             if choice.stored == default_choice {
                 effort_label.push_str(" (default)");
             }
@@ -8691,7 +8725,7 @@ impl ChatWidget {
 
         let mut header = ColumnRenderable::new();
         header.push(Line::from(
-            format!("Select Reasoning Level for {model_slug}").bold(),
+            format!("Select Reasoning Level for {model_display_name}").bold(),
         ));
 
         self.bottom_pane.show_selection_view(SelectionViewParams {
@@ -8711,6 +8745,21 @@ impl ChatWidget {
             ReasoningEffortConfig::Medium => "Medium",
             ReasoningEffortConfig::High => "High",
             ReasoningEffortConfig::XHigh => "Extra high",
+        }
+    }
+
+    fn reasoning_effort_label_for_model(
+        model: &str,
+        provider_id: &str,
+        effort: ReasoningEffortConfig,
+    ) -> &'static str {
+        if provider_id == "claude_cli"
+            && model == "claude-opus-4-6"
+            && effort == ReasoningEffortConfig::XHigh
+        {
+            "Max"
+        } else {
+            Self::reasoning_effort_label(effort)
         }
     }
 
@@ -10081,14 +10130,7 @@ impl ChatWidget {
         {
             let mut message = format!("Model changed to {next_model}");
             if !next_model.starts_with("codex-auto-") {
-                let reasoning_label = match next_effort {
-                    Some(ReasoningEffortConfig::Minimal) => "minimal",
-                    Some(ReasoningEffortConfig::Low) => "low",
-                    Some(ReasoningEffortConfig::Medium) => "medium",
-                    Some(ReasoningEffortConfig::High) => "high",
-                    Some(ReasoningEffortConfig::XHigh) => "xhigh",
-                    None | Some(ReasoningEffortConfig::None) => "default",
-                };
+                let reasoning_label = self.status_line_reasoning_effort_label(next_effort);
                 message.push(' ');
                 message.push_str(reasoning_label);
             }
