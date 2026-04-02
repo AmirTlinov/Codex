@@ -163,6 +163,54 @@ async fn claude_cli_provider_uses_bundled_claude_catalog() {
     assert_eq!(opus.default_reasoning_summary, ReasoningSummary::None);
     assert_eq!(opus.truncation_policy.mode, TruncationMode::Tokens);
     assert_eq!(opus.input_modalities, vec![InputModality::Text]);
+    assert!(!opus.supports_search_tool);
+}
+
+#[tokio::test]
+async fn anthropic_provider_uses_multimodal_search_capable_claude_catalog() {
+    let codex_home = TempDir::new().expect("create temp dir");
+    let auth_manager = crate::test_support::auth_manager_from_auth(
+        CodexAuth::create_dummy_chatgpt_auth_for_testing(),
+    );
+    let manager = ModelsManager::new_with_provider(
+        codex_home.path().to_path_buf(),
+        auth_manager,
+        /*model_catalog*/ None,
+        CollaborationModesConfig::default(),
+        crate::model_provider_info::create_anthropic_provider(),
+    );
+
+    let presets = manager.list_models(RefreshStrategy::Offline).await;
+    let preset_ids = presets
+        .iter()
+        .map(|preset| preset.model.as_str())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        preset_ids,
+        vec!["claude-opus-4-6", "claude-sonnet-4-6", "haiku"]
+    );
+    assert_eq!(presets[2].display_name, "Claude Haiku 4.6");
+
+    let remote_models = manager.get_remote_models().await;
+    let opus = remote_models
+        .iter()
+        .find(|model| model.slug == "claude-opus-4-6")
+        .expect("Claude Opus 4.6 should exist in the bundled catalog");
+    let haiku = remote_models
+        .iter()
+        .find(|model| model.slug == "haiku")
+        .expect("Claude Haiku 4.6 should exist in the bundled catalog");
+
+    assert_eq!(
+        opus.input_modalities,
+        codex_protocol::openai_models::default_input_modalities()
+    );
+    assert!(opus.supports_search_tool);
+    assert_eq!(
+        haiku.input_modalities,
+        codex_protocol::openai_models::default_input_modalities()
+    );
+    assert!(haiku.supports_search_tool);
 }
 
 struct ProviderAuthScript {

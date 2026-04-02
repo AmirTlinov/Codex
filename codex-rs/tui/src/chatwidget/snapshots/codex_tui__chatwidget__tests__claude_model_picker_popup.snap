@@ -9,7 +9,7 @@ expression: popup
                                 reflective and coding work.
   2. Claude Sonnet 4.6          Balanced Claude model for everyday coding and
                                 long-running task execution.
-  3. Claude Haiku               Fast Claude model for quick iterations, narrow
+  3. Claude Haiku 4.6           Fast Claude model for quick iterations, narrow
                                 fixes, and lightweight turns.
 
   Press enter to select reasoning effort, or esc to dismiss.

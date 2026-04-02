@@ -107,17 +107,20 @@ pub struct AnthropicMessagesRequest {
     pub stream: bool,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct AnthropicMessage {
     pub role: String,
     pub content: Vec<AnthropicMessageContent>,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum AnthropicMessageContent {
     Text {
         text: String,
+    },
+    Image {
+        source: AnthropicImageSource,
     },
     ToolUse {
         id: String,
@@ -132,10 +135,18 @@ pub enum AnthropicMessageContent {
     },
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum AnthropicToolResultContent {
     Text { text: String },
+    Image { source: AnthropicImageSource },
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum AnthropicImageSource {
+    Base64 { media_type: String, data: String },
+    Url { url: String },
 }
 
 #[derive(Debug, Clone, Serialize)]

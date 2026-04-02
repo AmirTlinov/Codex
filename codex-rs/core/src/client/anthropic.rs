@@ -1,9 +1,9 @@
 use crate::auth::AuthCredentialsStoreMode;
 use crate::client_common::Prompt;
 use crate::client_common::ResponseStream;
-use crate::compact::content_items_to_text;
 use crate::error::CodexErr;
 use crate::error::Result;
+use codex_api::AnthropicImageSource;
 use codex_api::AnthropicMessage;
 use codex_api::AnthropicMessageContent;
 use codex_api::AnthropicMessagesClient;
@@ -15,6 +15,8 @@ use codex_api::AnthropicToolKind;
 use codex_api::AnthropicToolResultContent;
 use codex_api::ReqwestTransport;
 use codex_protocol::models::ContentItem;
+use codex_protocol::models::FunctionCallOutputBody;
+use codex_protocol::models::FunctionCallOutputContentItem;
 use codex_protocol::models::ResponseItem;
 use codex_protocol::openai_models::ModelInfo;
 use codex_protocol::openai_models::ReasoningEffort as ReasoningEffortConfig;
@@ -27,6 +29,7 @@ use serde_json::json;
 use std::collections::HashMap;
 use std::path::Path;
 use tokio::sync::mpsc;
+use url::Url;
 
 use crate::default_client::build_reqwest_client;
 use crate::model_provider_info::ModelProviderInfo;
@@ -266,11 +269,8 @@ fn render_messages(
 fn render_item(item: &ResponseItem) -> Result<Option<(String, Vec<AnthropicMessageContent>)>> {
     match item {
         ResponseItem::Message { role, content, .. } => {
-            ensure_no_image_inputs(content)?;
-            let Some(text) = content_items_to_text(content) else {
-                return Ok(None);
-            };
-            if text.trim().is_empty() {
+            let content = render_message_content(content)?;
+            if content.is_empty() {
                 return Ok(None);
             }
             let role = if role == "assistant" {
@@ -278,7 +278,7 @@ fn render_item(item: &ResponseItem) -> Result<Option<(String, Vec<AnthropicMessa
             } else {
                 "user".to_string()
             };
-            Ok(Some((role, vec![AnthropicMessageContent::Text { text }])))
+            Ok(Some((role, content)))
         }
         ResponseItem::FunctionCall {
             call_id,
@@ -340,15 +340,12 @@ fn render_item(item: &ResponseItem) -> Result<Option<(String, Vec<AnthropicMessa
         | ResponseItem::CustomToolCallOutput {
             call_id, output, ..
         } => {
-            let text = output
-                .body
-                .to_text()
-                .unwrap_or_else(|| serde_json::to_string(output).unwrap_or_default());
+            let content = render_tool_result_content(&output.body)?;
             Ok(Some((
                 "user".to_string(),
                 vec![AnthropicMessageContent::ToolResult {
                     tool_use_id: call_id.clone(),
-                    content: vec![AnthropicToolResultContent::Text { text }],
+                    content,
                     is_error: output.success.map(|success| !success),
                 }],
             )))
@@ -384,16 +381,95 @@ fn render_item(item: &ResponseItem) -> Result<Option<(String, Vec<AnthropicMessa
     }
 }
 
-fn ensure_no_image_inputs(content: &[ContentItem]) -> Result<()> {
-    if content
-        .iter()
-        .any(|item| matches!(item, ContentItem::InputImage { .. }))
-    {
-        return Err(CodexErr::UnsupportedOperation(
-            "Native Anthropic runtime does not yet support image inputs".to_string(),
-        ));
+fn render_message_content(content: &[ContentItem]) -> Result<Vec<AnthropicMessageContent>> {
+    let mut rendered = Vec::new();
+    for item in content {
+        match item {
+            ContentItem::InputText { text } | ContentItem::OutputText { text } => {
+                if !text.trim().is_empty() {
+                    rendered.push(AnthropicMessageContent::Text { text: text.clone() });
+                }
+            }
+            ContentItem::InputImage { image_url } => {
+                rendered.push(AnthropicMessageContent::Image {
+                    source: anthropic_image_source(image_url)?,
+                })
+            }
+        }
     }
-    Ok(())
+    Ok(rendered)
+}
+
+fn render_tool_result_content(
+    body: &FunctionCallOutputBody,
+) -> Result<Vec<AnthropicToolResultContent>> {
+    let content = match body {
+        FunctionCallOutputBody::Text(text) => {
+            if text.trim().is_empty() {
+                Vec::new()
+            } else {
+                vec![AnthropicToolResultContent::Text { text: text.clone() }]
+            }
+        }
+        FunctionCallOutputBody::ContentItems(items) => items
+            .iter()
+            .filter_map(render_tool_result_content_item)
+            .collect::<Result<Vec<_>>>()?,
+    };
+
+    if content.is_empty() {
+        return Ok(vec![AnthropicToolResultContent::Text {
+            text: body
+                .to_text()
+                .filter(|text| !text.trim().is_empty())
+                .unwrap_or_else(|| "[tool returned no textual output]".to_string()),
+        }]);
+    }
+
+    Ok(content)
+}
+
+fn render_tool_result_content_item(
+    item: &FunctionCallOutputContentItem,
+) -> Option<Result<AnthropicToolResultContent>> {
+    match item {
+        FunctionCallOutputContentItem::InputText { text } => (!text.trim().is_empty())
+            .then(|| Ok(AnthropicToolResultContent::Text { text: text.clone() })),
+        FunctionCallOutputContentItem::InputImage { image_url, .. } => Some(
+            anthropic_image_source(image_url)
+                .map(|source| AnthropicToolResultContent::Image { source }),
+        ),
+    }
+}
+
+fn anthropic_image_source(image_url: &str) -> Result<AnthropicImageSource> {
+    if let Some((media_type, data)) = parse_base64_data_url(image_url) {
+        return Ok(AnthropicImageSource::Base64 { media_type, data });
+    }
+
+    let parsed = Url::parse(image_url).map_err(|err| {
+        CodexErr::UnsupportedOperation(format!(
+            "Native Anthropic runtime only supports data:image/... URLs or http(s) image URLs, got `{image_url}`: {err}"
+        ))
+    })?;
+    match parsed.scheme() {
+        "http" | "https" => Ok(AnthropicImageSource::Url {
+            url: image_url.to_string(),
+        }),
+        scheme => Err(CodexErr::UnsupportedOperation(format!(
+            "Native Anthropic runtime only supports data:image/... URLs or http(s) image URLs, got unsupported scheme `{scheme}`"
+        ))),
+    }
+}
+
+fn parse_base64_data_url(image_url: &str) -> Option<(String, String)> {
+    let (prefix, payload) = image_url.split_once(',')?;
+    let normalized_prefix = prefix.to_ascii_lowercase();
+    if !normalized_prefix.starts_with("data:image/") || !normalized_prefix.ends_with(";base64") {
+        return None;
+    }
+    let media_type = prefix[5..prefix.len() - ";base64".len()].to_string();
+    Some((media_type, payload.to_string()))
 }
 
 fn build_system_prompt(base_instructions: &str) -> String {
@@ -433,5 +509,66 @@ fn max_output_tokens_for_model(model: &str) -> i64 {
         4_096
     } else {
         8_192
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use pretty_assertions::assert_eq;
+
+    #[test]
+    fn render_message_content_preserves_text_and_input_images() {
+        let content = render_message_content(&[
+            ContentItem::InputText {
+                text: "describe this".to_string(),
+            },
+            ContentItem::InputImage {
+                image_url: "data:image/png;base64,AAA".to_string(),
+            },
+        ])
+        .expect("content should render");
+
+        assert_eq!(
+            content,
+            vec![
+                AnthropicMessageContent::Text {
+                    text: "describe this".to_string(),
+                },
+                AnthropicMessageContent::Image {
+                    source: AnthropicImageSource::Base64 {
+                        media_type: "image/png".to_string(),
+                        data: "AAA".to_string(),
+                    },
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn render_tool_result_content_preserves_images() {
+        let body = FunctionCallOutputBody::ContentItems(vec![
+            FunctionCallOutputContentItem::InputText {
+                text: "saved preview".to_string(),
+            },
+            FunctionCallOutputContentItem::InputImage {
+                image_url: "https://example.com/preview.png".to_string(),
+                detail: None,
+            },
+        ]);
+
+        assert_eq!(
+            render_tool_result_content(&body).expect("tool result should render"),
+            vec![
+                AnthropicToolResultContent::Text {
+                    text: "saved preview".to_string(),
+                },
+                AnthropicToolResultContent::Image {
+                    source: AnthropicImageSource::Url {
+                        url: "https://example.com/preview.png".to_string(),
+                    },
+                },
+            ]
+        );
     }
 }

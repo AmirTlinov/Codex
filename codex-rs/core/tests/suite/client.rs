@@ -36,10 +36,12 @@ use codex_protocol::models::ResponseItem;
 use codex_protocol::models::WebSearchAction;
 use codex_protocol::openai_models::ModelsResponse;
 use codex_protocol::openai_models::ReasoningEffort;
+use codex_protocol::protocol::AskForApproval;
 use codex_protocol::protocol::EventMsg;
 use codex_protocol::protocol::Op;
 use codex_protocol::protocol::RolloutItem;
 use codex_protocol::protocol::RolloutLine;
+use codex_protocol::protocol::SandboxPolicy;
 use codex_protocol::protocol::SessionMeta;
 use codex_protocol::protocol::SessionMetaLine;
 use codex_protocol::protocol::SessionSource;
@@ -61,6 +63,7 @@ use core_test_support::skip_if_no_network;
 use core_test_support::test_codex::TestCodex;
 use core_test_support::test_codex::test_codex;
 use core_test_support::wait_for_event;
+use core_test_support::wait_for_event_match;
 use dunce::canonicalize as normalize_path;
 use futures::StreamExt;
 use pretty_assertions::assert_eq;
@@ -1010,6 +1013,129 @@ async fn anthropic_native_tool_roundtrip_executes_shell_and_sends_tool_result() 
         .filter(|request| path_matcher.matches(request))
         .collect::<Vec<_>>();
     assert_eq!(anthropic_requests.len(), 2);
+
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn anthropic_native_request_preserves_input_images() -> anyhow::Result<()> {
+    const INPUT_IMAGE: &str = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGP4z8DwHwAFAAH/iZk9HQAAAABJRU5ErkJggg==";
+
+    struct AnthropicImageResponder;
+
+    impl Respond for AnthropicImageResponder {
+        fn respond(&self, request: &WiremockRequest) -> ResponseTemplate {
+            let body: Value = request
+                .body_json()
+                .expect("Anthropic request body to be valid JSON");
+            assert_eq!(request.url.path(), "/v1/messages");
+            let messages = body["messages"]
+                .as_array()
+                .expect("Anthropic messages array");
+            let user_message = messages
+                .iter()
+                .find(|message| message["role"].as_str() == Some("user"))
+                .expect("Anthropic request should include a user message");
+            let content = user_message["content"]
+                .as_array()
+                .expect("Anthropic user content array");
+
+            assert!(
+                content.iter().any(|block| {
+                    block["type"].as_str() == Some("text")
+                        && block["text"].as_str() == Some("describe this image")
+                }),
+                "expected text content in Anthropic request: {body}"
+            );
+            assert!(
+                content.iter().any(|block| {
+                    block["type"].as_str() == Some("image")
+                        && block["source"]["type"].as_str() == Some("base64")
+                        && block["source"]["media_type"].as_str() == Some("image/png")
+                        && block["source"]["data"]
+                            .as_str()
+                            .is_some_and(|data| !data.is_empty())
+                }),
+                "expected input_image content in Anthropic request: {body}"
+            );
+
+            ResponseTemplate::new(200)
+                .insert_header("content-type", "text/event-stream")
+                .set_body_string(concat!(
+                    "data: {\"type\":\"message_start\",\"message\":{\"id\":\"msg-image\",\"usage\":{\"input_tokens\":8}}}\n\n",
+                    "data: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"text\",\"text\":\"\"}}\n\n",
+                    "data: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"looks good\"}}\n\n",
+                    "data: {\"type\":\"content_block_stop\",\"index\":0}\n\n",
+                    "data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"},\"usage\":{\"output_tokens\":2}}\n\n",
+                    "data: {\"type\":\"message_stop\"}\n\n",
+                ))
+        }
+    }
+
+    let server = MockServer::start().await;
+    let base_url = format!("{}/v1", server.uri());
+    Mock::given(method("POST"))
+        .and(path("/v1/messages"))
+        .respond_with(AnthropicImageResponder)
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let mut builder = test_codex()
+        .with_model("claude-opus-4-6")
+        .with_config(move |config| {
+            config.model_provider_id = codex_core::ANTHROPIC_PROVIDER_ID.to_string();
+            config.model_provider = built_in_model_providers(/*openai_base_url*/ None)
+                [codex_core::ANTHROPIC_PROVIDER_ID]
+                .clone();
+            config.model_provider.base_url = Some(base_url);
+            config.model = Some("claude-opus-4-6".to_string());
+        })
+        .with_pre_build_hook(|codex_home| {
+            codex_login::login_with_anthropic_api_key(
+                codex_home,
+                "sk-ant-test",
+                codex_login::AuthCredentialsStoreMode::File,
+            )
+            .expect("save anthropic auth fixture");
+        });
+    let test = builder.build(&server).await?;
+
+    test.codex
+        .submit(Op::UserTurn {
+            items: vec![
+                UserInput::Text {
+                    text: "describe this image".to_string(),
+                    text_elements: Vec::new(),
+                },
+                UserInput::Image {
+                    image_url: INPUT_IMAGE.to_string(),
+                },
+            ],
+            final_output_json_schema: None,
+            cwd: test.config.cwd.to_path_buf(),
+            approval_policy: AskForApproval::Never,
+            approvals_reviewer: None,
+            sandbox_policy: SandboxPolicy::DangerFullAccess,
+            model: test.session_configured.model.clone(),
+            effort: None,
+            summary: None,
+            service_tier: None,
+            collaboration_mode: None,
+            personality: None,
+        })
+        .await?;
+
+    let turn_id: String = wait_for_event_match(&test.codex, |event| match event {
+        EventMsg::TurnStarted(event) => Some(event.turn_id.clone()),
+        _ => None,
+    })
+    .await;
+    wait_for_event(&test.codex, |event| match event {
+        EventMsg::TurnComplete(event) => event.turn_id == turn_id,
+        _ => false,
+    })
+    .await;
 
     Ok(())
 }

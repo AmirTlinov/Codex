@@ -27,6 +27,7 @@ pub use crate::common::WS_REQUEST_HEADER_TRACEPARENT_CLIENT_METADATA_KEY;
 pub use crate::common::WS_REQUEST_HEADER_TRACESTATE_CLIENT_METADATA_KEY;
 pub use crate::common::create_text_param_for_request;
 pub use crate::common::response_create_client_metadata;
+pub use crate::endpoint::anthropic_messages::AnthropicImageSource;
 pub use crate::endpoint::anthropic_messages::AnthropicMessage;
 pub use crate::endpoint::anthropic_messages::AnthropicMessageContent;
 pub use crate::endpoint::anthropic_messages::AnthropicMessagesClient;

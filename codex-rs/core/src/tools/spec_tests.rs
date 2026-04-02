@@ -995,6 +995,12 @@ fn image_generation_tools_require_feature_and_supported_model() {
     supported_model_info.slug = "custom/gpt-5.2-variant".to_string();
     let mut unsupported_model_info = supported_model_info.clone();
     unsupported_model_info.input_modalities = vec![InputModality::Text];
+    let claude_multimodal_model_info = ModelInfo {
+        slug: "claude-opus-4-6".to_string(),
+        display_name: "Claude Opus 4.6".to_string(),
+        input_modalities: codex_protocol::openai_models::default_input_modalities(),
+        ..supported_model_info.clone()
+    };
     let default_features = Features::with_defaults();
     let mut image_generation_features = default_features.clone();
     image_generation_features.enable(Feature::ImageGeneration);
@@ -1070,6 +1076,29 @@ fn image_generation_tools_require_feature_and_supported_model() {
             .iter()
             .any(|tool| tool.spec.name() == "image_generation"),
         "image_generation should be disabled for unsupported models"
+    );
+
+    let tools_config = ToolsConfig::new(&ToolsConfigParams {
+        model_info: &claude_multimodal_model_info,
+        available_models: &available_models,
+        features: &image_generation_features,
+        web_search_mode: Some(WebSearchMode::Cached),
+        session_source: SessionSource::Cli,
+        sandbox_policy: &SandboxPolicy::DangerFullAccess,
+        windows_sandbox_level: WindowsSandboxLevel::Disabled,
+    });
+    let (tools, _) = build_specs(
+        &tools_config,
+        /*mcp_tools*/ None,
+        /*app_tools*/ None,
+        &[],
+    )
+    .build();
+    assert!(
+        !tools
+            .iter()
+            .any(|tool| tool.spec.name() == "image_generation"),
+        "Anthropic multimodal models should not expose the image_generation tool"
     );
 }
 

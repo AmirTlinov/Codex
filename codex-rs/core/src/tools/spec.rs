@@ -355,7 +355,12 @@ impl ToolsConfig {
 }
 
 fn supports_image_generation(model_info: &ModelInfo) -> bool {
+    // Claude models support image inputs for multimodal turns, but Anthropic's Messages API does
+    // not expose a native image-generation tool. Keep image understanding and image generation as
+    // separate capabilities until model metadata grows an explicit image-generation bit.
     model_info.input_modalities.contains(&InputModality::Image)
+        && model_info.slug != "haiku"
+        && !model_info.slug.starts_with("claude-")
 }
 
 /// TODO(dylan): deprecate once we get rid of json tool

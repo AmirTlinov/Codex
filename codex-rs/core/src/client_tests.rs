@@ -17,6 +17,8 @@ use tempfile::TempDir;
 use tokio_util::sync::CancellationToken;
 use wiremock::Mock;
 use wiremock::MockServer;
+use wiremock::Request as WiremockRequest;
+use wiremock::Respond;
 use wiremock::ResponseTemplate;
 use wiremock::matchers::method;
 use wiremock::matchers::path;
@@ -447,4 +449,140 @@ async fn stream_routes_main_turns_to_native_anthropic_provider() {
         saw_message,
         "expected Anthropic stream to emit an assistant message"
     );
+}
+
+#[tokio::test]
+async fn native_anthropic_requests_preserve_input_images() {
+    struct AnthropicImageResponder;
+
+    impl Respond for AnthropicImageResponder {
+        fn respond(&self, request: &WiremockRequest) -> ResponseTemplate {
+            let body: serde_json::Value = request
+                .body_json()
+                .expect("Anthropic request body should be valid JSON");
+            let content = body["messages"][0]["content"]
+                .as_array()
+                .expect("Anthropic message content should be an array");
+            assert!(
+                content.iter().any(|item| {
+                    item["type"].as_str() == Some("text")
+                        && item["text"].as_str() == Some("Describe this image.")
+                }),
+                "expected Anthropic request to preserve the user text: {body}"
+            );
+            assert!(
+                content.iter().any(|item| {
+                    item["type"].as_str() == Some("image")
+                        && item["source"]["type"].as_str() == Some("base64")
+                        && item["source"]["media_type"].as_str() == Some("image/png")
+                        && item["source"]["data"].as_str() == Some("AAA")
+                }),
+                "expected Anthropic request to preserve the image payload: {body}"
+            );
+
+            ResponseTemplate::new(200)
+                .insert_header("content-type", "text/event-stream")
+                .set_body_string(concat!(
+                    "data: {\"type\":\"message_start\",\"message\":{\"id\":\"msg-vision\",\"usage\":{\"input_tokens\":7}}}\n\n",
+                    "data: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"text\",\"text\":\"\"}}\n\n",
+                    "data: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"Looks good.\"}}\n\n",
+                    "data: {\"type\":\"content_block_stop\",\"index\":0}\n\n",
+                    "data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"},\"usage\":{\"output_tokens\":2}}\n\n",
+                    "data: {\"type\":\"message_stop\"}\n\n",
+                ))
+        }
+    }
+
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/v1/messages"))
+        .respond_with(AnthropicImageResponder)
+        .mount(&server)
+        .await;
+
+    let codex_home = TempDir::new().expect("create temp dir");
+    crate::auth::login_with_anthropic_api_key(
+        codex_home.path(),
+        "sk-ant-test",
+        crate::auth::AuthCredentialsStoreMode::File,
+    )
+    .expect("save anthropic auth");
+
+    let provider = crate::ModelProviderInfo {
+        name: "Anthropic".to_string(),
+        base_url: Some(format!("{}/v1", server.uri())),
+        env_key: None,
+        env_key_instructions: None,
+        experimental_bearer_token: None,
+        auth: None,
+        wire_api: crate::WireApi::Anthropic,
+        query_params: None,
+        http_headers: None,
+        env_http_headers: None,
+        request_max_retries: None,
+        stream_max_retries: None,
+        stream_idle_timeout_ms: None,
+        websocket_connect_timeout_ms: None,
+        requires_openai_auth: false,
+        supports_websockets: false,
+    };
+    let client = ModelClient::new(
+        /*auth_manager*/ None,
+        ThreadId::new(),
+        provider,
+        crate::config::ClaudeCliConfig::default(),
+        codex_home.path().to_path_buf(),
+        crate::auth::AuthCredentialsStoreMode::File,
+        SessionSource::Cli,
+        /*model_verbosity*/ None,
+        /*enable_request_compression*/ false,
+        /*include_timing_metrics*/ false,
+        /*beta_features_header*/ None,
+    );
+    let mut client_session = client.new_session();
+    let mut model_info = test_model_info_with_slug("claude-opus-4-6");
+    model_info.input_modalities = vec![
+        codex_protocol::openai_models::InputModality::Text,
+        codex_protocol::openai_models::InputModality::Image,
+    ];
+    let prompt = crate::Prompt {
+        input: vec![ResponseItem::Message {
+            id: None,
+            role: "user".to_string(),
+            content: vec![
+                ContentItem::InputText {
+                    text: "Describe this image.".to_string(),
+                },
+                ContentItem::InputImage {
+                    image_url: "data:image/png;base64,AAA".to_string(),
+                },
+            ],
+            end_turn: None,
+            phase: None,
+        }],
+        ..Default::default()
+    };
+    let mut stream = client_session
+        .stream(
+            &prompt,
+            &model_info,
+            std::path::Path::new("."),
+            &test_session_telemetry(),
+            /*effort*/ None,
+            ReasoningSummary::None,
+            /*service_tier*/ None,
+            /*turn_metadata_header*/ None,
+            CancellationToken::new(),
+        )
+        .await
+        .expect("native anthropic stream should succeed");
+
+    while let Some(event) = stream.next().await {
+        if matches!(
+            event.expect("stream event should succeed"),
+            crate::client_common::ResponseEvent::Completed { .. }
+        ) {
+            break;
+        }
+    }
 }

@@ -60,17 +60,18 @@ This downstream slice is intentionally honest and narrow:
 
 - the main Claude lane now uses Codex's own tool loop for normal function,
   freeform, local shell, and tool-search tool calls;
-- the bundled Claude catalog is text-only right now, so image inputs are not
-  supported in the main Claude lane;
+- the native Anthropic provider now preserves Claude image prompts and image
+  tool-result content too, so `Claudex` is no longer text-only when it stays on
+  the native Anthropic path;
 - `claude_cli` still exists as an explicit compat backend for roles or manual
   fallback, but it is no longer the default Claudex main-lane runtime; when it
   is used, Claudex now pins `CLAUDE_CONFIG_DIR` to its own home so it does not
-  silently fall back to global `~/.claude`;
+  silently fall back to global `~/.claude`, and it remains the intentionally
+  narrower text-only fallback surface;
 - Anthropic web search / image-generation special built-ins are not yet mapped
   into native Anthropic tool calls, so the native path currently focuses on the
   normal Codex function/custom/local-shell/tool-search surfaces;
-- `Claude Haiku 4.6` currently maps to Claude CLI's stable `haiku` alias on
-  purpose, while Opus and Sonnet stay pinned to explicit `4.6` slugs; Opus
+- `Claude Haiku 4.6` intentionally stays on the stable `haiku` alias; Opus
   exposes `Low/Medium/High/Max`, Sonnet stops at `High`, and Haiku skips the
   reasoning picker entirely.
 - if you want a different Claude default model, pass `claudex -m <model>` or

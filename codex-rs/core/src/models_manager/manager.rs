@@ -51,6 +51,23 @@ const MODEL_CACHE_FILE: &str = "models_cache.json";
 const DEFAULT_MODEL_CACHE_TTL: Duration = Duration::from_secs(300);
 const MODELS_REFRESH_TIMEOUT: Duration = Duration::from_secs(5);
 const MODELS_ENDPOINT: &str = "/models";
+
+#[derive(Clone)]
+struct ClaudeModelCapabilities {
+    input_modalities: Vec<InputModality>,
+    supports_search_tool: bool,
+}
+
+struct ClaudeModelDefinition<'a> {
+    slug: &'a str,
+    display_name: &'a str,
+    description: &'a str,
+    default_reasoning_level: Option<codex_protocol::openai_models::ReasoningEffort>,
+    supported_reasoning_levels: Vec<codex_protocol::openai_models::ReasoningEffortPreset>,
+    priority: i32,
+    context_window: i64,
+}
+
 #[derive(Clone)]
 struct ModelsRequestTelemetry {
     auth_mode: Option<String>,
@@ -503,7 +520,9 @@ impl ModelsManager {
     fn load_bundled_models(provider: &ModelProviderInfo) -> Result<Vec<ModelInfo>, std::io::Error> {
         match provider.wire_api {
             WireApi::Responses => Self::load_remote_models_from_file(),
-            WireApi::Anthropic | WireApi::ClaudeCli => Self::load_bundled_claude_models(),
+            WireApi::Anthropic | WireApi::ClaudeCli => {
+                Self::load_bundled_claude_models(Self::claude_capabilities(provider.wire_api))
+            }
         }
     }
 
@@ -513,89 +532,114 @@ impl ModelsManager {
         Ok(response.models)
     }
 
-    fn load_bundled_claude_models() -> Result<Vec<ModelInfo>, std::io::Error> {
+    fn load_bundled_claude_models(
+        capabilities: ClaudeModelCapabilities,
+    ) -> Result<Vec<ModelInfo>, std::io::Error> {
         Ok(vec![
             Self::claude_model(
-                "claude-opus-4-6",
-                "Claude Opus 4.6",
-                "Claude flagship model for the deepest reflective and coding work.",
-                Some(codex_protocol::openai_models::ReasoningEffort::High),
-                vec![
-                    codex_protocol::openai_models::ReasoningEffortPreset {
-                        effort: codex_protocol::openai_models::ReasoningEffort::Low,
-                        description: "Fast responses with lighter reasoning".to_string(),
-                    },
-                    codex_protocol::openai_models::ReasoningEffortPreset {
-                        effort: codex_protocol::openai_models::ReasoningEffort::Medium,
-                        description: "Balances speed and reasoning depth for everyday tasks"
-                            .to_string(),
-                    },
-                    codex_protocol::openai_models::ReasoningEffortPreset {
-                        effort: codex_protocol::openai_models::ReasoningEffort::High,
-                        description: "Greater reasoning depth for complex problems".to_string(),
-                    },
-                    codex_protocol::openai_models::ReasoningEffortPreset {
-                        effort: codex_protocol::openai_models::ReasoningEffort::XHigh,
-                        description: "Maximum effort for the hardest tasks".to_string(),
-                    },
-                ],
-                /*priority*/ 0,
-                /*context_window*/ 200_000,
+                &capabilities,
+                ClaudeModelDefinition {
+                    slug: "claude-opus-4-6",
+                    display_name: "Claude Opus 4.6",
+                    description: "Claude flagship model for the deepest reflective and coding work.",
+                    default_reasoning_level: Some(
+                        codex_protocol::openai_models::ReasoningEffort::High,
+                    ),
+                    supported_reasoning_levels: vec![
+                        codex_protocol::openai_models::ReasoningEffortPreset {
+                            effort: codex_protocol::openai_models::ReasoningEffort::Low,
+                            description: "Fast responses with lighter reasoning".to_string(),
+                        },
+                        codex_protocol::openai_models::ReasoningEffortPreset {
+                            effort: codex_protocol::openai_models::ReasoningEffort::Medium,
+                            description: "Balances speed and reasoning depth for everyday tasks"
+                                .to_string(),
+                        },
+                        codex_protocol::openai_models::ReasoningEffortPreset {
+                            effort: codex_protocol::openai_models::ReasoningEffort::High,
+                            description: "Greater reasoning depth for complex problems".to_string(),
+                        },
+                        codex_protocol::openai_models::ReasoningEffortPreset {
+                            effort: codex_protocol::openai_models::ReasoningEffort::XHigh,
+                            description: "Maximum effort for the hardest tasks".to_string(),
+                        },
+                    ],
+                    priority: 0,
+                    context_window: 200_000,
+                },
             ),
             Self::claude_model(
-                "claude-sonnet-4-6",
-                "Claude Sonnet 4.6",
-                "Balanced Claude model for everyday coding and long-running task execution.",
-                Some(codex_protocol::openai_models::ReasoningEffort::Medium),
-                vec![
-                    codex_protocol::openai_models::ReasoningEffortPreset {
-                        effort: codex_protocol::openai_models::ReasoningEffort::Low,
-                        description: "Fast responses with lighter reasoning".to_string(),
-                    },
-                    codex_protocol::openai_models::ReasoningEffortPreset {
-                        effort: codex_protocol::openai_models::ReasoningEffort::Medium,
-                        description: "Balances speed and reasoning depth for everyday tasks"
-                            .to_string(),
-                    },
-                    codex_protocol::openai_models::ReasoningEffortPreset {
-                        effort: codex_protocol::openai_models::ReasoningEffort::High,
-                        description: "Greater reasoning depth for complex problems".to_string(),
-                    },
-                ],
-                /*priority*/ 1,
-                /*context_window*/ 200_000,
+                &capabilities,
+                ClaudeModelDefinition {
+                    slug: "claude-sonnet-4-6",
+                    display_name: "Claude Sonnet 4.6",
+                    description: "Balanced Claude model for everyday coding and long-running task execution.",
+                    default_reasoning_level: Some(
+                        codex_protocol::openai_models::ReasoningEffort::Medium,
+                    ),
+                    supported_reasoning_levels: vec![
+                        codex_protocol::openai_models::ReasoningEffortPreset {
+                            effort: codex_protocol::openai_models::ReasoningEffort::Low,
+                            description: "Fast responses with lighter reasoning".to_string(),
+                        },
+                        codex_protocol::openai_models::ReasoningEffortPreset {
+                            effort: codex_protocol::openai_models::ReasoningEffort::Medium,
+                            description: "Balances speed and reasoning depth for everyday tasks"
+                                .to_string(),
+                        },
+                        codex_protocol::openai_models::ReasoningEffortPreset {
+                            effort: codex_protocol::openai_models::ReasoningEffort::High,
+                            description: "Greater reasoning depth for complex problems".to_string(),
+                        },
+                    ],
+                    priority: 1,
+                    context_window: 200_000,
+                },
             ),
             Self::claude_model(
-                "haiku",
-                "Claude Haiku 4.6",
-                "Fast Claude model for quick iterations, narrow fixes, and lightweight turns.",
-                Some(codex_protocol::openai_models::ReasoningEffort::Low),
-                Vec::new(),
-                /*priority*/ 2,
-                /*context_window*/ 200_000,
+                &capabilities,
+                ClaudeModelDefinition {
+                    slug: "haiku",
+                    display_name: "Claude Haiku 4.6",
+                    description: "Fast Claude model for quick iterations, narrow fixes, and lightweight turns.",
+                    default_reasoning_level: Some(
+                        codex_protocol::openai_models::ReasoningEffort::Low,
+                    ),
+                    supported_reasoning_levels: Vec::new(),
+                    priority: 2,
+                    context_window: 200_000,
+                },
             ),
         ])
     }
 
+    fn claude_capabilities(wire_api: WireApi) -> ClaudeModelCapabilities {
+        match wire_api {
+            WireApi::Anthropic => ClaudeModelCapabilities {
+                input_modalities: codex_protocol::openai_models::default_input_modalities(),
+                supports_search_tool: true,
+            },
+            WireApi::ClaudeCli | WireApi::Responses => ClaudeModelCapabilities {
+                input_modalities: vec![InputModality::Text],
+                supports_search_tool: false,
+            },
+        }
+    }
+
     fn claude_model(
-        slug: &str,
-        display_name: &str,
-        description: &str,
-        default_reasoning_level: Option<codex_protocol::openai_models::ReasoningEffort>,
-        supported_reasoning_levels: Vec<codex_protocol::openai_models::ReasoningEffortPreset>,
-        priority: i32,
-        context_window: i64,
+        capabilities: &ClaudeModelCapabilities,
+        definition: ClaudeModelDefinition<'_>,
     ) -> ModelInfo {
         ModelInfo {
-            slug: slug.to_string(),
-            display_name: display_name.to_string(),
-            description: Some(description.to_string()),
-            default_reasoning_level,
-            supported_reasoning_levels,
+            slug: definition.slug.to_string(),
+            display_name: definition.display_name.to_string(),
+            description: Some(definition.description.to_string()),
+            default_reasoning_level: definition.default_reasoning_level,
+            supported_reasoning_levels: definition.supported_reasoning_levels,
             shell_type: ConfigShellToolType::ShellCommand,
             visibility: ModelVisibility::List,
             supported_in_api: true,
-            priority,
+            priority: definition.priority,
             availability_nux: None,
             upgrade: None,
             base_instructions: model_info::BASE_INSTRUCTIONS.to_string(),
@@ -609,13 +653,13 @@ impl ModelsManager {
             truncation_policy: TruncationPolicyConfig::tokens(/*limit*/ 10_000),
             supports_parallel_tool_calls: false,
             supports_image_detail_original: false,
-            context_window: Some(context_window),
+            context_window: Some(definition.context_window),
             auto_compact_token_limit: None,
             effective_context_window_percent: 95,
             experimental_supported_tools: Vec::new(),
-            input_modalities: vec![InputModality::Text],
+            input_modalities: capabilities.input_modalities.clone(),
             used_fallback_model_metadata: false,
-            supports_search_tool: false,
+            supports_search_tool: capabilities.supports_search_tool,
         }
     }
 
