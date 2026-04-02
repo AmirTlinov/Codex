@@ -52,7 +52,7 @@ This downstream slice is intentionally honest and narrow:
   Responses-tool loop;
 - the bundled Claude catalog is text-only right now, so image inputs are not
   supported in the main Claude lane;
-- `Claude Haiku` currently maps to Claude CLI's stable `haiku` alias on
+- `Claude Haiku 4.6` currently maps to Claude CLI's stable `haiku` alias on
   purpose, while Opus and Sonnet stay pinned to explicit `4.6` slugs;
 - if you want a different Claude default model, pass `claudex -m <model>` or
   override it in config.

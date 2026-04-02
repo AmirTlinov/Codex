@@ -1670,7 +1670,7 @@ async fn claude_model_picker_popup_snapshot() {
         ),
         preset(
             "haiku",
-            "Claude Haiku",
+            "Claude Haiku 4.6",
             "Fast Claude model for quick iterations, narrow fixes, and lightweight turns.",
             false,
         ),

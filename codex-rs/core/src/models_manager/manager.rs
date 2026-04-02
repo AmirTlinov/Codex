@@ -533,7 +533,7 @@ impl ModelsManager {
             ),
             Self::claude_model(
                 "haiku",
-                "Claude Haiku",
+                "Claude Haiku 4.6",
                 "Fast Claude model for quick iterations, narrow fixes, and lightweight turns.",
                 codex_protocol::openai_models::ReasoningEffort::Low,
                 /*priority*/ 2,

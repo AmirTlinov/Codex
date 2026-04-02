@@ -133,7 +133,7 @@ async fn claude_cli_provider_uses_bundled_claude_catalog() {
     );
     assert_eq!(presets[0].display_name, "Claude Opus 4.6");
     assert_eq!(presets[1].display_name, "Claude Sonnet 4.6");
-    assert_eq!(presets[2].display_name, "Claude Haiku");
+    assert_eq!(presets[2].display_name, "Claude Haiku 4.6");
 
     let remote_models = manager.get_remote_models().await;
     let opus = remote_models
