@@ -211,6 +211,9 @@ impl CodexAuth {
             ApiAuthMode::ChatgptAuthTokens => {
                 Ok(Self::ChatgptAuthTokens(ChatgptAuthTokens { state }))
             }
+            ApiAuthMode::AnthropicApiKey | ApiAuthMode::AnthropicOauth => Err(
+                std::io::Error::other("Anthropic auth is stored separately from OpenAI auth.json."),
+            ),
             ApiAuthMode::ApiKey => unreachable!("api key mode is handled above"),
         }
     }
@@ -506,6 +509,10 @@ pub fn enforce_login_restrictions(config: &AuthConfig) -> std::io::Result<()> {
             (ForcedLoginMethod::Api, crate::AuthMode::ApiKey) => None,
             (ForcedLoginMethod::Chatgpt, crate::AuthMode::Chatgpt)
             | (ForcedLoginMethod::Chatgpt, crate::AuthMode::ChatgptAuthTokens) => None,
+            (ForcedLoginMethod::Api, crate::AuthMode::AnthropicApiKey)
+            | (ForcedLoginMethod::Api, crate::AuthMode::AnthropicOauth)
+            | (ForcedLoginMethod::Chatgpt, crate::AuthMode::AnthropicApiKey)
+            | (ForcedLoginMethod::Chatgpt, crate::AuthMode::AnthropicOauth) => None,
             (ForcedLoginMethod::Api, crate::AuthMode::Chatgpt)
             | (ForcedLoginMethod::Api, crate::AuthMode::ChatgptAuthTokens) => Some(
                 "API key login is required, but ChatGPT is currently being used. Logging out."

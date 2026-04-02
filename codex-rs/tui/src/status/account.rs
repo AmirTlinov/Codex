@@ -4,5 +4,10 @@ pub(crate) enum StatusAccountDisplay {
         email: Option<String>,
         plan: Option<String>,
     },
+    AnthropicOauth {
+        email: Option<String>,
+        subscription: Option<String>,
+    },
+    AnthropicApiKey,
     ApiKey,
 }

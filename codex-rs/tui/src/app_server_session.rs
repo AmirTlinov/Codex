@@ -65,6 +65,7 @@ use codex_app_server_protocol::TurnStartParams;
 use codex_app_server_protocol::TurnStartResponse;
 use codex_app_server_protocol::TurnSteerParams;
 use codex_app_server_protocol::TurnSteerResponse;
+use codex_core::ANTHROPIC_AUTH_PROVIDER_ID;
 use codex_core::CLAUDE_CLI_PROVIDER_ID;
 use codex_core::OPENAI_PROVIDER_ID;
 use codex_core::config::Config;
@@ -235,6 +236,30 @@ impl AppServerSession {
                 None,
                 Some(TelemetryAuthMode::ApiKey),
                 Some(StatusAccountDisplay::ApiKey),
+                None,
+                FeedbackAudience::External,
+                false,
+            ),
+            Some(Account::AnthropicApiKey {}) => (
+                Some(AuthMode::AnthropicApiKey),
+                None,
+                Some(TelemetryAuthMode::AnthropicApiKey),
+                Some(StatusAccountDisplay::AnthropicApiKey),
+                None,
+                FeedbackAudience::External,
+                false,
+            ),
+            Some(Account::AnthropicOauth {
+                email,
+                subscription_type,
+            }) => (
+                Some(AuthMode::AnthropicOauth),
+                email.clone(),
+                Some(TelemetryAuthMode::AnthropicOauth),
+                Some(StatusAccountDisplay::AnthropicOauth {
+                    email,
+                    subscription: subscription_type,
+                }),
                 None,
                 FeedbackAudience::External,
                 false,
@@ -765,6 +790,11 @@ pub(crate) fn status_account_display_from_auth_mode(
 ) -> Option<StatusAccountDisplay> {
     match auth_mode {
         Some(AuthMode::ApiKey) => Some(StatusAccountDisplay::ApiKey),
+        Some(AuthMode::AnthropicApiKey) => Some(StatusAccountDisplay::AnthropicApiKey),
+        Some(AuthMode::AnthropicOauth) => Some(StatusAccountDisplay::AnthropicOauth {
+            email: None,
+            subscription: None,
+        }),
         Some(AuthMode::Chatgpt) | Some(AuthMode::ChatgptAuthTokens) => {
             Some(StatusAccountDisplay::ChatGpt {
                 email: None,
@@ -808,6 +838,15 @@ fn requested_picker_providers_for_distribution(
             .any(|provider| provider == CLAUDE_CLI_PROVIDER_ID)
     {
         providers.push(CLAUDE_CLI_PROVIDER_ID.to_string());
+    }
+    if distribution.uses_custom_branding()
+        && config.model_provider.required_auth_provider() == Some(ANTHROPIC_AUTH_PROVIDER_ID)
+        && config.model_providers.contains_key(OPENAI_PROVIDER_ID)
+        && !providers
+            .iter()
+            .any(|provider| provider == OPENAI_PROVIDER_ID)
+    {
+        providers.push(OPENAI_PROVIDER_ID.to_string());
     }
 
     Some(providers)

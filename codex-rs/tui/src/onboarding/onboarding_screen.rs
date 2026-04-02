@@ -88,6 +88,10 @@ impl OnboardingScreen {
         let cwd = config.cwd.to_path_buf();
         let forced_chatgpt_workspace_id = config.forced_chatgpt_workspace_id.clone();
         let forced_login_method = config.forced_login_method;
+        let required_auth_provider = config
+            .model_provider
+            .required_auth_provider()
+            .map(str::to_string);
         let codex_home = config.codex_home.clone();
         let cli_auth_credentials_store_mode = config.cli_auth_credentials_store_mode;
         let mut steps: Vec<Step> = Vec::new();
@@ -113,6 +117,7 @@ impl OnboardingScreen {
                     app_server_request_handle,
                     forced_chatgpt_workspace_id,
                     forced_login_method,
+                    required_auth_provider,
                     animations_enabled: config.animations,
                 }));
             } else {

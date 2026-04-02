@@ -1468,6 +1468,8 @@ impl Session {
             self.conversation_id,
             turn_context.provider.clone(),
             turn_context.config.claude_cli.clone(),
+            turn_context.config.codex_home.clone(),
+            turn_context.config.cli_auth_credentials_store_mode,
             turn_context.session_source.clone(),
             turn_context.config.model_verbosity,
             turn_context
@@ -2061,6 +2063,8 @@ impl Session {
                 conversation_id,
                 session_configuration.provider.clone(),
                 config.claude_cli.clone(),
+                config.codex_home.clone(),
+                config.cli_auth_credentials_store_mode,
                 session_configuration.session_source.clone(),
                 config.model_verbosity,
                 config.features.enabled(Feature::EnableRequestCompression),

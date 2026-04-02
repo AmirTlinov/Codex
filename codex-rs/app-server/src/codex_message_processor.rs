@@ -195,9 +195,16 @@ use codex_core::SteerInputError;
 use codex_core::ThreadConfigSnapshot;
 use codex_core::ThreadManager;
 use codex_core::ThreadSortKey as CoreThreadSortKey;
+use codex_core::auth::AnthropicAuthMode;
+use codex_core::auth::AnthropicLoginServerOptions;
 use codex_core::auth::AuthMode as CoreAuthMode;
 use codex_core::auth::CLIENT_ID;
+use codex_core::auth::load_anthropic_auth;
+use codex_core::auth::login_with_anthropic_api_key;
 use codex_core::auth::login_with_api_key;
+use codex_core::auth::logout_anthropic;
+use codex_core::auth::resolve_anthropic_account_display;
+use codex_core::auth::resolve_anthropic_account_display_after_refresh;
 use codex_core::config::Config;
 use codex_core::config::ConfigOverrides;
 use codex_core::config::NetworkProxyAuditMetadata;
@@ -250,11 +257,13 @@ use codex_features::Feature;
 use codex_features::Stage;
 use codex_feedback::CodexFeedback;
 use codex_git_utils::git_diff_to_remote;
+use codex_login::AnthropicShutdownHandle;
 use codex_login::ServerOptions as LoginServerOptions;
 use codex_login::ShutdownHandle;
 use codex_login::auth::login_with_chatgpt_auth_tokens;
 use codex_login::complete_device_code_login;
 use codex_login::request_device_code;
+use codex_login::run_anthropic_login_server;
 use codex_login::run_login_server;
 use codex_protocol::ThreadId;
 use codex_protocol::config_types::CollaborationMode;
@@ -347,18 +356,24 @@ struct ThreadListFilters {
 
 // Duration before a browser ChatGPT login attempt is abandoned.
 const LOGIN_CHATGPT_TIMEOUT: Duration = Duration::from_secs(10 * 60);
+#[cfg(debug_assertions)]
 const LOGIN_ISSUER_OVERRIDE_ENV_VAR: &str = "CODEX_APP_SERVER_LOGIN_ISSUER";
 const APP_LIST_LOAD_TIMEOUT: Duration = Duration::from_secs(90);
 
 enum ActiveLogin {
     Browser {
-        shutdown_handle: ShutdownHandle,
+        shutdown_handle: BrowserLoginShutdownHandle,
         login_id: Uuid,
     },
     DeviceCode {
         cancel: CancellationToken,
         login_id: Uuid,
     },
+}
+
+enum BrowserLoginShutdownHandle {
+    OpenAi(ShutdownHandle),
+    Anthropic(AnthropicShutdownHandle),
 }
 
 impl ActiveLogin {
@@ -374,7 +389,10 @@ impl ActiveLogin {
         match self {
             ActiveLogin::Browser {
                 shutdown_handle, ..
-            } => shutdown_handle.shutdown(),
+            } => match shutdown_handle {
+                BrowserLoginShutdownHandle::OpenAi(handle) => handle.shutdown(),
+                BrowserLoginShutdownHandle::Anthropic(handle) => handle.shutdown(),
+            },
             ActiveLogin::DeviceCode { cancel, .. } => cancel.cancel(),
         }
     }
@@ -492,11 +510,45 @@ impl CodexMessageProcessor {
     }
 
     fn current_account_updated_notification(&self) -> AccountUpdatedNotification {
+        if self.required_auth_provider() == Some(ANTHROPIC_AUTH_PROVIDER_ID) {
+            let account = load_anthropic_auth(
+                &self.config.codex_home,
+                self.config.cli_auth_credentials_store_mode,
+            )
+            .ok()
+            .flatten()
+            .map(|auth| codex_core::auth::AnthropicAccountDisplay {
+                auth_mode: auth.auth_mode,
+                email: auth
+                    .oauth
+                    .as_ref()
+                    .and_then(|oauth| oauth.profile.email.clone()),
+                subscription_type: auth
+                    .oauth
+                    .as_ref()
+                    .and_then(|oauth| oauth.profile.subscription_type.clone()),
+            });
+            let auth_mode = account.as_ref().map(|account| match account.auth_mode {
+                AnthropicAuthMode::ApiKey => AuthMode::AnthropicApiKey,
+                AnthropicAuthMode::Oauth => AuthMode::AnthropicOauth,
+            });
+            return AccountUpdatedNotification {
+                auth_mode,
+                plan_type: None,
+                required_auth_provider: Some(ANTHROPIC_AUTH_PROVIDER_ID.to_string()),
+            };
+        }
+
         let auth = self.auth_manager.auth_cached();
         AccountUpdatedNotification {
             auth_mode: auth.as_ref().map(CodexAuth::api_auth_mode),
             plan_type: auth.as_ref().and_then(CodexAuth::account_plan_type),
+            required_auth_provider: self.required_auth_provider().map(str::to_string),
         }
+    }
+
+    fn required_auth_provider(&self) -> Option<&'static str> {
+        self.config.model_provider.required_auth_provider()
     }
 
     async fn load_thread(
@@ -991,6 +1043,12 @@ impl CodexMessageProcessor {
                 self.login_api_key_v2(request_id, LoginApiKeyParams { api_key })
                     .await;
             }
+            LoginAccountParams::AnthropicApiKey { api_key } => {
+                self.login_anthropic_api_key_v2(request_id, api_key).await;
+            }
+            LoginAccountParams::AnthropicOauth => {
+                self.login_anthropic_oauth_v2(request_id).await;
+            }
             LoginAccountParams::Chatgpt => {
                 self.login_chatgpt_v2(request_id).await;
             }
@@ -1026,6 +1084,14 @@ impl CodexMessageProcessor {
         &mut self,
         params: &LoginApiKeyParams,
     ) -> std::result::Result<(), JSONRPCErrorError> {
+        if self.required_auth_provider() == Some(ANTHROPIC_AUTH_PROVIDER_ID) {
+            return Err(JSONRPCErrorError {
+                code: INVALID_REQUEST_ERROR_CODE,
+                message: "OpenAI API key login is not available for the active Anthropic provider."
+                    .to_string(),
+                data: None,
+            });
+        }
         if self.auth_manager.is_external_chatgpt_auth_active() {
             return Err(self.external_auth_active_error());
         }
@@ -1099,11 +1165,190 @@ impl CodexMessageProcessor {
         }
     }
 
+    async fn login_anthropic_api_key_v2(
+        &mut self,
+        request_id: ConnectionRequestId,
+        api_key: String,
+    ) {
+        if self.required_auth_provider() != Some(ANTHROPIC_AUTH_PROVIDER_ID) {
+            self.outgoing
+                .send_error(
+                    request_id,
+                    JSONRPCErrorError {
+                        code: INVALID_REQUEST_ERROR_CODE,
+                        message: "Anthropic login is not available for the active provider."
+                            .to_string(),
+                        data: None,
+                    },
+                )
+                .await;
+            return;
+        }
+
+        {
+            let mut guard = self.active_login.lock().await;
+            if let Some(active) = guard.take() {
+                drop(active);
+            }
+        }
+
+        match login_with_anthropic_api_key(
+            &self.config.codex_home,
+            &api_key,
+            self.config.cli_auth_credentials_store_mode,
+        ) {
+            Ok(()) => {
+                self.outgoing
+                    .send_response(request_id, LoginAccountResponse::AnthropicApiKey {})
+                    .await;
+                self.outgoing
+                    .send_server_notification(ServerNotification::AccountLoginCompleted(
+                        AccountLoginCompletedNotification {
+                            login_id: None,
+                            success: true,
+                            error: None,
+                        },
+                    ))
+                    .await;
+                self.outgoing
+                    .send_server_notification(ServerNotification::AccountUpdated(
+                        self.current_account_updated_notification(),
+                    ))
+                    .await;
+            }
+            Err(err) => {
+                self.outgoing
+                    .send_error(
+                        request_id,
+                        JSONRPCErrorError {
+                            code: INTERNAL_ERROR_CODE,
+                            message: format!("failed to save Anthropic API key: {err}"),
+                            data: None,
+                        },
+                    )
+                    .await;
+            }
+        }
+    }
+
+    async fn login_anthropic_oauth_v2(&mut self, request_id: ConnectionRequestId) {
+        if self.required_auth_provider() != Some(ANTHROPIC_AUTH_PROVIDER_ID) {
+            self.outgoing
+                .send_error(
+                    request_id,
+                    JSONRPCErrorError {
+                        code: INVALID_REQUEST_ERROR_CODE,
+                        message: "Anthropic login is not available for the active provider."
+                            .to_string(),
+                        data: None,
+                    },
+                )
+                .await;
+            return;
+        }
+
+        let opts = AnthropicLoginServerOptions {
+            open_browser: false,
+            ..AnthropicLoginServerOptions::new(
+                self.config.codex_home.clone(),
+                self.config.cli_auth_credentials_store_mode,
+            )
+        };
+
+        match run_anthropic_login_server(opts) {
+            Ok(server) => {
+                let login_id = Uuid::new_v4();
+                let shutdown_handle = server.cancel_handle();
+                let auth_url = server.auth_url.clone();
+                {
+                    let mut guard = self.active_login.lock().await;
+                    if let Some(existing) = guard.take() {
+                        drop(existing);
+                    }
+                    *guard = Some(ActiveLogin::Browser {
+                        shutdown_handle: BrowserLoginShutdownHandle::Anthropic(shutdown_handle),
+                        login_id,
+                    });
+                }
+
+                let outgoing_clone = self.outgoing.clone();
+                let active_login = self.active_login.clone();
+                tokio::spawn(async move {
+                    let result =
+                        tokio::time::timeout(LOGIN_CHATGPT_TIMEOUT, server.block_until_done())
+                            .await;
+                    let (success, error) = match result {
+                        Ok(Ok(())) => (true, None),
+                        Ok(Err(err)) => (false, Some(err.to_string())),
+                        Err(_) => (false, Some("Anthropic login timed out".to_string())),
+                    };
+                    outgoing_clone
+                        .send_server_notification(ServerNotification::AccountLoginCompleted(
+                            AccountLoginCompletedNotification {
+                                login_id: Some(login_id.to_string()),
+                                success,
+                                error,
+                            },
+                        ))
+                        .await;
+                    if success {
+                        outgoing_clone
+                            .send_server_notification(ServerNotification::AccountUpdated(
+                                AccountUpdatedNotification {
+                                    auth_mode: Some(AuthMode::AnthropicOauth),
+                                    plan_type: None,
+                                    required_auth_provider: Some(
+                                        ANTHROPIC_AUTH_PROVIDER_ID.to_string(),
+                                    ),
+                                },
+                            ))
+                            .await;
+                    }
+                    let mut guard = active_login.lock().await;
+                    if guard.as_ref().map(ActiveLogin::login_id) == Some(login_id) {
+                        *guard = None;
+                    }
+                });
+
+                self.outgoing
+                    .send_response(
+                        request_id,
+                        LoginAccountResponse::AnthropicOauth {
+                            login_id: login_id.to_string(),
+                            auth_url,
+                        },
+                    )
+                    .await;
+            }
+            Err(err) => {
+                self.outgoing
+                    .send_error(
+                        request_id,
+                        JSONRPCErrorError {
+                            code: INTERNAL_ERROR_CODE,
+                            message: format!("failed to start Anthropic login server: {err}"),
+                            data: None,
+                        },
+                    )
+                    .await;
+            }
+        }
+    }
+
     // Build options for a ChatGPT login attempt; performs validation.
     async fn login_chatgpt_common(
         &self,
     ) -> std::result::Result<LoginServerOptions, JSONRPCErrorError> {
         let config = self.config.as_ref();
+
+        if self.required_auth_provider() == Some(ANTHROPIC_AUTH_PROVIDER_ID) {
+            return Err(JSONRPCErrorError {
+                code: INVALID_REQUEST_ERROR_CODE,
+                message: "ChatGPT login is not available for the active Anthropic provider."
+                    .to_string(),
+                data: None,
+            });
+        }
 
         if self.auth_manager.is_external_chatgpt_auth_active() {
             return Err(self.external_auth_active_error());
@@ -1117,7 +1362,7 @@ impl CodexMessageProcessor {
             });
         }
 
-        let mut opts = LoginServerOptions {
+        let opts = LoginServerOptions {
             open_browser: false,
             ..LoginServerOptions::new(
                 config.codex_home.clone(),
@@ -1127,11 +1372,15 @@ impl CodexMessageProcessor {
             )
         };
         #[cfg(debug_assertions)]
-        if let Ok(issuer) = std::env::var(LOGIN_ISSUER_OVERRIDE_ENV_VAR)
-            && !issuer.trim().is_empty()
-        {
-            opts.issuer = issuer;
-        }
+        let opts = {
+            let mut opts = opts;
+            if let Ok(issuer) = std::env::var(LOGIN_ISSUER_OVERRIDE_ENV_VAR)
+                && !issuer.trim().is_empty()
+            {
+                opts.issuer = issuer;
+            }
+            opts
+        };
 
         Ok(opts)
     }
@@ -1167,7 +1416,9 @@ impl CodexMessageProcessor {
                             drop(existing);
                         }
                         *guard = Some(ActiveLogin::Browser {
-                            shutdown_handle: shutdown_handle.clone(),
+                            shutdown_handle: BrowserLoginShutdownHandle::OpenAi(
+                                shutdown_handle.clone(),
+                            ),
                             login_id,
                         });
                     }
@@ -1226,6 +1477,9 @@ impl CodexMessageProcessor {
                             let payload_v2 = AccountUpdatedNotification {
                                 auth_mode: auth.as_ref().map(CodexAuth::api_auth_mode),
                                 plan_type: auth.as_ref().and_then(CodexAuth::account_plan_type),
+                                required_auth_provider: Some(
+                                    codex_core::OPENAI_PROVIDER_ID.to_string(),
+                                ),
                             };
                             outgoing_clone
                                 .send_server_notification(ServerNotification::AccountUpdated(
@@ -1339,6 +1593,9 @@ impl CodexMessageProcessor {
                             let payload_v2 = AccountUpdatedNotification {
                                 auth_mode: auth.as_ref().map(CodexAuth::api_auth_mode),
                                 plan_type: auth.as_ref().and_then(CodexAuth::account_plan_type),
+                                required_auth_provider: Some(
+                                    codex_core::OPENAI_PROVIDER_ID.to_string(),
+                                ),
                             };
                             outgoing_clone
                                 .send_server_notification(ServerNotification::AccountUpdated(
@@ -1504,6 +1761,20 @@ impl CodexMessageProcessor {
             }
         }
 
+        if self.required_auth_provider() == Some(ANTHROPIC_AUTH_PROVIDER_ID) {
+            return match logout_anthropic(
+                &self.config.codex_home,
+                self.config.cli_auth_credentials_store_mode,
+            ) {
+                Ok(_) => Ok(None),
+                Err(err) => Err(JSONRPCErrorError {
+                    code: INTERNAL_ERROR_CODE,
+                    message: format!("logout failed: {err}"),
+                    data: None,
+                }),
+            };
+        }
+
         if let Err(err) = self.auth_manager.logout() {
             return Err(JSONRPCErrorError {
                 code: INTERNAL_ERROR_CODE,
@@ -1512,7 +1783,6 @@ impl CodexMessageProcessor {
             });
         }
 
-        // Reflect the current auth method after logout (likely None).
         Ok(self
             .auth_manager
             .auth_cached()
@@ -1530,6 +1800,7 @@ impl CodexMessageProcessor {
                 let payload_v2 = AccountUpdatedNotification {
                     auth_mode: current_auth_method,
                     plan_type: None,
+                    required_auth_provider: self.required_auth_provider().map(str::to_string),
                 };
                 self.outgoing
                     .send_server_notification(ServerNotification::AccountUpdated(payload_v2))
@@ -1543,6 +1814,9 @@ impl CodexMessageProcessor {
 
     async fn refresh_token_if_requested(&self, do_refresh: bool) -> RefreshTokenRequestOutcome {
         if self.auth_manager.is_external_chatgpt_auth_active() {
+            return RefreshTokenRequestOutcome::NotAttemptedOrSucceeded;
+        }
+        if self.required_auth_provider() == Some(ANTHROPIC_AUTH_PROVIDER_ID) {
             return RefreshTokenRequestOutcome::NotAttemptedOrSucceeded;
         }
         if do_refresh && let Err(err) = self.auth_manager.refresh_token().await {
@@ -1565,11 +1839,26 @@ impl CodexMessageProcessor {
         // Determine whether auth is required based on the active model provider.
         // If a custom provider is configured with `requires_openai_auth == false`,
         // then no auth step is required; otherwise, default to requiring auth.
-        let requires_openai_auth = self.config.model_provider.requires_openai_auth;
-
-        let response = if !requires_openai_auth {
+        let required_auth_provider = self.required_auth_provider();
+        let response = if required_auth_provider.is_none() {
             GetAuthStatusResponse {
                 auth_method: None,
+                auth_token: None,
+                requires_openai_auth: Some(false),
+            }
+        } else if required_auth_provider == Some(ANTHROPIC_AUTH_PROVIDER_ID) {
+            let auth = load_anthropic_auth(
+                &self.config.codex_home,
+                self.config.cli_auth_credentials_store_mode,
+            )
+            .ok()
+            .flatten();
+            let auth_method = auth.as_ref().map(|auth| match auth.auth_mode {
+                AnthropicAuthMode::ApiKey => AuthMode::AnthropicApiKey,
+                AnthropicAuthMode::Oauth => AuthMode::AnthropicOauth,
+            });
+            GetAuthStatusResponse {
+                auth_method,
                 auth_token: None,
                 requires_openai_auth: Some(false),
             }
@@ -1623,12 +1912,48 @@ impl CodexMessageProcessor {
         self.refresh_token_if_requested(do_refresh).await;
 
         // Whether auth is required for the active model provider.
-        let requires_openai_auth = self.config.model_provider.requires_openai_auth;
+        let required_auth_provider = self.required_auth_provider();
+        let requires_openai_auth = required_auth_provider == Some(codex_core::OPENAI_PROVIDER_ID);
 
-        if !requires_openai_auth {
+        if required_auth_provider.is_none() {
             let response = GetAccountResponse {
                 account: None,
                 requires_openai_auth,
+                required_auth_provider: None,
+            };
+            self.outgoing.send_response(request_id, response).await;
+            return;
+        }
+
+        if required_auth_provider == Some(ANTHROPIC_AUTH_PROVIDER_ID) {
+            let account = match if do_refresh {
+                resolve_anthropic_account_display_after_refresh(
+                    &self.config.codex_home,
+                    self.config.cli_auth_credentials_store_mode,
+                )
+                .await
+            } else {
+                resolve_anthropic_account_display(
+                    &self.config.codex_home,
+                    self.config.cli_auth_credentials_store_mode,
+                )
+                .await
+            } {
+                Ok(Some(account)) => Some(match account.auth_mode {
+                    AnthropicAuthMode::ApiKey => Account::AnthropicApiKey {},
+                    AnthropicAuthMode::Oauth => Account::AnthropicOauth {
+                        email: account.email,
+                        subscription_type: account.subscription_type,
+                    },
+                }),
+                Ok(None) => None,
+                Err(_) => None,
+            };
+
+            let response = GetAccountResponse {
+                account,
+                requires_openai_auth,
+                required_auth_provider: Some(ANTHROPIC_AUTH_PROVIDER_ID.to_string()),
             };
             self.outgoing.send_response(request_id, response).await;
             return;
@@ -1658,6 +1983,7 @@ impl CodexMessageProcessor {
                         }
                     }
                 }
+                CoreAuthMode::AnthropicApiKey | CoreAuthMode::AnthropicOauth => None,
             },
             None => None,
         };
@@ -1665,6 +1991,7 @@ impl CodexMessageProcessor {
         let response = GetAccountResponse {
             account,
             requires_openai_auth,
+            required_auth_provider: required_auth_provider.map(str::to_string),
         };
         self.outgoing.send_response(request_id, response).await;
     }
@@ -8780,6 +9107,7 @@ pub(crate) fn summary_to_thread(summary: ConversationSummary) -> Thread {
         turns: Vec::new(),
     }
 }
+use codex_core::ANTHROPIC_AUTH_PROVIDER_ID;
 
 #[cfg(test)]
 mod tests {

@@ -20,6 +20,16 @@ use ts_rs::TS;
 pub enum AuthMode {
     /// OpenAI API key provided by the caller and stored by Codex.
     ApiKey,
+    /// Anthropic API key provided by the caller and stored by Codex.
+    #[serde(rename = "anthropicApiKey")]
+    #[ts(rename = "anthropicApiKey")]
+    #[strum(serialize = "anthropicApiKey")]
+    AnthropicApiKey,
+    /// Claude.ai OAuth managed by Codex.
+    #[serde(rename = "anthropicOauth")]
+    #[ts(rename = "anthropicOauth")]
+    #[strum(serialize = "anthropicOauth")]
+    AnthropicOauth,
     /// ChatGPT OAuth managed by Codex (tokens persisted and refreshed by Codex).
     Chatgpt,
     /// [UNSTABLE] FOR OPENAI INTERNAL USE ONLY - DO NOT USE.

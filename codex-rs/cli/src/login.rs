@@ -7,12 +7,18 @@
 //! into a one-shot CLI command while still producing a durable `codex-login.log` artifact that
 //! support can request from users.
 
+use codex_core::ANTHROPIC_AUTH_PROVIDER_ID;
 use codex_core::CodexAuth;
+use codex_core::auth::AnthropicAuthMode;
 use codex_core::auth::AuthCredentialsStoreMode;
 use codex_core::auth::AuthMode;
 use codex_core::auth::CLIENT_ID;
+use codex_core::auth::load_anthropic_auth;
+use codex_core::auth::login_with_anthropic_api_key;
 use codex_core::auth::login_with_api_key;
 use codex_core::auth::logout;
+use codex_core::auth::logout_anthropic;
+use codex_core::auth::run_anthropic_login_server;
 use codex_core::config::Config;
 use codex_login::ServerOptions;
 use codex_login::run_device_code_login;
@@ -110,6 +116,12 @@ fn print_login_server_start(actual_port: u16, auth_url: &str) {
     );
 }
 
+fn print_anthropic_login_server_start(actual_port: u16, auth_url: &str) {
+    eprintln!(
+        "Starting local Anthropic login server on http://localhost:{actual_port}.\nIf your browser did not open, navigate to this URL to authenticate with Claude.ai:\n\n{auth_url}"
+    );
+}
+
 pub async fn login_with_chatgpt(
     codex_home: PathBuf,
     forced_chatgpt_workspace_id: Option<String>,
@@ -132,6 +144,19 @@ pub async fn run_login_with_chatgpt(cli_config_overrides: CliConfigOverrides) ->
     let config = load_config_or_exit(cli_config_overrides).await;
     let _login_log_guard = init_login_file_logging(&config);
     tracing::info!("starting browser login flow");
+
+    if config.model_provider.required_auth_provider() == Some(ANTHROPIC_AUTH_PROVIDER_ID) {
+        match login_with_anthropic_oauth(&config).await {
+            Ok(()) => {
+                eprintln!("{LOGIN_SUCCESS_MESSAGE}");
+                std::process::exit(0);
+            }
+            Err(err) => {
+                eprintln!("Error logging in: {err}");
+                std::process::exit(1);
+            }
+        }
+    }
 
     if matches!(config.forced_login_method, Some(ForcedLoginMethod::Api)) {
         eprintln!("{CHATGPT_LOGIN_DISABLED_MESSAGE}");
@@ -165,6 +190,23 @@ pub async fn run_login_with_api_key(
     let config = load_config_or_exit(cli_config_overrides).await;
     let _login_log_guard = init_login_file_logging(&config);
     tracing::info!("starting api key login flow");
+
+    if config.model_provider.required_auth_provider() == Some(ANTHROPIC_AUTH_PROVIDER_ID) {
+        match login_with_anthropic_api_key(
+            &config.codex_home,
+            &api_key,
+            config.cli_auth_credentials_store_mode,
+        ) {
+            Ok(()) => {
+                eprintln!("{LOGIN_SUCCESS_MESSAGE}");
+                std::process::exit(0);
+            }
+            Err(err) => {
+                eprintln!("Error logging in: {err}");
+                std::process::exit(1);
+            }
+        }
+    }
 
     if matches!(config.forced_login_method, Some(ForcedLoginMethod::Chatgpt)) {
         eprintln!("{API_KEY_LOGIN_DISABLED_MESSAGE}");
@@ -223,6 +265,12 @@ pub async fn run_login_with_device_code(
     let config = load_config_or_exit(cli_config_overrides).await;
     let _login_log_guard = init_login_file_logging(&config);
     tracing::info!("starting device code login flow");
+    if config.model_provider.required_auth_provider() == Some(ANTHROPIC_AUTH_PROVIDER_ID) {
+        eprintln!(
+            "Anthropic device-code login is not supported. Use browser-based `claudex login` instead."
+        );
+        std::process::exit(1);
+    }
     if matches!(config.forced_login_method, Some(ForcedLoginMethod::Api)) {
         eprintln!("{CHATGPT_LOGIN_DISABLED_MESSAGE}");
         std::process::exit(1);
@@ -261,6 +309,12 @@ pub async fn run_login_with_device_code_fallback_to_browser(
     let config = load_config_or_exit(cli_config_overrides).await;
     let _login_log_guard = init_login_file_logging(&config);
     tracing::info!("starting login flow with device code fallback");
+    if config.model_provider.required_auth_provider() == Some(ANTHROPIC_AUTH_PROVIDER_ID) {
+        eprintln!(
+            "Anthropic device-code login is not supported. Use browser-based `claudex login` instead."
+        );
+        std::process::exit(1);
+    }
     if matches!(config.forced_login_method, Some(ForcedLoginMethod::Api)) {
         eprintln!("{CHATGPT_LOGIN_DISABLED_MESSAGE}");
         std::process::exit(1);
@@ -316,6 +370,34 @@ pub async fn run_login_with_device_code_fallback_to_browser(
 pub async fn run_login_status(cli_config_overrides: CliConfigOverrides) -> ! {
     let config = load_config_or_exit(cli_config_overrides).await;
 
+    if config.model_provider.required_auth_provider() == Some(ANTHROPIC_AUTH_PROVIDER_ID) {
+        match load_anthropic_auth(&config.codex_home, config.cli_auth_credentials_store_mode) {
+            Ok(Some(auth)) => {
+                match auth.auth_mode {
+                    AnthropicAuthMode::ApiKey => {
+                        let api_key = auth.api_key.unwrap_or_default();
+                        eprintln!(
+                            "Logged in to Anthropic using an API key - {}",
+                            safe_format_key(&api_key)
+                        );
+                    }
+                    AnthropicAuthMode::Oauth => {
+                        eprintln!("Logged in to Anthropic using Claude.ai");
+                    }
+                }
+                std::process::exit(0);
+            }
+            Ok(None) => {
+                eprintln!("Not logged in");
+                std::process::exit(1);
+            }
+            Err(err) => {
+                eprintln!("Error checking login status: {err}");
+                std::process::exit(1);
+            }
+        }
+    }
+
     match CodexAuth::from_auth_storage(&config.codex_home, config.cli_auth_credentials_store_mode) {
         Ok(Some(auth)) => match auth.auth_mode() {
             AuthMode::ApiKey => match auth.get_token() {
@@ -328,6 +410,10 @@ pub async fn run_login_status(cli_config_overrides: CliConfigOverrides) -> ! {
                     std::process::exit(1);
                 }
             },
+            AuthMode::AnthropicApiKey | AuthMode::AnthropicOauth => {
+                eprintln!("Anthropic auth is handled outside the OpenAI auth store.");
+                std::process::exit(1);
+            }
             AuthMode::Chatgpt | AuthMode::ChatgptAuthTokens => {
                 eprintln!("Logged in using ChatGPT");
                 std::process::exit(0);
@@ -347,6 +433,23 @@ pub async fn run_login_status(cli_config_overrides: CliConfigOverrides) -> ! {
 pub async fn run_logout(cli_config_overrides: CliConfigOverrides) -> ! {
     let config = load_config_or_exit(cli_config_overrides).await;
 
+    if config.model_provider.required_auth_provider() == Some(ANTHROPIC_AUTH_PROVIDER_ID) {
+        match logout_anthropic(&config.codex_home, config.cli_auth_credentials_store_mode) {
+            Ok(true) => {
+                eprintln!("Successfully logged out");
+                std::process::exit(0);
+            }
+            Ok(false) => {
+                eprintln!("Not logged in");
+                std::process::exit(0);
+            }
+            Err(err) => {
+                eprintln!("Error logging out: {err}");
+                std::process::exit(1);
+            }
+        }
+    }
+
     match logout(&config.codex_home, config.cli_auth_credentials_store_mode) {
         Ok(true) => {
             eprintln!("Successfully logged out");
@@ -361,6 +464,15 @@ pub async fn run_logout(cli_config_overrides: CliConfigOverrides) -> ! {
             std::process::exit(1);
         }
     }
+}
+
+async fn login_with_anthropic_oauth(config: &Config) -> std::io::Result<()> {
+    let server = run_anthropic_login_server(codex_core::auth::AnthropicLoginServerOptions::new(
+        config.codex_home.clone(),
+        config.cli_auth_credentials_store_mode,
+    ))?;
+    print_anthropic_login_server_start(server.actual_port, &server.auth_url);
+    server.block_until_done().await
 }
 
 async fn load_config_or_exit(cli_config_overrides: CliConfigOverrides) -> Config {

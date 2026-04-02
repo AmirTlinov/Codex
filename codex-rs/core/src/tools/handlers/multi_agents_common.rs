@@ -1,9 +1,12 @@
+use crate::ModelProviderInfo;
 use crate::agent::AgentStatus;
 use crate::codex::Session;
 use crate::codex::TurnContext;
 use crate::config::Config;
 use crate::error::CodexErr;
 use crate::function_tool::FunctionCallError;
+use crate::models_manager::collaboration_mode_presets::CollaborationModesConfig;
+use crate::models_manager::manager::ModelsManager;
 use crate::models_manager::manager::RefreshStrategy;
 use crate::tools::context::FunctionToolOutput;
 use crate::tools::context::ToolOutput;
@@ -275,14 +278,27 @@ pub(crate) async fn apply_requested_spawn_agent_model_overrides(
     session: &Session,
     turn: &TurnContext,
     config: &mut Config,
+    requested_model_provider: Option<&str>,
     requested_model: Option<&str>,
     requested_reasoning_effort: Option<ReasoningEffort>,
 ) -> Result<(), FunctionCallError> {
-    if requested_model.is_none() && requested_reasoning_effort.is_none() {
+    if requested_model_provider.is_none()
+        && requested_model.is_none()
+        && requested_reasoning_effort.is_none()
+    {
         return Ok(());
     }
 
     if config.agent_backend.is_claude_cli() {
+        if let Some(requested_model_provider) = requested_model_provider
+            && requested_model_provider != crate::ANTHROPIC_PROVIDER_ID
+            && requested_model_provider != crate::CLAUDE_CLI_PROVIDER_ID
+        {
+            return Err(FunctionCallError::RespondToModel(
+                "model_provider overrides are not supported when agent_backend=claude_cli"
+                    .to_string(),
+            ));
+        }
         if let Some(requested_model) = requested_model {
             config.model = Some(requested_model.to_string());
         }
@@ -292,16 +308,21 @@ pub(crate) async fn apply_requested_spawn_agent_model_overrides(
         return Ok(());
     }
 
+    let (provider_id, provider, provider_models, provider_models_manager) =
+        resolve_requested_provider_and_models(
+            session,
+            config,
+            requested_model_provider,
+            requested_model,
+        )
+        .await?;
+
+    config.model_provider_id = provider_id;
+    config.model_provider = provider;
+
     if let Some(requested_model) = requested_model {
-        let available_models = session
-            .services
-            .models_manager
-            .list_models(RefreshStrategy::Offline)
-            .await;
-        let selected_model_name = find_spawn_agent_model_name(&available_models, requested_model)?;
-        let selected_model_info = session
-            .services
-            .models_manager
+        let selected_model_name = find_spawn_agent_model_name(&provider_models, requested_model)?;
+        let selected_model_info = provider_models_manager
             .get_model_info(&selected_model_name, config)
             .await;
 
@@ -320,16 +341,153 @@ pub(crate) async fn apply_requested_spawn_agent_model_overrides(
         return Ok(());
     }
 
+    if requested_model_provider.is_some() {
+        let selected_model_name = provider_models
+            .iter()
+            .find(|model| model.is_default)
+            .or_else(|| provider_models.first())
+            .map(|model| model.model.clone())
+            .ok_or_else(|| {
+                FunctionCallError::RespondToModel(format!(
+                    "No models are available for model_provider `{}`",
+                    config.model_provider_id
+                ))
+            })?;
+        let selected_model_info = provider_models_manager
+            .get_model_info(&selected_model_name, config)
+            .await;
+        config.model = Some(selected_model_name);
+        if requested_reasoning_effort.is_none() {
+            config.model_reasoning_effort = selected_model_info.default_reasoning_level;
+            return Ok(());
+        }
+    }
+
     if let Some(reasoning_effort) = requested_reasoning_effort {
+        let selected_model_name = config
+            .model
+            .clone()
+            .unwrap_or_else(|| turn.model_info.slug.clone());
+        let selected_model_info = provider_models_manager
+            .get_model_info(&selected_model_name, config)
+            .await;
         validate_spawn_agent_reasoning_effort(
-            &turn.model_info.slug,
-            &turn.model_info.supported_reasoning_levels,
+            &selected_model_name,
+            &selected_model_info.supported_reasoning_levels,
             reasoning_effort,
         )?;
         config.model_reasoning_effort = Some(reasoning_effort);
     }
 
     Ok(())
+}
+
+async fn resolve_requested_provider_and_models(
+    session: &Session,
+    config: &Config,
+    requested_model_provider: Option<&str>,
+    requested_model: Option<&str>,
+) -> Result<
+    (
+        String,
+        ModelProviderInfo,
+        Vec<codex_protocol::openai_models::ModelPreset>,
+        ModelsManager,
+    ),
+    FunctionCallError,
+> {
+    if let Some(requested_model_provider) = requested_model_provider {
+        let provider = config
+            .model_providers
+            .get(requested_model_provider)
+            .cloned()
+            .ok_or_else(|| {
+                FunctionCallError::RespondToModel(format!(
+                    "Unknown model_provider `{requested_model_provider}` for spawn_agent"
+                ))
+            })?;
+        let manager = models_manager_for_provider(session, config, provider.clone());
+        let models = manager.list_models(RefreshStrategy::Offline).await;
+        return Ok((
+            requested_model_provider.to_string(),
+            provider,
+            models,
+            manager,
+        ));
+    }
+
+    if let Some(requested_model) = requested_model {
+        let current_models = session
+            .services
+            .models_manager
+            .list_models(RefreshStrategy::Offline)
+            .await;
+        if current_models
+            .iter()
+            .any(|model| model.model == requested_model)
+        {
+            return Ok((
+                config.model_provider_id.clone(),
+                config.model_provider.clone(),
+                current_models,
+                models_manager_for_provider(session, config, config.model_provider.clone()),
+            ));
+        }
+
+        let mut matches = Vec::new();
+        for (provider_id, provider) in &config.model_providers {
+            if provider_id == &config.model_provider_id {
+                continue;
+            }
+            let manager = models_manager_for_provider(session, config, provider.clone());
+            let models = manager.list_models(RefreshStrategy::Offline).await;
+            if models.iter().any(|model| model.model == requested_model) {
+                matches.push((provider_id.clone(), provider.clone(), models, manager));
+            }
+        }
+
+        return match matches.len() {
+            0 => Err(FunctionCallError::RespondToModel(format!(
+                "Unknown model `{requested_model}` for spawn_agent."
+            ))),
+            1 => Ok(matches.remove(0)),
+            _ => {
+                let providers = matches
+                    .iter()
+                    .map(|(provider_id, ..)| provider_id.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                Err(FunctionCallError::RespondToModel(format!(
+                    "Model `{requested_model}` is available from multiple providers ({providers}). Pass model_provider explicitly."
+                )))
+            }
+        };
+    }
+
+    Ok((
+        config.model_provider_id.clone(),
+        config.model_provider.clone(),
+        session
+            .services
+            .models_manager
+            .list_models(RefreshStrategy::Offline)
+            .await,
+        models_manager_for_provider(session, config, config.model_provider.clone()),
+    ))
+}
+
+fn models_manager_for_provider(
+    session: &Session,
+    config: &Config,
+    provider: ModelProviderInfo,
+) -> ModelsManager {
+    ModelsManager::new_with_provider(
+        config.codex_home.clone(),
+        session.services.auth_manager.clone(),
+        /*model_catalog*/ None,
+        CollaborationModesConfig::default(),
+        provider,
+    )
 }
 
 fn find_spawn_agent_model_name(

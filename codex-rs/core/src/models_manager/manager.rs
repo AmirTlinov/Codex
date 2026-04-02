@@ -503,7 +503,7 @@ impl ModelsManager {
     fn load_bundled_models(provider: &ModelProviderInfo) -> Result<Vec<ModelInfo>, std::io::Error> {
         match provider.wire_api {
             WireApi::Responses => Self::load_remote_models_from_file(),
-            WireApi::ClaudeCli => Self::load_bundled_claude_models(),
+            WireApi::Anthropic | WireApi::ClaudeCli => Self::load_bundled_claude_models(),
         }
     }
 

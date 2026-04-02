@@ -183,6 +183,19 @@ fn model_picker_provider_ids_pairs_builtin_claude_with_openai() {
 }
 
 #[test]
+fn model_picker_provider_ids_pairs_builtin_anthropic_with_openai() {
+    let providers = built_in_model_providers(/*openai_base_url*/ None);
+
+    assert_eq!(
+        model_picker_provider_ids(&providers, ANTHROPIC_PROVIDER_ID),
+        vec![
+            ANTHROPIC_PROVIDER_ID.to_string(),
+            OPENAI_PROVIDER_ID.to_string()
+        ]
+    );
+}
+
+#[test]
 fn model_picker_provider_ids_pairs_custom_claude_cli_provider_with_openai() {
     let mut providers = built_in_model_providers(/*openai_base_url*/ None);
     providers.insert(
@@ -220,5 +233,22 @@ fn model_picker_provider_ids_leaves_openai_sessions_unpaired() {
     assert_eq!(
         model_picker_provider_ids(&providers, OPENAI_PROVIDER_ID),
         vec![OPENAI_PROVIDER_ID.to_string()]
+    );
+}
+
+#[test]
+fn required_auth_provider_maps_openai_and_claude_cli() {
+    let openai = ModelProviderInfo::create_openai_provider(/*base_url*/ None);
+    let anthropic = create_anthropic_provider();
+    let claude = create_claude_cli_provider();
+
+    assert_eq!(openai.required_auth_provider(), Some(OPENAI_PROVIDER_ID));
+    assert_eq!(
+        anthropic.required_auth_provider(),
+        Some(ANTHROPIC_AUTH_PROVIDER_ID)
+    );
+    assert_eq!(
+        claude.required_auth_provider(),
+        Some(ANTHROPIC_AUTH_PROVIDER_ID)
     );
 }

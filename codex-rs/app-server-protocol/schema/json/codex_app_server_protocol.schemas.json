@@ -4811,6 +4811,50 @@
           },
           {
             "properties": {
+              "type": {
+                "enum": [
+                  "anthropicApiKey"
+                ],
+                "title": "AnthropicApiKeyAccountType",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type"
+            ],
+            "title": "AnthropicApiKeyAccount",
+            "type": "object"
+          },
+          {
+            "properties": {
+              "email": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "subscriptionType": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "type": {
+                "enum": [
+                  "anthropicOauth"
+                ],
+                "title": "AnthropicOauthAccountType",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type"
+            ],
+            "title": "AnthropicOauthAccount",
+            "type": "object"
+          },
+          {
+            "properties": {
               "email": {
                 "type": "string"
               },
@@ -4894,6 +4938,12 @@
               {
                 "type": "null"
               }
+            ]
+          },
+          "requiredAuthProvider": {
+            "type": [
+              "string",
+              "null"
             ]
           }
         },
@@ -5482,6 +5532,20 @@
             "description": "OpenAI API key provided by the caller and stored by Codex.",
             "enum": [
               "apikey"
+            ],
+            "type": "string"
+          },
+          {
+            "description": "Anthropic API key provided by the caller and stored by Codex.",
+            "enum": [
+              "anthropicApiKey"
+            ],
+            "type": "string"
+          },
+          {
+            "description": "Claude.ai OAuth managed by Codex.",
+            "enum": [
+              "anthropicOauth"
             ],
             "type": "string"
           },
@@ -7976,6 +8040,12 @@
               }
             ]
           },
+          "requiredAuthProvider": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
           "requiresOpenaiAuth": {
             "type": "boolean"
           }
@@ -8555,6 +8625,42 @@
           },
           {
             "properties": {
+              "apiKey": {
+                "type": "string"
+              },
+              "type": {
+                "enum": [
+                  "anthropicApiKey"
+                ],
+                "title": "AnthropicApiKeyv2::LoginAccountParamsType",
+                "type": "string"
+              }
+            },
+            "required": [
+              "apiKey",
+              "type"
+            ],
+            "title": "AnthropicApiKeyv2::LoginAccountParams",
+            "type": "object"
+          },
+          {
+            "properties": {
+              "type": {
+                "enum": [
+                  "anthropicOauth"
+                ],
+                "title": "AnthropicOauthv2::LoginAccountParamsType",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type"
+            ],
+            "title": "AnthropicOauthv2::LoginAccountParams",
+            "type": "object"
+          },
+          {
+            "properties": {
               "type": {
                 "enum": [
                   "chatgpt"
@@ -8639,6 +8745,46 @@
               "type"
             ],
             "title": "ApiKeyv2::LoginAccountResponse",
+            "type": "object"
+          },
+          {
+            "properties": {
+              "type": {
+                "enum": [
+                  "anthropicApiKey"
+                ],
+                "title": "AnthropicApiKeyv2::LoginAccountResponseType",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type"
+            ],
+            "title": "AnthropicApiKeyv2::LoginAccountResponse",
+            "type": "object"
+          },
+          {
+            "properties": {
+              "authUrl": {
+                "type": "string"
+              },
+              "loginId": {
+                "type": "string"
+              },
+              "type": {
+                "enum": [
+                  "anthropicOauth"
+                ],
+                "title": "AnthropicOauthv2::LoginAccountResponseType",
+                "type": "string"
+              }
+            },
+            "required": [
+              "authUrl",
+              "loginId",
+              "type"
+            ],
+            "title": "AnthropicOauthv2::LoginAccountResponse",
             "type": "object"
           },
           {

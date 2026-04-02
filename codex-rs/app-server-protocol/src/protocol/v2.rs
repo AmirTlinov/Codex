@@ -1569,6 +1569,19 @@ pub enum Account {
     #[ts(rename = "apiKey", rename_all = "camelCase")]
     ApiKey {},
 
+    #[serde(rename = "anthropicApiKey", rename_all = "camelCase")]
+    #[ts(rename = "anthropicApiKey", rename_all = "camelCase")]
+    AnthropicApiKey {},
+
+    #[serde(rename = "anthropicOauth", rename_all = "camelCase")]
+    #[ts(rename = "anthropicOauth", rename_all = "camelCase")]
+    AnthropicOauth {
+        #[ts(type = "string | null")]
+        email: Option<String>,
+        #[ts(type = "string | null")]
+        subscription_type: Option<String>,
+    },
+
     #[serde(rename = "chatgpt", rename_all = "camelCase")]
     #[ts(rename = "chatgpt", rename_all = "camelCase")]
     Chatgpt { email: String, plan_type: PlanType },
@@ -1586,6 +1599,16 @@ pub enum LoginAccountParams {
         #[ts(rename = "apiKey")]
         api_key: String,
     },
+    #[serde(rename = "anthropicApiKey", rename_all = "camelCase")]
+    #[ts(rename = "anthropicApiKey", rename_all = "camelCase")]
+    AnthropicApiKey {
+        #[serde(rename = "apiKey")]
+        #[ts(rename = "apiKey")]
+        api_key: String,
+    },
+    #[serde(rename = "anthropicOauth")]
+    #[ts(rename = "anthropicOauth")]
+    AnthropicOauth,
     #[serde(rename = "chatgpt")]
     #[ts(rename = "chatgpt")]
     Chatgpt,
@@ -1620,6 +1643,12 @@ pub enum LoginAccountResponse {
     #[serde(rename = "apiKey", rename_all = "camelCase")]
     #[ts(rename = "apiKey", rename_all = "camelCase")]
     ApiKey {},
+    #[serde(rename = "anthropicApiKey", rename_all = "camelCase")]
+    #[ts(rename = "anthropicApiKey", rename_all = "camelCase")]
+    AnthropicApiKey {},
+    #[serde(rename = "anthropicOauth", rename_all = "camelCase")]
+    #[ts(rename = "anthropicOauth", rename_all = "camelCase")]
+    AnthropicOauth { login_id: String, auth_url: String },
     #[serde(rename = "chatgpt", rename_all = "camelCase")]
     #[ts(rename = "chatgpt", rename_all = "camelCase")]
     Chatgpt {
@@ -1735,6 +1764,7 @@ pub struct GetAccountParams {
 pub struct GetAccountResponse {
     pub account: Option<Account>,
     pub requires_openai_auth: bool,
+    pub required_auth_provider: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Default, JsonSchema, TS)]
@@ -3620,6 +3650,7 @@ pub struct Thread {
 pub struct AccountUpdatedNotification {
     pub auth_mode: Option<AuthMode>,
     pub plan_type: Option<PlanType>,
+    pub required_auth_provider: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, JsonSchema, TS)]

@@ -60,6 +60,12 @@
               "type": "null"
             }
           ]
+        },
+        "requiredAuthProvider": {
+          "type": [
+            "string",
+            "null"
+          ]
         }
       },
       "type": "object"
@@ -369,6 +375,20 @@
           "description": "OpenAI API key provided by the caller and stored by Codex.",
           "enum": [
             "apikey"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "Anthropic API key provided by the caller and stored by Codex.",
+          "enum": [
+            "anthropicApiKey"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "Claude.ai OAuth managed by Codex.",
+          "enum": [
+            "anthropicOauth"
           ],
           "type": "string"
         },

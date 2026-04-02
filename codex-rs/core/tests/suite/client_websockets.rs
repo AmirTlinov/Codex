@@ -1770,6 +1770,8 @@ async fn websocket_harness_with_provider_options(
         conversation_id,
         provider.clone(),
         codex_core::config::ClaudeCliConfig::default(),
+        config.codex_home.clone(),
+        config.cli_auth_credentials_store_mode,
         SessionSource::Exec,
         config.model_verbosity,
         /*enable_request_compression*/ false,

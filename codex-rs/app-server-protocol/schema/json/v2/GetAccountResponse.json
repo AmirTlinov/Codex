@@ -21,6 +21,50 @@
         },
         {
           "properties": {
+            "type": {
+              "enum": [
+                "anthropicApiKey"
+              ],
+              "title": "AnthropicApiKeyAccountType",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type"
+          ],
+          "title": "AnthropicApiKeyAccount",
+          "type": "object"
+        },
+        {
+          "properties": {
+            "email": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "subscriptionType": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "type": {
+              "enum": [
+                "anthropicOauth"
+              ],
+              "title": "AnthropicOauthAccountType",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type"
+          ],
+          "title": "AnthropicOauthAccount",
+          "type": "object"
+        },
+        {
+          "properties": {
             "email": {
               "type": "string"
             },
@@ -71,6 +115,12 @@
         {
           "type": "null"
         }
+      ]
+    },
+    "requiredAuthProvider": {
+      "type": [
+        "string",
+        "null"
       ]
     },
     "requiresOpenaiAuth": {

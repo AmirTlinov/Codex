@@ -13,7 +13,8 @@ What it does:
   - installs `~/.local/bin/claudex` by default
   - makes `claudex` point at this clone's newest built Codex binary
     (prefers a newer debug build over release, unless `CLAUDEX_PROFILE=release`)
-  - defaults the session, model picker, and subagents to Claude CLI
+  - defaults the session to native Anthropic Claude inside Codex
+  - defaults spawned subagents to Codex backend so Claude and GPT agents can interoperate
   - brands the TUI as Claudex and checks for updates against this fork's
     current branch instead of the upstream OpenAI release feed
 
@@ -249,11 +250,9 @@ if ((\$# > 0)) && [[ "\$1" == "--version" || "\$1" == "-V" ]]; then
 fi
 
 exec "\$chosen_binary" \
-  -c model_provider=claude_cli \
+  -c model_provider=anthropic \
   -c model=claude-opus-4-6 \
-  -c agent_backend=claude_cli \
-  -c claude_cli.permission_mode=acceptEdits \
-  -c 'claude_cli.tools=["default"]' \
+  -c agent_backend=codex \
   "\$@"
 WRAPPER
 chmod 0755 "$wrapper_path"

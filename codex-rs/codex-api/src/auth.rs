@@ -12,19 +12,23 @@ pub trait AuthProvider: Send + Sync {
     fn account_id(&self) -> Option<String> {
         None
     }
+
+    fn apply_headers(&self, headers: &mut HeaderMap) {
+        if let Some(token) = self.bearer_token()
+            && let Ok(header) = HeaderValue::from_str(&format!("Bearer {token}"))
+        {
+            let _ = headers.insert(http::header::AUTHORIZATION, header);
+        }
+        if let Some(account_id) = self.account_id()
+            && let Ok(header) = HeaderValue::from_str(&account_id)
+        {
+            let _ = headers.insert("ChatGPT-Account-ID", header);
+        }
+    }
 }
 
 pub(crate) fn add_auth_headers_to_header_map<A: AuthProvider>(auth: &A, headers: &mut HeaderMap) {
-    if let Some(token) = auth.bearer_token()
-        && let Ok(header) = HeaderValue::from_str(&format!("Bearer {token}"))
-    {
-        let _ = headers.insert(http::header::AUTHORIZATION, header);
-    }
-    if let Some(account_id) = auth.account_id()
-        && let Ok(header) = HeaderValue::from_str(&account_id)
-    {
-        let _ = headers.insert("ChatGPT-Account-ID", header);
-    }
+    auth.apply_headers(headers);
 }
 
 pub(crate) fn add_auth_headers<A: AuthProvider>(auth: &A, mut req: Request) -> Request {

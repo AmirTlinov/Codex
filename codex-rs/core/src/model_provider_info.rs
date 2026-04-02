@@ -31,6 +31,7 @@ const MAX_REQUEST_MAX_RETRIES: u64 = 100;
 
 const OPENAI_PROVIDER_NAME: &str = "OpenAI";
 pub const OPENAI_PROVIDER_ID: &str = "openai";
+pub const ANTHROPIC_AUTH_PROVIDER_ID: &str = "anthropic";
 const CHAT_WIRE_API_REMOVED_ERROR: &str = "`wire_api = \"chat\"` is no longer supported.\nHow to fix: set `wire_api = \"responses\"` in your provider config.\nMore info: https://github.com/openai/codex/discussions/7782";
 pub(crate) const LEGACY_OLLAMA_CHAT_PROVIDER_ID: &str = "ollama-chat";
 pub(crate) const OLLAMA_CHAT_PROVIDER_REMOVED_ERROR: &str = "`ollama-chat` is no longer supported.\nHow to fix: replace `ollama-chat` with `ollama` in `model_provider`, `oss_provider`, or `--local-provider`.\nMore info: https://github.com/openai/codex/discussions/7782";
@@ -42,6 +43,10 @@ pub enum WireApi {
     /// The Responses API exposed by OpenAI at `/v1/responses`.
     #[default]
     Responses,
+    /// Native Anthropic Messages API.
+    #[serde(rename = "anthropic")]
+    #[schemars(rename = "anthropic")]
+    Anthropic,
     /// The local Claude Code CLI invoked as a turn-scoped subprocess.
     #[serde(rename = "claude_cli")]
     #[schemars(rename = "claude_cli")]
@@ -52,6 +57,7 @@ impl fmt::Display for WireApi {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let value = match self {
             Self::Responses => "responses",
+            Self::Anthropic => "anthropic",
             Self::ClaudeCli => "claude_cli",
         };
         f.write_str(value)
@@ -66,11 +72,12 @@ impl<'de> Deserialize<'de> for WireApi {
         let value = String::deserialize(deserializer)?;
         match value.as_str() {
             "responses" => Ok(Self::Responses),
+            "anthropic" => Ok(Self::Anthropic),
             "claude_cli" => Ok(Self::ClaudeCli),
             "chat" => Err(serde::de::Error::custom(CHAT_WIRE_API_REMOVED_ERROR)),
             _ => Err(serde::de::Error::unknown_variant(
                 &value,
-                &["responses", "claude_cli"],
+                &["responses", "anthropic", "claude_cli"],
             )),
         }
     }
@@ -322,6 +329,16 @@ impl ModelProviderInfo {
         self.name == OPENAI_PROVIDER_NAME
     }
 
+    pub fn required_auth_provider(&self) -> Option<&'static str> {
+        if self.requires_openai_auth {
+            Some(OPENAI_PROVIDER_ID)
+        } else if matches!(self.wire_api, WireApi::ClaudeCli | WireApi::Anthropic) {
+            Some(ANTHROPIC_AUTH_PROVIDER_ID)
+        } else {
+            None
+        }
+    }
+
     pub(crate) fn has_command_auth(&self) -> bool {
         self.auth.is_some()
     }
@@ -333,6 +350,7 @@ pub const DEFAULT_OLLAMA_PORT: u16 = 11434;
 pub const LMSTUDIO_OSS_PROVIDER_ID: &str = "lmstudio";
 pub const OLLAMA_OSS_PROVIDER_ID: &str = "ollama";
 pub const CLAUDE_CLI_PROVIDER_ID: &str = "claude_cli";
+pub const ANTHROPIC_PROVIDER_ID: &str = "anthropic";
 
 /// Built-in default provider list.
 pub fn built_in_model_providers(
@@ -347,6 +365,7 @@ pub fn built_in_model_providers(
     // `model_providers` in config.toml to add their own providers.
     [
         (OPENAI_PROVIDER_ID, openai_provider),
+        (ANTHROPIC_PROVIDER_ID, create_anthropic_provider()),
         (
             OLLAMA_OSS_PROVIDER_ID,
             create_oss_provider(DEFAULT_OLLAMA_PORT, WireApi::Responses),
@@ -371,6 +390,27 @@ pub fn create_claude_cli_provider() -> ModelProviderInfo {
         experimental_bearer_token: None,
         auth: None,
         wire_api: WireApi::ClaudeCli,
+        query_params: None,
+        http_headers: None,
+        env_http_headers: None,
+        request_max_retries: None,
+        stream_max_retries: None,
+        stream_idle_timeout_ms: None,
+        websocket_connect_timeout_ms: None,
+        requires_openai_auth: false,
+        supports_websockets: false,
+    }
+}
+
+pub fn create_anthropic_provider() -> ModelProviderInfo {
+    ModelProviderInfo {
+        name: "Anthropic".into(),
+        base_url: Some("https://api.anthropic.com/v1".into()),
+        env_key: None,
+        env_key_instructions: None,
+        experimental_bearer_token: None,
+        auth: None,
+        wire_api: WireApi::Anthropic,
         query_params: None,
         http_headers: None,
         env_http_headers: None,
@@ -432,8 +472,10 @@ pub fn model_picker_provider_ids(
         return provider_ids;
     };
 
-    if active_provider.wire_api == WireApi::ClaudeCli
-        && model_providers.contains_key(OPENAI_PROVIDER_ID)
+    if matches!(
+        active_provider.wire_api,
+        WireApi::ClaudeCli | WireApi::Anthropic
+    ) && model_providers.contains_key(OPENAI_PROVIDER_ID)
         && active_provider_id != OPENAI_PROVIDER_ID
     {
         provider_ids.push(OPENAI_PROVIDER_ID.to_string());

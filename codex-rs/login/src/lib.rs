@@ -1,3 +1,5 @@
+pub mod anthropic;
+mod anthropic_storage;
 pub mod auth;
 pub mod token_data;
 
@@ -15,6 +17,22 @@ pub use server::ServerOptions;
 pub use server::ShutdownHandle;
 pub use server::run_login_server;
 
+pub use anthropic::AnthropicAccountDisplay;
+pub use anthropic::AnthropicLoginServer;
+pub use anthropic::AnthropicLoginServerOptions;
+pub use anthropic::AnthropicRuntimeAuth;
+pub use anthropic::AnthropicShutdownHandle;
+pub use anthropic::account_display_from_auth;
+pub use anthropic::load_anthropic_auth;
+pub use anthropic::login_with_anthropic_api_key;
+pub use anthropic::logout_anthropic;
+pub use anthropic::resolve_anthropic_account_display;
+pub use anthropic::resolve_anthropic_account_display_after_refresh;
+pub use anthropic::resolve_anthropic_runtime_auth;
+pub use anthropic::run_anthropic_login_server;
+pub use anthropic_storage::AnthropicAuthJson;
+pub use anthropic_storage::AnthropicAuthMode;
+pub use anthropic_storage::AnthropicProfile;
 pub use auth::AuthConfig;
 pub use auth::AuthCredentialsStoreMode;
 pub use auth::AuthDotJson;

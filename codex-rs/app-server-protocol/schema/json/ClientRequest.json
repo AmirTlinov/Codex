@@ -1142,6 +1142,42 @@
         },
         {
           "properties": {
+            "apiKey": {
+              "type": "string"
+            },
+            "type": {
+              "enum": [
+                "anthropicApiKey"
+              ],
+              "title": "AnthropicApiKeyLoginAccountParamsType",
+              "type": "string"
+            }
+          },
+          "required": [
+            "apiKey",
+            "type"
+          ],
+          "title": "AnthropicApiKeyLoginAccountParams",
+          "type": "object"
+        },
+        {
+          "properties": {
+            "type": {
+              "enum": [
+                "anthropicOauth"
+              ],
+              "title": "AnthropicOauthLoginAccountParamsType",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type"
+          ],
+          "title": "AnthropicOauthLoginAccountParams",
+          "type": "object"
+        },
+        {
+          "properties": {
             "type": {
               "enum": [
                 "chatgpt"

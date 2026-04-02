@@ -979,8 +979,11 @@ async fn run_ratatui_app(
 
     let should_show_trust_screen_flag = !remote_mode && should_show_trust_screen(&initial_config);
     let mut trust_decision_was_made = false;
-    let needs_onboarding_app_server =
-        should_show_trust_screen_flag || initial_config.model_provider.requires_openai_auth;
+    let needs_onboarding_app_server = should_show_trust_screen_flag
+        || initial_config
+            .model_provider
+            .required_auth_provider()
+            .is_some();
     let mut onboarding_app_server = if needs_onboarding_app_server {
         Some(AppServerSession::new(
             start_app_server(
@@ -997,7 +1000,11 @@ async fn run_ratatui_app(
     } else {
         None
     };
-    let login_status = if initial_config.model_provider.requires_openai_auth {
+    let login_status = if initial_config
+        .model_provider
+        .required_auth_provider()
+        .is_some()
+    {
         let Some(app_server) = onboarding_app_server.as_mut() else {
             unreachable!("onboarding app server should exist when auth is required");
         };
@@ -1564,7 +1571,7 @@ async fn get_login_status(
     app_server: &mut AppServerSession,
     config: &Config,
 ) -> color_eyre::Result<LoginStatus> {
-    if !config.model_provider.requires_openai_auth {
+    if config.model_provider.required_auth_provider().is_none() {
         return Ok(LoginStatus::NotAuthenticated);
     }
 
@@ -1630,9 +1637,8 @@ fn should_show_onboarding(
 }
 
 fn should_show_login_screen(login_status: LoginStatus, config: &Config) -> bool {
-    // Only show the login screen for providers that actually require OpenAI auth
-    // (OpenAI or equivalents). For OSS/other providers, skip login entirely.
-    if !config.model_provider.requires_openai_auth {
+    // Only show the login screen for providers that actually require managed auth.
+    if config.model_provider.required_auth_provider().is_none() {
         return false;
     }
 

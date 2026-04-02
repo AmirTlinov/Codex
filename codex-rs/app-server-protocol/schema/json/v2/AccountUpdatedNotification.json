@@ -12,6 +12,20 @@
           "type": "string"
         },
         {
+          "description": "Anthropic API key provided by the caller and stored by Codex.",
+          "enum": [
+            "anthropicApiKey"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "Claude.ai OAuth managed by Codex.",
+          "enum": [
+            "anthropicOauth"
+          ],
+          "type": "string"
+        },
+        {
           "description": "ChatGPT OAuth managed by Codex (tokens persisted and refreshed by Codex).",
           "enum": [
             "chatgpt"
@@ -63,6 +77,12 @@
         {
           "type": "null"
         }
+      ]
+    },
+    "requiredAuthProvider": {
+      "type": [
+        "string",
+        "null"
       ]
     }
   },

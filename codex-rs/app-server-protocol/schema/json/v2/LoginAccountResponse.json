@@ -19,6 +19,46 @@
     },
     {
       "properties": {
+        "type": {
+          "enum": [
+            "anthropicApiKey"
+          ],
+          "title": "AnthropicApiKeyv2::LoginAccountResponseType",
+          "type": "string"
+        }
+      },
+      "required": [
+        "type"
+      ],
+      "title": "AnthropicApiKeyv2::LoginAccountResponse",
+      "type": "object"
+    },
+    {
+      "properties": {
+        "authUrl": {
+          "type": "string"
+        },
+        "loginId": {
+          "type": "string"
+        },
+        "type": {
+          "enum": [
+            "anthropicOauth"
+          ],
+          "title": "AnthropicOauthv2::LoginAccountResponseType",
+          "type": "string"
+        }
+      },
+      "required": [
+        "authUrl",
+        "loginId",
+        "type"
+      ],
+      "title": "AnthropicOauthv2::LoginAccountResponse",
+      "type": "object"
+    },
+    {
+      "properties": {
         "authUrl": {
           "description": "URL the client should open in a browser to initiate the OAuth flow.",
           "type": "string"

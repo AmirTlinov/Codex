@@ -21,16 +21,25 @@ target-only path repair on launch. Override the destination with
 `CLAUDEX_SOURCE_HOME=/path/to/source`. You can force the binary choice with
 `CLAUDEX_PROFILE=debug|release`.
 
-- `model_provider=claude_cli`
+- `model_provider=anthropic`
 - `model=claude-opus-4-6`
-- `agent_backend=claude_cli`
-- `claude_cli.permission_mode=acceptEdits`
-- `claude_cli.tools=["default"]`
+- `agent_backend=codex`
 
 This means:
 
-- the main session runs through Claude Code CLI instead of the Responses API;
-- spawned subagents default to the Claude CLI backend too;
+- the main session now runs through a native Anthropic provider inside Codex,
+  not through the old `claude_cli` bridge;
+- spawned subagents default to the Codex backend too, so Claude and GPT agents
+  can interoperate inside one control plane instead of living on isolated
+  external backends;
+- `Claudex` now owns a native Anthropic auth lane inside `~/.claudex`:
+  - `claudex login --with-api-key` stores Anthropic API key auth in
+    `anthropic-auth.json`;
+  - browser login from the TUI or `claudex login` stores Claude.ai OAuth there
+    too;
+  - when `claude_cli` is used explicitly as a compat backend, Codex injects the
+    saved Anthropic auth into that process instead of depending on the user's
+    global `~/.claude` auth state;
 - the model picker keeps the Claude catalog front-and-center while also exposing
   paired OpenAI GPT entries for quick fallback in `claudex` when the OpenAI provider is available;
   when both providers are present, the full `/model` browser now separates them
@@ -49,10 +58,17 @@ This means:
 
 This downstream slice is intentionally honest and narrow:
 
-- the Claude-backed main lane uses Claude Code's built-in tools, not Codex's
-  Responses-tool loop;
+- the main Claude lane now uses Codex's own tool loop for normal function,
+  freeform, local shell, and tool-search tool calls;
 - the bundled Claude catalog is text-only right now, so image inputs are not
   supported in the main Claude lane;
+- `claude_cli` still exists as an explicit compat backend for roles or manual
+  fallback, but it is no longer the default Claudex main-lane runtime; when it
+  is used, Claudex now pins `CLAUDE_CONFIG_DIR` to its own home so it does not
+  silently fall back to global `~/.claude`;
+- Anthropic web search / image-generation special built-ins are not yet mapped
+  into native Anthropic tool calls, so the native path currently focuses on the
+  normal Codex function/custom/local-shell/tool-search surfaces;
 - `Claude Haiku 4.6` currently maps to Claude CLI's stable `haiku` alias on
   purpose, while Opus and Sonnet stay pinned to explicit `4.6` slugs; Opus
   exposes `Low/Medium/High/Max`, Sonnet stops at `High`, and Haiku skips the

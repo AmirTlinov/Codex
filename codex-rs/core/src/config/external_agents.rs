@@ -5,6 +5,8 @@ use serde::Deserialize;
 use serde::Serialize;
 use std::path::PathBuf;
 
+use crate::auth::AuthCredentialsStoreMode;
+
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum AgentBackend {
@@ -106,6 +108,8 @@ pub struct ClaudeCliConfig {
     pub effort: Option<ClaudeCliEffort>,
     pub tools: Option<Vec<String>>,
     pub add_dirs: Vec<PathBuf>,
+    pub auth_home: Option<PathBuf>,
+    pub auth_credentials_store_mode: AuthCredentialsStoreMode,
 }
 
 impl From<ClaudeCliToml> for ClaudeCliConfig {
@@ -127,6 +131,8 @@ impl From<ClaudeCliToml> for ClaudeCliConfig {
                 .into_iter()
                 .map(Into::into)
                 .collect(),
+            auth_home: None,
+            auth_credentials_store_mode: AuthCredentialsStoreMode::File,
         }
     }
 }

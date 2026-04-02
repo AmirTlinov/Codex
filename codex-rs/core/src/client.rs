@@ -23,6 +23,7 @@
 //! WebSocket prewarm is treated as the first websocket connection attempt for a turn. If it
 //! fails, normal stream retry/fallback logic handles recovery on the same turn.
 
+mod anthropic;
 mod claude_cli;
 
 use std::collections::HashMap;
@@ -95,6 +96,7 @@ use tracing::trace;
 use tracing::warn;
 
 use crate::AuthManager;
+use crate::auth::AuthCredentialsStoreMode;
 use crate::auth::AuthMode;
 use crate::auth::CodexAuth;
 use crate::auth::RefreshTokenError;
@@ -116,6 +118,7 @@ use crate::response_debug_context::telemetry_transport_error_message;
 use crate::util::FeedbackRequestTags;
 use crate::util::emit_feedback_auth_recovery_tags;
 use crate::util::emit_feedback_request_tags_with_auth_env;
+use anthropic::stream_anthropic_turn;
 use claude_cli::stream_claude_cli_turn;
 
 pub const OPENAI_BETA_HEADER: &str = "OpenAI-Beta";
@@ -139,6 +142,8 @@ pub(crate) const WEBSOCKET_CONNECT_TIMEOUT: Duration =
 struct ModelClientState {
     auth_manager: Option<Arc<AuthManager>>,
     claude_cli: ClaudeCliConfig,
+    codex_home: std::path::PathBuf,
+    auth_credentials_store_mode: AuthCredentialsStoreMode,
     conversation_id: ThreadId,
     provider: ModelProviderInfo,
     auth_env_telemetry: AuthEnvTelemetry,
@@ -263,6 +268,8 @@ impl ModelClient {
         conversation_id: ThreadId,
         provider: ModelProviderInfo,
         claude_cli: ClaudeCliConfig,
+        codex_home: std::path::PathBuf,
+        auth_credentials_store_mode: AuthCredentialsStoreMode,
         session_source: SessionSource,
         model_verbosity: Option<VerbosityConfig>,
         enable_request_compression: bool,
@@ -278,6 +285,8 @@ impl ModelClient {
             state: Arc::new(ModelClientState {
                 auth_manager,
                 claude_cli,
+                codex_home,
+                auth_credentials_store_mode,
                 conversation_id,
                 provider,
                 auth_env_telemetry,
@@ -1364,6 +1373,18 @@ impl ModelClientSession {
                 )
                 .await
             }
+            WireApi::Anthropic => {
+                stream_anthropic_turn(
+                    &self.client.state.provider,
+                    &self.client.state.codex_home,
+                    self.client.state.auth_credentials_store_mode,
+                    prompt,
+                    model_info,
+                    effort,
+                    cancellation_token,
+                )
+                .await
+            }
         }
     }
 
@@ -1561,6 +1582,8 @@ impl AuthRequestTelemetryContext {
         Self {
             auth_mode: auth_mode.map(|mode| match mode {
                 AuthMode::ApiKey => "ApiKey",
+                AuthMode::AnthropicApiKey => "AnthropicApiKey",
+                AuthMode::AnthropicOauth => "AnthropicOauth",
                 AuthMode::Chatgpt | AuthMode::ChatgptAuthTokens => "Chatgpt",
             }),
             auth_header_attached: api_auth.auth_header_attached(),

@@ -70,6 +70,7 @@ impl ToolHandler for Handler {
             &session,
             turn.as_ref(),
             &mut config,
+            args.model_provider.as_deref(),
             args.model.as_deref(),
             args.reasoning_effort,
         )
@@ -205,6 +206,7 @@ struct SpawnAgentArgs {
     message: String,
     task_name: String,
     agent_type: Option<String>,
+    model_provider: Option<String>,
     model: Option<String>,
     reasoning_effort: Option<ReasoningEffort>,
     fork_turns: Option<String>,

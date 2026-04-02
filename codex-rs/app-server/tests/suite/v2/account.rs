@@ -8,6 +8,7 @@ use app_test_support::ChatGptIdTokenClaims;
 use app_test_support::encode_id_token;
 use app_test_support::write_chatgpt_auth;
 use app_test_support::write_models_cache;
+use chrono::Utc;
 use codex_app_server_protocol::Account;
 use codex_app_server_protocol::AuthMode;
 use codex_app_server_protocol::CancelLoginAccountParams;
@@ -33,6 +34,7 @@ use codex_login::login_with_api_key;
 use codex_protocol::account::PlanType as AccountPlanType;
 use core_test_support::responses;
 use pretty_assertions::assert_eq;
+use reqwest::Url;
 use serde_json::json;
 use serial_test::serial;
 use std::path::Path;
@@ -55,6 +57,7 @@ struct CreateConfigTomlParams {
     forced_workspace_id: Option<String>,
     requires_openai_auth: Option<bool>,
     base_url: Option<String>,
+    wire_api: Option<String>,
 }
 
 fn create_config_toml(codex_home: &Path, params: CreateConfigTomlParams) -> std::io::Result<()> {
@@ -62,6 +65,7 @@ fn create_config_toml(codex_home: &Path, params: CreateConfigTomlParams) -> std:
     let base_url = params
         .base_url
         .unwrap_or_else(|| "http://127.0.0.1:0/v1".to_string());
+    let wire_api = params.wire_api.unwrap_or_else(|| "responses".to_string());
     let forced_line = if let Some(method) = params.forced_method {
         format!("forced_login_method = \"{method}\"\n")
     } else {
@@ -93,7 +97,7 @@ shell_snapshot = false
 [model_providers.mock_provider]
 name = "Mock provider for test"
 base_url = "{base_url}"
-wire_api = "responses"
+wire_api = "{wire_api}"
 request_max_retries = 0
 stream_max_retries = 0
 {requires_line}
@@ -282,6 +286,7 @@ async fn set_auth_token_updates_account_and_notifies() -> Result<()> {
                 plan_type: AccountPlanType::Pro,
             }),
             requires_openai_auth: true,
+            required_auth_provider: Some("openai".to_string()),
         }
     );
 
@@ -349,6 +354,7 @@ async fn account_read_refresh_token_is_noop_in_external_mode() -> Result<()> {
                 plan_type: AccountPlanType::Pro,
             }),
             requires_openai_auth: true,
+            required_auth_provider: Some("openai".to_string()),
         }
     );
 
@@ -1506,6 +1512,7 @@ async fn get_account_with_api_key() -> Result<()> {
     let expected = GetAccountResponse {
         account: Some(Account::ApiKey {}),
         requires_openai_auth: true,
+        required_auth_provider: Some("openai".to_string()),
     };
     assert_eq!(received, expected);
     Ok(())
@@ -1540,8 +1547,266 @@ async fn get_account_when_auth_not_required() -> Result<()> {
     let expected = GetAccountResponse {
         account: None,
         requires_openai_auth: false,
+        required_auth_provider: None,
     };
     assert_eq!(received, expected);
+    Ok(())
+}
+
+#[tokio::test]
+async fn anthropic_api_key_login_and_get_account() -> Result<()> {
+    let codex_home = TempDir::new()?;
+    create_config_toml(
+        codex_home.path(),
+        CreateConfigTomlParams {
+            wire_api: Some("claude_cli".to_string()),
+            ..Default::default()
+        },
+    )?;
+
+    let mut mcp = McpProcess::new(codex_home.path()).await?;
+    timeout(DEFAULT_READ_TIMEOUT, mcp.initialize()).await??;
+
+    let req_id = mcp
+        .send_login_account_anthropic_api_key_request("sk-ant-test")
+        .await?;
+    let resp: JSONRPCResponse = timeout(
+        DEFAULT_READ_TIMEOUT,
+        mcp.read_stream_until_response_message(RequestId::Integer(req_id)),
+    )
+    .await??;
+    let login: LoginAccountResponse = to_response(resp)?;
+    assert_eq!(login, LoginAccountResponse::AnthropicApiKey {});
+
+    let updated = timeout(
+        DEFAULT_READ_TIMEOUT,
+        mcp.read_stream_until_notification_message("account/updated"),
+    )
+    .await??;
+    let JSONRPCNotification {
+        params: Some(serde_json::Value::Object(_)),
+        ..
+    } = updated
+    else {
+        bail!("expected account/updated notification payload");
+    };
+
+    let request_id = mcp
+        .send_get_account_request(GetAccountParams {
+            refresh_token: false,
+        })
+        .await?;
+    let resp: JSONRPCResponse = timeout(
+        DEFAULT_READ_TIMEOUT,
+        mcp.read_stream_until_response_message(RequestId::Integer(request_id)),
+    )
+    .await??;
+    let received: GetAccountResponse = to_response(resp)?;
+    assert_eq!(
+        received,
+        GetAccountResponse {
+            account: Some(Account::AnthropicApiKey {}),
+            requires_openai_auth: false,
+            required_auth_provider: Some("anthropic".to_string()),
+        }
+    );
+
+    Ok(())
+}
+
+#[tokio::test]
+#[serial(login_port)]
+async fn anthropic_oauth_login_completes_via_browser_callback() -> Result<()> {
+    let codex_home = TempDir::new()?;
+    create_config_toml(
+        codex_home.path(),
+        CreateConfigTomlParams {
+            wire_api: Some("anthropic".to_string()),
+            ..Default::default()
+        },
+    )?;
+    let oauth_server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/oauth/token"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "access_token": "anth-access-token",
+            "refresh_token": "anth-refresh-token",
+            "expires_in": 3600,
+            "scope": "user:profile user:inference"
+        })))
+        .mount(&oauth_server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/oauth/profile"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "account": {
+                "email": "claude@example.com",
+                "display_name": "Claude User"
+            },
+            "organization": {
+                "uuid": "org-anthropic",
+                "organization_type": "claude_max",
+                "rate_limit_tier": "default_claude_max_5x"
+            }
+        })))
+        .mount(&oauth_server)
+        .await;
+
+    let authorize_url = format!("{}/oauth/authorize", oauth_server.uri());
+    let token_url = format!("{}/oauth/token", oauth_server.uri());
+    let profile_url = format!("{}/oauth/profile", oauth_server.uri());
+    let mut mcp = McpProcess::new_with_env(
+        codex_home.path(),
+        &[
+            (
+                "CLAUDEX_ANTHROPIC_AUTHORIZE_URL",
+                Some(authorize_url.as_str()),
+            ),
+            ("CLAUDEX_ANTHROPIC_TOKEN_URL", Some(token_url.as_str())),
+            ("CLAUDEX_ANTHROPIC_PROFILE_URL", Some(profile_url.as_str())),
+            ("CLAUDEX_ANTHROPIC_CLIENT_ID", Some("test-anthropic-client")),
+        ],
+    )
+    .await?;
+    timeout(DEFAULT_READ_TIMEOUT, mcp.initialize()).await??;
+
+    let request_id = mcp.send_login_account_anthropic_oauth_request().await?;
+    let resp: JSONRPCResponse = timeout(
+        DEFAULT_READ_TIMEOUT,
+        mcp.read_stream_until_response_message(RequestId::Integer(request_id)),
+    )
+    .await??;
+    let login: LoginAccountResponse = to_response(resp)?;
+    let LoginAccountResponse::AnthropicOauth { login_id, auth_url } = login else {
+        bail!("unexpected login response: {login:?}");
+    };
+    assert!(
+        auth_url.contains("client_id=test-anthropic-client"),
+        "Anthropic auth URL should use the override client id"
+    );
+    let parsed_auth_url = Url::parse(&auth_url)?;
+    let state = parsed_auth_url
+        .query_pairs()
+        .find(|(key, _)| key == "state")
+        .map(|pair| pair.1.to_string())
+        .expect("state should be present");
+    let redirect_uri = parsed_auth_url
+        .query_pairs()
+        .find(|(key, _)| key == "redirect_uri")
+        .map(|pair| pair.1.to_string())
+        .expect("redirect_uri should be present");
+    let callback_url = format!("{redirect_uri}?code=test-auth-code&state={state}");
+    let callback_response = reqwest::get(callback_url).await?;
+    assert_eq!(callback_response.status(), reqwest::StatusCode::OK);
+
+    let completed = timeout(
+        DEFAULT_READ_TIMEOUT,
+        mcp.read_stream_until_notification_message("account/login/completed"),
+    )
+    .await??;
+    let parsed: ServerNotification = completed.try_into()?;
+    let ServerNotification::AccountLoginCompleted(payload) = parsed else {
+        bail!("unexpected notification: {parsed:?}");
+    };
+    assert_eq!(payload.login_id, Some(login_id));
+    assert_eq!(payload.success, true);
+    assert_eq!(payload.error, None);
+
+    let updated = timeout(
+        DEFAULT_READ_TIMEOUT,
+        mcp.read_stream_until_notification_message("account/updated"),
+    )
+    .await??;
+    let parsed: ServerNotification = updated.try_into()?;
+    let ServerNotification::AccountUpdated(payload) = parsed else {
+        bail!("unexpected notification: {parsed:?}");
+    };
+    assert_eq!(payload.auth_mode, Some(AuthMode::AnthropicOauth));
+    assert_eq!(
+        payload.required_auth_provider,
+        Some("anthropic".to_string())
+    );
+
+    let request_id = mcp
+        .send_get_account_request(GetAccountParams {
+            refresh_token: false,
+        })
+        .await?;
+    let resp: JSONRPCResponse = timeout(
+        DEFAULT_READ_TIMEOUT,
+        mcp.read_stream_until_response_message(RequestId::Integer(request_id)),
+    )
+    .await??;
+    let received: GetAccountResponse = to_response(resp)?;
+    assert_eq!(
+        received,
+        GetAccountResponse {
+            account: Some(Account::AnthropicOauth {
+                email: Some("claude@example.com".to_string()),
+                subscription_type: Some("max".to_string()),
+            }),
+            requires_openai_auth: false,
+            required_auth_provider: Some("anthropic".to_string()),
+        }
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn get_account_with_expired_anthropic_oauth_degrades_to_logged_out() -> Result<()> {
+    let codex_home = TempDir::new()?;
+    create_config_toml(
+        codex_home.path(),
+        CreateConfigTomlParams {
+            wire_api: Some("anthropic".to_string()),
+            ..Default::default()
+        },
+    )?;
+    std::fs::write(
+        codex_home.path().join("anthropic-auth.json"),
+        serde_json::to_string_pretty(&json!({
+            "auth_mode": "oauth",
+            "api_key": null,
+            "oauth": {
+                "access_token": "expired-access-token",
+                "refresh_token": "refresh-token",
+                "expires_at": (Utc::now() - chrono::Duration::hours(1)).to_rfc3339(),
+                "scopes": ["user:profile", "user:inference"],
+                "profile": {
+                    "email": "stale@example.com",
+                    "display_name": "Stale User",
+                    "organization_uuid": "org-stale",
+                    "subscription_type": "max",
+                    "rate_limit_tier": "default_claude_max_5x"
+                }
+            },
+            "last_refresh": (Utc::now() - chrono::Duration::hours(1)).to_rfc3339()
+        }))?,
+    )?;
+
+    let mut mcp = McpProcess::new(codex_home.path()).await?;
+    timeout(DEFAULT_READ_TIMEOUT, mcp.initialize()).await??;
+
+    let request_id = mcp
+        .send_get_account_request(GetAccountParams {
+            refresh_token: false,
+        })
+        .await?;
+    let resp: JSONRPCResponse = timeout(
+        DEFAULT_READ_TIMEOUT,
+        mcp.read_stream_until_response_message(RequestId::Integer(request_id)),
+    )
+    .await??;
+    let received: GetAccountResponse = to_response(resp)?;
+    assert_eq!(
+        received,
+        GetAccountResponse {
+            account: None,
+            requires_openai_auth: false,
+            required_auth_provider: Some("anthropic".to_string()),
+        }
+    );
+
     Ok(())
 }
 
@@ -1584,6 +1849,7 @@ async fn get_account_with_chatgpt() -> Result<()> {
             plan_type: AccountPlanType::Pro,
         }),
         requires_openai_auth: true,
+        required_auth_provider: Some("openai".to_string()),
     };
     assert_eq!(received, expected);
     Ok(())
@@ -1626,6 +1892,7 @@ async fn get_account_with_chatgpt_missing_plan_claim_returns_unknown() -> Result
             plan_type: AccountPlanType::Unknown,
         }),
         requires_openai_auth: true,
+        required_auth_provider: Some("openai".to_string()),
     };
     assert_eq!(received, expected);
     Ok(())

@@ -50,6 +50,8 @@ pub(crate) async fn run_claude_cli(
         .arg(&request.system_prompt)
         .arg("--model")
         .arg(&request.model);
+
+    apply_anthropic_runtime_auth_env(&mut command, config).await?;
     #[cfg(unix)]
     command.process_group(0);
 
@@ -122,6 +124,39 @@ pub(crate) async fn run_claude_cli(
             finalize_claude_cli_output(status, stdout, stderr)
         }
     }
+}
+
+async fn apply_anthropic_runtime_auth_env(
+    command: &mut Command,
+    config: &ClaudeCliConfig,
+) -> anyhow::Result<()> {
+    let Some(auth_home) = config.auth_home.as_deref() else {
+        return Ok(());
+    };
+    command.env("CLAUDE_CONFIG_DIR", auth_home);
+    match crate::auth::resolve_anthropic_runtime_auth(auth_home, config.auth_credentials_store_mode)
+        .await
+    {
+        Ok(Some(crate::auth::AnthropicRuntimeAuth::ApiKey(api_key))) => {
+            command.env_remove("CLAUDE_CODE_OAUTH_TOKEN");
+            command.env_remove("ANTHROPIC_AUTH_TOKEN");
+            command.env("ANTHROPIC_API_KEY", api_key);
+        }
+        Ok(Some(crate::auth::AnthropicRuntimeAuth::OauthAccessToken(access_token))) => {
+            command.env_remove("ANTHROPIC_API_KEY");
+            command.env_remove("ANTHROPIC_AUTH_TOKEN");
+            command.env("CLAUDE_CODE_OAUTH_TOKEN", access_token);
+        }
+        Ok(None) => {
+            command.env_remove("CLAUDE_CODE_OAUTH_TOKEN");
+            command.env_remove("ANTHROPIC_AUTH_TOKEN");
+            command.env_remove("ANTHROPIC_API_KEY");
+        }
+        Err(err) => {
+            anyhow::bail!("resolve Anthropic auth for Claude CLI: {err}");
+        }
+    }
+    Ok(())
 }
 
 fn finalize_claude_cli_output(

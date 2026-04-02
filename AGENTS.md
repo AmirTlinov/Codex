@@ -46,7 +46,13 @@ This fork is maintained as a downstream customization layer over
   branch, reroutes the in-app update action to this clone's
   `scripts/install-claudex.sh` instead of upstream OpenAI install flows, and
   prefers the newest local debug build over release unless
-  `CLAUDEX_PROFILE=release` is set.
+  `CLAUDEX_PROFILE=release` is set. `Claudex` now defaults to native Anthropic
+  execution inside Codex (`model_provider=anthropic`, `agent_backend=codex`)
+  instead of using `claude_cli` as the main lane. `Claudex` also owns native
+  Anthropic auth under `~/.claudex`: Claude.ai OAuth and Anthropic API-key
+  login flow through Codex account surfaces and are stored there, while any
+  explicit `claude_cli` compat runtime still receives that saved auth from
+  Codex rather than silently depending on global `~/.claude` auth state.
 - When the downstream workflow changes, update the matching repo truth in the
   same change: `AGENTS.md`, `.agents/skills/*`, and `docs/fork-maintenance.md`.
 - Keep durable intent and workflow truth in repo files, not only in chat.

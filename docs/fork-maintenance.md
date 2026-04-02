@@ -143,6 +143,11 @@ What it does:
 - starts this fork with downstream Claude defaults for the main session,
   subagents, and a Claude-first model picker that still exposes paired OpenAI
   GPT entries when the OpenAI provider is available;
+- keeps Anthropic auth native to `Claudex`: the fork now stores Anthropic API
+  key / Claude.ai OAuth credentials under `~/.claudex`, exposes Anthropic login
+  through the app-server/TUI/CLI account surfaces, and injects that saved auth
+  into spawned `claude` subprocesses instead of silently depending on global
+  `~/.claude` login state;
 - brands the runtime as `Claudex`, makes `claudex --version` report the
   current downstream short SHA, uses the same downstream product name in the
   default terminal title plus CLI update/human-output copy, points update
@@ -153,15 +158,14 @@ What it does:
 
 The wrapper currently injects:
 
-- `model_provider=claude_cli`
+- `model_provider=anthropic`
 - `model=claude-opus-4-6`
-- `agent_backend=claude_cli`
-- `claude_cli.permission_mode=acceptEdits`
-- `claude_cli.tools=["default"]`
+- `agent_backend=codex`
 
 That keeps the stock `codex` command untouched while making `claudex` behave
-like the Claude-backed downstream flavor of this fork. If you move the clone or
-clean the release target, rerun the installer.
+like the Anthropic-native downstream flavor of this fork, with Codex-owned
+subagents by default. If you move the clone or clean the release target, rerun
+the installer.
 
 See `docs/claudex.md` for the runtime boundary and current limitations.
 

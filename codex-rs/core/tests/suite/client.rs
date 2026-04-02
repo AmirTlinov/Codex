@@ -64,20 +64,27 @@ use core_test_support::wait_for_event;
 use dunce::canonicalize as normalize_path;
 use futures::StreamExt;
 use pretty_assertions::assert_eq;
+use serde_json::Value;
 use serde_json::json;
 use std::io::Write;
 use std::num::NonZeroU64;
 use std::sync::Arc;
+use std::sync::atomic::AtomicUsize;
+use std::sync::atomic::Ordering;
 use tempfile::TempDir;
 use uuid::Uuid;
+use wiremock::Match;
 use wiremock::Mock;
 use wiremock::MockServer;
+use wiremock::Request as WiremockRequest;
+use wiremock::Respond;
 use wiremock::ResponseTemplate;
 use wiremock::matchers::body_string_contains;
 use wiremock::matchers::header;
 use wiremock::matchers::header_regex;
 use wiremock::matchers::method;
 use wiremock::matchers::path;
+use wiremock::matchers::path_regex;
 use wiremock::matchers::query_param;
 
 #[expect(clippy::unwrap_used)]
@@ -856,6 +863,8 @@ async fn send_provider_auth_request(server: &MockServer, auth: ModelProviderAuth
         conversation_id,
         provider,
         codex_core::config::ClaudeCliConfig::default(),
+        config.codex_home.clone(),
+        config.cli_auth_credentials_store_mode,
         SessionSource::Exec,
         config.model_verbosity,
         /*enable_request_compression*/ false,
@@ -894,6 +903,115 @@ async fn send_provider_auth_request(server: &MockServer, auth: ModelProviderAuth
             break;
         }
     }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn anthropic_native_tool_roundtrip_executes_shell_and_sends_tool_result() -> anyhow::Result<()>
+{
+    struct AnthropicSequenceResponder {
+        call_index: Arc<AtomicUsize>,
+    }
+
+    impl Respond for AnthropicSequenceResponder {
+        fn respond(&self, request: &WiremockRequest) -> ResponseTemplate {
+            let body: Value = request
+                .body_json()
+                .expect("Anthropic request body to be valid JSON");
+            let call_index = self.call_index.fetch_add(1, Ordering::SeqCst);
+            match call_index {
+                0 => {
+                    assert_eq!(request.url.path(), "/v1/messages");
+                    assert_eq!(body["model"].as_str(), Some("claude-opus-4-6"));
+                    ResponseTemplate::new(200)
+                        .insert_header("content-type", "text/event-stream")
+                        .set_body_string(concat!(
+                            "data: {\"type\":\"message_start\",\"message\":{\"id\":\"msg-1\",\"usage\":{\"input_tokens\":5}}}\n\n",
+                            "data: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"tool_use\",\"id\":\"call-1\",\"name\":\"shell\",\"input\":{}}}\n\n",
+                            "data: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"input_json_delta\",\"partial_json\":\"{\\\"command\\\":[\\\"bash\\\",\\\"-lc\\\",\\\"printf ok\\\"],\\\"workdir\\\":\\\".\\\"}\"}}\n\n",
+                            "data: {\"type\":\"content_block_stop\",\"index\":0}\n\n",
+                            "data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"tool_use\"},\"usage\":{\"output_tokens\":3}}\n\n",
+                            "data: {\"type\":\"message_stop\"}\n\n",
+                        ))
+                }
+                1 => {
+                    assert_eq!(request.url.path(), "/v1/messages");
+                    let messages = body["messages"]
+                        .as_array()
+                        .expect("Anthropic messages array");
+                    let contains_tool_result = messages.iter().any(|message| {
+                        message["role"].as_str() == Some("user")
+                            && message["content"].as_array().is_some_and(|content| {
+                                content.iter().any(|block| {
+                                    block["type"].as_str() == Some("tool_result")
+                                        && block["tool_use_id"].as_str() == Some("call-1")
+                                })
+                            })
+                    });
+                    assert!(
+                        contains_tool_result,
+                        "expected second Anthropic request to include tool_result for call-1: {body}"
+                    );
+                    ResponseTemplate::new(200)
+                        .insert_header("content-type", "text/event-stream")
+                        .set_body_string(concat!(
+                            "data: {\"type\":\"message_start\",\"message\":{\"id\":\"msg-2\",\"usage\":{\"input_tokens\":9}}}\n\n",
+                            "data: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"text\",\"text\":\"\"}}\n\n",
+                            "data: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"done\"}}\n\n",
+                            "data: {\"type\":\"content_block_stop\",\"index\":0}\n\n",
+                            "data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"},\"usage\":{\"output_tokens\":2}}\n\n",
+                            "data: {\"type\":\"message_stop\"}\n\n",
+                        ))
+                }
+                _ => panic!("unexpected extra Anthropic request #{call_index}: {body}"),
+            }
+        }
+    }
+
+    let server = MockServer::start().await;
+    let base_url = format!("{}/v1", server.uri());
+    Mock::given(method("POST"))
+        .and(path("/v1/messages"))
+        .respond_with(AnthropicSequenceResponder {
+            call_index: Arc::new(AtomicUsize::new(0)),
+        })
+        .expect(2)
+        .mount(&server)
+        .await;
+
+    let mut builder = test_codex()
+        .with_model("claude-opus-4-6")
+        .with_config(move |config| {
+            config.model_provider_id = codex_core::ANTHROPIC_PROVIDER_ID.to_string();
+            config.model_provider = built_in_model_providers(/*openai_base_url*/ None)
+                [codex_core::ANTHROPIC_PROVIDER_ID]
+                .clone();
+            config.model_provider.base_url = Some(base_url);
+            config.model = Some("claude-opus-4-6".to_string());
+        })
+        .with_pre_build_hook(|codex_home| {
+            codex_login::login_with_anthropic_api_key(
+                codex_home,
+                "sk-ant-test",
+                codex_login::AuthCredentialsStoreMode::File,
+            )
+            .expect("save anthropic auth fixture");
+        });
+    let test = builder.build(&server).await?;
+    test.submit_turn("run the shell command and then answer")
+        .await?;
+
+    let path_matcher = path_regex(".*/messages$");
+    let requests = server
+        .received_requests()
+        .await
+        .expect("mock server should not fail");
+    let anthropic_requests = requests
+        .into_iter()
+        .filter(|request| path_matcher.matches(request))
+        .collect::<Vec<_>>();
+    assert_eq!(anthropic_requests.len(), 2);
+
+    Ok(())
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -2078,6 +2196,8 @@ async fn azure_responses_request_includes_store_and_reasoning_ids() {
         conversation_id,
         provider.clone(),
         codex_core::config::ClaudeCliConfig::default(),
+        config.codex_home.clone(),
+        config.cli_auth_credentials_store_mode,
         SessionSource::Exec,
         config.model_verbosity,
         /*enable_request_compression*/ false,

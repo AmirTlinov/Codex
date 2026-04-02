@@ -573,6 +573,15 @@ fn spawn_agent_common_properties_v1(agent_type_description: &str) -> BTreeMap<St
             },
         ),
         (
+            "model_provider".to_string(),
+            JsonSchema::String {
+                description: Some(
+                    "Optional model provider override for the new agent. Use when the requested model belongs to a different provider, for example `anthropic` or `openai`."
+                        .to_string(),
+                ),
+            },
+        ),
+        (
             "model".to_string(),
             JsonSchema::String {
                 description: Some(
@@ -612,6 +621,15 @@ fn spawn_agent_common_properties_v2(agent_type_description: &str) -> BTreeMap<St
             JsonSchema::String {
                 description: Some(
                     "Optional MultiAgentV2 fork mode. Use `none`, `all`, or a positive integer string such as `3` to fork only the most recent turns."
+                        .to_string(),
+                ),
+            },
+        ),
+        (
+            "model_provider".to_string(),
+            JsonSchema::String {
+                description: Some(
+                    "Optional model provider override for the new agent. Use when the requested model belongs to a different provider, for example `anthropic` or `openai`."
                         .to_string(),
                 ),
             },

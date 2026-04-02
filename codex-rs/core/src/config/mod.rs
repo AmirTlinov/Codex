@@ -2361,7 +2361,9 @@ impl Config {
             let trimmed = value.trim();
             (!trimmed.is_empty()).then(|| trimmed.to_string())
         });
-        let claude_cli = cfg.claude_cli.unwrap_or_default().into();
+        let mut claude_cli: ClaudeCliConfig = cfg.claude_cli.unwrap_or_default().into();
+        claude_cli.auth_home = Some(codex_home.clone());
+        claude_cli.auth_credentials_store_mode = cfg.cli_auth_credentials_store.unwrap_or_default();
         if agent_job_max_runtime_seconds == Some(0) {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::InvalidInput,

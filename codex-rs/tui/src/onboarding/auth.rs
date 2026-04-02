@@ -8,6 +8,7 @@ use codex_app_server_protocol::CancelLoginAccountParams;
 use codex_app_server_protocol::ClientRequest;
 use codex_app_server_protocol::LoginAccountParams;
 use codex_app_server_protocol::LoginAccountResponse;
+use codex_core::ANTHROPIC_AUTH_PROVIDER_ID;
 use codex_core::auth::AuthCredentialsStoreMode;
 use codex_core::auth::read_openai_api_key_from_env;
 use codex_login::DeviceCode;
@@ -187,6 +188,7 @@ pub(crate) struct AuthModeWidget {
     pub app_server_request_handle: AppServerRequestHandle,
     pub forced_chatgpt_workspace_id: Option<String>,
     pub forced_login_method: Option<ForcedLoginMethod>,
+    pub required_auth_provider: Option<String>,
     pub animations_enabled: bool,
 }
 
@@ -229,6 +231,45 @@ impl AuthModeWidget {
         self.error.read().unwrap().clone()
     }
 
+    fn uses_anthropic_auth(&self) -> bool {
+        self.required_auth_provider.as_deref() == Some(ANTHROPIC_AUTH_PROVIDER_ID)
+    }
+
+    fn oauth_sign_in_label(&self) -> &'static str {
+        if self.uses_anthropic_auth() {
+            "Sign in with Claude.ai"
+        } else {
+            "Sign in with ChatGPT"
+        }
+    }
+
+    fn oauth_sign_in_description(&self) -> &'static str {
+        if self.uses_anthropic_auth() {
+            "Use your Claude.ai subscription inside Claudex"
+        } else {
+            "Usage included with Plus, Pro, Business, and Enterprise plans"
+        }
+    }
+
+    fn api_key_prompt_label(&self) -> &'static str {
+        if self.uses_anthropic_auth() {
+            "Use your own Anthropic API key for usage-based billing"
+        } else {
+            "Use your own OpenAI API key for usage-based billing"
+        }
+    }
+
+    fn api_key_env_value(&self) -> Option<String> {
+        if self.uses_anthropic_auth() {
+            std::env::var("ANTHROPIC_API_KEY")
+                .ok()
+                .map(|value| value.trim().to_string())
+                .filter(|value| !value.is_empty())
+        } else {
+            read_openai_api_key_from_env()
+        }
+    }
+
     fn is_api_login_allowed(&self) -> bool {
         !matches!(self.forced_login_method, Some(ForcedLoginMethod::Chatgpt))
     }
@@ -239,7 +280,7 @@ impl AuthModeWidget {
 
     fn displayed_sign_in_options(&self) -> Vec<SignInOption> {
         let mut options = vec![SignInOption::ChatGpt];
-        if self.is_chatgpt_login_allowed() {
+        if self.is_chatgpt_login_allowed() && !self.uses_anthropic_auth() {
             options.push(SignInOption::DeviceCode);
         }
         if self.is_api_login_allowed() {
@@ -252,7 +293,9 @@ impl AuthModeWidget {
         let mut options = Vec::new();
         if self.is_chatgpt_login_allowed() {
             options.push(SignInOption::ChatGpt);
-            options.push(SignInOption::DeviceCode);
+            if !self.uses_anthropic_auth() {
+                options.push(SignInOption::DeviceCode);
+            }
         }
         if self.is_api_login_allowed() {
             options.push(SignInOption::ApiKey);
@@ -306,23 +349,41 @@ impl AuthModeWidget {
 
     fn disallow_api_login(&mut self) {
         self.highlighted_mode = SignInOption::ChatGpt;
-        self.set_error(Some(API_KEY_DISABLED_MESSAGE.to_string()));
+        self.set_error(Some(if self.uses_anthropic_auth() {
+            "Anthropic API key login is disabled.".to_string()
+        } else {
+            API_KEY_DISABLED_MESSAGE.to_string()
+        }));
         *self.sign_in_state.write().unwrap() = SignInState::PickMode;
         self.request_frame.schedule_frame();
     }
 
     fn render_pick_mode(&self, area: Rect, buf: &mut Buffer) {
-        let mut lines: Vec<Line> = vec![
-            Line::from(vec![
-                "  ".into(),
-                "Sign in with ChatGPT to use Codex as part of your paid plan".into(),
-            ]),
-            Line::from(vec![
-                "  ".into(),
-                "or connect an API key for usage-based billing".into(),
-            ]),
-            "".into(),
-        ];
+        let mut lines: Vec<Line> = if self.uses_anthropic_auth() {
+            vec![
+                Line::from(vec![
+                    "  ".into(),
+                    "Sign in with Claude.ai to use Anthropic models in Claudex".into(),
+                ]),
+                Line::from(vec![
+                    "  ".into(),
+                    "or connect an Anthropic API key for usage-based billing".into(),
+                ]),
+                "".into(),
+            ]
+        } else {
+            vec![
+                Line::from(vec![
+                    "  ".into(),
+                    "Sign in with ChatGPT to use Codex as part of your paid plan".into(),
+                ]),
+                Line::from(vec![
+                    "  ".into(),
+                    "or connect an API key for usage-based billing".into(),
+                ]),
+                "".into(),
+            ]
+        };
 
         let create_mode_item = |idx: usize,
                                 selected_mode: SignInOption,
@@ -353,10 +414,14 @@ impl AuthModeWidget {
             vec![line1, line2]
         };
 
-        let chatgpt_description = if !self.is_chatgpt_login_allowed() {
-            "ChatGPT login is disabled"
+        let oauth_description = if !self.is_chatgpt_login_allowed() {
+            if self.uses_anthropic_auth() {
+                "Claude.ai login is disabled"
+            } else {
+                "ChatGPT login is disabled"
+            }
         } else {
-            "Usage included with Plus, Pro, Business, and Enterprise plans"
+            self.oauth_sign_in_description()
         };
         let device_code_description = "Sign in from another device with a one-time code";
 
@@ -366,8 +431,8 @@ impl AuthModeWidget {
                     lines.extend(create_mode_item(
                         idx,
                         option,
-                        "Sign in with ChatGPT",
-                        chatgpt_description,
+                        self.oauth_sign_in_label(),
+                        oauth_description,
                     ));
                 }
                 SignInOption::DeviceCode => {
@@ -382,7 +447,11 @@ impl AuthModeWidget {
                     lines.extend(create_mode_item(
                         idx,
                         option,
-                        "Provide your own API key",
+                        if self.uses_anthropic_auth() {
+                            "Provide your own Anthropic API key"
+                        } else {
+                            "Provide your own API key"
+                        },
                         "Pay for what you use",
                     ));
                 }
@@ -392,9 +461,13 @@ impl AuthModeWidget {
 
         if !self.is_api_login_allowed() {
             lines.push(
-                "  API key login is disabled by this workspace. Sign in with ChatGPT to continue."
-                    .dim()
-                    .into(),
+                if self.uses_anthropic_auth() {
+                    "  API key login is disabled by this workspace. Sign in with Claude.ai to continue."
+                } else {
+                    "  API key login is disabled by this workspace. Sign in with ChatGPT to continue."
+                }
+                .dim()
+                .into(),
             );
             lines.push("".into());
         }
@@ -419,9 +492,20 @@ impl AuthModeWidget {
             // Schedule a follow-up frame to keep the shimmer animation going.
             self.request_frame
                 .schedule_frame_in(std::time::Duration::from_millis(100));
-            spans.extend(shimmer_spans("Finish signing in via your browser"));
+            spans.extend(shimmer_spans(if self.uses_anthropic_auth() {
+                "Finish signing in to Claude.ai via your browser"
+            } else {
+                "Finish signing in via your browser"
+            }));
         } else {
-            spans.push("Finish signing in via your browser".into());
+            spans.push(
+                if self.uses_anthropic_auth() {
+                    "Finish signing in to Claude.ai via your browser"
+                } else {
+                    "Finish signing in via your browser"
+                }
+                .into(),
+            );
         }
         let mut lines = vec![spans.into(), "".into()];
 
@@ -436,11 +520,18 @@ impl AuthModeWidget {
                 state.auth_url.as_str().cyan().underlined(),
             ]));
             lines.push("".into());
-            lines.push(Line::from(vec![
-                "  On a remote or headless machine? Press Esc and choose ".into(),
-                "Sign in with Device Code".cyan(),
-                ".".into(),
-            ]));
+            lines.push(Line::from(vec![if self.uses_anthropic_auth() {
+                "  Return to Claudex after completing the Claude.ai sign-in in your browser.".into()
+            } else {
+                "  On a remote or headless machine? Press Esc and choose ".into()
+            }]));
+            if !self.uses_anthropic_auth() {
+                lines.push(Line::from(vec![
+                    "  ".into(),
+                    "Sign in with Device Code".cyan(),
+                    ".".into(),
+                ]));
+            }
             lines.push("".into());
             Some(state.auth_url.clone())
         } else {
@@ -460,30 +551,46 @@ impl AuthModeWidget {
     }
 
     fn render_chatgpt_success_message(&self, area: Rect, buf: &mut Buffer) {
-        let lines = vec![
-            "✓ Signed in with your ChatGPT account".fg(Color::Green).into(),
-            "".into(),
-            "  Before you start:".into(),
-            "".into(),
-            "  Decide how much autonomy you want to grant Codex".into(),
-            Line::from(vec![
-                "  For more details see the ".into(),
-                "\u{1b}]8;;https://developers.openai.com/codex/security\u{7}Codex docs\u{1b}]8;;\u{7}".underlined(),
-            ])
-            .dim(),
-            "".into(),
-            "  Codex can make mistakes".into(),
-            "  Review the code it writes and commands it runs".dim().into(),
-            "".into(),
-            "  Powered by your ChatGPT account".into(),
-            Line::from(vec![
-                "  Uses your plan's rate limits and ".into(),
-                "\u{1b}]8;;https://chatgpt.com/#settings\u{7}training data preferences\u{1b}]8;;\u{7}".underlined(),
-            ])
-            .dim(),
-            "".into(),
-            "  Press Enter to continue".fg(Color::Cyan).into(),
-        ];
+        let lines = if self.uses_anthropic_auth() {
+            vec![
+                "✓ Signed in with your Claude.ai account"
+                    .fg(Color::Green)
+                    .into(),
+                "".into(),
+                "  Claudex will use your Claude.ai account for Anthropic models.".into(),
+                "".into(),
+                "  Review generated code and executed commands before trusting them."
+                    .dim()
+                    .into(),
+                "".into(),
+                "  Press Enter to continue".fg(Color::Cyan).into(),
+            ]
+        } else {
+            vec![
+                "✓ Signed in with your ChatGPT account".fg(Color::Green).into(),
+                "".into(),
+                "  Before you start:".into(),
+                "".into(),
+                "  Decide how much autonomy you want to grant Codex".into(),
+                Line::from(vec![
+                    "  For more details see the ".into(),
+                    "\u{1b}]8;;https://developers.openai.com/codex/security\u{7}Codex docs\u{1b}]8;;\u{7}".underlined(),
+                ])
+                .dim(),
+                "".into(),
+                "  Codex can make mistakes".into(),
+                "  Review the code it writes and commands it runs".dim().into(),
+                "".into(),
+                "  Powered by your ChatGPT account".into(),
+                Line::from(vec![
+                    "  Uses your plan's rate limits and ".into(),
+                    "\u{1b}]8;;https://chatgpt.com/#settings\u{7}training data preferences\u{1b}]8;;\u{7}".underlined(),
+                ])
+                .dim(),
+                "".into(),
+                "  Press Enter to continue".fg(Color::Cyan).into(),
+            ]
+        };
 
         Paragraph::new(lines)
             .wrap(Wrap { trim: false })
@@ -492,9 +599,13 @@ impl AuthModeWidget {
 
     fn render_chatgpt_success(&self, area: Rect, buf: &mut Buffer) {
         let lines = vec![
-            "✓ Signed in with your ChatGPT account"
-                .fg(Color::Green)
-                .into(),
+            if self.uses_anthropic_auth() {
+                "✓ Signed in with your Claude.ai account"
+            } else {
+                "✓ Signed in with your ChatGPT account"
+            }
+            .fg(Color::Green)
+            .into(),
         ];
 
         Paragraph::new(lines)
@@ -504,9 +615,20 @@ impl AuthModeWidget {
 
     fn render_api_key_configured(&self, area: Rect, buf: &mut Buffer) {
         let lines = vec![
-            "✓ API key configured".fg(Color::Green).into(),
+            if self.uses_anthropic_auth() {
+                "✓ Anthropic API key configured"
+            } else {
+                "✓ API key configured"
+            }
+            .fg(Color::Green)
+            .into(),
             "".into(),
-            "  Codex will use usage-based billing with your API key.".into(),
+            if self.uses_anthropic_auth() {
+                "  Claudex will use usage-based billing with your Anthropic API key."
+            } else {
+                "  Codex will use usage-based billing with your API key."
+            }
+            .into(),
         ];
 
         Paragraph::new(lines)
@@ -525,14 +647,26 @@ impl AuthModeWidget {
         let mut intro_lines: Vec<Line> = vec![
             Line::from(vec![
                 "> ".into(),
-                "Use your own OpenAI API key for usage-based billing".bold(),
+                self.api_key_prompt_label().bold(),
             ]),
             "".into(),
-            "  Paste or type your API key below. It will be stored locally in auth.json.".into(),
+            if self.uses_anthropic_auth() {
+                "  Paste or type your Anthropic API key below. It will be stored locally in anthropic-auth.json."
+            } else {
+                "  Paste or type your API key below. It will be stored locally in auth.json."
+            }
+            .into(),
             "".into(),
         ];
         if state.prepopulated_from_env {
-            intro_lines.push("  Detected OPENAI_API_KEY environment variable.".into());
+            intro_lines.push(
+                if self.uses_anthropic_auth() {
+                    "  Detected ANTHROPIC_API_KEY environment variable."
+                } else {
+                    "  Detected OPENAI_API_KEY environment variable."
+                }
+                .into(),
+            );
             intro_lines.push(
                 "  Paste a different key if you prefer to use another account."
                     .dim()
@@ -545,7 +679,15 @@ impl AuthModeWidget {
             .render(intro_area, buf);
 
         let content_line: Line = if state.value.is_empty() {
-            vec!["Paste or type your API key".dim()].into()
+            vec![
+                if self.uses_anthropic_auth() {
+                    "Paste or type your Anthropic API key"
+                } else {
+                    "Paste or type your API key"
+                }
+                .dim(),
+            ]
+            .into()
         } else {
             Line::from(state.value.clone())
         };
@@ -553,7 +695,11 @@ impl AuthModeWidget {
             .wrap(Wrap { trim: false })
             .block(
                 Block::default()
-                    .title("API key")
+                    .title(if self.uses_anthropic_auth() {
+                        "Anthropic API key"
+                    } else {
+                        "API key"
+                    })
                     .borders(Borders::ALL)
                     .border_type(BorderType::Rounded)
                     .border_style(Style::default().fg(Color::Cyan)),
@@ -665,7 +811,7 @@ impl AuthModeWidget {
             return;
         }
         self.set_error(/*message*/ None);
-        let prefill_from_env = read_openai_api_key_from_env();
+        let prefill_from_env = self.api_key_env_value();
         let mut guard = self.sign_in_state.write().unwrap();
         match &mut *guard {
             SignInState::ApiKeyEntry(state) => {
@@ -699,17 +845,25 @@ impl AuthModeWidget {
         let sign_in_state = self.sign_in_state.clone();
         let error = self.error.clone();
         let request_frame = self.request_frame.clone();
+        let uses_anthropic_auth = self.uses_anthropic_auth();
         tokio::spawn(async move {
             match request_handle
                 .request_typed::<LoginAccountResponse>(ClientRequest::LoginAccount {
                     request_id: onboarding_request_id(),
-                    params: LoginAccountParams::ApiKey {
-                        api_key: api_key.clone(),
+                    params: if uses_anthropic_auth {
+                        LoginAccountParams::AnthropicApiKey {
+                            api_key: api_key.clone(),
+                        }
+                    } else {
+                        LoginAccountParams::ApiKey {
+                            api_key: api_key.clone(),
+                        }
                     },
                 })
                 .await
             {
-                Ok(LoginAccountResponse::ApiKey {}) => {
+                Ok(LoginAccountResponse::ApiKey {})
+                | Ok(LoginAccountResponse::AnthropicApiKey {}) => {
                     *error.write().unwrap() = None;
                     *sign_in_state.write().unwrap() = SignInState::ApiKeyConfigured;
                 }
@@ -735,12 +889,20 @@ impl AuthModeWidget {
         self.request_frame.schedule_frame();
     }
 
-    fn handle_existing_chatgpt_login(&mut self) -> bool {
-        if matches!(
-            self.login_status,
-            LoginStatus::AuthMode(AppServerAuthMode::Chatgpt)
-                | LoginStatus::AuthMode(AppServerAuthMode::ChatgptAuthTokens)
-        ) {
+    fn handle_existing_oauth_login(&mut self) -> bool {
+        let already_authenticated = if self.uses_anthropic_auth() {
+            matches!(
+                self.login_status,
+                LoginStatus::AuthMode(AppServerAuthMode::AnthropicOauth)
+            )
+        } else {
+            matches!(
+                self.login_status,
+                LoginStatus::AuthMode(AppServerAuthMode::Chatgpt)
+                    | LoginStatus::AuthMode(AppServerAuthMode::ChatgptAuthTokens)
+            )
+        };
+        if already_authenticated {
             *self.sign_in_state.write().unwrap() = SignInState::ChatGptSuccess;
             self.request_frame.schedule_frame();
             true
@@ -753,7 +915,7 @@ impl AuthModeWidget {
     fn start_chatgpt_login(&mut self) {
         // If we're already authenticated with ChatGPT, don't start a new login –
         // just proceed to the success message flow.
-        if self.handle_existing_chatgpt_login() {
+        if self.handle_existing_oauth_login() {
             return;
         }
 
@@ -762,15 +924,21 @@ impl AuthModeWidget {
         let sign_in_state = self.sign_in_state.clone();
         let error = self.error.clone();
         let request_frame = self.request_frame.clone();
+        let uses_anthropic_auth = self.uses_anthropic_auth();
         tokio::spawn(async move {
             match request_handle
                 .request_typed::<LoginAccountResponse>(ClientRequest::LoginAccount {
                     request_id: onboarding_request_id(),
-                    params: LoginAccountParams::Chatgpt,
+                    params: if uses_anthropic_auth {
+                        LoginAccountParams::AnthropicOauth
+                    } else {
+                        LoginAccountParams::Chatgpt
+                    },
                 })
                 .await
             {
-                Ok(LoginAccountResponse::Chatgpt { login_id, auth_url }) => {
+                Ok(LoginAccountResponse::Chatgpt { login_id, auth_url })
+                | Ok(LoginAccountResponse::AnthropicOauth { login_id, auth_url }) => {
                     maybe_open_auth_url_in_browser(&request_handle, &auth_url);
                     *error.write().unwrap() = None;
                     *sign_in_state.write().unwrap() =
@@ -795,7 +963,7 @@ impl AuthModeWidget {
     }
 
     fn start_device_code_login(&mut self) {
-        if self.handle_existing_chatgpt_login() {
+        if self.handle_existing_oauth_login() {
             return;
         }
 
@@ -949,6 +1117,7 @@ mod tests {
             app_server_request_handle: AppServerRequestHandle::InProcess(client.request_handle()),
             forced_chatgpt_workspace_id: None,
             forced_login_method: Some(ForcedLoginMethod::Chatgpt),
+            required_auth_provider: Some("openai".to_string()),
             animations_enabled: true,
         };
         (widget, codex_home)
@@ -992,13 +1161,28 @@ mod tests {
         let (mut widget, _tmp) = widget_forced_chatgpt().await;
         widget.login_status = LoginStatus::AuthMode(AppServerAuthMode::ChatgptAuthTokens);
 
-        let handled = widget.handle_existing_chatgpt_login();
+        let handled = widget.handle_existing_oauth_login();
 
         assert_eq!(handled, true);
         assert!(matches!(
             &*widget.sign_in_state.read().unwrap(),
             SignInState::ChatGptSuccess
         ));
+    }
+
+    #[tokio::test]
+    async fn anthropic_login_options_hide_device_code() {
+        let (mut widget, _tmp) = widget_forced_chatgpt().await;
+        widget.required_auth_provider = Some(ANTHROPIC_AUTH_PROVIDER_ID.to_string());
+
+        assert_eq!(
+            widget.displayed_sign_in_options(),
+            vec![SignInOption::ChatGpt]
+        );
+        assert_eq!(
+            widget.selectable_sign_in_options(),
+            vec![SignInOption::ChatGpt]
+        );
     }
 
     #[tokio::test]
