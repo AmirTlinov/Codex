@@ -14,6 +14,8 @@ What it does:
   - makes `claudex` point at this clone's newest built Codex binary
     (prefers a newer debug build over release, unless `CLAUDEX_PROFILE=release`)
   - defaults the session, model picker, and subagents to Claude CLI
+  - brands the TUI as Claudex and checks for updates against this fork's
+    current branch instead of the upstream OpenAI release feed
 
 Environment:
   CLAUDEX_INSTALL_DIR   Override the target bin directory (default: ~/.local/bin)
@@ -27,6 +29,25 @@ USAGE
 fail() {
   echo "error: $*" >&2
   exit 1
+}
+
+derive_github_repo_slug() {
+  python3 - "$1" <<'PY_REPO'
+import re
+import sys
+
+remote = sys.argv[1].strip()
+patterns = [
+    r'^(?:https://|ssh://git@)github\.com/(?P<owner>[^/]+)/(?P<repo>[^/]+?)(?:\.git)?$',
+    r'^git@github\.com:(?P<owner>[^/]+)/(?P<repo>[^/]+?)(?:\.git)?$',
+]
+for pattern in patterns:
+    match = re.match(pattern, remote)
+    if match:
+        print(f"{match.group('owner')}/{match.group('repo')}")
+        raise SystemExit(0)
+raise SystemExit(1)
+PY_REPO
 }
 
 if (($# > 0)); then
@@ -46,6 +67,14 @@ install_dir="${CLAUDEX_INSTALL_DIR:-$HOME/.local/bin}"
 release_binary="$repo_root/codex-rs/target/release/codex"
 debug_binary="$repo_root/codex-rs/target/debug/codex"
 wrapper_path="$install_dir/claudex"
+origin_url="$(git -C "$repo_root" remote get-url origin 2>/dev/null || true)"
+origin_repo_slug="$(derive_github_repo_slug "$origin_url" 2>/dev/null || true)"
+install_branch="$(git -C "$repo_root" branch --show-current 2>/dev/null || true)"
+install_sha="$(git -C "$repo_root" rev-parse --short=12 HEAD 2>/dev/null || true)"
+
+[[ -n "$origin_repo_slug" ]] || fail "origin remote must point at a GitHub repository"
+install_branch="${install_branch:-amir/main}"
+install_sha="${install_sha:-unknown}"
 
 mkdir -p "$install_dir"
 
@@ -59,6 +88,9 @@ cat > "$wrapper_path" <<WRAPPER
 #!/usr/bin/env bash
 set -euo pipefail
 repo_root="$repo_root"
+origin_repo_slug="$origin_repo_slug"
+install_branch="$install_branch"
+install_sha="$install_sha"
 release_binary="$release_binary"
 debug_binary="$debug_binary"
 profile="\${CLAUDEX_PROFILE:-auto}"
@@ -145,6 +177,37 @@ PY_REBASE
 
 rebase_home_local_paths_if_needed
 export CODEX_HOME="\$claudex_home"
+
+current_branch() {
+  local branch
+  branch="\$(git -C "\$repo_root" branch --show-current 2>/dev/null || true)"
+  if [[ -n "\$branch" ]]; then
+    printf '%s\n' "\$branch"
+  else
+    printf '%s\n' "\$install_branch"
+  fi
+}
+
+current_sha() {
+  local sha
+  sha="\$(git -C "\$repo_root" rev-parse --short=12 HEAD 2>/dev/null || true)"
+  if [[ -n "\$sha" ]]; then
+    printf '%s\n' "\$sha"
+  else
+    printf '%s\n' "\$install_sha"
+  fi
+}
+
+current_branch="\$(current_branch)"
+current_sha="\$(current_sha)"
+export CODEX_DIST_PRODUCT_NAME="Claudex"
+export CODEX_DIST_VERSION="\$current_sha"
+export CODEX_DIST_INSTALL_URL="https://github.com/$origin_repo_slug/tree/\$current_branch"
+export CODEX_DIST_RELEASE_NOTES_URL="https://github.com/$origin_repo_slug/commits/\$current_branch"
+export CODEX_DIST_ANNOUNCEMENT_TIP_URL=""
+export CODEX_DIST_UPDATE_KIND="github-branch"
+export CODEX_DIST_UPDATE_REPO="$origin_repo_slug"
+export CODEX_DIST_UPDATE_BRANCH="\$current_branch"
 
 choose_binary() {
   case "\$profile" in

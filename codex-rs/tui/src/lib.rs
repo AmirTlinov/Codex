@@ -105,6 +105,7 @@ pub mod custom_terminal;
 mod cwd_prompt;
 mod debug_config;
 mod diff_render;
+mod distribution;
 mod exec_cell;
 mod exec_command;
 mod external_editor;

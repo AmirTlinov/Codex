@@ -1,10 +1,8 @@
+use crate::distribution::DistributionInfo;
 use codex_features::FEATURES;
 use codex_protocol::account::PlanType;
 use lazy_static::lazy_static;
 use rand::Rng;
-
-const ANNOUNCEMENT_TIP_URL: &str =
-    "https://raw.githubusercontent.com/openai/codex/main/announcement_tip.toml";
 
 const IS_MACOS: bool = cfg!(target_os = "macos");
 const IS_WINDOWS: bool = cfg!(target_os = "windows");
@@ -51,10 +49,18 @@ fn experimental_tooltips() -> Vec<&'static str> {
 
 /// Pick a random tooltip to show to the user when starting Codex.
 pub(crate) fn get_tooltip(plan: Option<PlanType>, fast_mode_enabled: bool) -> Option<String> {
+    let distribution = DistributionInfo::current();
     let mut rng = rand::rng();
 
     if let Some(announcement) = announcement::fetch_announcement_tip() {
         return Some(announcement);
+    }
+
+    if distribution.uses_custom_branding() {
+        return Some(format!(
+            "*New* Build faster with {}.",
+            distribution.short_product_name()
+        ));
     }
 
     // Leave small chance for a random tooltip to be shown.
@@ -119,8 +125,7 @@ fn pick_tooltip<R: Rng + ?Sized>(rng: &mut R) -> Option<&'static str> {
 }
 
 pub(crate) mod announcement {
-    use crate::tooltips::ANNOUNCEMENT_TIP_URL;
-    use crate::version::CODEX_CLI_VERSION;
+    use crate::distribution::DistributionInfo;
     use chrono::NaiveDate;
     use chrono::Utc;
     use regex_lite::Regex;
@@ -176,13 +181,14 @@ pub(crate) mod announcement {
     }
 
     fn blocking_init_announcement_tip() -> Option<String> {
+        let announcement_tip_url = DistributionInfo::current().announcement_tip_url.clone()?;
         // Avoid system proxy detection to prevent macOS system-configuration panics (#8912).
         let client = reqwest::blocking::Client::builder()
             .no_proxy()
             .build()
             .ok()?;
         let response = client
-            .get(ANNOUNCEMENT_TIP_URL)
+            .get(announcement_tip_url)
             .timeout(Duration::from_millis(2000))
             .send()
             .ok()?;
@@ -201,7 +207,7 @@ pub(crate) mod announcement {
             let Some(tip) = AnnouncementTip::from_raw(raw) else {
                 continue;
             };
-            if tip.version_matches(CODEX_CLI_VERSION)
+            if tip.version_matches(&DistributionInfo::current().display_version)
                 && tip.date_matches(today)
                 && tip.target_app == "cli"
             {
@@ -393,7 +399,7 @@ from_date = "2000-01-01"
 # Example announcement tips for Codex TUI.
 # Each [[announcements]] entry is evaluated in order; the last matching one is shown.
 # Dates are UTC, formatted as YYYY-MM-DD. The from_date is inclusive and the to_date is exclusive.
-# version_regex matches against the CLI version (env!("CARGO_PKG_VERSION")); omit to apply to all versions.
+# version_regex matches against the active distribution version; omit to apply to all versions.
 # target_app specify which app should display the announcement (cli, vsce, ...).
 
 [[announcements]]

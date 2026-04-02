@@ -24,6 +24,7 @@ use crate::chatwidget::ReplayKind;
 use crate::chatwidget::ThreadInputState;
 use crate::cwd_prompt::CwdPromptAction;
 use crate::diff_render::DiffSummary;
+use crate::distribution::DistributionInfo;
 use crate::exec_command::split_command_string;
 use crate::exec_command::strip_bash_lc_and_escape;
 use crate::external_editor;
@@ -50,7 +51,6 @@ use crate::test_support::PathBufExt;
 use crate::tui;
 use crate::tui::TuiEvent;
 use crate::update_action::UpdateAction;
-use crate::version::CODEX_CLI_VERSION;
 use codex_ansi_escape::ansi_escape_line;
 use codex_app_server_client::AppServerRequestHandle;
 use codex_app_server_client::TypedRequestError;
@@ -1457,7 +1457,7 @@ impl App {
     fn clear_ui_header_lines_with_version(
         &self,
         width: u16,
-        version: &'static str,
+        version: impl Into<String>,
     ) -> Vec<Line<'static>> {
         history_cell::SessionHeaderHistoryCell::new(
             self.chat_widget.current_model().to_string(),
@@ -1467,13 +1467,16 @@ impl App {
                 self.chat_widget.current_service_tier(),
             ),
             self.config.cwd.to_path_buf(),
-            version,
+            version.into(),
         )
         .display_lines(width)
     }
 
     fn clear_ui_header_lines(&self, width: u16) -> Vec<Line<'static>> {
-        self.clear_ui_header_lines_with_version(width, CODEX_CLI_VERSION)
+        self.clear_ui_header_lines_with_version(
+            width,
+            DistributionInfo::current().display_version.clone(),
+        )
     }
 
     fn queue_clear_ui_header(&mut self, tui: &mut tui::Tui) {
@@ -8925,7 +8928,7 @@ guardian_approval = true
         app.has_emitted_history_lines = true;
 
         let rendered = app
-            .clear_ui_header_lines_with_version(/*width*/ 80, "<VERSION>")
+            .clear_ui_header_lines_with_version(/*width*/ 80, "v<VERSION>")
             .iter()
             .map(|line| {
                 line.spans
@@ -8983,7 +8986,7 @@ guardian_approval = true
         set_chatgpt_auth(&mut app.chat_widget);
 
         let rendered = app
-            .clear_ui_header_lines_with_version(/*width*/ 80, "<VERSION>")
+            .clear_ui_header_lines_with_version(/*width*/ 80, "v<VERSION>")
             .iter()
             .map(|line| {
                 line.spans

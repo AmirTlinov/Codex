@@ -12,6 +12,8 @@
 
 use crate::diff_render::create_diff_summary;
 use crate::diff_render::display_path_for;
+use crate::distribution;
+use crate::distribution::DistributionInfo;
 use crate::exec_cell::CommandOutput;
 use crate::exec_cell::OutputLinesParams;
 use crate::exec_cell::TOOL_CALL_MAX_LINES;
@@ -34,7 +36,6 @@ use crate::text_formatting::truncate_text;
 use crate::tooltips;
 use crate::ui_consts::LIVE_PREFIX_COLS;
 use crate::update_action::UpdateAction;
-use crate::version::CODEX_CLI_VERSION;
 use crate::wrapping::RtOptions;
 use crate::wrapping::adaptive_wrap_line;
 use crate::wrapping::adaptive_wrap_lines;
@@ -518,12 +519,13 @@ impl HistoryCell for UpdateAvailableHistoryCell {
     fn display_lines(&self, width: u16) -> Vec<Line<'static>> {
         use ratatui_macros::line;
         use ratatui_macros::text;
+        let distribution = DistributionInfo::current();
         let update_instruction = if let Some(update_action) = self.update_action {
             line!["Run ", update_action.command_str().cyan(), " to update."]
         } else {
             line![
                 "See ",
-                "https://github.com/openai/codex".cyan().underlined(),
+                distribution.install_url.clone().cyan().underlined(),
                 " for installation options."
             ]
         };
@@ -533,14 +535,16 @@ impl HistoryCell for UpdateAvailableHistoryCell {
                 padded_emoji("✨").bold().cyan(),
                 "Update available!".bold().cyan(),
                 " ",
-                format!("{CODEX_CLI_VERSION} -> {}", self.latest_version).bold(),
+                format!(
+                    "{} -> {}",
+                    distribution.display_version, self.latest_version
+                )
+                .bold(),
             ],
             update_instruction,
             "",
             "See full release notes:",
-            "https://github.com/openai/codex/releases/latest"
-                .cyan()
-                .underlined(),
+            distribution.release_notes_url.clone().cyan().underlined(),
         ];
 
         let inner_width = content
@@ -1148,7 +1152,7 @@ pub(crate) fn new_session_info(
         reasoning_effort,
         show_fast_status,
         config.cwd.to_path_buf(),
-        CODEX_CLI_VERSION,
+        DistributionInfo::current().display_version.clone(),
     );
     let mut parts: Vec<Box<dyn HistoryCell>> = vec![Box::new(header)];
 
@@ -1229,7 +1233,7 @@ pub(crate) fn new_user_prompt(
 
 #[derive(Debug)]
 pub(crate) struct SessionHeaderHistoryCell {
-    version: &'static str,
+    version: String,
     model: String,
     model_style: Style,
     reasoning_effort: Option<ReasoningEffortConfig>,
@@ -1243,7 +1247,7 @@ impl SessionHeaderHistoryCell {
         reasoning_effort: Option<ReasoningEffortConfig>,
         show_fast_status: bool,
         directory: PathBuf,
-        version: &'static str,
+        version: String,
     ) -> Self {
         Self::new_with_style(
             model,
@@ -1261,7 +1265,7 @@ impl SessionHeaderHistoryCell {
         reasoning_effort: Option<ReasoningEffortConfig>,
         show_fast_status: bool,
         directory: PathBuf,
-        version: &'static str,
+        version: String,
     ) -> Self {
         Self {
             version,
@@ -1320,12 +1324,13 @@ impl HistoryCell for SessionHeaderHistoryCell {
 
         let make_row = |spans: Vec<Span<'static>>| Line::from(spans);
 
-        // Title line rendered inside the box: ">_ OpenAI Codex (vX)"
+        let distribution = DistributionInfo::current();
+        let version_label = distribution::format_version_label(&self.version);
         let title_spans: Vec<Span<'static>> = vec![
             Span::from(">_ ").dim(),
-            Span::from("OpenAI Codex").bold(),
+            Span::from(distribution.product_name.clone()).bold(),
             Span::from(" ").dim(),
-            Span::from(format!("(v{})", self.version)).dim(),
+            Span::from(format!("({version_label})")).dim(),
         ];
 
         const CHANGE_MODEL_HINT_COMMAND: &str = "/model";
@@ -3862,7 +3867,7 @@ mod tests {
             Some(ReasoningEffortConfig::High),
             /*show_fast_status*/ true,
             std::env::temp_dir(),
-            "test",
+            "test".to_string(),
         );
 
         let lines = render_lines(&cell.display_lines(/*width*/ 80));
@@ -3882,7 +3887,7 @@ mod tests {
             Some(ReasoningEffortConfig::High),
             /*show_fast_status*/ false,
             std::env::temp_dir(),
-            "test",
+            "test".to_string(),
         );
 
         let lines = render_lines(&cell.display_lines(/*width*/ 80));
