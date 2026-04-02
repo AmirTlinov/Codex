@@ -13,9 +13,13 @@ uses `target/release/codex`. It also exports `CODEX_HOME` to `~/.claudex` by
 default so `claudex` keeps its own config, auth, logs, memories, and session
 state separate from stock `~/.codex`. On a fresh or empty `~/.claudex`, the
 wrapper first copies the current `~/.codex` into it without modifying the
-source home. Override the destination with `CLAUDEX_HOME=/path/to/home` and the
-copy source with `CLAUDEX_SOURCE_HOME=/path/to/source`. You can force the
-binary choice with `CLAUDEX_PROFILE=debug|release`.
+source home, then rebases home-local absolute paths inside the copied
+`config.toml` and `agents/*.toml` files so `claudex` points at `~/.claudex`
+instead of falling back to `~/.codex`. Existing non-empty homes get that same
+target-only path repair on launch. Override the destination with
+`CLAUDEX_HOME=/path/to/home` and the copy source with
+`CLAUDEX_SOURCE_HOME=/path/to/source`. You can force the binary choice with
+`CLAUDEX_PROFILE=debug|release`.
 
 - `model_provider=claude_cli`
 - `model=claude-opus-4-6`

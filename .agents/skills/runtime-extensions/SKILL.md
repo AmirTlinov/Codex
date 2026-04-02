@@ -35,8 +35,10 @@ description: Downstream workflow for config, MCP, plugin, skill, AGENTS, and wra
   upstream `codex` command. Keep `claudex` runtime isolation there too: the
   installed wrapper should own its separate `CODEX_HOME` (`~/.claudex` by
   default, override with `CLAUDEX_HOME`) and seed a fresh or empty target by
-  copying `~/.codex` without mutating the source home (override the copy source
-  with `CLAUDEX_SOURCE_HOME`).
+  copying `~/.codex` without mutating the source home, then repairing copied
+  home-local absolute paths inside `config.toml` and `agents/*.toml` so the
+  target points at itself (override the copy source with
+  `CLAUDEX_SOURCE_HOME`).
 - If `scripts/install-claudex.sh` changes behavior, keep the wrapper, `AGENTS.md`,
   and `docs/fork-maintenance.md` / `docs/claudex.md` aligned in the same slice.
 - If a behavior is machine-local rather than repo-owned, keep it in

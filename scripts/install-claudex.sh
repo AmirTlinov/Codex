@@ -75,14 +75,8 @@ canonicalize_path() {
   realpath -m -- "\$1"
 }
 
-seed_home_if_needed() {
+validate_claudex_home_layout() {
   local canonical_claudex_home canonical_source_home
-  if dir_has_entries "\$claudex_home"; then
-    return
-  fi
-
-  mkdir -p "\$claudex_home"
-
   canonical_claudex_home="\$(canonicalize_path "\$claudex_home")"
   canonical_source_home="\$(canonicalize_path "\$source_home")"
 
@@ -91,16 +85,65 @@ seed_home_if_needed() {
   fi
 
   if [[ "\$canonical_claudex_home" == "\$canonical_source_home"/* ]]; then
-    echo "CLAUDEX_HOME must not be nested under CLAUDEX_SOURCE_HOME when seeding a fresh home" >&2
+    echo "CLAUDEX_HOME must not be nested under CLAUDEX_SOURCE_HOME" >&2
     exit 1
   fi
+}
+
+seed_home_if_needed() {
+  if dir_has_entries "\$claudex_home"; then
+    return
+  fi
+
+  mkdir -p "\$claudex_home"
 
   if dir_has_entries "\$source_home"; then
     cp -a "\$source_home"/. "\$claudex_home"/
   fi
 }
 
+validate_claudex_home_layout
 seed_home_if_needed
+
+rebase_home_local_paths_if_needed() {
+  local canonical_claudex_home canonical_source_home
+  canonical_claudex_home="\$(canonicalize_path "\$claudex_home")"
+  canonical_source_home="\$(canonicalize_path "\$source_home")"
+
+  if [[ "\$canonical_claudex_home" == "\$canonical_source_home" ]]; then
+    return
+  fi
+
+  python3 - "\$canonical_source_home" "\$canonical_claudex_home" "\$claudex_home" <<'PY_REBASE'
+from pathlib import Path
+import sys
+
+source_home = sys.argv[1]
+target_home = sys.argv[2]
+claudex_home = Path(sys.argv[3])
+files = []
+config_file = claudex_home / 'config.toml'
+if config_file.is_file():
+    files.append(config_file)
+
+agents_dir = claudex_home / 'agents'
+if agents_dir.is_dir():
+    files.extend(sorted(agents_dir.rglob('*.toml')))
+
+exact_old = f'"{source_home}"'
+prefix_old = f'"{source_home}/'
+exact_new = f'"{target_home}"'
+prefix_new = f'"{target_home}/'
+
+for file_path in files:
+    text = file_path.read_text()
+    updated = text.replace(prefix_old, prefix_new).replace(exact_old, exact_new)
+    if updated != text:
+        file_path.write_text(updated)
+PY_REBASE
+}
+
+rebase_home_local_paths_if_needed
 export CODEX_HOME="\$claudex_home"
 
 choose_binary() {
