@@ -468,7 +468,10 @@ fn handle_app_exit(exit_info: AppExitInfo) -> anyhow::Result<()> {
 fn run_update_action(action: UpdateAction) -> anyhow::Result<()> {
     println!();
     let cmd_str = action.command_str();
-    println!("Updating Codex via `{cmd_str}`...");
+    println!(
+        "Updating {} via `{cmd_str}`...",
+        distribution_product_name()
+    );
 
     let status = {
         #[cfg(windows)]
@@ -494,8 +497,25 @@ fn run_update_action(action: UpdateAction) -> anyhow::Result<()> {
     if !status.success() {
         anyhow::bail!("`{cmd_str}` failed with status {status}");
     }
-    println!("\n🎉 Update ran successfully! Please restart Codex.");
+    println!(
+        "\n🎉 Update ran successfully! Please restart {}.",
+        distribution_product_name()
+    );
     Ok(())
+}
+
+fn distribution_product_name() -> String {
+    distribution_product_name_from_env(|key| std::env::var(key).ok())
+}
+
+fn distribution_product_name_from_env<F>(get: F) -> String
+where
+    F: Fn(&str) -> Option<String>,
+{
+    get("CODEX_DIST_PRODUCT_NAME")
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| "Codex".to_string())
 }
 
 fn run_execpolicycheck(cmd: ExecPolicyCheckCommand) -> anyhow::Result<()> {
@@ -1558,6 +1578,21 @@ mod tests {
                 "Token usage: total=2 input=0 output=2".to_string(),
                 "To continue this session, run codex resume my-thread".to_string(),
             ]
+        );
+    }
+
+    #[test]
+    fn distribution_product_name_defaults_to_codex() {
+        assert_eq!(distribution_product_name_from_env(|_| None), "Codex");
+    }
+
+    #[test]
+    fn distribution_product_name_uses_claudex_override() {
+        assert_eq!(
+            distribution_product_name_from_env(|key| {
+                (key == "CODEX_DIST_PRODUCT_NAME").then(|| "Claudex".to_string())
+            }),
+            "Claudex"
         );
     }
 

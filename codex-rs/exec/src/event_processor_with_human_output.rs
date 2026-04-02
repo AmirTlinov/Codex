@@ -38,6 +38,25 @@ pub(crate) struct EventProcessorWithHumanOutput {
     last_total_token_usage: Option<ThreadTokenUsage>,
 }
 
+fn distribution_banner_label() -> String {
+    distribution_banner_label_from_env(|key| std::env::var(key).ok())
+}
+
+fn distribution_banner_label_from_env<F>(get: F) -> String
+where
+    F: Fn(&str) -> Option<String>,
+{
+    let version = get("CODEX_DIST_VERSION")
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| env!("CARGO_PKG_VERSION").to_string());
+    let product_name = get("CODEX_DIST_PRODUCT_NAME")
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| "OpenAI Codex".to_string());
+    format!("{product_name} v{version} (research preview)")
+}
+
 impl EventProcessorWithHumanOutput {
     pub(crate) fn create_with_ansi(
         with_ansi: bool,
@@ -215,8 +234,7 @@ impl EventProcessor for EventProcessorWithHumanOutput {
         prompt: &str,
         session_configured_event: &SessionConfiguredEvent,
     ) {
-        const VERSION: &str = env!("CARGO_PKG_VERSION");
-        eprintln!("OpenAI Codex v{VERSION} (research preview)\n--------");
+        eprintln!("{}\n--------", distribution_banner_label());
         for (key, value) in config_summary_entries(config, session_configured_event) {
             eprintln!("{} {}", format!("{key}:").style(self.bold), value);
         }
@@ -571,12 +589,36 @@ mod tests {
     use owo_colors::Style;
 
     use super::EventProcessorWithHumanOutput;
+    use super::distribution_banner_label_from_env;
     use super::final_message_from_turn_items;
     use super::reasoning_text;
     use super::should_print_final_message_to_stdout;
     use super::should_print_final_message_to_tty;
     use crate::event_processor::EventProcessor;
     use codex_app_server_protocol::ServerNotification;
+
+    #[test]
+    fn distribution_banner_label_defaults_to_openai_codex() {
+        assert_eq!(
+            distribution_banner_label_from_env(|_| None),
+            format!(
+                "OpenAI Codex v{} (research preview)",
+                env!("CARGO_PKG_VERSION")
+            )
+        );
+    }
+
+    #[test]
+    fn distribution_banner_label_uses_downstream_overrides() {
+        assert_eq!(
+            distribution_banner_label_from_env(|key| match key {
+                "CODEX_DIST_PRODUCT_NAME" => Some("Claudex".to_string()),
+                "CODEX_DIST_VERSION" => Some("9b9b5a4cf0cf".to_string()),
+                _ => None,
+            }),
+            "Claudex v9b9b5a4cf0cf (research preview)"
+        );
+    }
 
     #[test]
     fn suppresses_final_stdout_message_when_both_streams_are_terminals() {

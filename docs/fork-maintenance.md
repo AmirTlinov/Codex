@@ -144,7 +144,8 @@ What it does:
   subagents, and a Claude-first model picker that still exposes paired OpenAI
   GPT entries when the OpenAI provider is available;
 - brands the runtime as `Claudex`, makes `claudex --version` report the
-  current downstream short SHA, points update checks at the fork's `origin`
+  current downstream short SHA, uses the same downstream product name in CLI
+  update/human-output copy, points update checks at the fork's `origin`
   remote + current branch, and reroutes the in-app update action to this
   clone's `scripts/install-claudex.sh`, so the update banner/version identity
   stay separate from upstream `openai/codex` releases.
