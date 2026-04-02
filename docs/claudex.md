@@ -9,7 +9,10 @@ The installer at `scripts/install-claudex.sh` builds this clone's release
 binary and installs a machine-local wrapper that starts Codex with downstream
 Claude defaults. The wrapper picks the newest local binary automatically: it
 uses `target/debug/codex` when that build is newer than release, otherwise it
-uses `target/release/codex`. You can force a choice with
+uses `target/release/codex`. It also exports `CODEX_HOME` to `~/.claudex` by
+default so `claudex` keeps its own config, auth, logs, memories, and session
+state separate from stock `~/.codex`. Override that home with
+`CLAUDEX_HOME=/path/to/home`. You can force the binary choice with
 `CLAUDEX_PROFILE=debug|release`.
 
 - `model_provider=claude_cli`

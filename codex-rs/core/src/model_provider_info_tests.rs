@@ -168,3 +168,57 @@ args = ["--format=text"]
         })
     );
 }
+
+#[test]
+fn model_picker_provider_ids_pairs_builtin_claude_with_openai() {
+    let providers = built_in_model_providers(/*openai_base_url*/ None);
+
+    assert_eq!(
+        model_picker_provider_ids(&providers, CLAUDE_CLI_PROVIDER_ID),
+        vec![
+            CLAUDE_CLI_PROVIDER_ID.to_string(),
+            OPENAI_PROVIDER_ID.to_string()
+        ]
+    );
+}
+
+#[test]
+fn model_picker_provider_ids_pairs_custom_claude_cli_provider_with_openai() {
+    let mut providers = built_in_model_providers(/*openai_base_url*/ None);
+    providers.insert(
+        "custom-claude".to_string(),
+        ModelProviderInfo {
+            name: "Custom Claude".into(),
+            base_url: None,
+            env_key: None,
+            env_key_instructions: None,
+            experimental_bearer_token: None,
+            auth: None,
+            wire_api: WireApi::ClaudeCli,
+            query_params: None,
+            http_headers: None,
+            env_http_headers: None,
+            request_max_retries: None,
+            stream_max_retries: None,
+            stream_idle_timeout_ms: None,
+            websocket_connect_timeout_ms: None,
+            requires_openai_auth: false,
+            supports_websockets: false,
+        },
+    );
+
+    assert_eq!(
+        model_picker_provider_ids(&providers, "custom-claude"),
+        vec!["custom-claude".to_string(), OPENAI_PROVIDER_ID.to_string()]
+    );
+}
+
+#[test]
+fn model_picker_provider_ids_leaves_openai_sessions_unpaired() {
+    let providers = built_in_model_providers(/*openai_base_url*/ None);
+
+    assert_eq!(
+        model_picker_provider_ids(&providers, OPENAI_PROVIDER_ID),
+        vec![OPENAI_PROVIDER_ID.to_string()]
+    );
+}

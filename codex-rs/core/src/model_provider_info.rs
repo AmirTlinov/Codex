@@ -423,6 +423,25 @@ pub fn create_oss_provider_with_base_url(base_url: &str, wire_api: WireApi) -> M
     }
 }
 
+pub fn model_picker_provider_ids(
+    model_providers: &HashMap<String, ModelProviderInfo>,
+    active_provider_id: &str,
+) -> Vec<String> {
+    let mut provider_ids = vec![active_provider_id.to_string()];
+    let Some(active_provider) = model_providers.get(active_provider_id) else {
+        return provider_ids;
+    };
+
+    if active_provider.wire_api == WireApi::ClaudeCli
+        && model_providers.contains_key(OPENAI_PROVIDER_ID)
+        && active_provider_id != OPENAI_PROVIDER_ID
+    {
+        provider_ids.push(OPENAI_PROVIDER_ID.to_string());
+    }
+
+    provider_ids
+}
+
 #[cfg(test)]
 #[path = "model_provider_info_tests.rs"]
 mod tests;

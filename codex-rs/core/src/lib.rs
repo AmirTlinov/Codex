@@ -119,6 +119,7 @@ pub use model_provider_info::WireApi;
 pub use model_provider_info::built_in_model_providers;
 pub use model_provider_info::create_claude_cli_provider;
 pub use model_provider_info::create_oss_provider_with_base_url;
+pub use model_provider_info::model_picker_provider_ids;
 mod event_mapping;
 mod response_debug_context;
 pub mod review_format;

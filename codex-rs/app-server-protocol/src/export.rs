@@ -128,13 +128,10 @@ pub fn generate_ts_with_options(
         generate_index_ts(&v2_out_dir)?;
     }
 
-    // Ensure our header is present on all TS files (root + subdirs like v2/).
-    let mut ts_files = Vec::new();
-    let should_collect_ts_files =
-        options.ensure_headers || (options.run_prettier && prettier.is_some());
-    if should_collect_ts_files {
-        ts_files = ts_files_in_recursive(out_dir)?;
-    }
+    // Normalize generated TypeScript so fixture updates stay deterministic and
+    // do not introduce trailing-whitespace-only diffs.
+    let ts_files = ts_files_in_recursive(out_dir)?;
+    normalize_generated_ts_files(&ts_files)?;
 
     if options.ensure_headers {
         let worker_count = thread::available_parallelism()
@@ -1904,6 +1901,33 @@ fn prepend_header_if_missing(path: &Path) -> Result<()> {
         .with_context(|| format!("Failed to write header to {}", path.display()))?;
     f.write_all(content.as_bytes())
         .with_context(|| format!("Failed to write content to {}", path.display()))?;
+    Ok(())
+}
+
+pub(crate) fn normalize_generated_ts_text(text: &str) -> String {
+    let normalized = text.replace("\r\n", "\n").replace('\r', "\n");
+    let has_trailing_newline = normalized.ends_with('\n');
+    let mut normalized = normalized
+        .lines()
+        .map(str::trim_end)
+        .collect::<Vec<_>>()
+        .join("\n");
+    if has_trailing_newline {
+        normalized.push('\n');
+    }
+    normalized
+}
+
+fn normalize_generated_ts_files(paths: &[PathBuf]) -> Result<()> {
+    for path in paths {
+        let content = fs::read_to_string(path)
+            .with_context(|| format!("Failed to read {}", path.display()))?;
+        let normalized = normalize_generated_ts_text(&content);
+        if normalized != content {
+            fs::write(path, normalized)
+                .with_context(|| format!("Failed to rewrite {}", path.display()))?;
+        }
+    }
     Ok(())
 }
 

@@ -17,6 +17,7 @@ What it does:
 
 Environment:
   CLAUDEX_INSTALL_DIR   Override the target bin directory (default: ~/.local/bin)
+  CLAUDEX_HOME          Override the Codex home for claudex (default: ~/.claudex)
   CLAUDEX_PROFILE       `auto` (default), `release`, or `debug`
 USAGE
 }
@@ -59,6 +60,10 @@ repo_root="$repo_root"
 release_binary="$release_binary"
 debug_binary="$debug_binary"
 profile="\${CLAUDEX_PROFILE:-auto}"
+claudex_home="\${CLAUDEX_HOME:-$HOME/.claudex}"
+
+mkdir -p "\$claudex_home"
+export CODEX_HOME="\$claudex_home"
 
 choose_binary() {
   case "\$profile" in

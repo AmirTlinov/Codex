@@ -64,10 +64,9 @@ use codex_app_server_protocol::TurnStartParams;
 use codex_app_server_protocol::TurnStartResponse;
 use codex_app_server_protocol::TurnSteerParams;
 use codex_app_server_protocol::TurnSteerResponse;
-use codex_core::CLAUDE_CLI_PROVIDER_ID;
-use codex_core::OPENAI_PROVIDER_ID;
 use codex_core::config::Config;
 use codex_core::message_history;
+use codex_core::model_picker_provider_ids;
 use codex_otel::TelemetryAuthMode;
 use codex_protocol::ThreadId;
 use codex_protocol::openai_models::ModelAvailabilityNux;
@@ -788,14 +787,10 @@ fn requested_picker_providers(config: &Config, is_remote: bool) -> Option<Vec<St
         return None;
     }
 
-    let mut provider_ids = vec![config.model_provider_id.clone()];
-    if config.model_provider_id == CLAUDE_CLI_PROVIDER_ID
-        && config.model_providers.contains_key(OPENAI_PROVIDER_ID)
-    {
-        provider_ids.push(OPENAI_PROVIDER_ID.to_string());
-    }
-
-    Some(provider_ids)
+    Some(model_picker_provider_ids(
+        &config.model_providers,
+        &config.model_provider_id,
+    ))
 }
 
 fn model_catalog_entry_from_api_model(model: ApiModel) -> ModelCatalogEntry {

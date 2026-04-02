@@ -133,7 +133,7 @@ fn read_file_bytes(path: &Path) -> Result<Vec<u8>> {
         // fixture test is platform-independent.
         let text = String::from_utf8(bytes)
             .with_context(|| format!("expected UTF-8 TypeScript in {}", path.display()))?;
-        let text = text.replace("\r\n", "\n").replace('\r', "\n");
+        let text = crate::export::normalize_generated_ts_text(&text);
         // Fixture comparisons care about schema content, not whether the generator
         // re-prepended the standard banner to every TypeScript file.
         let text = text
@@ -278,7 +278,7 @@ fn collect_typescript_fixture_file<T: TS + 'static + ?Sized>(
     let output_path = normalize_relative_fixture_path(&output_path);
     files.insert(
         output_path,
-        contents.replace("\r\n", "\n").replace('\r', "\n"),
+        crate::export::normalize_generated_ts_text(&contents),
     );
 
     let mut visitor = TypeScriptFixtureCollector {
