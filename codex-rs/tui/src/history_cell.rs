@@ -520,7 +520,7 @@ impl HistoryCell for UpdateAvailableHistoryCell {
         use ratatui_macros::line;
         use ratatui_macros::text;
         let distribution = DistributionInfo::current();
-        let update_instruction = if let Some(update_action) = self.update_action {
+        let update_instruction = if let Some(update_action) = &self.update_action {
             line!["Run ", update_action.command_str().cyan(), " to update."]
         } else {
             line![

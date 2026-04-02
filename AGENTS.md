@@ -43,9 +43,10 @@ This fork is maintained as a downstream customization layer over
   target points at itself (override that source with `CLAUDEX_SOURCE_HOME`),
   brands the TUI as `Claudex`, makes `claudex --version` report the current
   downstream short SHA, routes update checks against the fork remote + current
-  branch instead of the upstream OpenAI release channel, and prefers the
-  newest local debug build over release unless `CLAUDEX_PROFILE=release` is
-  set.
+  branch, reroutes the in-app update action to this clone's
+  `scripts/install-claudex.sh` instead of upstream OpenAI install flows, and
+  prefers the newest local debug build over release unless
+  `CLAUDEX_PROFILE=release` is set.
 - When the downstream workflow changes, update the matching repo truth in the
   same change: `AGENTS.md`, `.agents/skills/*`, and `docs/fork-maintenance.md`.
 - Keep durable intent and workflow truth in repo files, not only in chat.

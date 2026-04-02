@@ -37,7 +37,8 @@ This means:
 - `claudex` carries its own downstream version identity and update feed based on
   the current branch tip of this fork's `origin` remote, not the upstream
   `openai/codex` release channel; `claudex --version` prints that downstream
-  short SHA too.
+  short SHA too, and when an update is available the prompt reruns this clone's
+  `scripts/install-claudex.sh` instead of suggesting upstream npm/brew flows.
 
 ## Current boundaries
 

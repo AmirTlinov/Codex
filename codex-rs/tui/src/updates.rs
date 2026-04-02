@@ -22,11 +22,10 @@ pub fn get_upgrade_version(config: &Config) -> Option<String> {
     }
 
     let distribution = DistributionInfo::current();
-    let update_source_key = distribution.update_source_key();
     let version_file = version_filepath(config);
     let info = read_version_info(&version_file)
         .ok()
-        .filter(|info| info.update_source_key.as_deref() == Some(update_source_key.as_str()));
+        .filter(|info| version_info_matches_distribution(info, distribution));
 
     if match &info {
         None => true,
@@ -66,6 +65,8 @@ struct VersionInfo {
     dismissed_version: Option<String>,
     #[serde(default)]
     update_source_key: Option<String>,
+    #[serde(default)]
+    observed_current_version: Option<String>,
 }
 
 const VERSION_FILENAME: &str = "version.json";
@@ -97,6 +98,12 @@ fn read_version_info(version_file: &Path) -> anyhow::Result<VersionInfo> {
     Ok(serde_json::from_str(&contents)?)
 }
 
+fn version_info_matches_distribution(info: &VersionInfo, distribution: &DistributionInfo) -> bool {
+    let update_source_key = distribution.update_source_key();
+    info.update_source_key.as_deref() == Some(update_source_key.as_str())
+        && info.observed_current_version.as_deref() == Some(distribution.display_version.as_str())
+}
+
 async fn check_for_update(
     version_file: &Path,
     distribution: &DistributionInfo,
@@ -117,12 +124,13 @@ async fn check_for_update(
     let update_source_key = distribution.update_source_key();
     let prev_info = read_version_info(version_file)
         .ok()
-        .filter(|info| info.update_source_key.as_deref() == Some(update_source_key.as_str()));
+        .filter(|info| version_info_matches_distribution(info, distribution));
     let info = VersionInfo {
         latest_version,
         last_checked_at: Utc::now(),
         dismissed_version: prev_info.and_then(|p| p.dismissed_version),
         update_source_key: Some(update_source_key),
+        observed_current_version: Some(distribution.display_version.clone()),
     };
 
     let json_line = format!("{}\n", serde_json::to_string(&info)?);
@@ -208,7 +216,7 @@ pub fn get_upgrade_version_for_popup(config: &Config) -> Option<String> {
     let latest = get_upgrade_version(config)?;
     // If the user dismissed this exact version previously, do not show the popup.
     if let Ok(info) = read_version_info(&version_file)
-        && info.update_source_key.as_deref() == Some(distribution.update_source_key().as_str())
+        && version_info_matches_distribution(&info, distribution)
         && info.dismissed_version.as_deref() == Some(latest.as_str())
     {
         return None;
@@ -222,12 +230,7 @@ pub async fn dismiss_version(config: &Config, version: &str) -> anyhow::Result<(
     let distribution = DistributionInfo::current();
     let version_file = version_filepath(config);
     let mut info = match read_version_info(&version_file) {
-        Ok(info)
-            if info.update_source_key.as_deref()
-                == Some(distribution.update_source_key().as_str()) =>
-        {
-            info
-        }
+        Ok(info) if version_info_matches_distribution(&info, distribution) => info,
         _ => return Ok(()),
     };
     info.dismissed_version = Some(version.to_string());
@@ -287,6 +290,47 @@ mod tests {
                 .expect("failed to shorten sha"),
             "1234567890ab"
         );
+    }
+
+    #[test]
+    fn cached_version_requires_matching_current_version() {
+        let distribution = DistributionInfo {
+            product_name: "Claudex".to_string(),
+            display_version: "cee7e18c272f".to_string(),
+            install_url: "https://github.com/AmirTlinov/Codex/tree/amir/claude-reflective-agent"
+                .to_string(),
+            release_notes_url:
+                "https://github.com/AmirTlinov/Codex/commits/amir/claude-reflective-agent"
+                    .to_string(),
+            announcement_tip_url: None,
+            update_channel: UpdateChannel::GithubBranch {
+                api_url: "https://api.github.com/repos/AmirTlinov/Codex/commits/amir/claude-reflective-agent"
+                    .to_string(),
+            },
+        };
+        let cached = VersionInfo {
+            latest_version: "da167a5b095b".to_string(),
+            last_checked_at: Utc::now(),
+            dismissed_version: None,
+            update_source_key: Some(distribution.update_source_key()),
+            observed_current_version: Some("da167a5b095b".to_string()),
+        };
+
+        assert!(!version_info_matches_distribution(&cached, &distribution));
+        assert!(!version_info_matches_distribution(
+            &VersionInfo {
+                observed_current_version: None,
+                ..cached.clone()
+            },
+            &distribution,
+        ));
+        assert!(version_info_matches_distribution(
+            &VersionInfo {
+                observed_current_version: Some(distribution.display_version.clone()),
+                ..cached
+            },
+            &distribution,
+        ));
     }
 
     #[test]

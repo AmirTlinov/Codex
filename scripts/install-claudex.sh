@@ -208,6 +208,7 @@ export CODEX_DIST_ANNOUNCEMENT_TIP_URL=""
 export CODEX_DIST_UPDATE_KIND="github-branch"
 export CODEX_DIST_UPDATE_REPO="$origin_repo_slug"
 export CODEX_DIST_UPDATE_BRANCH="\$current_branch"
+export CODEX_DIST_UPDATE_COMMAND="$repo_root/scripts/install-claudex.sh"
 
 choose_binary() {
   case "\$profile" in

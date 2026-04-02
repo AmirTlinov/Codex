@@ -3893,7 +3893,7 @@ impl App {
             token_usage: app.token_usage(),
             thread_id: app.chat_widget.thread_id(),
             thread_name: app.chat_widget.thread_name(),
-            update_action: app.pending_update_action,
+            update_action: app.pending_update_action.clone(),
             exit_reason,
         })
     }
