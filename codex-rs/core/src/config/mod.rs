@@ -40,8 +40,8 @@ use crate::config_loader::ResidencyRequirement;
 use crate::config_loader::Sourced;
 use crate::config_loader::load_config_layers_state;
 use crate::memories::memory_root;
-use crate::model_provider_info::CLAUDE_CODE_PROVIDER_ID;
 use crate::model_provider_info::CLAUDE_CLI_PROVIDER_ID;
+use crate::model_provider_info::CLAUDE_CODE_PROVIDER_ID;
 use crate::model_provider_info::LEGACY_OLLAMA_CHAT_PROVIDER_ID;
 use crate::model_provider_info::LMSTUDIO_OSS_PROVIDER_ID;
 use crate::model_provider_info::ModelProviderInfo;
@@ -2315,10 +2315,10 @@ impl Config {
 
         let model_provider_id = crate::canonical_claude_provider_id(
             model_provider
-            .or(config_profile.model_provider)
-            .or(cfg.model_provider)
-            .as_deref()
-            .unwrap_or("openai"),
+                .or(config_profile.model_provider)
+                .or(cfg.model_provider)
+                .as_deref()
+                .unwrap_or("openai"),
         )
         .to_string();
         let model_provider = model_providers

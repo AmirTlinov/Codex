@@ -1,5 +1,5 @@
-use codex_core::CLAUDE_CODE_PROVIDER_ID;
 use codex_core::CLAUDE_CLI_PROVIDER_ID;
+use codex_core::CLAUDE_CODE_PROVIDER_ID;
 use codex_core::OPENAI_PROVIDER_ID;
 use codex_core::models_manager::collaboration_mode_presets::CollaborationModesConfig;
 use codex_core::models_manager::collaboration_mode_presets::builtin_collaboration_mode_presets;
@@ -93,7 +93,9 @@ impl ModelCatalog {
         let models = self
             .models
             .iter()
-            .filter(|entry| codex_core::canonical_claude_provider_id(&entry.provider_id) == provider_id)
+            .filter(|entry| {
+                codex_core::canonical_claude_provider_id(&entry.provider_id) == provider_id
+            })
             .map(|entry| entry.preset.clone())
             .collect::<Vec<_>>();
         if models.is_empty() {
