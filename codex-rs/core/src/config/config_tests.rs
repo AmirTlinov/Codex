@@ -4541,7 +4541,7 @@ fn load_config_supports_claude_cli_external_agents() -> anyhow::Result<()> {
 
     let config = Config::load_from_base_config_with_overrides(
         ConfigToml {
-            agent_backend: Some(AgentBackend::ClaudeCli),
+            agent_backend: Some(AgentBackend::ClaudeCode),
             reflective_window_agent_type: Some("claude_reflector".to_string()),
             claude_cli: Some(ClaudeCliToml {
                 path: Some(AbsolutePathBuf::try_from(claude_path.clone())?),
@@ -4563,7 +4563,7 @@ fn load_config_supports_claude_cli_external_agents() -> anyhow::Result<()> {
         fixture.codex_home(),
     )?;
 
-    assert_eq!(config.agent_backend, AgentBackend::ClaudeCli);
+    assert_eq!(config.agent_backend, AgentBackend::ClaudeCode);
     assert_eq!(
         config.reflective_window_agent_type.as_deref(),
         Some("claude_reflector")
@@ -4598,7 +4598,7 @@ fn load_config_supports_claude_code_external_agents() -> anyhow::Result<()> {
 
     let config = Config::load_from_base_config_with_overrides(
         ConfigToml {
-            agent_backend: Some(AgentBackend::ClaudeCli),
+            agent_backend: Some(AgentBackend::ClaudeCode),
             claude_code: Some(ClaudeCliToml {
                 path: Some(AbsolutePathBuf::try_from(claude_path.clone())?),
                 permission_mode: Some(ClaudeCliPermissionMode::Plan),
@@ -4615,7 +4615,7 @@ fn load_config_supports_claude_code_external_agents() -> anyhow::Result<()> {
         fixture.codex_home(),
     )?;
 
-    assert_eq!(config.agent_backend, AgentBackend::ClaudeCli);
+    assert_eq!(config.agent_backend, AgentBackend::ClaudeCode);
     assert_eq!(config.claude_cli.path, Some(claude_path));
     assert_eq!(config.claude_cli.tools, Some(vec!["Read".to_string()]));
     Ok(())

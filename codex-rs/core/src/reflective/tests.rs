@@ -189,7 +189,7 @@ path = "{}"
     let spawn_config = build_reflective_spawn_config(turn_context.as_ref())
         .await
         .expect("build reflective spawn config");
-    assert_eq!(spawn_config.agent_backend, AgentBackend::ClaudeCli);
+    assert_eq!(spawn_config.agent_backend, AgentBackend::ClaudeCode);
     assert_eq!(spawn_config.model.as_deref(), Some("claude-opus-4-6"));
 
     let report = run_reflective_sidecar_claude(thread.codex.session.as_ref(), &spawn_config)

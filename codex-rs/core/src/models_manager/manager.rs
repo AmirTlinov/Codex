@@ -520,7 +520,7 @@ impl ModelsManager {
     fn load_bundled_models(provider: &ModelProviderInfo) -> Result<Vec<ModelInfo>, std::io::Error> {
         match provider.wire_api {
             WireApi::Responses => Self::load_remote_models_from_file(),
-            WireApi::Anthropic | WireApi::ClaudeCli => {
+            WireApi::Anthropic | WireApi::ClaudeCode => {
                 Self::load_bundled_claude_models(Self::claude_capabilities(provider.wire_api))
             }
         }
@@ -619,7 +619,7 @@ impl ModelsManager {
                 input_modalities: codex_protocol::openai_models::default_input_modalities(),
                 supports_search_tool: true,
             },
-            WireApi::ClaudeCli | WireApi::Responses => ClaudeModelCapabilities {
+            WireApi::ClaudeCode | WireApi::Responses => ClaudeModelCapabilities {
                 input_modalities: vec![InputModality::Text],
                 supports_search_tool: false,
             },

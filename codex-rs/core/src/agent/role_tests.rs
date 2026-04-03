@@ -155,7 +155,10 @@ permission_mode = "plan"
         .await
         .expect("Claude reflector role should apply");
 
-    assert_eq!(config.agent_backend, crate::config::AgentBackend::ClaudeCli);
+    assert_eq!(
+        config.agent_backend,
+        crate::config::AgentBackend::ClaudeCode
+    );
     assert_eq!(config.model.as_deref(), Some("claude-opus-4-6"));
     assert_eq!(
         config.claude_cli.permission_mode,

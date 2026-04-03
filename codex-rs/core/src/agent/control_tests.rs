@@ -548,7 +548,7 @@ async fn send_inter_agent_communication_routes_to_external_claude_agent() {
     let harness = AgentControlHarness::new().await;
     let mock_claude = mock_claude_script(&harness._home);
     let mut config = harness.config.clone();
-    config.agent_backend = crate::config::AgentBackend::ClaudeCli;
+    config.agent_backend = crate::config::AgentBackend::ClaudeCode;
     config.claude_cli.path = Some(mock_claude.script_path.clone());
 
     let thread_id = harness

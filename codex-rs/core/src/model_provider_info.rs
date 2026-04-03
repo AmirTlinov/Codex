@@ -50,7 +50,7 @@ pub enum WireApi {
     /// The local Claude Code carrier invoked as a turn-scoped subprocess.
     #[serde(rename = "claude_code", alias = "claude_cli")]
     #[schemars(rename = "claude_code")]
-    ClaudeCli,
+    ClaudeCode,
 }
 
 impl fmt::Display for WireApi {
@@ -58,7 +58,7 @@ impl fmt::Display for WireApi {
         let value = match self {
             Self::Responses => "responses",
             Self::Anthropic => "anthropic",
-            Self::ClaudeCli => "claude_code",
+            Self::ClaudeCode => "claude_code",
         };
         f.write_str(value)
     }
@@ -73,7 +73,7 @@ impl<'de> Deserialize<'de> for WireApi {
         match value.as_str() {
             "responses" => Ok(Self::Responses),
             "anthropic" => Ok(Self::Anthropic),
-            "claude_code" | "claude_cli" => Ok(Self::ClaudeCli),
+            "claude_code" | "claude_cli" => Ok(Self::ClaudeCode),
             "chat" => Err(serde::de::Error::custom(CHAT_WIRE_API_REMOVED_ERROR)),
             _ => Err(serde::de::Error::unknown_variant(
                 &value,
@@ -332,7 +332,7 @@ impl ModelProviderInfo {
     pub fn required_auth_provider(&self) -> Option<&'static str> {
         if self.requires_openai_auth {
             Some(OPENAI_PROVIDER_ID)
-        } else if matches!(self.wire_api, WireApi::ClaudeCli | WireApi::Anthropic) {
+        } else if matches!(self.wire_api, WireApi::ClaudeCode | WireApi::Anthropic) {
             Some(ANTHROPIC_AUTH_PROVIDER_ID)
         } else {
             None
@@ -390,7 +390,7 @@ pub fn create_claude_code_provider() -> ModelProviderInfo {
         env_key_instructions: None,
         experimental_bearer_token: None,
         auth: None,
-        wire_api: WireApi::ClaudeCli,
+        wire_api: WireApi::ClaudeCode,
         query_params: None,
         http_headers: None,
         env_http_headers: None,
@@ -480,7 +480,7 @@ pub fn model_picker_provider_ids(
 
     if matches!(
         active_provider.wire_api,
-        WireApi::ClaudeCli | WireApi::Anthropic
+        WireApi::ClaudeCode | WireApi::Anthropic
     ) && model_providers.contains_key(OPENAI_PROVIDER_ID)
         && active_provider_id != OPENAI_PROVIDER_ID
     {

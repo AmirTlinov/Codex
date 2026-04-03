@@ -124,7 +124,7 @@ wire_api = "claude_cli"
         "#;
 
     let provider: ModelProviderInfo = toml::from_str(provider_toml).unwrap();
-    assert_eq!(provider.wire_api, WireApi::ClaudeCli);
+    assert_eq!(provider.wire_api, WireApi::ClaudeCode);
     assert_eq!(provider.wire_api.to_string(), "claude_code");
 }
 
@@ -136,7 +136,7 @@ wire_api = "claude_code"
         "#;
 
     let provider: ModelProviderInfo = toml::from_str(provider_toml).unwrap();
-    assert_eq!(provider.wire_api, WireApi::ClaudeCli);
+    assert_eq!(provider.wire_api, WireApi::ClaudeCode);
     assert_eq!(provider.wire_api.to_string(), "claude_code");
 }
 
@@ -219,7 +219,7 @@ fn model_picker_provider_ids_pairs_custom_claude_cli_provider_with_openai() {
             env_key_instructions: None,
             experimental_bearer_token: None,
             auth: None,
-            wire_api: WireApi::ClaudeCli,
+            wire_api: WireApi::ClaudeCode,
             query_params: None,
             http_headers: None,
             env_http_headers: None,

@@ -7736,7 +7736,7 @@ async fn try_run_sampling_request(
                 .await;
                 sess.update_token_usage_info(&turn_context, token_usage.as_ref())
                     .await;
-                if token_usage.is_none() && turn_context.provider.wire_api == WireApi::ClaudeCli {
+                if token_usage.is_none() && turn_context.provider.wire_api == WireApi::ClaudeCode {
                     sess.recompute_token_usage(turn_context.as_ref()).await;
                 }
                 should_emit_turn_diff = true;

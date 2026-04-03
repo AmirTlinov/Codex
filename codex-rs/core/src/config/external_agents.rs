@@ -13,12 +13,12 @@ pub enum AgentBackend {
     #[default]
     Codex,
     #[serde(rename = "claude_code", alias = "claude_cli")]
-    ClaudeCli,
+    ClaudeCode,
 }
 
 impl AgentBackend {
     pub(crate) fn is_claude_code(self) -> bool {
-        matches!(self, Self::ClaudeCli)
+        matches!(self, Self::ClaudeCode)
     }
 
     pub(crate) fn is_claude_cli(self) -> bool {

@@ -1362,7 +1362,7 @@ impl ModelClientSession {
                 )
                 .await
             }
-            WireApi::ClaudeCli => {
+            WireApi::ClaudeCode => {
                 stream_claude_cli_turn(
                     &self.client.state.claude_cli,
                     prompt,

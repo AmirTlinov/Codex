@@ -534,7 +534,7 @@ impl CodexMessageProcessor {
 
     fn anthropic_oauth_supported(&self) -> bool {
         self.required_auth_provider() == Some(ANTHROPIC_AUTH_PROVIDER_ID)
-            && self.config.model_provider.wire_api == WireApi::ClaudeCli
+            && self.config.model_provider.wire_api == WireApi::ClaudeCode
     }
 
     fn current_anthropic_auth_mode(&self) -> Option<AuthMode> {

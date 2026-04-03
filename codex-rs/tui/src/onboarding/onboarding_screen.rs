@@ -125,7 +125,7 @@ impl OnboardingScreen {
                     forced_login_method,
                     required_auth_provider,
                     anthropic_oauth_supported: config.model_provider.wire_api
-                        == codex_core::WireApi::ClaudeCli,
+                        == codex_core::WireApi::ClaudeCode,
                     animations_enabled: config.animations,
                 }));
             } else {
