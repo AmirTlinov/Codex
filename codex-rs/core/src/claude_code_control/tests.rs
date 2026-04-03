@@ -137,3 +137,37 @@ async fn read_permission_requests_route_through_request_permissions() {
     let RequestPermissionProfile { file_system, .. } = event.permissions;
     assert!(file_system.is_some());
 }
+
+#[tokio::test]
+async fn approval_policy_never_auto_allows_claude_permission_requests() {
+    let (session, mut turn_context, _rx) = make_session_and_context_with_rx().await;
+    *session.active_turn.lock().await = Some(ActiveTurn::default());
+    Arc::get_mut(&mut turn_context)
+        .expect("single turn context ref")
+        .approval_policy
+        .set(AskForApproval::Never)
+        .expect("test setup should allow updating approval policy");
+
+    let outcome = resolve_claude_code_permission_request(
+        &session,
+        &turn_context,
+        &ClaudeCodePermissionRequest::new(
+            "permission-never".to_string(),
+            "TodoWrite".to_string(),
+            json!({}),
+            "tool-never".to_string(),
+            Some("bypassPermissions should not block tool execution".to_string()),
+            /*decision_reason*/ None,
+            codex_api::common::ClaudeCodeControlResponder::new(tokio::sync::mpsc::channel(1).0),
+        ),
+    )
+    .await;
+
+    assert!(matches!(
+        outcome.response,
+        ClaudeCodeControlResponseSubtype::Allow {
+            updated_input: None
+        }
+    ));
+    assert!(!outcome.interrupt_turn);
+}

@@ -10,6 +10,7 @@ use serde_json::Value;
 
 use crate::codex::Session;
 use crate::codex::TurnContext;
+use crate::protocol::AskForApproval;
 use crate::protocol::ReviewDecision;
 
 pub(crate) struct ClaudeCodePermissionResolution {
@@ -22,6 +23,9 @@ pub(crate) async fn resolve_claude_code_permission_request(
     turn_context: &Arc<TurnContext>,
     request: &ClaudeCodePermissionRequest,
 ) -> ClaudeCodePermissionResolution {
+    if approval_policy_auto_allows_claude_control(turn_context.approval_policy.value()) {
+        return allowed_resolution();
+    }
     if is_bash_tool(&request.tool_name) {
         return resolve_bash_permission_request(sess, turn_context, request).await;
     }
@@ -59,6 +63,10 @@ pub(crate) async fn resolve_claude_code_permission_request(
 
 fn is_bash_tool(tool_name: &str) -> bool {
     matches!(tool_name, "Bash" | "BashTool")
+}
+
+fn approval_policy_auto_allows_claude_control(approval_policy: AskForApproval) -> bool {
+    matches!(approval_policy, AskForApproval::Never)
 }
 
 async fn resolve_bash_permission_request(
@@ -151,7 +159,17 @@ fn requested_permissions_for_tool(
     cwd: &Path,
 ) -> Option<RequestPermissionProfile> {
     match tool_name {
-        "Read" | "Glob" | "Grep" => {
+        "Read"
+        | "FileReadTool"
+        | "NotebookRead"
+        | "NotebookReadTool"
+        | "Glob"
+        | "GlobTool"
+        | "Grep"
+        | "GrepTool"
+        | "LSP"
+        | "LS"
+        | "ListDir" => {
             let paths = resolve_paths(input, cwd);
             (!paths.is_empty()).then_some(RequestPermissionProfile {
                 file_system: Some(codex_protocol::models::FileSystemPermissions {
@@ -161,7 +179,13 @@ fn requested_permissions_for_tool(
                 ..RequestPermissionProfile::default()
             })
         }
-        "Write" | "Edit" | "MultiEdit" | "NotebookEdit" => {
+        "Write"
+        | "Edit"
+        | "MultiEdit"
+        | "FileWriteTool"
+        | "FileEditTool"
+        | "NotebookEdit"
+        | "NotebookEditTool" => {
             let paths = resolve_paths(input, cwd);
             (!paths.is_empty()).then_some(RequestPermissionProfile {
                 file_system: Some(codex_protocol::models::FileSystemPermissions {
@@ -171,12 +195,14 @@ fn requested_permissions_for_tool(
                 ..RequestPermissionProfile::default()
             })
         }
-        "WebFetch" | "WebSearch" => Some(RequestPermissionProfile {
+        "WebFetch" | "WebFetchTool" | "WebSearch" | "WebSearchTool" => {
+            Some(RequestPermissionProfile {
             network: Some(codex_protocol::models::NetworkPermissions {
                 enabled: Some(true),
             }),
             ..RequestPermissionProfile::default()
-        }),
+            })
+        }
         _ => None,
     }
 }

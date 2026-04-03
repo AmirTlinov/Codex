@@ -76,6 +76,8 @@ This downstream slice is intentionally honest and narrow:
   - `Bash` routes through command approval;
   - file/network tools like `Read` / `Edit` / `Write` / `Glob` / `Grep` /
     `WebFetch` / `WebSearch` route through request-permissions;
+  - `approval_policy=never` / bypassPermissions auto-allows these carrier
+    requests instead of accidentally turning them into denials;
   - unsupported Claude control subtypes still fail closed instead of hanging;
 - spawned Claude Code subagents still use the structured carrier, but their
   permission prompts are not bridged yet the way the main lane is;

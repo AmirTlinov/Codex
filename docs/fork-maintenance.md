@@ -158,8 +158,9 @@ What it does:
 - bridges supported Claude Code `can_use_tool` control requests in the main
   lane into existing Codex approval surfaces instead of blanket fail-closed:
   shell-like `Bash` requests use command approval, and basic file/network tool
-  requests use request-permissions; unsupported control subtypes still fail
-  closed;
+  requests use request-permissions; `approval_policy=never` auto-allows the
+  bridge so bypassPermissions does not dead-end; unsupported control subtypes
+  still fail closed;
 - brands the runtime as `Claudex`, makes `claudex --version` report the
   current downstream short SHA, uses the same downstream product name in the
   default terminal title plus CLI update/human-output copy, points update
