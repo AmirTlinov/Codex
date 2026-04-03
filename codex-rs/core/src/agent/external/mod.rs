@@ -23,6 +23,7 @@ use crate::error::Result as CodexResult;
 
 pub(crate) use self::claude_cli::ClaudeCliRequest;
 pub(crate) use self::claude_cli::run_claude_cli;
+pub(crate) use self::claude_cli::run_claude_cli_stream_json;
 
 const MAX_EXTERNAL_AGENT_CONVERSATION_ENTRIES: usize = 12;
 

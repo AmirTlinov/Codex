@@ -3,9 +3,12 @@ use std::process::Stdio;
 
 use anyhow::Context;
 use codex_utils_pty::process_group::kill_child_process_group;
+use tokio::io::AsyncBufReadExt;
 use tokio::io::AsyncReadExt;
 use tokio::io::AsyncWriteExt;
+use tokio::io::BufReader;
 use tokio::process::Command;
+use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
 use crate::config::ClaudeCliConfig;
@@ -124,6 +127,179 @@ pub(crate) async fn run_claude_cli(
             finalize_claude_cli_output(status, stdout, stderr)
         }
     }
+}
+
+pub(crate) async fn run_claude_cli_stream_json(
+    config: &ClaudeCliConfig,
+    request: ClaudeCliRequest,
+    cancellation_token: CancellationToken,
+) -> anyhow::Result<mpsc::Receiver<anyhow::Result<String>>> {
+    let executable = config
+        .path
+        .clone()
+        .unwrap_or_else(|| PathBuf::from("claude"));
+    let mut command = Command::new(&executable);
+    command
+        .kill_on_drop(true)
+        .current_dir(&request.cwd)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .arg("--print")
+        .arg("--output-format")
+        .arg("stream-json")
+        .arg("--verbose")
+        .arg("--include-partial-messages")
+        .arg("--no-session-persistence")
+        .arg("--disable-slash-commands")
+        .arg("--permission-mode")
+        .arg(config.permission_mode.as_cli_arg())
+        .arg("--system-prompt")
+        .arg(&request.system_prompt)
+        .arg("--model")
+        .arg(&request.model);
+
+    apply_anthropic_runtime_auth_env(&mut command, config).await?;
+    #[cfg(unix)]
+    command.process_group(0);
+
+    let effort = request.effort.or(config.effort);
+    if let Some(effort) = effort {
+        command.arg("--effort").arg(effort.as_cli_arg());
+    }
+
+    if request.force_toolless {
+        command.arg("--tools").arg("");
+    } else if let Some(tools) = request.tools.or_else(|| config.tools.clone()) {
+        command.arg("--tools").arg(tools.join(","));
+        for add_dir in &config.add_dirs {
+            command.arg("--add-dir").arg(add_dir);
+        }
+    } else {
+        command.arg("--tools").arg("");
+    }
+
+    if let Some(json_schema) = request.json_schema {
+        command
+            .arg("--json-schema")
+            .arg(serde_json::to_string(&json_schema).context("serialize claude JSON schema")?);
+    }
+
+    let mut child = command.spawn().with_context(|| {
+        format!(
+            "spawn Claude CLI at {} from {}",
+            executable.display(),
+            request.cwd.display()
+        )
+    })?;
+    let stdout = child.stdout.take().context("capture Claude CLI stdout")?;
+    let mut stderr_reader = child.stderr.take().context("capture Claude CLI stderr")?;
+    let mut stdin_writer = child.stdin.take().context("capture Claude CLI stdin")?;
+    let user_prompt = request.user_prompt;
+    let (tx_line, rx_line) = mpsc::channel(1600);
+
+    tokio::spawn(async move {
+        let stdin_task = tokio::spawn(async move {
+            stdin_writer.write_all(user_prompt.as_bytes()).await?;
+            stdin_writer.shutdown().await
+        });
+        let stderr_task = tokio::spawn(async move {
+            let mut stderr = Vec::new();
+            stderr_reader.read_to_end(&mut stderr).await?;
+            Ok::<Vec<u8>, std::io::Error>(stderr)
+        });
+        let mut lines = BufReader::new(stdout).lines();
+
+        loop {
+            tokio::select! {
+                biased;
+                _ = cancellation_token.cancelled() => {
+                    let _ = terminate_child(&mut child).await;
+                    stdin_task.abort();
+                    stderr_task.abort();
+                    let _ = tx_line.send(Err(anyhow::anyhow!("Claude CLI run cancelled"))).await;
+                    return;
+                }
+                line = lines.next_line() => {
+                    match line {
+                        Ok(Some(line)) => {
+                            let trimmed = line.trim();
+                            if trimmed.is_empty() {
+                                continue;
+                            }
+                            if is_permission_request_line(trimmed) {
+                                let _ = terminate_child(&mut child).await;
+                                let _ = tx_line.send(Err(anyhow::anyhow!(
+                                    "Claude Code carrier requested an interactive permission decision that Claudex has not bridged yet"
+                                ))).await;
+                                return;
+                            }
+                            if tx_line.send(Ok(line)).await.is_err() {
+                                let _ = terminate_child(&mut child).await;
+                                return;
+                            }
+                        }
+                        Ok(None) => break,
+                        Err(err) => {
+                            let _ = tx_line.send(Err(err.into())).await;
+                            return;
+                        }
+                    }
+                }
+            }
+        }
+
+        let status = match child.wait().await {
+            Ok(status) => status,
+            Err(err) => {
+                let _ = tx_line.send(Err(err.into())).await;
+                return;
+            }
+        };
+        let stdin_result = stdin_task.await;
+        let stderr = match stderr_task.await {
+            Ok(Ok(stderr)) => stderr,
+            Ok(Err(err)) => {
+                let _ = tx_line.send(Err(err.into())).await;
+                return;
+            }
+            Err(err) => {
+                let _ = tx_line.send(Err(err.into())).await;
+                return;
+            }
+        };
+        if let Ok(Err(err)) = stdin_result {
+            let _ = tx_line.send(Err(err.into())).await;
+            return;
+        }
+        if !status.success() {
+            let stdout_summary = String::new();
+            let stderr_summary = String::from_utf8_lossy(&stderr).trim().to_string();
+            let message = if stderr_summary.is_empty() {
+                stdout_summary
+            } else {
+                stderr_summary
+            };
+            let _ = tx_line
+                .send(Err(anyhow::anyhow!("Claude CLI failed: {message}")))
+                .await;
+        }
+    });
+
+    Ok(rx_line)
+}
+
+fn is_permission_request_line(line: &str) -> bool {
+    serde_json::from_str::<serde_json::Value>(line)
+        .ok()
+        .and_then(|value| {
+            value
+                .get("type")
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_string)
+        })
+        .as_deref()
+        == Some("control_request")
 }
 
 async fn apply_anthropic_runtime_auth_env(

@@ -1,5 +1,5 @@
 use crate::agent::external::ClaudeCliRequest;
-use crate::agent::external::run_claude_cli;
+use crate::agent::external::run_claude_cli_stream_json;
 use crate::client_common::Prompt;
 use crate::client_common::ResponseEvent;
 use crate::client_common::ResponseStream;
@@ -13,14 +13,14 @@ use codex_protocol::models::ContentItem;
 use codex_protocol::models::ResponseItem;
 use codex_protocol::openai_models::ModelInfo;
 use codex_protocol::openai_models::ReasoningEffort as ReasoningEffortConfig;
+use codex_protocol::protocol::TokenUsage;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
 const CLAUDE_BRIDGE_PROMPT: &str = concat!(
-    "You are the main assistant running inside Codex through Claude Code CLI.\n",
-    "Use Claude Code's built-in tools when inspection, edits, or shell work are required.\n",
-    "Return only the assistant response that should appear in the Codex conversation."
+    "You are the main assistant running inside Codex through Claude Code.\n",
+    "Return the assistant response that should appear in the Codex conversation."
 );
 
 pub(super) async fn stream_claude_cli_turn(
@@ -32,7 +32,7 @@ pub(super) async fn stream_claude_cli_turn(
     cancellation_token: CancellationToken,
 ) -> Result<ResponseStream> {
     let user_prompt = render_claude_turn_prompt(&prompt.input)?;
-    let output = run_claude_cli(
+    let mut raw_lines = run_claude_cli_stream_json(
         claude_cli,
         ClaudeCliRequest {
             cwd: cwd.to_path_buf(),
@@ -51,29 +51,230 @@ pub(super) async fn stream_claude_cli_turn(
     .await
     .map_err(|err| CodexErr::Stream(err.to_string(), None))?;
 
-    let response_id = format!("claude-cli-{}", Uuid::new_v4());
-    let item = ResponseItem::Message {
-        id: Some(response_id.clone()),
-        role: "assistant".to_string(),
-        content: vec![ContentItem::OutputText { text: output }],
-        end_turn: Some(true),
-        phase: None,
-    };
-    let (tx_event, rx_event) = mpsc::channel(3);
-    tx_event.send(Ok(ResponseEvent::Created)).await.ok();
-    tx_event
-        .send(Ok(ResponseEvent::OutputItemDone(item)))
-        .await
-        .ok();
-    tx_event
-        .send(Ok(ResponseEvent::Completed {
-            response_id,
-            token_usage: None,
-        }))
-        .await
-        .ok();
-    drop(tx_event);
+    let (tx_event, rx_event) = mpsc::channel(1600);
+    tokio::spawn(async move {
+        let mut state = ClaudeCodeStreamState::default();
+        while let Some(line) = raw_lines.recv().await {
+            match line {
+                Ok(line) => {
+                    if let Err(err) = handle_stream_line(&line, &mut state, &tx_event).await {
+                        let _ = tx_event.send(Err(err)).await;
+                        return;
+                    }
+                }
+                Err(err) => {
+                    let _ = tx_event
+                        .send(Err(CodexErr::Stream(err.to_string(), None)))
+                        .await;
+                    return;
+                }
+            }
+        }
+
+        let response_id = state
+            .response_id
+            .clone()
+            .unwrap_or_else(|| format!("claude-code-{}", Uuid::new_v4()));
+        let _ = tx_event
+            .send(Ok(ResponseEvent::Completed {
+                response_id,
+                token_usage: state.token_usage,
+            }))
+            .await;
+    });
+
     Ok(ResponseStream { rx_event })
+}
+
+#[derive(Default)]
+struct ClaudeCodeStreamState {
+    created_sent: bool,
+    response_id: Option<String>,
+    token_usage: Option<TokenUsage>,
+    active_message_id: Option<String>,
+}
+
+async fn handle_stream_line(
+    line: &str,
+    state: &mut ClaudeCodeStreamState,
+    tx_event: &mpsc::Sender<Result<ResponseEvent>>,
+) -> Result<()> {
+    let value: serde_json::Value =
+        serde_json::from_str(line).map_err(|err| CodexErr::Stream(err.to_string(), None))?;
+    let Some(message_type) = value.get("type").and_then(serde_json::Value::as_str) else {
+        return Ok(());
+    };
+
+    match message_type {
+        "system" => {
+            if value.get("subtype").and_then(serde_json::Value::as_str) == Some("init")
+                && !state.created_sent
+            {
+                state.created_sent = true;
+                tx_event.send(Ok(ResponseEvent::Created)).await.ok();
+            }
+        }
+        "stream_event" => {
+            if !state.created_sent {
+                state.created_sent = true;
+                tx_event.send(Ok(ResponseEvent::Created)).await.ok();
+            }
+            let Some(event) = value.get("event").and_then(serde_json::Value::as_object) else {
+                return Ok(());
+            };
+            match event.get("type").and_then(serde_json::Value::as_str) {
+                Some("message_start") => {
+                    state.response_id = event
+                        .get("message")
+                        .and_then(|message| message.get("id"))
+                        .and_then(serde_json::Value::as_str)
+                        .map(str::to_string);
+                }
+                Some("content_block_start") => {
+                    if event
+                        .get("content_block")
+                        .and_then(|block| block.get("type"))
+                        .and_then(serde_json::Value::as_str)
+                        == Some("text")
+                    {
+                        let item_id = state
+                            .response_id
+                            .clone()
+                            .unwrap_or_else(|| format!("claude-code-{}", Uuid::new_v4()));
+                        state.active_message_id = Some(item_id.clone());
+                        tx_event
+                            .send(Ok(ResponseEvent::OutputItemAdded(ResponseItem::Message {
+                                id: Some(item_id),
+                                role: "assistant".to_string(),
+                                content: Vec::new(),
+                                end_turn: None,
+                                phase: None,
+                            })))
+                            .await
+                            .ok();
+                    }
+                }
+                Some("content_block_delta") => {
+                    let Some(delta) = event.get("delta").and_then(serde_json::Value::as_object)
+                    else {
+                        return Ok(());
+                    };
+                    match delta.get("type").and_then(serde_json::Value::as_str) {
+                        Some("text_delta") => {
+                            if let Some(text) =
+                                delta.get("text").and_then(serde_json::Value::as_str)
+                            {
+                                tx_event
+                                    .send(Ok(ResponseEvent::OutputTextDelta(text.to_string())))
+                                    .await
+                                    .ok();
+                            }
+                        }
+                        Some("thinking_delta") => {
+                            if let Some(text) =
+                                delta.get("thinking").and_then(serde_json::Value::as_str)
+                            {
+                                tx_event
+                                    .send(Ok(ResponseEvent::ReasoningContentDelta {
+                                        delta: text.to_string(),
+                                        content_index: 0,
+                                    }))
+                                    .await
+                                    .ok();
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+                _ => {}
+            }
+        }
+        "assistant" => {
+            if !state.created_sent {
+                state.created_sent = true;
+                tx_event.send(Ok(ResponseEvent::Created)).await.ok();
+            }
+            let Some(message) = value.get("message").and_then(serde_json::Value::as_object) else {
+                return Ok(());
+            };
+            let message_id = message
+                .get("id")
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_string)
+                .or_else(|| state.active_message_id.clone())
+                .or_else(|| state.response_id.clone())
+                .unwrap_or_else(|| format!("claude-code-{}", Uuid::new_v4()));
+            state.response_id = Some(message_id.clone());
+            let text = message
+                .get("content")
+                .and_then(serde_json::Value::as_array)
+                .map(|content| {
+                    content
+                        .iter()
+                        .filter(|&block| {
+                            block.get("type").and_then(serde_json::Value::as_str) == Some("text")
+                        })
+                        .map(|block| {
+                            block
+                                .get("text")
+                                .and_then(serde_json::Value::as_str)
+                                .unwrap_or_default()
+                        })
+                        .collect::<Vec<_>>()
+                        .join("")
+                })
+                .unwrap_or_default();
+            tx_event
+                .send(Ok(ResponseEvent::OutputItemDone(ResponseItem::Message {
+                    id: Some(message_id),
+                    role: "assistant".to_string(),
+                    content: vec![ContentItem::OutputText { text }],
+                    end_turn: Some(true),
+                    phase: None,
+                })))
+                .await
+                .ok();
+            state.active_message_id = None;
+        }
+        "result" => {
+            if let Some(session_id) = value.get("session_id").and_then(serde_json::Value::as_str) {
+                state
+                    .response_id
+                    .get_or_insert_with(|| session_id.to_string());
+            }
+            state.token_usage = parse_token_usage(value.get("usage"));
+        }
+        _ => {}
+    }
+
+    Ok(())
+}
+
+fn parse_token_usage(usage: Option<&serde_json::Value>) -> Option<TokenUsage> {
+    let usage = usage?.as_object()?;
+    let input_tokens = usage
+        .get("input_tokens")
+        .and_then(serde_json::Value::as_i64)
+        .unwrap_or_default();
+    let output_tokens = usage
+        .get("output_tokens")
+        .and_then(serde_json::Value::as_i64)
+        .unwrap_or_default();
+    let cached_input_tokens = usage
+        .get("cache_read_input_tokens")
+        .and_then(serde_json::Value::as_i64)
+        .unwrap_or_default()
+        + usage
+            .get("cache_creation_input_tokens")
+            .and_then(serde_json::Value::as_i64)
+            .unwrap_or_default();
+    Some(TokenUsage {
+        input_tokens,
+        cached_input_tokens,
+        output_tokens,
+        reasoning_output_tokens: 0,
+        total_tokens: input_tokens + output_tokens,
+    })
 }
 
 fn build_system_prompt(base_instructions: &str) -> String {
@@ -177,7 +378,8 @@ fn ensure_no_image_inputs(content: &[ContentItem]) -> Result<()> {
         .any(|item| matches!(item, ContentItem::InputImage { .. }))
     {
         return Err(CodexErr::UnsupportedOperation(
-            "Claude CLI main sessions do not yet support image inputs".to_string(),
+            "Claude Code carrier does not yet support image inputs on the structured stream path"
+                .to_string(),
         ));
     }
     Ok(())

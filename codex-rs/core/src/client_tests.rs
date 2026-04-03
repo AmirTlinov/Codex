@@ -153,7 +153,7 @@ fn write_mock_claude_script(
     std::fs::write(
         &script_path,
         format!(
-            "#!/usr/bin/env bash\nset -euo pipefail\nstdin_payload=$(cat)\nprintf '%s' \"$stdin_payload\" > '{}'\nprintf '%s\\n' \"$@\" > '{}'\nprintf 'claude-main-ok'\n",
+            "#!/usr/bin/env bash\nset -euo pipefail\nstdin_payload=$(cat)\nprintf '%s' \"$stdin_payload\" > '{}'\nprintf '%s\\n' \"$@\" > '{}'\nsession_id='mock-session'\ncat <<'EOF'\n{{\"type\":\"system\",\"subtype\":\"init\",\"session_id\":\"mock-session\",\"tools\":[],\"mcp_servers\":[],\"model\":\"claude-opus-4-6\",\"permissionMode\":\"bypassPermissions\",\"slash_commands\":[],\"apiKeySource\":\"none\",\"claude_code_version\":\"test\",\"output_style\":\"default\",\"agents\":[],\"skills\":[],\"plugins\":[],\"uuid\":\"init-1\"}}\n{{\"type\":\"assistant\",\"message\":{{\"model\":\"claude-opus-4-6\",\"id\":\"msg-1\",\"type\":\"message\",\"role\":\"assistant\",\"content\":[{{\"type\":\"text\",\"text\":\"claude-main-ok\"}}],\"stop_reason\":null,\"stop_sequence\":null,\"stop_details\":null,\"usage\":{{\"input_tokens\":3,\"cache_creation_input_tokens\":0,\"cache_read_input_tokens\":0,\"output_tokens\":2,\"service_tier\":\"standard\",\"inference_geo\":\"not_available\"}},\"context_management\":null}},\"parent_tool_use_id\":null,\"session_id\":\"mock-session\",\"uuid\":\"assistant-1\"}}\n{{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":false,\"duration_ms\":10,\"duration_api_ms\":10,\"num_turns\":1,\"result\":\"claude-main-ok\",\"stop_reason\":\"end_turn\",\"session_id\":\"mock-session\",\"total_cost_usd\":0.0,\"usage\":{{\"input_tokens\":3,\"cache_creation_input_tokens\":0,\"cache_read_input_tokens\":0,\"output_tokens\":2}},\"modelUsage\":{{}},\"permission_denials\":[],\"uuid\":\"result-1\"}}\nEOF\n",
             stdin_log_path.display(),
             args_log_path.display(),
         ),
@@ -251,6 +251,106 @@ async fn stream_routes_main_turns_to_claude_cli_provider() {
 }
 
 #[tokio::test]
+async fn stream_routes_partial_claude_code_deltas() {
+    let root = TempDir::new().expect("create temp dir");
+    let script_path = root.path().join("mock-claude-partial.sh");
+    std::fs::write(
+        &script_path,
+        "#!/usr/bin/env bash\nset -euo pipefail\ncat >/dev/null\ncat <<'EOF'\n{\"type\":\"system\",\"subtype\":\"init\",\"session_id\":\"mock-session\",\"tools\":[],\"mcp_servers\":[],\"model\":\"claude-opus-4-6\",\"permissionMode\":\"bypassPermissions\",\"slash_commands\":[],\"apiKeySource\":\"none\",\"claude_code_version\":\"test\",\"output_style\":\"default\",\"agents\":[],\"skills\":[],\"plugins\":[],\"uuid\":\"init-1\"}\n{\"type\":\"stream_event\",\"event\":{\"type\":\"message_start\",\"message\":{\"model\":\"claude-opus-4-6\",\"id\":\"msg-1\",\"type\":\"message\",\"role\":\"assistant\",\"content\":[],\"stop_reason\":null,\"stop_sequence\":null,\"stop_details\":null,\"usage\":{\"input_tokens\":3,\"cache_creation_input_tokens\":0,\"cache_read_input_tokens\":0,\"output_tokens\":2,\"service_tier\":\"standard\",\"inference_geo\":\"not_available\"}}},\"session_id\":\"mock-session\",\"parent_tool_use_id\":null,\"uuid\":\"event-1\"}\n{\"type\":\"stream_event\",\"event\":{\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"text\",\"text\":\"\"}},\"session_id\":\"mock-session\",\"parent_tool_use_id\":null,\"uuid\":\"event-2\"}\n{\"type\":\"stream_event\",\"event\":{\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"hi\"}},\"session_id\":\"mock-session\",\"parent_tool_use_id\":null,\"uuid\":\"event-3\"}\n{\"type\":\"assistant\",\"message\":{\"model\":\"claude-opus-4-6\",\"id\":\"msg-1\",\"type\":\"message\",\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":\"hi\"}],\"stop_reason\":null,\"stop_sequence\":null,\"stop_details\":null,\"usage\":{\"input_tokens\":3,\"cache_creation_input_tokens\":0,\"cache_read_input_tokens\":0,\"output_tokens\":2,\"service_tier\":\"standard\",\"inference_geo\":\"not_available\"},\"context_management\":null},\"parent_tool_use_id\":null,\"session_id\":\"mock-session\",\"uuid\":\"assistant-1\"}\n{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":false,\"duration_ms\":10,\"duration_api_ms\":10,\"num_turns\":1,\"result\":\"hi\",\"stop_reason\":\"end_turn\",\"session_id\":\"mock-session\",\"total_cost_usd\":0.0,\"usage\":{\"input_tokens\":3,\"cache_creation_input_tokens\":0,\"cache_read_input_tokens\":0,\"output_tokens\":2},\"modelUsage\":{},\"permission_denials\":[],\"uuid\":\"result-1\"}\nEOF\n",
+    )
+    .expect("write partial mock claude script");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mut permissions = std::fs::metadata(&script_path)
+            .expect("partial mock claude metadata")
+            .permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(&script_path, permissions).expect("chmod partial mock claude");
+    }
+
+    let client = ModelClient::new(
+        /*auth_manager*/ None,
+        ThreadId::new(),
+        crate::create_claude_code_provider(),
+        crate::config::ClaudeCliConfig {
+            path: Some(script_path),
+            ..Default::default()
+        },
+        root.path().to_path_buf(),
+        crate::auth::AuthCredentialsStoreMode::File,
+        SessionSource::Cli,
+        /*model_verbosity*/ None,
+        /*enable_request_compression*/ false,
+        /*include_timing_metrics*/ false,
+        /*beta_features_header*/ None,
+    );
+    let mut client_session = client.new_session();
+    let prompt = crate::Prompt {
+        input: vec![ResponseItem::Message {
+            id: None,
+            role: "user".to_string(),
+            content: vec![ContentItem::InputText {
+                text: "Say hi".to_string(),
+            }],
+            end_turn: None,
+            phase: None,
+        }],
+        ..Default::default()
+    };
+
+    let mut stream = client_session
+        .stream(
+            &prompt,
+            &test_model_info_with_slug("claude-opus-4-6"),
+            root.path(),
+            &test_session_telemetry(),
+            /*effort*/ None,
+            ReasoningSummary::None,
+            /*service_tier*/ None,
+            /*turn_metadata_header*/ None,
+            CancellationToken::new(),
+        )
+        .await
+        .expect("claude stream should succeed");
+
+    let mut saw_added = false;
+    let mut saw_delta = false;
+    let mut saw_done = false;
+    while let Some(event) = stream.next().await {
+        match event.expect("stream event") {
+            crate::client_common::ResponseEvent::OutputItemAdded(ResponseItem::Message {
+                ..
+            }) => {
+                saw_added = true;
+            }
+            crate::client_common::ResponseEvent::OutputTextDelta(delta) => {
+                assert_eq!(delta, "hi");
+                saw_delta = true;
+            }
+            crate::client_common::ResponseEvent::OutputItemDone(ResponseItem::Message {
+                content,
+                ..
+            }) => {
+                assert_eq!(
+                    content,
+                    vec![ContentItem::OutputText {
+                        text: "hi".to_string()
+                    }]
+                );
+                saw_done = true;
+            }
+            crate::client_common::ResponseEvent::Completed { .. } => break,
+            _ => {}
+        }
+    }
+
+    assert!(saw_added);
+    assert!(saw_delta);
+    assert!(saw_done);
+}
+
+#[tokio::test]
 async fn stream_cancels_in_flight_claude_cli_subprocess() {
     let root = TempDir::new().expect("create temp dir");
     let script_path = root.path().join("mock-claude-sleep.sh");
@@ -327,15 +427,96 @@ async fn stream_cancels_in_flight_claude_cli_subprocess() {
     .expect("Claude stream cancellation should finish promptly");
     cancel_handle.await.expect("join cancel task");
 
-    let err = match stream_result {
-        Ok(_stream) => panic!("Claude stream should abort on cancellation"),
-        Err(err) => err,
-    };
+    let mut stream = stream_result.expect("stream should start before cancellation");
+    let err = stream
+        .next()
+        .await
+        .expect("expected cancellation event")
+        .expect_err("cancellation event should be an error");
 
     let crate::error::CodexErr::Stream(message, _response_id) = err else {
         panic!("expected stream error, got {err:?}");
     };
     assert_eq!(message, "Claude CLI run cancelled");
+}
+
+#[tokio::test]
+async fn stream_fails_closed_on_claude_code_permission_request() {
+    let root = TempDir::new().expect("create temp dir");
+    let script_path = root.path().join("mock-claude-permission.sh");
+    std::fs::write(
+        &script_path,
+        "#!/usr/bin/env bash\nset -euo pipefail\ncat >/dev/null\nprintf '%s\n' '{\"type\":\"control_request\",\"request_id\":\"req-1\",\"request\":{\"subtype\":\"can_use_tool\",\"tool_name\":\"Read\",\"input\":{\"file_path\":\"AGENTS.md\"},\"tool_use_id\":\"tool-1\"}}'\nsleep 30\n",
+    )
+    .expect("write permission mock claude script");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mut permissions = std::fs::metadata(&script_path)
+            .expect("permission mock claude metadata")
+            .permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(&script_path, permissions).expect("chmod permission mock claude");
+    }
+
+    let client = ModelClient::new(
+        /*auth_manager*/ None,
+        ThreadId::new(),
+        crate::create_claude_code_provider(),
+        crate::config::ClaudeCliConfig {
+            path: Some(script_path),
+            ..Default::default()
+        },
+        root.path().to_path_buf(),
+        crate::auth::AuthCredentialsStoreMode::File,
+        SessionSource::Cli,
+        /*model_verbosity*/ None,
+        /*enable_request_compression*/ false,
+        /*include_timing_metrics*/ false,
+        /*beta_features_header*/ None,
+    );
+    let mut client_session = client.new_session();
+    let prompt = crate::Prompt {
+        input: vec![ResponseItem::Message {
+            id: None,
+            role: "user".to_string(),
+            content: vec![ContentItem::InputText {
+                text: "Read AGENTS.md".to_string(),
+            }],
+            end_turn: None,
+            phase: None,
+        }],
+        ..Default::default()
+    };
+
+    let mut stream = client_session
+        .stream(
+            &prompt,
+            &test_model_info_with_slug("claude-opus-4-6"),
+            root.path(),
+            &test_session_telemetry(),
+            /*effort*/ None,
+            ReasoningSummary::None,
+            /*service_tier*/ None,
+            /*turn_metadata_header*/ None,
+            CancellationToken::new(),
+        )
+        .await
+        .expect("claude stream should start");
+
+    let event = stream
+        .next()
+        .await
+        .expect("expected permission failure event");
+    let crate::error::CodexErr::Stream(message, _response_id) =
+        event.expect_err("permission request should fail closed")
+    else {
+        panic!("expected stream error");
+    };
+    assert!(
+        message.contains("permission decision"),
+        "unexpected error message: {message}"
+    );
 }
 
 #[tokio::test]

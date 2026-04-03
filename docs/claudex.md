@@ -62,6 +62,12 @@ This downstream slice is intentionally honest and narrow:
 - the new default `claude_code` lane is now first-class in config/provider/backend
   naming and auth/account UX, but it still uses the Claude Code carrier
   implementation under the hood;
+- the Claude Code main lane now uses Claude's structured `stream-json` output
+  path instead of the older plain-text bridge, so Claudex receives real
+  assistant deltas, final result metadata, and explicit carrier control events;
+- Claude Code carrier permission requests currently fail closed in Claudex's
+  main lane instead of hanging, because interactive `control_request`
+  approvals are not bridged into the Codex approval flow yet;
 - the native `anthropic` lane now preserves Claude image prompts and image
   tool-result content too, so API-key Anthropic usage is no longer text-only;
 - native `anthropic` still fail-closes on Claude.ai OAuth because `/v1/messages`
