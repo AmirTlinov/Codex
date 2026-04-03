@@ -1559,7 +1559,7 @@ async fn anthropic_api_key_login_and_get_account() -> Result<()> {
     create_config_toml(
         codex_home.path(),
         CreateConfigTomlParams {
-            wire_api: Some("claude_cli".to_string()),
+            wire_api: Some("claude_code".to_string()),
             ..Default::default()
         },
     )?;
@@ -1649,7 +1649,7 @@ async fn anthropic_oauth_login_completes_via_browser_callback() -> Result<()> {
     create_config_toml(
         codex_home.path(),
         CreateConfigTomlParams {
-            wire_api: Some("claude_cli".to_string()),
+            wire_api: Some("claude_code".to_string()),
             ..Default::default()
         },
     )?;

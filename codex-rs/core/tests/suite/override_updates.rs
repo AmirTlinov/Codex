@@ -234,8 +234,8 @@ async fn override_turn_context_rejects_invalid_model_provider_pair() -> Result<(
     let server = start_mock_server().await;
     let mut builder = test_codex().with_config(|config| {
         config.model = Some("claude-opus-4-6".to_string());
-        config.model_provider_id = "claude_cli".to_string();
-        config.model_provider = codex_core::create_claude_cli_provider();
+        config.model_provider_id = codex_core::CLAUDE_CODE_PROVIDER_ID.to_string();
+        config.model_provider = codex_core::create_claude_code_provider();
     });
     let test = builder.build(&server).await?;
 
@@ -247,7 +247,7 @@ async fn override_turn_context_rejects_invalid_model_provider_pair() -> Result<(
             sandbox_policy: None,
             windows_sandbox_level: None,
             model: Some("gpt-5.4".to_string()),
-            model_provider: Some("claude_cli".to_string()),
+            model_provider: Some(codex_core::CLAUDE_CODE_PROVIDER_ID.to_string()),
             effort: None,
             summary: None,
             service_tier: None,
@@ -266,7 +266,9 @@ async fn override_turn_context_rejects_invalid_model_provider_pair() -> Result<(
         error_event.message
     );
     assert!(
-        error_event.message.contains("claude_cli"),
+        error_event
+            .message
+            .contains(codex_core::CLAUDE_CODE_PROVIDER_ID),
         "unexpected error message: {}",
         error_event.message
     );

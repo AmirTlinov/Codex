@@ -66,6 +66,7 @@ use codex_app_server_protocol::TurnStartResponse;
 use codex_app_server_protocol::TurnSteerParams;
 use codex_app_server_protocol::TurnSteerResponse;
 use codex_core::ANTHROPIC_AUTH_PROVIDER_ID;
+use codex_core::CLAUDE_CODE_PROVIDER_ID;
 use codex_core::CLAUDE_CLI_PROVIDER_ID;
 use codex_core::OPENAI_PROVIDER_ID;
 use codex_core::config::Config;
@@ -832,12 +833,13 @@ fn requested_picker_providers_for_distribution(
         model_picker_provider_ids(&config.model_providers, &config.model_provider_id);
     if distribution.uses_custom_branding()
         && config.model_provider_id == OPENAI_PROVIDER_ID
-        && config.model_providers.contains_key(CLAUDE_CLI_PROVIDER_ID)
+        && (config.model_providers.contains_key(CLAUDE_CODE_PROVIDER_ID)
+            || config.model_providers.contains_key(CLAUDE_CLI_PROVIDER_ID))
         && !providers
             .iter()
-            .any(|provider| provider == CLAUDE_CLI_PROVIDER_ID)
+            .any(|provider| provider == CLAUDE_CODE_PROVIDER_ID)
     {
-        providers.push(CLAUDE_CLI_PROVIDER_ID.to_string());
+        providers.push(CLAUDE_CODE_PROVIDER_ID.to_string());
     }
     if distribution.uses_custom_branding()
         && config.model_provider.required_auth_provider() == Some(ANTHROPIC_AUTH_PROVIDER_ID)
@@ -1245,10 +1247,10 @@ mod tests {
     async fn requested_picker_providers_include_openai_pairing_for_claudex_sessions() {
         let temp_dir = tempfile::tempdir().expect("tempdir");
         let mut config = build_config(&temp_dir).await;
-        config.model_provider_id = "claude_cli".to_string();
+        config.model_provider_id = CLAUDE_CODE_PROVIDER_ID.to_string();
         config.model_provider = config
             .model_providers
-            .get("claude_cli")
+            .get(CLAUDE_CODE_PROVIDER_ID)
             .cloned()
             .expect("built-in claude provider");
 
@@ -1261,7 +1263,7 @@ mod tests {
 
         assert_eq!(
             providers,
-            vec!["claude_cli".to_string(), "openai".to_string()]
+            vec![CLAUDE_CODE_PROVIDER_ID.to_string(), "openai".to_string()]
         );
     }
 
@@ -1279,7 +1281,7 @@ mod tests {
 
         assert_eq!(
             providers,
-            vec!["openai".to_string(), "claude_cli".to_string()]
+            vec!["openai".to_string(), CLAUDE_CODE_PROVIDER_ID.to_string()]
         );
     }
 

@@ -119,13 +119,25 @@ wire_api = "chat"
 #[test]
 fn test_deserialize_claude_cli_wire_api() {
     let provider_toml = r#"
-name = "Claude Code CLI"
+name = "Claude Code"
 wire_api = "claude_cli"
         "#;
 
     let provider: ModelProviderInfo = toml::from_str(provider_toml).unwrap();
     assert_eq!(provider.wire_api, WireApi::ClaudeCli);
-    assert_eq!(provider.wire_api.to_string(), "claude_cli");
+    assert_eq!(provider.wire_api.to_string(), "claude_code");
+}
+
+#[test]
+fn test_deserialize_claude_code_wire_api() {
+    let provider_toml = r#"
+name = "Claude Code"
+wire_api = "claude_code"
+        "#;
+
+    let provider: ModelProviderInfo = toml::from_str(provider_toml).unwrap();
+    assert_eq!(provider.wire_api, WireApi::ClaudeCli);
+    assert_eq!(provider.wire_api.to_string(), "claude_code");
 }
 
 #[test]
@@ -176,7 +188,7 @@ fn model_picker_provider_ids_pairs_builtin_claude_with_openai() {
     assert_eq!(
         model_picker_provider_ids(&providers, CLAUDE_CLI_PROVIDER_ID),
         vec![
-            CLAUDE_CLI_PROVIDER_ID.to_string(),
+            CLAUDE_CODE_PROVIDER_ID.to_string(),
             OPENAI_PROVIDER_ID.to_string()
         ]
     );

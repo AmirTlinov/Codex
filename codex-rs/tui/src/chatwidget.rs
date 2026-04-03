@@ -8753,7 +8753,8 @@ impl ChatWidget {
         provider_id: &str,
         effort: ReasoningEffortConfig,
     ) -> &'static str {
-        if provider_id == "claude_cli"
+        if (provider_id == codex_core::CLAUDE_CODE_PROVIDER_ID
+            || provider_id == codex_core::CLAUDE_CLI_PROVIDER_ID)
             && model == "claude-opus-4-6"
             && effort == ReasoningEffortConfig::XHigh
         {

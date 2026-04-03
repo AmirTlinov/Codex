@@ -1,3 +1,4 @@
+use codex_core::CLAUDE_CODE_PROVIDER_ID;
 use codex_core::CLAUDE_CLI_PROVIDER_ID;
 use codex_core::OPENAI_PROVIDER_ID;
 use codex_core::models_manager::collaboration_mode_presets::CollaborationModesConfig;
@@ -33,7 +34,7 @@ pub(crate) struct ModelProviderGroup {
 
 pub(crate) fn provider_group_label(entry: &ModelCatalogEntry) -> String {
     match entry.provider_id.as_str() {
-        CLAUDE_CLI_PROVIDER_ID => "Anthropic".to_string(),
+        CLAUDE_CODE_PROVIDER_ID | CLAUDE_CLI_PROVIDER_ID => "Anthropic".to_string(),
         OPENAI_PROVIDER_ID => "OpenAI".to_string(),
         _ if !entry.provider_name.trim().is_empty() => entry.provider_name.trim().to_string(),
         _ if !entry.provider_id.trim().is_empty() => entry.provider_id.clone(),
@@ -88,10 +89,11 @@ impl ModelCatalog {
         &self,
         provider_id: &str,
     ) -> Result<Vec<ModelPreset>, Infallible> {
+        let provider_id = codex_core::canonical_claude_provider_id(provider_id);
         let models = self
             .models
             .iter()
-            .filter(|entry| entry.provider_id == provider_id)
+            .filter(|entry| codex_core::canonical_claude_provider_id(&entry.provider_id) == provider_id)
             .map(|entry| entry.preset.clone())
             .collect::<Vec<_>>();
         if models.is_empty() {
@@ -154,8 +156,8 @@ mod tests {
     fn provider_group_label_maps_built_in_provider_families() {
         assert_eq!(
             provider_group_label(&ModelCatalogEntry {
-                provider_id: CLAUDE_CLI_PROVIDER_ID.to_string(),
-                provider_name: "Claude Code CLI".to_string(),
+                provider_id: CLAUDE_CODE_PROVIDER_ID.to_string(),
+                provider_name: "Claude Code".to_string(),
                 preset: preset("claude-opus-4-6"),
             }),
             "Anthropic"
@@ -179,13 +181,13 @@ mod tests {
                 preset: preset("gpt-5.4"),
             },
             ModelCatalogEntry {
-                provider_id: CLAUDE_CLI_PROVIDER_ID.to_string(),
-                provider_name: "Claude Code CLI".to_string(),
+                provider_id: CLAUDE_CODE_PROVIDER_ID.to_string(),
+                provider_name: "Claude Code".to_string(),
                 preset: preset("claude-opus-4-6"),
             },
             ModelCatalogEntry {
-                provider_id: CLAUDE_CLI_PROVIDER_ID.to_string(),
-                provider_name: "Claude Code CLI".to_string(),
+                provider_id: CLAUDE_CODE_PROVIDER_ID.to_string(),
+                provider_name: "Claude Code".to_string(),
                 preset: preset("claude-sonnet-4-6"),
             },
         ]);
@@ -194,17 +196,17 @@ mod tests {
             groups,
             vec![
                 ModelProviderGroup {
-                    provider_id: CLAUDE_CLI_PROVIDER_ID.to_string(),
+                    provider_id: CLAUDE_CODE_PROVIDER_ID.to_string(),
                     label: "Anthropic".to_string(),
                     entries: vec![
                         ModelCatalogEntry {
-                            provider_id: CLAUDE_CLI_PROVIDER_ID.to_string(),
-                            provider_name: "Claude Code CLI".to_string(),
+                            provider_id: CLAUDE_CODE_PROVIDER_ID.to_string(),
+                            provider_name: "Claude Code".to_string(),
                             preset: preset("claude-opus-4-6"),
                         },
                         ModelCatalogEntry {
-                            provider_id: CLAUDE_CLI_PROVIDER_ID.to_string(),
-                            provider_name: "Claude Code CLI".to_string(),
+                            provider_id: CLAUDE_CODE_PROVIDER_ID.to_string(),
+                            provider_name: "Claude Code".to_string(),
                             preset: preset("claude-sonnet-4-6"),
                         },
                     ],

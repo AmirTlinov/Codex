@@ -250,9 +250,9 @@ if ((\$# > 0)) && [[ "\$1" == "--version" || "\$1" == "-V" ]]; then
 fi
 
 exec "\$chosen_binary" \
-  -c model_provider=anthropic \
+  -c model_provider=claude_code \
   -c model=claude-opus-4-6 \
-  -c agent_backend=codex \
+  -c agent_backend=claude_code \
   "\$@"
 WRAPPER
 chmod 0755 "$wrapper_path"

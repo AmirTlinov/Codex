@@ -40,6 +40,7 @@ use crate::config_loader::ResidencyRequirement;
 use crate::config_loader::Sourced;
 use crate::config_loader::load_config_layers_state;
 use crate::memories::memory_root;
+use crate::model_provider_info::CLAUDE_CODE_PROVIDER_ID;
 use crate::model_provider_info::CLAUDE_CLI_PROVIDER_ID;
 use crate::model_provider_info::LEGACY_OLLAMA_CHAT_PROVIDER_ID;
 use crate::model_provider_info::LMSTUDIO_OSS_PROVIDER_ID;
@@ -155,7 +156,8 @@ pub(crate) const DEFAULT_AGENT_JOB_MAX_RUNTIME_SECONDS: Option<u64> = None;
 
 pub const CONFIG_TOML_FILE: &str = "config.toml";
 const OPENAI_BASE_URL_ENV_VAR: &str = "OPENAI_BASE_URL";
-const RESERVED_MODEL_PROVIDER_IDS: [&str; 4] = [
+const RESERVED_MODEL_PROVIDER_IDS: [&str; 5] = [
+    CLAUDE_CODE_PROVIDER_ID,
     CLAUDE_CLI_PROVIDER_ID,
     OPENAI_PROVIDER_ID,
     OLLAMA_OSS_PROVIDER_ID,
@@ -424,7 +426,7 @@ pub struct Config {
     /// Optional agent role to use when refreshing the reflective window.
     pub reflective_window_agent_type: Option<String>,
 
-    /// Claude Code CLI integration settings for `agent_backend = "claude_cli"`.
+    /// Claude Code carrier settings for `agent_backend = "claude_code"`.
     pub claude_cli: ClaudeCliConfig,
 
     /// Memories subsystem settings.
@@ -1347,7 +1349,10 @@ pub struct ConfigToml {
     /// Optional agent role to use when refreshing the reflective window.
     pub reflective_window_agent_type: Option<String>,
 
-    /// Claude Code CLI integration settings for `agent_backend = "claude_cli"`.
+    /// Claude Code carrier settings for `agent_backend = "claude_code"`.
+    pub claude_code: Option<ClaudeCliToml>,
+
+    /// Legacy Claude Code carrier settings for `agent_backend = "claude_cli"`.
     pub claude_cli: Option<ClaudeCliToml>,
 
     /// Agent-related settings (thread limits, etc.).
@@ -2308,10 +2313,14 @@ impl Config {
             model_providers.entry(key).or_insert(provider);
         }
 
-        let model_provider_id = model_provider
+        let model_provider_id = crate::canonical_claude_provider_id(
+            model_provider
             .or(config_profile.model_provider)
             .or(cfg.model_provider)
-            .unwrap_or_else(|| "openai".to_string());
+            .as_deref()
+            .unwrap_or("openai"),
+        )
+        .to_string();
         let model_provider = model_providers
             .get(&model_provider_id)
             .ok_or_else(|| {
@@ -2361,7 +2370,11 @@ impl Config {
             let trimmed = value.trim();
             (!trimmed.is_empty()).then(|| trimmed.to_string())
         });
-        let mut claude_cli: ClaudeCliConfig = cfg.claude_cli.unwrap_or_default().into();
+        let mut claude_cli: ClaudeCliConfig = cfg
+            .claude_code
+            .or(cfg.claude_cli)
+            .unwrap_or_default()
+            .into();
         claude_cli.auth_home = Some(codex_home.clone());
         claude_cli.auth_credentials_store_mode = cfg.cli_auth_credentials_store.unwrap_or_default();
         if agent_job_max_runtime_seconds == Some(0) {

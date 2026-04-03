@@ -46,15 +46,15 @@ This fork is maintained as a downstream customization layer over
   branch, reroutes the in-app update action to this clone's
   `scripts/install-claudex.sh` instead of upstream OpenAI install flows, and
   prefers the newest local debug build over release unless
-  `CLAUDEX_PROFILE=release` is set. `Claudex` now defaults to native Anthropic
-  execution inside Codex (`model_provider=anthropic`, `agent_backend=codex`)
-  instead of using `claude_cli` as the main lane. `Claudex` also owns native
-  Anthropic auth under `~/.claudex`: Anthropic API-key login is the supported
-  auth mode for the native Messages API lane, while Claude.ai OAuth is stored
-  only for explicit `claude_cli` compat use because Anthropic's native
-  `/v1/messages` API rejects OAuth bearer tokens. Any explicit `claude_cli`
-  compat runtime still receives that saved auth from Codex rather than
-  silently depending on global `~/.claude` auth state.
+  `CLAUDEX_PROFILE=release` is set. `Claudex` now defaults to the first-class
+  Claude Code carrier/backend (`model_provider=claude_code`,
+  `agent_backend=claude_code`) while keeping the direct native Anthropic
+  Messages API lane available as a separate provider for API-key usage.
+  `Claudex` also owns Anthropic auth under `~/.claudex`: Claude.ai OAuth and
+  Anthropic API-key login both belong to the Claude Code lane, while the
+  native `/v1/messages` lane remains API-key-only because Anthropic rejects
+  OAuth bearer tokens there. Claude Code carrier runtime still receives saved
+  auth from Codex rather than silently depending on global `~/.claude` state.
 - If you change Claudex runtime behavior or any user-visible Claudex surface,
   do not stop at green tests: rebuild and reinstall the local `claudex` binary
   yourself with `scripts/install-claudex.sh` before claiming done.

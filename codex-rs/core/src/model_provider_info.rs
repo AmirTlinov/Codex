@@ -47,9 +47,9 @@ pub enum WireApi {
     #[serde(rename = "anthropic")]
     #[schemars(rename = "anthropic")]
     Anthropic,
-    /// The local Claude Code CLI invoked as a turn-scoped subprocess.
-    #[serde(rename = "claude_cli")]
-    #[schemars(rename = "claude_cli")]
+    /// The local Claude Code carrier invoked as a turn-scoped subprocess.
+    #[serde(rename = "claude_code", alias = "claude_cli")]
+    #[schemars(rename = "claude_code")]
     ClaudeCli,
 }
 
@@ -58,7 +58,7 @@ impl fmt::Display for WireApi {
         let value = match self {
             Self::Responses => "responses",
             Self::Anthropic => "anthropic",
-            Self::ClaudeCli => "claude_cli",
+            Self::ClaudeCli => "claude_code",
         };
         f.write_str(value)
     }
@@ -73,11 +73,11 @@ impl<'de> Deserialize<'de> for WireApi {
         match value.as_str() {
             "responses" => Ok(Self::Responses),
             "anthropic" => Ok(Self::Anthropic),
-            "claude_cli" => Ok(Self::ClaudeCli),
+            "claude_code" | "claude_cli" => Ok(Self::ClaudeCli),
             "chat" => Err(serde::de::Error::custom(CHAT_WIRE_API_REMOVED_ERROR)),
             _ => Err(serde::de::Error::unknown_variant(
                 &value,
-                &["responses", "anthropic", "claude_cli"],
+                &["responses", "anthropic", "claude_code"],
             )),
         }
     }
@@ -349,6 +349,7 @@ pub const DEFAULT_OLLAMA_PORT: u16 = 11434;
 
 pub const LMSTUDIO_OSS_PROVIDER_ID: &str = "lmstudio";
 pub const OLLAMA_OSS_PROVIDER_ID: &str = "ollama";
+pub const CLAUDE_CODE_PROVIDER_ID: &str = "claude_code";
 pub const CLAUDE_CLI_PROVIDER_ID: &str = "claude_cli";
 pub const ANTHROPIC_PROVIDER_ID: &str = "anthropic";
 
@@ -374,16 +375,16 @@ pub fn built_in_model_providers(
             LMSTUDIO_OSS_PROVIDER_ID,
             create_oss_provider(DEFAULT_LMSTUDIO_PORT, WireApi::Responses),
         ),
-        (CLAUDE_CLI_PROVIDER_ID, create_claude_cli_provider()),
+        (CLAUDE_CODE_PROVIDER_ID, create_claude_code_provider()),
     ]
     .into_iter()
     .map(|(k, v)| (k.to_string(), v))
     .collect()
 }
 
-pub fn create_claude_cli_provider() -> ModelProviderInfo {
+pub fn create_claude_code_provider() -> ModelProviderInfo {
     ModelProviderInfo {
-        name: "Claude Code CLI".into(),
+        name: "Claude Code".into(),
         base_url: None,
         env_key: None,
         env_key_instructions: None,
@@ -400,6 +401,10 @@ pub fn create_claude_cli_provider() -> ModelProviderInfo {
         requires_openai_auth: false,
         supports_websockets: false,
     }
+}
+
+pub fn create_claude_cli_provider() -> ModelProviderInfo {
+    create_claude_code_provider()
 }
 
 pub fn create_anthropic_provider() -> ModelProviderInfo {
@@ -467,6 +472,7 @@ pub fn model_picker_provider_ids(
     model_providers: &HashMap<String, ModelProviderInfo>,
     active_provider_id: &str,
 ) -> Vec<String> {
+    let active_provider_id = canonical_claude_provider_id(active_provider_id);
     let mut provider_ids = vec![active_provider_id.to_string()];
     let Some(active_provider) = model_providers.get(active_provider_id) else {
         return provider_ids;
@@ -482,6 +488,14 @@ pub fn model_picker_provider_ids(
     }
 
     provider_ids
+}
+
+pub fn canonical_claude_provider_id(provider_id: &str) -> &str {
+    if provider_id == CLAUDE_CLI_PROVIDER_ID {
+        CLAUDE_CODE_PROVIDER_ID
+    } else {
+        provider_id
+    }
 }
 
 #[cfg(test)]

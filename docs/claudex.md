@@ -21,26 +21,23 @@ target-only path repair on launch. Override the destination with
 `CLAUDEX_SOURCE_HOME=/path/to/source`. You can force the binary choice with
 `CLAUDEX_PROFILE=debug|release`.
 
-- `model_provider=anthropic`
+- `model_provider=claude_code`
 - `model=claude-opus-4-6`
-- `agent_backend=codex`
+- `agent_backend=claude_code`
 
 This means:
 
-- the main session now runs through a native Anthropic provider inside Codex,
-  not through the old `claude_cli` bridge;
-- spawned subagents default to the Codex backend too, so Claude and GPT agents
-  can interoperate inside one control plane instead of living on isolated
-  external backends;
-- `Claudex` now owns a native Anthropic auth lane inside `~/.claudex`:
-  - `claudex login --with-api-key` stores Anthropic API key auth in
-    `anthropic-auth.json`;
-  - native Anthropic Messages API turns use that Anthropic API key;
-  - Claude.ai OAuth is now treated as a `claude_cli` compat-only auth mode,
-    because Anthropic's native `/v1/messages` API rejects OAuth bearer tokens;
-  - when `claude_cli` is used explicitly as a compat backend, Codex injects
-    the saved Anthropic auth into that process instead of depending on the
-    user's global `~/.claude` auth state;
+- the default Claudex lane now runs through a first-class **Claude Code
+  carrier/backend** inside Codex rather than the old `claude_cli`-named compat
+  surface;
+- spawned subagents default to the same Claude Code carrier/backend by default,
+  while GPT agents continue to live on the shared Codex control plane;
+- `Claudex` owns provider-aware Anthropic auth under `~/.claudex`:
+  - `claude_code` lane can use Claude.ai OAuth or an Anthropic API key;
+  - direct native `anthropic` lane is still available for API-key usage;
+  - when Claude Code carrier is used, Codex injects the saved Anthropic auth
+    into that process instead of depending on the user's global `~/.claude`
+    auth state;
 - the model picker keeps the Claude catalog front-and-center while also exposing
   paired OpenAI GPT entries for quick fallback in `claudex` when the OpenAI provider is available;
   when both providers are present, the full `/model` browser now separates them
@@ -59,19 +56,19 @@ This means:
 
 This downstream slice is intentionally honest and narrow:
 
-- the main Claude lane now uses Codex's own tool loop for normal function,
-  freeform, local shell, and tool-search tool calls;
-- the native Anthropic provider now preserves Claude image prompts and image
-  tool-result content too, so `Claudex` is no longer text-only when it stays on
-  the native Anthropic path;
-- `claude_cli` still exists as an explicit compat backend for roles or manual
-  fallback, but it is no longer the default Claudex main-lane runtime; when it
-  is used, Claudex now pins `CLAUDE_CONFIG_DIR` to its own home so it does not
-  silently fall back to global `~/.claude`, and it remains the intentionally
-  narrower text-only fallback surface;
+- the direct native `anthropic` lane is still the only lane that currently uses
+  Codex's native Anthropic Messages API bridge and Codex-owned tool/result
+  reconstruction;
+- the new default `claude_code` lane is now first-class in config/provider/backend
+  naming and auth/account UX, but it still uses the Claude Code carrier
+  implementation under the hood;
+- the native `anthropic` lane now preserves Claude image prompts and image
+  tool-result content too, so API-key Anthropic usage is no longer text-only;
+- native `anthropic` still fail-closes on Claude.ai OAuth because `/v1/messages`
+  rejects OAuth bearer tokens;
 - Anthropic web search / image-generation special built-ins are not yet mapped
-  into native Anthropic tool calls, so the native path currently focuses on the
-  normal Codex function/custom/local-shell/tool-search surfaces;
+  into native Anthropic tool calls, so the native Messages path currently
+  focuses on the normal Codex function/custom/local-shell/tool-search surfaces;
 - `Claude Haiku 4.6` intentionally stays on the stable `haiku` alias; Opus
   exposes `Low/Medium/High/Max`, Sonnet stops at `High`, and Haiku skips the
   reasoning picker entirely.

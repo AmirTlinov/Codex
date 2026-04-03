@@ -12,12 +12,17 @@ use crate::auth::AuthCredentialsStoreMode;
 pub enum AgentBackend {
     #[default]
     Codex,
+    #[serde(rename = "claude_code", alias = "claude_cli")]
     ClaudeCli,
 }
 
 impl AgentBackend {
-    pub(crate) fn is_claude_cli(self) -> bool {
+    pub(crate) fn is_claude_code(self) -> bool {
         matches!(self, Self::ClaudeCli)
+    }
+
+    pub(crate) fn is_claude_cli(self) -> bool {
+        self.is_claude_code()
     }
 }
 

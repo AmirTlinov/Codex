@@ -2620,7 +2620,7 @@ async fn turn_start_rejects_model_provider_pair_when_model_is_not_available() ->
 model = "claude-opus-4-6"
 approval_policy = "never"
 sandbox_mode = "read-only"
-model_provider = "claude_cli"
+model_provider = "claude_code"
 "#,
     )?;
 
@@ -2648,7 +2648,7 @@ model_provider = "claude_cli"
                 text_elements: Vec::new(),
             }],
             model: Some("gpt-5.4".to_string()),
-            model_provider: Some("claude_cli".to_string()),
+            model_provider: Some("claude_code".to_string()),
             ..Default::default()
         })
         .await?;
@@ -2665,7 +2665,7 @@ model_provider = "claude_cli"
         err.error.message
     );
     assert!(
-        err.error.message.contains("claude_cli"),
+        err.error.message.contains("claude_code"),
         "unexpected error message: {}",
         err.error.message
     );

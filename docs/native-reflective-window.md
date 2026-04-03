@@ -26,7 +26,7 @@ This fork now has a working native downstream slice for two things:
 Important boundaries of the current slice:
 
 - external Claude agents are session-local, not resumable from rollout;
-- they are text-only by default unless `[claude_cli].tools` is configured;
+- they are text-only by default unless `[claude_code].tools` is configured;
 - reflective Claude runs are forced toolless and read-only;
 - reflective Claude scopes its transcript to a bounded recent window and keeps
   an omission marker instead of replaying the whole session forever;
@@ -418,7 +418,7 @@ reflective_window_agent_type = "claude_reflector"
 description = "Claude reflective sidecar"
 config_file = "~/.codex/agents/claude-reflector.toml"
 
-[claude_cli]
+[claude_code]
 path = "/home/amir/.npm-global/bin/claude"
 permission_mode = "plan"
 ```
@@ -426,7 +426,7 @@ permission_mode = "plan"
 `~/.codex/agents/claude-reflector.toml`:
 
 ```toml
-agent_backend = "claude_cli"
+agent_backend = "claude_code"
 model = "claude-opus-4-6"
 model_reasoning_effort = "high"
 ```
@@ -434,9 +434,9 @@ model_reasoning_effort = "high"
 If you want all spawned subagents to use Claude by default:
 
 ```toml
-agent_backend = "claude_cli"
+agent_backend = "claude_code"
 
-[claude_cli]
+[claude_code]
 path = "/home/amir/.npm-global/bin/claude"
 permission_mode = "plan"
 tools = ["Read", "Glob", "Grep"]
@@ -455,10 +455,10 @@ config_file = "~/.codex/agents/claude-worker.toml"
 `~/.codex/agents/claude-worker.toml`:
 
 ```toml
-agent_backend = "claude_cli"
+agent_backend = "claude_code"
 model = "claude-opus-4-6"
 
-[claude_cli]
+[claude_code]
 permission_mode = "plan"
 tools = ["Read", "Glob", "Grep"]
 ```
@@ -471,7 +471,7 @@ Notes:
   reflective sidecar";
 - a bad `reflective_window_agent_type` now emits a startup warning instead of
   quietly degrading into a runtime-only no-op;
-- root `agent_backend = "claude_cli"` switches normal spawned subagents too;
+- root `agent_backend = "claude_code"` switches normal spawned subagents too;
 - `tools` is opt-in for external Claude agents; when omitted they stay
   text-only;
 - `add_dirs` should stay narrow and absolute;

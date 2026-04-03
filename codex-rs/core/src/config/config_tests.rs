@@ -4586,6 +4586,42 @@ fn load_config_supports_claude_cli_external_agents() -> anyhow::Result<()> {
 }
 
 #[test]
+fn load_config_supports_claude_code_external_agents() -> anyhow::Result<()> {
+    let fixture = create_test_fixture()?;
+    let claude_path = fixture.codex_home().join("bin/claude");
+    std::fs::create_dir_all(
+        claude_path
+            .parent()
+            .expect("claude path should have a parent directory"),
+    )?;
+    std::fs::write(&claude_path, "#!/usr/bin/env bash\n")?;
+
+    let config = Config::load_from_base_config_with_overrides(
+        ConfigToml {
+            agent_backend: Some(AgentBackend::ClaudeCli),
+            claude_code: Some(ClaudeCliToml {
+                path: Some(AbsolutePathBuf::try_from(claude_path.clone())?),
+                permission_mode: Some(ClaudeCliPermissionMode::Plan),
+                effort: Some(ClaudeCliEffort::High),
+                tools: Some(vec!["Read".to_string()]),
+                add_dirs: None,
+            }),
+            ..ConfigToml::default()
+        },
+        ConfigOverrides {
+            cwd: Some(fixture.cwd_path()),
+            ..Default::default()
+        },
+        fixture.codex_home(),
+    )?;
+
+    assert_eq!(config.agent_backend, AgentBackend::ClaudeCli);
+    assert_eq!(config.claude_cli.path, Some(claude_path));
+    assert_eq!(config.claude_cli.tools, Some(vec!["Read".to_string()]));
+    Ok(())
+}
+
+#[test]
 fn load_config_warns_when_reflective_window_agent_type_is_unknown() -> anyhow::Result<()> {
     let fixture = create_test_fixture()?;
     let config = Config::load_from_base_config_with_overrides(

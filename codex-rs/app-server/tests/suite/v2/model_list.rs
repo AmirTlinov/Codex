@@ -116,7 +116,7 @@ async fn list_models_can_request_multiple_providers() -> Result<()> {
         codex_home.path().join("config.toml"),
         r#"
 model = "claude-opus-4-6"
-model_provider = "claude_cli"
+model_provider = "claude_code"
 approval_policy = "never"
 sandbox_mode = "read-only"
 "#,
@@ -130,7 +130,7 @@ sandbox_mode = "read-only"
             limit: Some(200),
             cursor: None,
             include_hidden: None,
-            providers: Some(vec!["claude_cli".to_string(), "openai".to_string()]),
+            providers: Some(vec!["claude_code".to_string(), "openai".to_string()]),
         })
         .await?;
 
@@ -146,7 +146,7 @@ sandbox_mode = "read-only"
     } = to_response::<ModelListResponse>(response)?;
 
     assert!(
-        items.iter().any(|item| item.provider_id == "claude_cli"),
+        items.iter().any(|item| item.provider_id == "claude_code"),
         "expected Claude models in picker response: {items:#?}"
     );
     assert!(

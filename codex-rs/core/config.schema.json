@@ -9,7 +9,7 @@
     "AgentBackend": {
       "enum": [
         "codex",
-        "claude_cli"
+        "claude_code"
       ],
       "type": "string"
     },
@@ -1967,9 +1967,16 @@
           "type": "string"
         },
         {
-          "description": "The local Claude Code CLI invoked as a turn-scoped subprocess.",
+          "description": "Native Anthropic Messages API.",
           "enum": [
-            "claude_cli"
+            "anthropic"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "The local Claude Code carrier invoked as a turn-scoped subprocess.",
+          "enum": [
+            "claude_code"
           ],
           "type": "string"
         }
@@ -2060,7 +2067,15 @@
           "$ref": "#/definitions/ClaudeCliToml"
         }
       ],
-      "description": "Claude Code CLI integration settings for `agent_backend = \"claude_cli\"`."
+      "description": "Legacy Claude Code carrier settings for `agent_backend = \"claude_cli\"`."
+    },
+    "claude_code": {
+      "allOf": [
+        {
+          "$ref": "#/definitions/ClaudeCliToml"
+        }
+      ],
+      "description": "Claude Code carrier settings for `agent_backend = \"claude_code\"`."
     },
     "cli_auth_credentials_store": {
       "allOf": [
