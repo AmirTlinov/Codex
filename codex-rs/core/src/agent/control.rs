@@ -191,14 +191,14 @@ impl AgentControl {
         let notification_source = session_source.clone();
 
         if config.agent_backend.is_claude_cli() {
-            let thread_id = ThreadId::new();
-            let status = self
+            let (thread_id, status) = self
                 .spawn_external_agent(
                     &state,
-                    thread_id,
-                    &config,
                     notification_source.clone(),
                     &options,
+                    config,
+                    inherited_shell_snapshot,
+                    inherited_exec_policy,
                     initial_operation,
                     &mut agent_metadata,
                     reservation,
@@ -292,25 +292,49 @@ impl AgentControl {
     async fn spawn_external_agent(
         &self,
         state: &Arc<ThreadManagerState>,
-        thread_id: ThreadId,
-        config: &crate::config::Config,
         session_source: Option<SessionSource>,
         options: &SpawnAgentOptions,
+        config: crate::config::Config,
+        inherited_shell_snapshot: Option<Arc<ShellSnapshot>>,
+        inherited_exec_policy: Option<Arc<crate::exec_policy::ExecPolicyManager>>,
         initial_operation: Op,
         agent_metadata: &mut AgentMetadata,
         reservation: crate::agent::registry::SpawnReservation,
-    ) -> CodexResult<AgentStatus> {
+    ) -> CodexResult<(ThreadId, AgentStatus)> {
         let parent_context = self
             .external_parent_context_for_spawn(state, session_source.as_ref(), options)
             .await?;
+        let mut host_config = config.clone();
+        host_config.model = Some(default_claude_model(config.model.as_deref()));
+        host_config.model_provider = crate::create_claude_code_provider();
+        host_config.model_provider_id = crate::CLAUDE_CODE_PROVIDER_ID.to_string();
+        let host_thread = match session_source.clone() {
+            Some(session_source) => {
+                state
+                    .spawn_new_thread_with_source(
+                        host_config,
+                        self.clone(),
+                        session_source,
+                        /*persist_extended_history*/ false,
+                        /*metrics_service_name*/ None,
+                        inherited_shell_snapshot,
+                        inherited_exec_policy,
+                    )
+                    .await?
+            }
+            None => state.spawn_new_thread(host_config, self.clone()).await?,
+        };
+        let thread_id = host_thread.thread_id;
         let config_snapshot = external_thread_config_snapshot(
-            config,
+            &config,
             session_source.clone().unwrap_or(SessionSource::Cli),
         );
-        self.external
+        if let Err(err) = self
+            .external
             .spawn_agent(
                 thread_id,
                 ExternalAgentLaunchRequest {
+                    host_thread: host_thread.thread.clone(),
                     config_snapshot,
                     developer_instructions: config.developer_instructions.clone(),
                     claude_cli: config.claude_cli.clone(),
@@ -319,10 +343,22 @@ impl AgentControl {
                 },
                 initial_operation,
             )
-            .await?;
+            .await
+        {
+            let _ = host_thread.thread.shutdown_and_wait().await;
+            let _ = state.remove_thread(&thread_id).await;
+            return Err(err);
+        }
         agent_metadata.agent_id = Some(thread_id);
         reservation.commit(agent_metadata.clone());
-        Ok(self.get_status(thread_id).await)
+        state.notify_thread_created(thread_id);
+        self.persist_thread_spawn_edge_for_source(
+            host_thread.thread.as_ref(),
+            thread_id,
+            session_source.as_ref(),
+        )
+        .await;
+        Ok((thread_id, self.get_status(thread_id).await))
     }
 
     async fn spawn_forked_thread(
@@ -683,6 +719,11 @@ impl AgentControl {
     pub(crate) async fn shutdown_live_agent(&self, agent_id: ThreadId) -> CodexResult<String> {
         if self.external.get_status(agent_id).await.is_some() {
             let result = self.external.close_agent(agent_id).await;
+            if let Ok(state) = self.upgrade()
+                && let Some(thread) = state.remove_thread(&agent_id).await
+            {
+                let _ = thread.shutdown_and_wait().await;
+            }
             self.state.release_spawned_thread(agent_id);
             return result;
         }
@@ -1224,7 +1265,7 @@ fn external_thread_config_snapshot(
 ) -> ThreadConfigSnapshot {
     ThreadConfigSnapshot {
         model: default_claude_model(config.model.as_deref()),
-        model_provider_id: "claude_cli".to_string(),
+        model_provider_id: "claude_code".to_string(),
         service_tier: config.service_tier,
         approval_policy: config.permissions.approval_policy.value(),
         approvals_reviewer: config.approvals_reviewer,

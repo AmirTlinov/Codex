@@ -6,6 +6,8 @@ use std::sync::atomic::AtomicU64;
 use std::sync::atomic::Ordering;
 
 use codex_protocol::ThreadId;
+use codex_protocol::models::ResponseItem;
+use codex_protocol::protocol::Event;
 use codex_protocol::protocol::AgentStatus;
 use codex_protocol::protocol::Op;
 use tokio::sync::Mutex;
@@ -15,23 +17,29 @@ use uuid::Uuid;
 
 use crate::agent::control::render_input_preview;
 use crate::codex_thread::ThreadConfigSnapshot;
+use crate::claude_code_control::ControlRequestParseOutcome;
+use crate::claude_code_control::parse_control_request_line;
+use crate::claude_code_control::resolve_external_claude_code_permission_request;
 use crate::compact_transcript::render_compact_transcript;
 use crate::config::ClaudeCliConfig;
 use crate::config::ClaudeCliEffort;
 use crate::error::CodexErr;
 use crate::error::Result as CodexResult;
+use crate::protocol::EventMsg;
+use crate::protocol::WarningEvent;
+use crate::CodexThread;
 
 pub(crate) use self::claude_cli::ClaudeCliRequest;
 pub(crate) use self::claude_cli::ClaudeCliSession;
 pub(crate) use self::claude_cli::ClaudeCodeTurnResult;
 pub(crate) use self::claude_cli::run_claude_cli;
 pub(crate) use self::claude_cli::run_claude_cli_stream_json_controlled;
-pub(crate) use self::claude_cli::run_claude_code_turn;
 
 const MAX_EXTERNAL_AGENT_CONVERSATION_ENTRIES: usize = 12;
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub(crate) struct ExternalAgentLaunchRequest {
+    pub(crate) host_thread: Arc<CodexThread>,
     pub(crate) config_snapshot: ThreadConfigSnapshot,
     pub(crate) developer_instructions: Option<String>,
     pub(crate) claude_cli: ClaudeCliConfig,
@@ -132,12 +140,13 @@ impl ConversationRole {
 }
 
 #[derive(Clone)]
-struct ActiveTurn {
+struct ExternalActiveTurn {
     generation: u64,
     cancellation_token: CancellationToken,
 }
 
 struct ExternalAgentState {
+    host_thread: Arc<CodexThread>,
     config_snapshot: ThreadConfigSnapshot,
     developer_instructions: Option<String>,
     claude_cli: ClaudeCliConfig,
@@ -145,7 +154,7 @@ struct ExternalAgentState {
     parent_context: Option<String>,
     claude_session_id: Mutex<Option<String>>,
     conversation: Mutex<Vec<ConversationEntry>>,
-    active_turn: Mutex<Option<ActiveTurn>>,
+    active_turn: Mutex<Option<ExternalActiveTurn>>,
     next_generation: AtomicU64,
     status_tx: watch::Sender<AgentStatus>,
 }
@@ -154,6 +163,7 @@ impl ExternalAgentState {
     fn new(request: ExternalAgentLaunchRequest) -> Self {
         let (status_tx, _status_rx) = watch::channel(AgentStatus::PendingInit);
         Self {
+            host_thread: request.host_thread,
             config_snapshot: request.config_snapshot,
             developer_instructions: request.developer_instructions,
             claude_cli: request.claude_cli,
@@ -196,7 +206,7 @@ impl ExternalAgentState {
                     "external Claude agent is already running; wait or interrupt first".to_string(),
                 ));
             }
-            *active_turn = Some(ActiveTurn {
+            *active_turn = Some(ExternalActiveTurn {
                 generation,
                 cancellation_token: cancellation_token.clone(),
             });
@@ -206,6 +216,23 @@ impl ExternalAgentState {
             text: user_message.clone(),
         });
         self.status_tx.send_replace(AgentStatus::Running);
+        let host_turn_context = self.begin_host_turn().await;
+        let host_turn_id = host_turn_context.sub_id.clone();
+        let host_truncation_policy = host_turn_context.truncation_policy;
+        self.record_host_message(
+            host_turn_id.as_str(),
+            host_truncation_policy,
+            ResponseItem::Message {
+                id: None,
+                role: "user".to_string(),
+                content: vec![codex_protocol::models::ContentItem::InputText {
+                    text: user_message.clone(),
+                }],
+                end_turn: None,
+                phase: None,
+            },
+        )
+        .await;
 
         let submission_id = Uuid::new_v4().to_string();
         let state = Arc::clone(self);
@@ -235,8 +262,12 @@ impl ExternalAgentState {
                     .reasoning_effort
                     .map(ClaudeCliEffort::from)),
             };
-            let result = run_claude_code_turn(&state.claude_cli, request, cancellation_token).await;
-            state.finish_turn(generation, result).await;
+            let result = state
+                .run_external_claude_turn(request, host_turn_id.clone(), cancellation_token)
+                .await;
+            state
+                .finish_turn(generation, host_turn_id, host_truncation_policy, result)
+                .await;
         });
 
         Ok(submission_id)
@@ -246,6 +277,7 @@ impl ExternalAgentState {
         let active_turn = self.active_turn.lock().await.take();
         if let Some(active_turn) = active_turn {
             active_turn.cancellation_token.cancel();
+            self.finish_host_turn().await;
             self.status_tx.send_replace(AgentStatus::Interrupted);
         }
         Ok(Uuid::new_v4().to_string())
@@ -257,7 +289,13 @@ impl ExternalAgentState {
         Ok(String::new())
     }
 
-    async fn finish_turn(&self, generation: u64, result: anyhow::Result<ClaudeCodeTurnResult>) {
+    async fn finish_turn(
+        &self,
+        generation: u64,
+        host_turn_id: String,
+        host_truncation_policy: codex_protocol::protocol::TruncationPolicy,
+        result: anyhow::Result<ClaudeCodeTurnResult>,
+    ) {
         let mut active_turn = self.active_turn.lock().await;
         if active_turn
             .as_ref()
@@ -273,6 +311,20 @@ impl ExternalAgentState {
                 if let Some(session_id) = output.session_id {
                     *self.claude_session_id.lock().await = Some(session_id);
                 }
+                self.record_host_message(
+                    host_turn_id.as_str(),
+                    host_truncation_policy,
+                    ResponseItem::Message {
+                        id: None,
+                        role: "assistant".to_string(),
+                        content: vec![codex_protocol::models::ContentItem::OutputText {
+                            text: output.output.clone(),
+                        }],
+                        end_turn: Some(true),
+                        phase: None,
+                    },
+                )
+                .await;
                 self.conversation.lock().await.push(ConversationEntry {
                     role: ConversationRole::Assistant,
                     text: output.output.clone(),
@@ -285,6 +337,18 @@ impl ExternalAgentState {
                 if should_clear_claude_session(&message) {
                     *self.claude_session_id.lock().await = None;
                 }
+                if !message.contains("Claude CLI run cancelled") {
+                    self.host_thread
+                        .codex
+                        .session
+                        .send_event_raw(Event {
+                            id: host_turn_id,
+                            msg: EventMsg::Warning(WarningEvent {
+                                message: message.clone(),
+                            }),
+                        })
+                        .await;
+                }
                 let status = if message.contains("Claude CLI run cancelled") {
                     AgentStatus::Interrupted
                 } else {
@@ -293,6 +357,107 @@ impl ExternalAgentState {
                 self.status_tx.send_replace(status);
             }
         }
+        self.finish_host_turn().await;
+    }
+
+    async fn begin_host_turn(&self) -> Arc<crate::codex::TurnContext> {
+        let turn_context = self.host_thread.codex.session.new_default_turn().await;
+        let mut active_turn = self.host_thread.codex.session.active_turn.lock().await;
+        if let Some(active_turn_state) = active_turn.as_mut() {
+            let mut turn_state = active_turn_state.turn_state.lock().await;
+            turn_state.clear_pending();
+        }
+        *active_turn = Some(crate::state::ActiveTurn::default());
+        turn_context
+    }
+
+    async fn finish_host_turn(&self) {
+        let mut active_turn = self.host_thread.codex.session.active_turn.lock().await;
+        if let Some(active_turn_state) = active_turn.as_mut() {
+            let mut turn_state = active_turn_state.turn_state.lock().await;
+            turn_state.clear_pending();
+        }
+        *active_turn = None;
+    }
+
+    async fn record_host_message(
+        &self,
+        event_id: &str,
+        truncation_policy: codex_protocol::protocol::TruncationPolicy,
+        message: ResponseItem,
+    ) {
+        self.host_thread
+            .codex
+            .session
+            .record_external_host_items(event_id, truncation_policy, &[message])
+            .await;
+    }
+
+    async fn run_external_claude_turn(
+        &self,
+        request: ClaudeCliRequest,
+        host_turn_id: String,
+        cancellation_token: CancellationToken,
+    ) -> anyhow::Result<ClaudeCodeTurnResult> {
+        let controlled = run_claude_cli_stream_json_controlled(
+            &self.claude_cli,
+            request,
+            cancellation_token.clone(),
+        )
+        .await?;
+        let mut raw_lines = controlled.lines;
+        let control_responder = controlled.control_responder;
+        let mut accumulator = crate::claude_code_stream::ClaudeCodeStreamAccumulator::default();
+
+        while let Some(line) = raw_lines.recv().await {
+                    match line {
+                Ok(line) => match parse_control_request_line(&line, &control_responder) {
+                    Ok(ControlRequestParseOutcome::Supported(permission_request)) => {
+                        let resolution = resolve_external_claude_code_permission_request(
+                            &self.host_thread.codex.session,
+                            self.config_snapshot.approval_policy,
+                            &host_turn_id,
+                            &self.config_snapshot.cwd,
+                            &permission_request,
+                        )
+                        .await;
+                        let responder = permission_request.responder();
+                        let request_id = permission_request.request_id.clone();
+                        match resolution.response {
+                            codex_api::common::ClaudeCodeControlResponseSubtype::Allow {
+                                updated_input,
+                            } => responder
+                                .allow_for_request(request_id, updated_input)
+                                .await
+                                .map_err(anyhow::Error::msg)?,
+                            codex_api::common::ClaudeCodeControlResponseSubtype::Deny {
+                                message,
+                            } => responder
+                                .deny(request_id, message)
+                                .await
+                                .map_err(anyhow::Error::msg)?,
+                        }
+                        if resolution.interrupt_turn {
+                            cancellation_token.cancel();
+                        }
+                    }
+                    Ok(ControlRequestParseOutcome::NotControlRequest) => {
+                        let _ = accumulator.push_line(&line)?;
+                    }
+                    Err(message) => anyhow::bail!(message),
+                },
+                Err(err) => return Err(err),
+            }
+        }
+
+        let summary = accumulator.finish();
+        if summary.assistant_text.trim().is_empty() {
+            anyhow::bail!("Claude Code returned empty output");
+        }
+        Ok(ClaudeCodeTurnResult {
+            output: summary.assistant_text,
+            session_id: summary.session_id,
+        })
     }
 }
 

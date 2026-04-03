@@ -79,8 +79,10 @@ This downstream slice is intentionally honest and narrow:
   - `approval_policy=never` / bypassPermissions auto-allows these carrier
     requests instead of accidentally turning them into denials;
   - unsupported Claude control subtypes still fail closed instead of hanging;
-- spawned Claude Code subagents still use the structured carrier, but their
-  permission prompts are not bridged yet the way the main lane is;
+- spawned Claude Code subagents now use a real child thread host too, so
+  supported carrier permission prompts surface on the child thread through the
+  same Codex approval/request-permissions UI rather than dying inside the
+  opaque external runner;
 - the native `anthropic` lane now preserves Claude image prompts and image
   tool-result content too, so API-key Anthropic usage is no longer text-only;
 - native `anthropic` still fail-closes on Claude.ai OAuth because `/v1/messages`

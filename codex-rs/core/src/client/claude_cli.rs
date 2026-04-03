@@ -1,6 +1,8 @@
 use crate::agent::external::ClaudeCliRequest;
 use crate::agent::external::ClaudeCliSession;
 use crate::agent::external::run_claude_cli_stream_json_controlled;
+use crate::claude_code_control::ControlRequestParseOutcome;
+use crate::claude_code_control::parse_control_request_line;
 use crate::claude_code_stream::ClaudeCodeStreamAccumulator;
 use crate::client_common::Prompt;
 use crate::client_common::ResponseEvent;
@@ -11,7 +13,6 @@ use crate::config::ClaudeCliEffort;
 use crate::error::CodexErr;
 use crate::error::Result;
 use crate::event_mapping::is_contextual_user_message_content;
-use codex_api::common::ClaudeCodePermissionRequest;
 use codex_protocol::models::ContentItem;
 use codex_protocol::models::ResponseItem;
 use codex_protocol::openai_models::ModelInfo;
@@ -229,62 +230,4 @@ fn ensure_no_image_inputs(content: &[ContentItem]) -> Result<()> {
 fn render_text_block(tag: &str, text: &str) -> Option<String> {
     let trimmed = text.trim();
     (!trimmed.is_empty()).then(|| format!("<{tag}>\n{trimmed}\n</{tag}>"))
-}
-
-enum ControlRequestParseOutcome {
-    NotControlRequest,
-    Supported(ClaudeCodePermissionRequest),
-}
-
-fn parse_control_request_line(
-    line: &str,
-    control_responder: &codex_api::common::ClaudeCodeControlResponder,
-) -> std::result::Result<ControlRequestParseOutcome, String> {
-    let value: serde_json::Value =
-        serde_json::from_str(line).map_err(|err| format!("parse Claude Code control_request: {err}"))?;
-    if value.get("type").and_then(serde_json::Value::as_str) != Some("control_request") {
-        return Ok(ControlRequestParseOutcome::NotControlRequest);
-    }
-    let request = value
-        .get("request")
-        .and_then(serde_json::Value::as_object)
-        .ok_or_else(|| "Claude Code carrier emitted malformed control_request payload".to_string())?;
-    let subtype = request
-        .get("subtype")
-        .and_then(serde_json::Value::as_str)
-        .ok_or_else(|| "Claude Code carrier emitted malformed control_request subtype".to_string())?;
-    if subtype != "can_use_tool" {
-        return Err("Claude Code carrier emitted an unsupported control_request subtype".to_string());
-    }
-    let input = request
-        .get("input")
-        .cloned()
-        .ok_or_else(|| "Claude Code carrier emitted malformed can_use_tool input".to_string())?;
-    Ok(ControlRequestParseOutcome::Supported(ClaudeCodePermissionRequest::new(
-        value
-            .get("request_id")
-            .and_then(serde_json::Value::as_str)
-            .ok_or_else(|| "Claude Code carrier emitted malformed can_use_tool request_id".to_string())?
-            .to_string(),
-        request
-            .get("tool_name")
-            .and_then(serde_json::Value::as_str)
-            .ok_or_else(|| "Claude Code carrier emitted malformed can_use_tool tool_name".to_string())?
-            .to_string(),
-        input,
-        request
-            .get("tool_use_id")
-            .and_then(serde_json::Value::as_str)
-            .ok_or_else(|| "Claude Code carrier emitted malformed can_use_tool tool_use_id".to_string())?
-            .to_string(),
-        request
-            .get("description")
-            .and_then(serde_json::Value::as_str)
-            .map(str::to_string),
-        request
-            .get("decision_reason")
-            .and_then(serde_json::Value::as_str)
-            .map(str::to_string),
-        control_responder.clone(),
-    )))
 }

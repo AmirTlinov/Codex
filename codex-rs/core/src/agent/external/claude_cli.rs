@@ -14,6 +14,7 @@ use tokio::process::Command;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
+#[cfg(test)]
 use crate::claude_code_stream::ClaudeCodeStreamAccumulator;
 use crate::config::ClaudeCliConfig;
 use crate::config::ClaudeCliEffort;
@@ -160,6 +161,7 @@ pub(crate) async fn run_claude_cli(
     }
 }
 
+#[cfg(test)]
 pub(crate) async fn run_claude_cli_stream_json(
     config: &ClaudeCliConfig,
     request: ClaudeCliRequest,
@@ -504,6 +506,7 @@ pub(crate) async fn run_claude_cli_stream_json_controlled(
     })
 }
 
+#[cfg(test)]
 pub(crate) async fn run_claude_code_turn(
     config: &ClaudeCliConfig,
     request: ClaudeCliRequest,
@@ -529,6 +532,7 @@ pub(crate) async fn run_claude_code_turn(
     })
 }
 
+#[cfg(test)]
 fn is_permission_request_line(line: &str) -> bool {
     serde_json::from_str::<serde_json::Value>(line)
         .ok()

@@ -1,12 +1,17 @@
 use super::*;
+use crate::agent::external::claude_cli::run_claude_code_turn;
 use pretty_assertions::assert_eq;
 use tempfile::TempDir;
 
+use crate::CodexAuth;
+use crate::CodexThread;
+use crate::ThreadManager;
 use codex_protocol::config_types::ApprovalsReviewer;
 use codex_protocol::protocol::AskForApproval;
 use codex_protocol::protocol::SandboxPolicy;
 use codex_protocol::protocol::SessionSource;
 use codex_protocol::user_input::UserInput;
+use std::sync::Arc;
 
 struct MockClaudeScript {
     script_path: std::path::PathBuf,
@@ -83,6 +88,30 @@ fn test_snapshot(cwd: &std::path::Path, model: &str) -> ThreadConfigSnapshot {
     }
 }
 
+async fn host_thread(root: &TempDir, model: &str) -> Arc<CodexThread> {
+    let mut config = crate::config::ConfigBuilder::default()
+        .codex_home(root.path().to_path_buf())
+        .build()
+        .await
+        .expect("build host-thread config");
+    config.model = Some(model.to_string());
+    config.model_provider = crate::create_claude_code_provider();
+    config.model_provider_id = crate::CLAUDE_CODE_PROVIDER_ID.to_string();
+    let manager = ThreadManager::with_models_provider_and_home_for_tests(
+        CodexAuth::from_api_key("dummy"),
+        config.model_provider.clone(),
+        config.codex_home.clone(),
+        Arc::new(codex_exec_server::EnvironmentManager::new(
+            /*exec_server_url*/ None,
+        )),
+    );
+    manager
+        .start_thread(config)
+        .await
+        .expect("start host thread")
+        .thread
+}
+
 fn mock_claude_script(root: &TempDir) -> MockClaudeScript {
     let script_path = root.path().join("mock-claude.sh");
     let args_log_path = root.path().join("invocations.args.log");
@@ -91,7 +120,7 @@ fn mock_claude_script(root: &TempDir) -> MockClaudeScript {
     std::fs::write(
         &script_path,
         format!(
-            "#!/usr/bin/env bash\nset -euo pipefail\nstdin_payload=$(cat)\nprintf '%s\\n' \"$@\" >> '{}'\nprintf -- '--\\n' >> '{}'\nprintf '%s\\n--\\n' \"$stdin_payload\" >> '{}'\ncount=0\nif [[ -f '{}' ]]; then\n  count=$(cat '{}')\nfi\ncount=$((count + 1))\nprintf '%s' \"$count\" > '{}'\nsession_id='123e4567-e89b-12d3-a456-426614174000'\nfor ((i=1; i<=$#; i++)); do\n  if [[ \"${{!i}}\" == '--session-id' ]]; then\n    echo 'unexpected --session-id' >&2\n    exit 99\n  fi\n  if [[ \"${{!i}}\" == '--resume' ]]; then\n    next=$((i + 1))\n    session_id=\"${{!next}}\"\n  fi\ndone\ncat <<EOF\n{{\"type\":\"system\",\"subtype\":\"init\",\"session_id\":\"$session_id\",\"tools\":[],\"mcp_servers\":[],\"model\":\"claude-opus-4-6\",\"permissionMode\":\"bypassPermissions\",\"slash_commands\":[],\"apiKeySource\":\"none\",\"claude_code_version\":\"test\",\"output_style\":\"default\",\"agents\":[],\"skills\":[],\"plugins\":[],\"uuid\":\"init-$count\"}}\n{{\"type\":\"assistant\",\"message\":{{\"model\":\"claude-opus-4-6\",\"id\":\"msg-$count\",\"type\":\"message\",\"role\":\"assistant\",\"content\":[{{\"type\":\"text\",\"text\":\"run-$count\"}}],\"stop_reason\":null,\"stop_sequence\":null,\"stop_details\":null,\"usage\":{{\"input_tokens\":3,\"cache_creation_input_tokens\":0,\"cache_read_input_tokens\":0,\"output_tokens\":2,\"service_tier\":\"standard\",\"inference_geo\":\"not_available\"}},\"context_management\":null}},\"parent_tool_use_id\":null,\"session_id\":\"$session_id\",\"uuid\":\"assistant-$count\"}}\n{{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":false,\"duration_ms\":10,\"duration_api_ms\":10,\"num_turns\":1,\"result\":\"run-$count\",\"stop_reason\":\"end_turn\",\"session_id\":\"$session_id\",\"total_cost_usd\":0.0,\"usage\":{{\"input_tokens\":3,\"cache_creation_input_tokens\":0,\"cache_read_input_tokens\":0,\"output_tokens\":2}},\"modelUsage\":{{}},\"permission_denials\":[],\"uuid\":\"result-$count\"}}\nEOF\n",
+            "#!/usr/bin/env bash\nset -euo pipefail\nIFS= read -r stdin_payload\nprintf '%s\\n' \"$@\" >> '{}'\nprintf -- '--\\n' >> '{}'\nprintf '%s\\n--\\n' \"$stdin_payload\" >> '{}'\ncount=0\nif [[ -f '{}' ]]; then\n  count=$(cat '{}')\nfi\ncount=$((count + 1))\nprintf '%s' \"$count\" > '{}'\nsession_id='123e4567-e89b-12d3-a456-426614174000'\nfor ((i=1; i<=$#; i++)); do\n  if [[ \"${{!i}}\" == '--session-id' ]]; then\n    echo 'unexpected --session-id' >&2\n    exit 99\n  fi\n  if [[ \"${{!i}}\" == '--resume' ]]; then\n    next=$((i + 1))\n    session_id=\"${{!next}}\"\n  fi\ndone\ncat <<EOF\n{{\"type\":\"system\",\"subtype\":\"init\",\"session_id\":\"$session_id\",\"tools\":[],\"mcp_servers\":[],\"model\":\"claude-opus-4-6\",\"permissionMode\":\"bypassPermissions\",\"slash_commands\":[],\"apiKeySource\":\"none\",\"claude_code_version\":\"test\",\"output_style\":\"default\",\"agents\":[],\"skills\":[],\"plugins\":[],\"uuid\":\"init-$count\"}}\n{{\"type\":\"assistant\",\"message\":{{\"model\":\"claude-opus-4-6\",\"id\":\"msg-$count\",\"type\":\"message\",\"role\":\"assistant\",\"content\":[{{\"type\":\"text\",\"text\":\"run-$count\"}}],\"stop_reason\":null,\"stop_sequence\":null,\"stop_details\":null,\"usage\":{{\"input_tokens\":3,\"cache_creation_input_tokens\":0,\"cache_read_input_tokens\":0,\"output_tokens\":2,\"service_tier\":\"standard\",\"inference_geo\":\"not_available\"}},\"context_management\":null}},\"parent_tool_use_id\":null,\"session_id\":\"$session_id\",\"uuid\":\"assistant-$count\"}}\n{{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":false,\"duration_ms\":10,\"duration_api_ms\":10,\"num_turns\":1,\"result\":\"run-$count\",\"stop_reason\":\"end_turn\",\"session_id\":\"$session_id\",\"total_cost_usd\":0.0,\"usage\":{{\"input_tokens\":3,\"cache_creation_input_tokens\":0,\"cache_read_input_tokens\":0,\"output_tokens\":2}},\"modelUsage\":{{}},\"permission_denials\":[],\"uuid\":\"result-$count\"}}\nEOF\n",
             args_log_path.display(),
             args_log_path.display(),
             stdin_log_path.display(),
@@ -125,7 +154,7 @@ fn mock_interruptible_claude_script(root: &TempDir) -> MockClaudeScript {
     std::fs::write(
         &script_path,
         format!(
-            "#!/usr/bin/env bash\nset -euo pipefail\nstdin_payload=$(cat)\nprintf '%s\\n' \"$@\" >> '{}'\nprintf -- '--\\n' >> '{}'\nprintf '%s\\n--\\n' \"$stdin_payload\" >> '{}'\ncount=0\nif [[ -f '{}' ]]; then\n  count=$(cat '{}')\nfi\ncount=$((count + 1))\nprintf '%s' \"$count\" > '{}'\nsession_id='123e4567-e89b-12d3-a456-426614174000'\nfor ((i=1; i<=$#; i++)); do\n  if [[ \"${{!i}}\" == '--session-id' ]]; then\n    echo 'unexpected --session-id' >&2\n    exit 99\n  fi\n  if [[ \"${{!i}}\" == '--resume' ]]; then\n    next=$((i + 1))\n    session_id=\"${{!next}}\"\n  fi\ndone\nif [[ \"$count\" == '2' ]]; then\n  sleep 30\nfi\ncat <<EOF\n{{\"type\":\"system\",\"subtype\":\"init\",\"session_id\":\"$session_id\",\"tools\":[],\"mcp_servers\":[],\"model\":\"claude-opus-4-6\",\"permissionMode\":\"bypassPermissions\",\"slash_commands\":[],\"apiKeySource\":\"none\",\"claude_code_version\":\"test\",\"output_style\":\"default\",\"agents\":[],\"skills\":[],\"plugins\":[],\"uuid\":\"init-$count\"}}\n{{\"type\":\"assistant\",\"message\":{{\"model\":\"claude-opus-4-6\",\"id\":\"msg-$count\",\"type\":\"message\",\"role\":\"assistant\",\"content\":[{{\"type\":\"text\",\"text\":\"run-$count\"}}],\"stop_reason\":null,\"stop_sequence\":null,\"stop_details\":null,\"usage\":{{\"input_tokens\":3,\"cache_creation_input_tokens\":0,\"cache_read_input_tokens\":0,\"output_tokens\":2,\"service_tier\":\"standard\",\"inference_geo\":\"not_available\"}},\"context_management\":null}},\"parent_tool_use_id\":null,\"session_id\":\"$session_id\",\"uuid\":\"assistant-$count\"}}\n{{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":false,\"duration_ms\":10,\"duration_api_ms\":10,\"num_turns\":1,\"result\":\"run-$count\",\"stop_reason\":\"end_turn\",\"session_id\":\"$session_id\",\"total_cost_usd\":0.0,\"usage\":{{\"input_tokens\":3,\"cache_creation_input_tokens\":0,\"cache_read_input_tokens\":0,\"output_tokens\":2}},\"modelUsage\":{{}},\"permission_denials\":[],\"uuid\":\"result-$count\"}}\nEOF\n",
+            "#!/usr/bin/env bash\nset -euo pipefail\nIFS= read -r stdin_payload\nprintf '%s\\n' \"$@\" >> '{}'\nprintf -- '--\\n' >> '{}'\nprintf '%s\\n--\\n' \"$stdin_payload\" >> '{}'\ncount=0\nif [[ -f '{}' ]]; then\n  count=$(cat '{}')\nfi\ncount=$((count + 1))\nprintf '%s' \"$count\" > '{}'\nsession_id='123e4567-e89b-12d3-a456-426614174000'\nfor ((i=1; i<=$#; i++)); do\n  if [[ \"${{!i}}\" == '--session-id' ]]; then\n    echo 'unexpected --session-id' >&2\n    exit 99\n  fi\n  if [[ \"${{!i}}\" == '--resume' ]]; then\n    next=$((i + 1))\n    session_id=\"${{!next}}\"\n  fi\ndone\nif [[ \"$count\" == '2' ]]; then\n  sleep 30\nfi\ncat <<EOF\n{{\"type\":\"system\",\"subtype\":\"init\",\"session_id\":\"$session_id\",\"tools\":[],\"mcp_servers\":[],\"model\":\"claude-opus-4-6\",\"permissionMode\":\"bypassPermissions\",\"slash_commands\":[],\"apiKeySource\":\"none\",\"claude_code_version\":\"test\",\"output_style\":\"default\",\"agents\":[],\"skills\":[],\"plugins\":[],\"uuid\":\"init-$count\"}}\n{{\"type\":\"assistant\",\"message\":{{\"model\":\"claude-opus-4-6\",\"id\":\"msg-$count\",\"type\":\"message\",\"role\":\"assistant\",\"content\":[{{\"type\":\"text\",\"text\":\"run-$count\"}}],\"stop_reason\":null,\"stop_sequence\":null,\"stop_details\":null,\"usage\":{{\"input_tokens\":3,\"cache_creation_input_tokens\":0,\"cache_read_input_tokens\":0,\"output_tokens\":2,\"service_tier\":\"standard\",\"inference_geo\":\"not_available\"}},\"context_management\":null}},\"parent_tool_use_id\":null,\"session_id\":\"$session_id\",\"uuid\":\"assistant-$count\"}}\n{{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":false,\"duration_ms\":10,\"duration_api_ms\":10,\"num_turns\":1,\"result\":\"run-$count\",\"stop_reason\":\"end_turn\",\"session_id\":\"$session_id\",\"total_cost_usd\":0.0,\"usage\":{{\"input_tokens\":3,\"cache_creation_input_tokens\":0,\"cache_read_input_tokens\":0,\"output_tokens\":2}},\"modelUsage\":{{}},\"permission_denials\":[],\"uuid\":\"result-$count\"}}\nEOF\n",
             args_log_path.display(),
             args_log_path.display(),
             stdin_log_path.display(),
@@ -179,6 +208,7 @@ async fn external_agent_registry_runs_claude_code_carrier_turns() {
         .spawn_agent(
             thread_id,
             ExternalAgentLaunchRequest {
+                host_thread: host_thread(&root, "claude-opus-4-6").await,
                 config_snapshot: test_snapshot(root.path(), "claude-opus-4-6"),
                 developer_instructions: Some("Follow repo truth".to_string()),
                 claude_cli: ClaudeCliConfig {
@@ -257,6 +287,7 @@ async fn interrupt_keeps_last_known_good_claude_session() {
         .spawn_agent(
             thread_id,
             ExternalAgentLaunchRequest {
+                host_thread: host_thread(&root, "claude-opus-4-6").await,
                 config_snapshot: test_snapshot(root.path(), "claude-opus-4-6"),
                 developer_instructions: Some("Follow repo truth".to_string()),
                 claude_cli: ClaudeCliConfig {
@@ -404,6 +435,7 @@ async fn interrupted_or_rejected_resume_clears_claude_session_for_future_turns()
         .spawn_agent(
             thread_id,
             ExternalAgentLaunchRequest {
+                host_thread: host_thread(&root, "claude-opus-4-6").await,
                 config_snapshot: test_snapshot(root.path(), "claude-opus-4-6"),
                 developer_instructions: Some("Follow repo truth".to_string()),
                 claude_cli: ClaudeCliConfig {

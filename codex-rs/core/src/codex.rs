@@ -399,6 +399,16 @@ pub struct Codex {
 
 pub(crate) type SessionLoopTermination = Shared<BoxFuture<'static, ()>>;
 
+pub(crate) struct ExternalCommandApprovalRequest {
+    pub(crate) approval_policy: AskForApproval,
+    pub(crate) turn_id: String,
+    pub(crate) call_id: String,
+    pub(crate) approval_id: Option<String>,
+    pub(crate) command: Vec<String>,
+    pub(crate) cwd: PathBuf,
+    pub(crate) reason: Option<String>,
+}
+
 /// Wrapper returned by [`Codex::spawn`] containing the spawned [`Codex`],
 /// the submission id for the initial `ConfigureSession` request and the
 /// unique session id.
@@ -3212,6 +3222,57 @@ impl Session {
         rx_approve.await.unwrap_or(ReviewDecision::Abort)
     }
 
+    pub(crate) async fn request_external_command_approval(
+        &self,
+        request: ExternalCommandApprovalRequest,
+    ) -> ReviewDecision {
+        let ExternalCommandApprovalRequest {
+            approval_policy,
+            turn_id,
+            call_id,
+            approval_id,
+            command,
+            cwd,
+            reason,
+        } = request;
+        let effective_approval_id = approval_id.clone().unwrap_or_else(|| call_id.clone());
+        let (tx_approve, rx_approve) = oneshot::channel();
+        {
+            let mut active = self.active_turn.lock().await;
+            if let Some(at) = active.as_mut() {
+                let mut ts = at.turn_state.lock().await;
+                let _ = ts.insert_pending_approval(effective_approval_id.clone(), tx_approve);
+            } else {
+                return ReviewDecision::Abort;
+            }
+        }
+        let available_decisions = ExecApprovalRequestEvent::default_available_decisions(
+            /*network_approval_context*/ None,
+            /*proposed_execpolicy_amendment*/ None,
+            /*proposed_network_policy_amendments*/ None,
+            /*additional_permissions*/ None,
+        );
+        let event = EventMsg::ExecApprovalRequest(ExecApprovalRequestEvent {
+            call_id,
+            approval_id,
+            turn_id: turn_id.clone(),
+            parsed_cmd: parse_command(&command),
+            command,
+            cwd,
+            reason,
+            network_approval_context: None,
+            proposed_execpolicy_amendment: None,
+            proposed_network_policy_amendments: None,
+            additional_permissions: None,
+            available_decisions: Some(available_decisions),
+        });
+        self.send_event_raw(Event { id: turn_id, msg: event }).await;
+        match approval_policy {
+            AskForApproval::Never => ReviewDecision::Approved,
+            _ => rx_approve.await.unwrap_or(ReviewDecision::Abort),
+        }
+    }
+
     pub async fn request_patch_approval(
         &self,
         turn_context: &TurnContext,
@@ -3300,6 +3361,54 @@ impl Session {
             permissions: args.permissions,
         });
         self.send_event(turn_context, event).await;
+        rx_response.await.ok()
+    }
+
+    pub(crate) async fn request_external_permissions(
+        &self,
+        approval_policy: AskForApproval,
+        turn_id: String,
+        call_id: String,
+        args: RequestPermissionsArgs,
+    ) -> Option<RequestPermissionsResponse> {
+        match approval_policy {
+            AskForApproval::Never => {
+                return Some(RequestPermissionsResponse {
+                    permissions: RequestPermissionProfile::default(),
+                    scope: PermissionGrantScope::Turn,
+                });
+            }
+            AskForApproval::Granular(granular_config)
+                if !granular_config.allows_request_permissions() =>
+            {
+                return Some(RequestPermissionsResponse {
+                    permissions: RequestPermissionProfile::default(),
+                    scope: PermissionGrantScope::Turn,
+                });
+            }
+            AskForApproval::OnFailure
+            | AskForApproval::OnRequest
+            | AskForApproval::UnlessTrusted
+            | AskForApproval::Granular(_) => {}
+        }
+
+        let (tx_response, rx_response) = oneshot::channel();
+        {
+            let mut active = self.active_turn.lock().await;
+            if let Some(at) = active.as_mut() {
+                let mut ts = at.turn_state.lock().await;
+                let _ = ts.insert_pending_request_permissions(call_id.clone(), tx_response);
+            } else {
+                return None;
+            }
+        }
+        let event = EventMsg::RequestPermissions(RequestPermissionsEvent {
+            call_id,
+            turn_id: turn_id.clone(),
+            reason: args.reason,
+            permissions: args.permissions,
+        });
+        self.send_event_raw(Event { id: turn_id, msg: event }).await;
         rx_response.await.ok()
     }
 
@@ -3585,6 +3694,26 @@ impl Session {
     ) {
         let mut state = self.state.lock().await;
         state.record_items(items.iter(), turn_context.truncation_policy);
+    }
+
+    pub(crate) async fn record_external_host_items(
+        &self,
+        event_id: &str,
+        truncation_policy: crate::protocol::TruncationPolicy,
+        items: &[ResponseItem],
+    ) {
+        {
+            let mut state = self.state.lock().await;
+            state.record_items(items.iter(), truncation_policy);
+        }
+        self.persist_rollout_response_items(items).await;
+        for item in items {
+            self.send_event_raw(Event {
+                id: event_id.to_string(),
+                msg: EventMsg::RawResponseItem(RawResponseItemEvent { item: item.clone() }),
+            })
+            .await;
+        }
     }
 
     pub(crate) async fn record_model_warning(&self, message: impl Into<String>, ctx: &TurnContext) {

@@ -2,6 +2,7 @@ use std::path::Path;
 use std::sync::Arc;
 
 use codex_api::common::ClaudeCodeControlResponseSubtype;
+use codex_api::common::ClaudeCodeControlResponder;
 use codex_api::common::ClaudeCodePermissionRequest;
 use codex_protocol::request_permissions::RequestPermissionProfile;
 use codex_protocol::request_permissions::RequestPermissionsArgs;
@@ -10,12 +11,71 @@ use serde_json::Value;
 
 use crate::codex::Session;
 use crate::codex::TurnContext;
+use crate::codex::ExternalCommandApprovalRequest;
 use crate::protocol::AskForApproval;
 use crate::protocol::ReviewDecision;
 
 pub(crate) struct ClaudeCodePermissionResolution {
     pub(crate) response: ClaudeCodeControlResponseSubtype,
     pub(crate) interrupt_turn: bool,
+}
+
+pub(crate) enum ControlRequestParseOutcome {
+    NotControlRequest,
+    Supported(ClaudeCodePermissionRequest),
+}
+
+pub(crate) fn parse_control_request_line(
+    line: &str,
+    control_responder: &ClaudeCodeControlResponder,
+) -> std::result::Result<ControlRequestParseOutcome, String> {
+    let value: serde_json::Value =
+        serde_json::from_str(line).map_err(|err| format!("parse Claude Code control_request: {err}"))?;
+    if value.get("type").and_then(serde_json::Value::as_str) != Some("control_request") {
+        return Ok(ControlRequestParseOutcome::NotControlRequest);
+    }
+    let request = value
+        .get("request")
+        .and_then(serde_json::Value::as_object)
+        .ok_or_else(|| "Claude Code carrier emitted malformed control_request payload".to_string())?;
+    let subtype = request
+        .get("subtype")
+        .and_then(serde_json::Value::as_str)
+        .ok_or_else(|| "Claude Code carrier emitted malformed control_request subtype".to_string())?;
+    if subtype != "can_use_tool" {
+        return Err("Claude Code carrier emitted an unsupported control_request subtype".to_string());
+    }
+    let input = request
+        .get("input")
+        .cloned()
+        .ok_or_else(|| "Claude Code carrier emitted malformed can_use_tool input".to_string())?;
+    Ok(ControlRequestParseOutcome::Supported(ClaudeCodePermissionRequest::new(
+        value
+            .get("request_id")
+            .and_then(serde_json::Value::as_str)
+            .ok_or_else(|| "Claude Code carrier emitted malformed can_use_tool request_id".to_string())?
+            .to_string(),
+        request
+            .get("tool_name")
+            .and_then(serde_json::Value::as_str)
+            .ok_or_else(|| "Claude Code carrier emitted malformed can_use_tool tool_name".to_string())?
+            .to_string(),
+        input,
+        request
+            .get("tool_use_id")
+            .and_then(serde_json::Value::as_str)
+            .ok_or_else(|| "Claude Code carrier emitted malformed can_use_tool tool_use_id".to_string())?
+            .to_string(),
+        request
+            .get("description")
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_string),
+        request
+            .get("decision_reason")
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_string),
+        control_responder.clone(),
+    )))
 }
 
 pub(crate) async fn resolve_claude_code_permission_request(
@@ -44,6 +104,56 @@ pub(crate) async fn resolve_claude_code_permission_request(
     let response = sess
         .request_permissions(
             turn_context.as_ref(),
+            request.request_id.clone(),
+            RequestPermissionsArgs {
+                reason: Some(permission_reason(request)),
+                permissions,
+            },
+        )
+        .await;
+
+    match response {
+        Some(response) if !response.permissions.is_empty() => allowed_resolution(),
+        _ => denied_resolution(format!(
+            "Permission denied for Claude Code tool `{}`",
+            request.tool_name
+        )),
+    }
+}
+
+pub(crate) async fn resolve_external_claude_code_permission_request(
+    sess: &Arc<Session>,
+    approval_policy: AskForApproval,
+    turn_id: &str,
+    cwd: &Path,
+    request: &ClaudeCodePermissionRequest,
+) -> ClaudeCodePermissionResolution {
+    if approval_policy_auto_allows_claude_control(approval_policy) {
+        return allowed_resolution();
+    }
+    if is_bash_tool(&request.tool_name) {
+        return resolve_external_bash_permission_request(
+            sess,
+            approval_policy,
+            turn_id,
+            cwd,
+            request,
+        )
+        .await;
+    }
+
+    let Some(permissions) = requested_permissions_for_tool(&request.tool_name, &request.input, cwd)
+    else {
+        return denied_resolution(format!(
+            "Claudex does not yet know how to approve Claude Code tool `{}` with these inputs.",
+            request.tool_name
+        ));
+    };
+
+    let response = sess
+        .request_external_permissions(
+            approval_policy,
+            turn_id.to_string(),
             request.request_id.clone(),
             RequestPermissionsArgs {
                 reason: Some(permission_reason(request)),
@@ -98,6 +208,37 @@ async fn resolve_bash_permission_request(
             /*additional_permissions*/ None,
             /*available_decisions*/ None,
         )
+        .await;
+
+    review_decision_to_control_response(decision, &request.tool_name)
+}
+
+async fn resolve_external_bash_permission_request(
+    sess: &Arc<Session>,
+    approval_policy: AskForApproval,
+    turn_id: &str,
+    cwd: &Path,
+    request: &ClaudeCodePermissionRequest,
+) -> ClaudeCodePermissionResolution {
+    let Some(command) = request
+        .input
+        .get("command")
+        .and_then(Value::as_str)
+        .map(str::to_owned)
+    else {
+        return denied_resolution("Claude Code Bash request did not include a command.".to_string());
+    };
+
+    let decision = sess
+        .request_external_command_approval(ExternalCommandApprovalRequest {
+            approval_policy,
+            turn_id: turn_id.to_string(),
+            call_id: request.tool_use_id.clone(),
+            approval_id: Some(request.request_id.clone()),
+            command: vec![command],
+            cwd: cwd.to_path_buf(),
+            reason: Some(permission_reason(request)),
+        })
         .await;
 
     review_decision_to_control_response(decision, &request.tool_name)

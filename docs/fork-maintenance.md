@@ -161,6 +161,9 @@ What it does:
   requests use request-permissions; `approval_policy=never` auto-allows the
   bridge so bypassPermissions does not dead-end; unsupported control subtypes
   still fail closed;
+- gives external Claude agents a real child-thread host so supported approval
+  prompts now surface on that child thread too, instead of remaining trapped
+  inside a status-only external runner;
 - brands the runtime as `Claudex`, makes `claudex --version` report the
   current downstream short SHA, uses the same downstream product name in the
   default terminal title plus CLI update/human-output copy, points update

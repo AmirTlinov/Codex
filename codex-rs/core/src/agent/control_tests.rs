@@ -6,6 +6,7 @@ use crate::agent::agent_status_from_event;
 use crate::config::AgentRoleConfig;
 use crate::config::Config;
 use crate::config::ConfigBuilder;
+use crate::config::Constrained;
 use crate::config_loader::LoaderOverrides;
 use crate::contextual_user_message::SUBAGENT_NOTIFICATION_OPEN_TAG;
 use assert_matches::assert_matches;
@@ -15,15 +16,19 @@ use codex_protocol::AgentPath;
 use codex_protocol::config_types::ModeKind;
 use codex_protocol::models::ContentItem;
 use codex_protocol::models::ResponseItem;
+use codex_protocol::protocol::AskForApproval;
 use codex_protocol::protocol::ErrorEvent;
 use codex_protocol::protocol::EventMsg;
 use codex_protocol::protocol::InterAgentCommunication;
+use codex_protocol::protocol::ReviewDecision;
 use codex_protocol::protocol::SessionSource;
 use codex_protocol::protocol::SubAgentSource;
 use codex_protocol::protocol::TurnAbortReason;
 use codex_protocol::protocol::TurnAbortedEvent;
 use codex_protocol::protocol::TurnCompleteEvent;
 use codex_protocol::protocol::TurnStartedEvent;
+use codex_protocol::request_permissions::PermissionGrantScope;
+use codex_protocol::request_permissions::RequestPermissionsResponse;
 use pretty_assertions::assert_eq;
 use tempfile::TempDir;
 use tokio::time::Duration;
@@ -74,6 +79,141 @@ struct MockClaudeScript {
     stdin_log_path: std::path::PathBuf,
 }
 
+fn mock_claude_permission_script(root: &TempDir) -> MockClaudeScript {
+    let script_path = root.path().join("mock-control-claude-permission.sh");
+    let stdin_log_path = root.path().join("control-claude-permission.stdin.log");
+    let script = [
+        "#!/usr/bin/env bash".to_string(),
+        "set -euo pipefail".to_string(),
+        "IFS= read -r first_line".to_string(),
+        format!("printf '%s\\n--\\n' \"$first_line\" >> '{}'", stdin_log_path.display()),
+        "session_id='123e4567-e89b-12d3-a456-4266141740aa'".to_string(),
+        "cat <<'EOF'".to_string(),
+        "{\"type\":\"system\",\"subtype\":\"init\",\"session_id\":\"123e4567-e89b-12d3-a456-4266141740aa\",\"tools\":[],\"mcp_servers\":[],\"model\":\"claude-opus-4-6\",\"permissionMode\":\"default\",\"slash_commands\":[],\"apiKeySource\":\"none\",\"claude_code_version\":\"test\",\"output_style\":\"default\",\"agents\":[],\"skills\":[],\"plugins\":[],\"uuid\":\"init-1\"}".to_string(),
+        "{\"type\":\"control_request\",\"request_id\":\"req-1\",\"request\":{\"subtype\":\"can_use_tool\",\"tool_name\":\"Read\",\"input\":{\"file_path\":\"AGENTS.md\"},\"tool_use_id\":\"tool-1\",\"description\":\"Read AGENTS.md\"}}".to_string(),
+        "EOF".to_string(),
+        "while IFS= read -r line; do".to_string(),
+        format!("  printf '%s\\n--\\n' \"$line\" >> '{}'", stdin_log_path.display()),
+        "  if [[ \"$line\" == *'\"type\":\"control_response\"'* && \"$line\" == *'\"request_id\":\"req-1\"'* && \"$line\" == *'\"behavior\":\"allow\"'* ]]; then".to_string(),
+        "    cat <<'EOF'".to_string(),
+        "{\"type\":\"assistant\",\"message\":{\"model\":\"claude-opus-4-6\",\"id\":\"msg-1\",\"type\":\"message\",\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":\"approved\"}],\"stop_reason\":null,\"stop_sequence\":null,\"stop_details\":null,\"usage\":{\"input_tokens\":3,\"cache_creation_input_tokens\":0,\"cache_read_input_tokens\":0,\"output_tokens\":1,\"service_tier\":\"standard\",\"inference_geo\":\"not_available\"},\"context_management\":null},\"parent_tool_use_id\":null,\"session_id\":\"123e4567-e89b-12d3-a456-4266141740aa\",\"uuid\":\"assistant-1\"}".to_string(),
+        "{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":false,\"duration_ms\":10,\"duration_api_ms\":10,\"num_turns\":1,\"result\":\"approved\",\"stop_reason\":\"end_turn\",\"session_id\":\"123e4567-e89b-12d3-a456-4266141740aa\",\"total_cost_usd\":0.0,\"usage\":{\"input_tokens\":3,\"cache_creation_input_tokens\":0,\"cache_read_input_tokens\":0,\"output_tokens\":1},\"modelUsage\":{},\"permission_denials\":[],\"uuid\":\"result-1\"}".to_string(),
+        "EOF".to_string(),
+        "    exit 0".to_string(),
+        "  fi".to_string(),
+        "done".to_string(),
+        "exit 13".to_string(),
+    ]
+    .join("\n");
+    std::fs::write(
+        &script_path,
+        script,
+    )
+    .expect("write mock Claude permission script");
+    let mut permissions = std::fs::metadata(&script_path)
+        .expect("mock Claude permission metadata")
+        .permissions();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(&script_path, permissions)
+            .expect("chmod mock Claude permission");
+    }
+    MockClaudeScript {
+        script_path,
+        stdin_log_path,
+    }
+}
+
+fn mock_claude_bash_permission_script(root: &TempDir) -> MockClaudeScript {
+    let script_path = root.path().join("mock-control-claude-bash-permission.sh");
+    let stdin_log_path = root.path().join("control-claude-bash-permission.stdin.log");
+    let script = [
+        "#!/usr/bin/env bash".to_string(),
+        "set -euo pipefail".to_string(),
+        "IFS= read -r first_line".to_string(),
+        format!("printf '%s\\n--\\n' \"$first_line\" >> '{}'", stdin_log_path.display()),
+        "session_id='123e4567-e89b-12d3-a456-4266141740ab'".to_string(),
+        "cat <<'EOF'".to_string(),
+        "{\"type\":\"system\",\"subtype\":\"init\",\"session_id\":\"123e4567-e89b-12d3-a456-4266141740ab\",\"tools\":[],\"mcp_servers\":[],\"model\":\"claude-opus-4-6\",\"permissionMode\":\"default\",\"slash_commands\":[],\"apiKeySource\":\"none\",\"claude_code_version\":\"test\",\"output_style\":\"default\",\"agents\":[],\"skills\":[],\"plugins\":[],\"uuid\":\"init-1\"}".to_string(),
+        "{\"type\":\"control_request\",\"request_id\":\"req-bash-1\",\"request\":{\"subtype\":\"can_use_tool\",\"tool_name\":\"Bash\",\"input\":{\"command\":\"git status\"},\"tool_use_id\":\"tool-bash-1\",\"description\":\"Run git status\"}}".to_string(),
+        "EOF".to_string(),
+        "while IFS= read -r line; do".to_string(),
+        format!("  printf '%s\\n--\\n' \"$line\" >> '{}'", stdin_log_path.display()),
+        "  if [[ \"$line\" == *'\"type\":\"control_response\"'* && \"$line\" == *'\"request_id\":\"req-bash-1\"'* && \"$line\" == *'\"behavior\":\"allow\"'* ]]; then".to_string(),
+        "    cat <<'EOF'".to_string(),
+        "{\"type\":\"assistant\",\"message\":{\"model\":\"claude-opus-4-6\",\"id\":\"msg-1\",\"type\":\"message\",\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":\"bash-approved\"}],\"stop_reason\":null,\"stop_sequence\":null,\"stop_details\":null,\"usage\":{\"input_tokens\":3,\"cache_creation_input_tokens\":0,\"cache_read_input_tokens\":0,\"output_tokens\":1,\"service_tier\":\"standard\",\"inference_geo\":\"not_available\"},\"context_management\":null},\"parent_tool_use_id\":null,\"session_id\":\"123e4567-e89b-12d3-a456-4266141740ab\",\"uuid\":\"assistant-1\"}".to_string(),
+        "{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":false,\"duration_ms\":10,\"duration_api_ms\":10,\"num_turns\":1,\"result\":\"bash-approved\",\"stop_reason\":\"end_turn\",\"session_id\":\"123e4567-e89b-12d3-a456-4266141740ab\",\"total_cost_usd\":0.0,\"usage\":{\"input_tokens\":3,\"cache_creation_input_tokens\":0,\"cache_read_input_tokens\":0,\"output_tokens\":1},\"modelUsage\":{},\"permission_denials\":[],\"uuid\":\"result-1\"}".to_string(),
+        "EOF".to_string(),
+        "    exit 0".to_string(),
+        "  fi".to_string(),
+        "done".to_string(),
+        "exit 13".to_string(),
+    ]
+    .join("\n");
+    std::fs::write(&script_path, script).expect("write mock Claude bash permission script");
+    let mut permissions = std::fs::metadata(&script_path)
+        .expect("mock Claude bash permission metadata")
+        .permissions();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(&script_path, permissions)
+            .expect("chmod mock Claude bash permission");
+    }
+    MockClaudeScript {
+        script_path,
+        stdin_log_path,
+    }
+}
+
+fn mock_claude_interruptible_permission_script(root: &TempDir) -> MockClaudeScript {
+    let script_path = root.path().join("mock-control-claude-interrupt-permission.sh");
+    let stdin_log_path = root.path().join("control-claude-interrupt-permission.stdin.log");
+    let count_path = root.path().join("control-claude-interrupt-permission.count");
+    let script = [
+        "#!/usr/bin/env bash".to_string(),
+        "set -euo pipefail".to_string(),
+        "IFS= read -r first_line".to_string(),
+        format!("printf '%s\\n--\\n' \"$first_line\" >> '{}'", stdin_log_path.display()),
+        format!("count=0; if [[ -f '{}' ]]; then count=$(cat '{}'); fi", count_path.display(), count_path.display()),
+        "count=$((count + 1))".to_string(),
+        format!("printf '%s' \"$count\" > '{}'", count_path.display()),
+        "session_id='123e4567-e89b-12d3-a456-4266141740ac'".to_string(),
+        "if [[ \"$count\" == '1' ]]; then".to_string(),
+        "  cat <<'EOF'".to_string(),
+        "{\"type\":\"system\",\"subtype\":\"init\",\"session_id\":\"123e4567-e89b-12d3-a456-4266141740ac\",\"tools\":[],\"mcp_servers\":[],\"model\":\"claude-opus-4-6\",\"permissionMode\":\"default\",\"slash_commands\":[],\"apiKeySource\":\"none\",\"claude_code_version\":\"test\",\"output_style\":\"default\",\"agents\":[],\"skills\":[],\"plugins\":[],\"uuid\":\"init-1\"}".to_string(),
+        "{\"type\":\"control_request\",\"request_id\":\"req-int-1\",\"request\":{\"subtype\":\"can_use_tool\",\"tool_name\":\"Read\",\"input\":{\"file_path\":\"AGENTS.md\"},\"tool_use_id\":\"tool-int-1\",\"description\":\"Read AGENTS.md\"}}".to_string(),
+        "EOF".to_string(),
+        "  sleep 30".to_string(),
+        "else".to_string(),
+        "  cat <<'EOF'".to_string(),
+        "{\"type\":\"system\",\"subtype\":\"init\",\"session_id\":\"123e4567-e89b-12d3-a456-4266141740ac\",\"tools\":[],\"mcp_servers\":[],\"model\":\"claude-opus-4-6\",\"permissionMode\":\"default\",\"slash_commands\":[],\"apiKeySource\":\"none\",\"claude_code_version\":\"test\",\"output_style\":\"default\",\"agents\":[],\"skills\":[],\"plugins\":[],\"uuid\":\"init-2\"}".to_string(),
+        "{\"type\":\"assistant\",\"message\":{\"model\":\"claude-opus-4-6\",\"id\":\"msg-2\",\"type\":\"message\",\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":\"after-interrupt\"}],\"stop_reason\":null,\"stop_sequence\":null,\"stop_details\":null,\"usage\":{\"input_tokens\":3,\"cache_creation_input_tokens\":0,\"cache_read_input_tokens\":0,\"output_tokens\":1,\"service_tier\":\"standard\",\"inference_geo\":\"not_available\"},\"context_management\":null},\"parent_tool_use_id\":null,\"session_id\":\"123e4567-e89b-12d3-a456-4266141740ac\",\"uuid\":\"assistant-2\"}".to_string(),
+        "{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":false,\"duration_ms\":10,\"duration_api_ms\":10,\"num_turns\":1,\"result\":\"after-interrupt\",\"stop_reason\":\"end_turn\",\"session_id\":\"123e4567-e89b-12d3-a456-4266141740ac\",\"total_cost_usd\":0.0,\"usage\":{\"input_tokens\":3,\"cache_creation_input_tokens\":0,\"cache_read_input_tokens\":0,\"output_tokens\":1},\"modelUsage\":{},\"permission_denials\":[],\"uuid\":\"result-2\"}".to_string(),
+        "EOF".to_string(),
+        "fi".to_string(),
+    ]
+    .join("\n");
+    std::fs::write(&script_path, script).expect("write mock Claude interrupt permission script");
+    let mut permissions = std::fs::metadata(&script_path)
+        .expect("mock Claude interrupt permission metadata")
+        .permissions();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(&script_path, permissions)
+            .expect("chmod mock Claude interrupt permission");
+    }
+    MockClaudeScript {
+        script_path,
+        stdin_log_path,
+    }
+}
+
 impl AgentControlHarness {
     async fn new() -> Self {
         let (home, config) = test_config().await;
@@ -111,7 +251,7 @@ fn mock_claude_script(root: &TempDir) -> MockClaudeScript {
     std::fs::write(
         &script_path,
         format!(
-            "#!/usr/bin/env bash\nset -euo pipefail\nstdin_payload=$(cat)\nprintf '%s\\n--\\n' \"$stdin_payload\" >> '{}'\ncount=0\nif [[ -f '{}' ]]; then\n  count=$(cat '{}')\nfi\ncount=$((count + 1))\nprintf '%s' \"$count\" > '{}'\nsession_id='123e4567-e89b-12d3-a456-426614174001'\ncat <<EOF\n{{\"type\":\"system\",\"subtype\":\"init\",\"session_id\":\"$session_id\",\"tools\":[],\"mcp_servers\":[],\"model\":\"claude-opus-4-6\",\"permissionMode\":\"bypassPermissions\",\"slash_commands\":[],\"apiKeySource\":\"none\",\"claude_code_version\":\"test\",\"output_style\":\"default\",\"agents\":[],\"skills\":[],\"plugins\":[],\"uuid\":\"init-$count\"}}\n{{\"type\":\"assistant\",\"message\":{{\"model\":\"claude-opus-4-6\",\"id\":\"msg-$count\",\"type\":\"message\",\"role\":\"assistant\",\"content\":[{{\"type\":\"text\",\"text\":\"run-$count\"}}],\"stop_reason\":null,\"stop_sequence\":null,\"stop_details\":null,\"usage\":{{\"input_tokens\":3,\"cache_creation_input_tokens\":0,\"cache_read_input_tokens\":0,\"output_tokens\":2,\"service_tier\":\"standard\",\"inference_geo\":\"not_available\"}},\"context_management\":null}},\"parent_tool_use_id\":null,\"session_id\":\"$session_id\",\"uuid\":\"assistant-$count\"}}\n{{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":false,\"duration_ms\":10,\"duration_api_ms\":10,\"num_turns\":1,\"result\":\"run-$count\",\"stop_reason\":\"end_turn\",\"session_id\":\"$session_id\",\"total_cost_usd\":0.0,\"usage\":{{\"input_tokens\":3,\"cache_creation_input_tokens\":0,\"cache_read_input_tokens\":0,\"output_tokens\":2}},\"modelUsage\":{{}},\"permission_denials\":[],\"uuid\":\"result-$count\"}}\nEOF\n",
+            "#!/usr/bin/env bash\nset -euo pipefail\nIFS= read -r stdin_payload\nprintf '%s\\n--\\n' \"$stdin_payload\" >> '{}'\ncount=0\nif [[ -f '{}' ]]; then\n  count=$(cat '{}')\nfi\ncount=$((count + 1))\nprintf '%s' \"$count\" > '{}'\nsession_id='123e4567-e89b-12d3-a456-426614174001'\ncat <<EOF\n{{\"type\":\"system\",\"subtype\":\"init\",\"session_id\":\"$session_id\",\"tools\":[],\"mcp_servers\":[],\"model\":\"claude-opus-4-6\",\"permissionMode\":\"bypassPermissions\",\"slash_commands\":[],\"apiKeySource\":\"none\",\"claude_code_version\":\"test\",\"output_style\":\"default\",\"agents\":[],\"skills\":[],\"plugins\":[],\"uuid\":\"init-$count\"}}\n{{\"type\":\"assistant\",\"message\":{{\"model\":\"claude-opus-4-6\",\"id\":\"msg-$count\",\"type\":\"message\",\"role\":\"assistant\",\"content\":[{{\"type\":\"text\",\"text\":\"run-$count\"}}],\"stop_reason\":null,\"stop_sequence\":null,\"stop_details\":null,\"usage\":{{\"input_tokens\":3,\"cache_creation_input_tokens\":0,\"cache_read_input_tokens\":0,\"output_tokens\":2,\"service_tier\":\"standard\",\"inference_geo\":\"not_available\"}},\"context_management\":null}},\"parent_tool_use_id\":null,\"session_id\":\"$session_id\",\"uuid\":\"assistant-$count\"}}\n{{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":false,\"duration_ms\":10,\"duration_api_ms\":10,\"num_turns\":1,\"result\":\"run-$count\",\"stop_reason\":\"end_turn\",\"session_id\":\"$session_id\",\"total_cost_usd\":0.0,\"usage\":{{\"input_tokens\":3,\"cache_creation_input_tokens\":0,\"cache_read_input_tokens\":0,\"output_tokens\":2}},\"modelUsage\":{{}},\"permission_denials\":[],\"uuid\":\"result-$count\"}}\nEOF\n",
             stdin_log_path.display(),
             count_path.display(),
             count_path.display(),
@@ -593,6 +733,172 @@ async fn send_inter_agent_communication_routes_to_external_claude_agent() {
     let stdin_log =
         std::fs::read_to_string(&mock_claude.stdin_log_path).expect("read Claude stdin log");
     assert!(stdin_log.contains("delegated follow-up"));
+}
+
+#[tokio::test]
+async fn external_claude_agent_routes_permission_requests_through_child_thread() {
+    let harness = AgentControlHarness::new().await;
+    let mock_claude = mock_claude_permission_script(&harness._home);
+    let mut config = harness.config.clone();
+    config.agent_backend = crate::config::AgentBackend::ClaudeCode;
+    config.claude_cli.path = Some(mock_claude.script_path.clone());
+    config.permissions.approval_policy = Constrained::allow_any(AskForApproval::OnRequest);
+
+    let thread_id = harness
+        .control
+        .spawn_agent(config, text_input("read AGENTS via child approval"), /*session_source*/ None)
+        .await
+        .expect("spawn external Claude agent");
+    let child_thread = harness
+        .manager
+        .get_thread(thread_id)
+        .await
+        .expect("external child thread host should exist");
+
+    let request = timeout(Duration::from_secs(5), async {
+        loop {
+            let event = child_thread.next_event().await.expect("child thread event");
+            if matches!(event.msg, EventMsg::RequestPermissions(_)) {
+                break event.msg;
+            }
+        }
+    })
+    .await
+    .expect("permission request should arrive");
+    let EventMsg::RequestPermissions(request) = request else {
+        panic!("expected request_permissions event");
+    };
+    child_thread
+        .submit(Op::RequestPermissionsResponse {
+            id: request.call_id.clone(),
+            response: RequestPermissionsResponse {
+                permissions: request.permissions,
+                scope: PermissionGrantScope::Turn,
+            },
+        })
+        .await
+        .expect("approve external child permission request");
+
+    let status = wait_for_final_agent_status(&harness.control, thread_id).await;
+    assert_eq!(status, AgentStatus::Completed(Some("approved".to_string())));
+
+    let stdin_log =
+        std::fs::read_to_string(&mock_claude.stdin_log_path).expect("read permission stdin log");
+    assert!(stdin_log.contains("\"type\":\"control_response\""));
+    assert!(stdin_log.contains("\"request_id\":\"req-1\""));
+}
+
+#[tokio::test]
+async fn external_claude_agent_routes_bash_approval_through_child_thread() {
+    let harness = AgentControlHarness::new().await;
+    let mock_claude = mock_claude_bash_permission_script(&harness._home);
+    let mut config = harness.config.clone();
+    config.agent_backend = crate::config::AgentBackend::ClaudeCode;
+    config.claude_cli.path = Some(mock_claude.script_path.clone());
+    config.permissions.approval_policy = Constrained::allow_any(AskForApproval::OnRequest);
+
+    let thread_id = harness
+        .control
+        .spawn_agent(
+            config,
+            text_input("run git status via child approval"),
+            /*session_source*/ None,
+        )
+        .await
+        .expect("spawn external Claude agent");
+    let child_thread = harness
+        .manager
+        .get_thread(thread_id)
+        .await
+        .expect("external child thread host should exist");
+
+    let request = timeout(Duration::from_secs(5), async {
+        loop {
+            let event = child_thread.next_event().await.expect("child thread event");
+            if matches!(event.msg, EventMsg::ExecApprovalRequest(_)) {
+                break event.msg;
+            }
+        }
+    })
+    .await
+    .expect("bash exec approval request should arrive");
+    let EventMsg::ExecApprovalRequest(request) = request else {
+        panic!("expected exec approval request");
+    };
+    child_thread
+        .submit(Op::ExecApproval {
+            id: request.effective_approval_id(),
+            turn_id: Some(request.turn_id),
+            decision: ReviewDecision::Approved,
+        })
+        .await
+        .expect("approve external child bash request");
+
+    let status = wait_for_final_agent_status(&harness.control, thread_id).await;
+    assert_eq!(status, AgentStatus::Completed(Some("bash-approved".to_string())));
+
+    let stdin_log = std::fs::read_to_string(&mock_claude.stdin_log_path)
+        .expect("read bash permission stdin log");
+    assert!(stdin_log.contains("\"type\":\"control_response\""));
+    assert!(stdin_log.contains("\"request_id\":\"req-bash-1\""));
+}
+
+#[tokio::test]
+async fn external_claude_interrupt_clears_pending_child_thread_permission_wait() {
+    let harness = AgentControlHarness::new().await;
+    let mock_claude = mock_claude_interruptible_permission_script(&harness._home);
+    let mut config = harness.config.clone();
+    config.agent_backend = crate::config::AgentBackend::ClaudeCode;
+    config.claude_cli.path = Some(mock_claude.script_path.clone());
+    config.permissions.approval_policy = Constrained::allow_any(AskForApproval::OnRequest);
+
+    let thread_id = harness
+        .control
+        .spawn_agent(
+            config,
+            text_input("interrupt pending permission"),
+            /*session_source*/ None,
+        )
+        .await
+        .expect("spawn external Claude agent");
+    let child_thread = harness
+        .manager
+        .get_thread(thread_id)
+        .await
+        .expect("external child thread host should exist");
+
+    let _request = timeout(Duration::from_secs(5), async {
+        loop {
+            let event = child_thread.next_event().await.expect("child thread event");
+            if matches!(event.msg, EventMsg::RequestPermissions(_)) {
+                break event.msg;
+            }
+        }
+    })
+    .await
+    .expect("permission request should arrive before interrupt");
+
+    harness
+        .control
+        .interrupt_agent(thread_id)
+        .await
+        .expect("interrupt external agent");
+    let status = wait_for_final_agent_status(&harness.control, thread_id).await;
+    assert_eq!(status, AgentStatus::Interrupted);
+
+    harness
+        .control
+        .send_input(thread_id, text_input("run after interrupt"))
+        .await
+        .expect("send follow-up after interrupt");
+    let status = wait_for_agent_status_change(&harness.control, thread_id, &AgentStatus::Interrupted)
+        .await;
+    let status = if matches!(status, AgentStatus::Completed(_)) {
+        status
+    } else {
+        wait_for_final_agent_status(&harness.control, thread_id).await
+    };
+    assert_eq!(status, AgentStatus::Completed(Some("after-interrupt".to_string())));
 }
 
 #[tokio::test]
