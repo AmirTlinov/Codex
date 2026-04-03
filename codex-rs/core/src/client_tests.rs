@@ -613,6 +613,83 @@ async fn stream_fails_closed_on_unsupported_claude_code_control_request() {
 }
 
 #[tokio::test]
+async fn stream_fails_closed_on_malformed_claude_code_permission_request() {
+    let root = TempDir::new().expect("create temp dir");
+    let script_path = root.path().join("mock-claude-malformed-control.sh");
+    std::fs::write(
+        &script_path,
+        "#!/usr/bin/env bash\nset -euo pipefail\nIFS= read -r _first_line\nprintf '%s\n' '{\"type\":\"control_request\",\"request_id\":\"req-1\",\"request\":{\"subtype\":\"can_use_tool\",\"tool_name\":\"Read\",\"input\":{\"file_path\":\"AGENTS.md\"}}}'\nsleep 30\n",
+    )
+    .expect("write malformed control mock claude script");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mut permissions = std::fs::metadata(&script_path)
+            .expect("malformed control mock claude metadata")
+            .permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(&script_path, permissions)
+            .expect("chmod malformed control mock claude");
+    }
+
+    let client = ModelClient::new(
+        /*auth_manager*/ None,
+        ThreadId::new(),
+        crate::create_claude_code_provider(),
+        crate::config::ClaudeCliConfig {
+            path: Some(script_path),
+            ..Default::default()
+        },
+        root.path().to_path_buf(),
+        crate::auth::AuthCredentialsStoreMode::File,
+        SessionSource::Cli,
+        /*model_verbosity*/ None,
+        /*enable_request_compression*/ false,
+        /*include_timing_metrics*/ false,
+        /*beta_features_header*/ None,
+    );
+    let mut client_session = client.new_session();
+    let prompt = crate::Prompt {
+        input: vec![ResponseItem::Message {
+            id: None,
+            role: "user".to_string(),
+            content: vec![ContentItem::InputText {
+                text: "Read AGENTS.md".to_string(),
+            }],
+            end_turn: None,
+            phase: None,
+        }],
+        ..Default::default()
+    };
+
+    let mut stream = client_session
+        .stream(
+            &prompt,
+            &test_model_info_with_slug("claude-opus-4-6"),
+            root.path(),
+            &test_session_telemetry(),
+            /*effort*/ None,
+            ReasoningSummary::None,
+            /*service_tier*/ None,
+            /*turn_metadata_header*/ None,
+            CancellationToken::new(),
+        )
+        .await
+        .expect("claude stream should start");
+
+    let event = stream
+        .next()
+        .await
+        .expect("expected malformed control failure event");
+    let crate::error::CodexErr::Stream(message, _response_id) =
+        event.expect_err("malformed control request should fail closed")
+    else {
+        panic!("expected stream error");
+    };
+    assert!(message.contains("malformed can_use_tool"), "{message}");
+}
+
+#[tokio::test]
 async fn stream_routes_main_turns_to_native_anthropic_provider() {
     let server = MockServer::start().await;
     let sse_body = concat!(
