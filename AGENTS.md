@@ -49,10 +49,12 @@ This fork is maintained as a downstream customization layer over
   `CLAUDEX_PROFILE=release` is set. `Claudex` now defaults to native Anthropic
   execution inside Codex (`model_provider=anthropic`, `agent_backend=codex`)
   instead of using `claude_cli` as the main lane. `Claudex` also owns native
-  Anthropic auth under `~/.claudex`: Claude.ai OAuth and Anthropic API-key
-  login flow through Codex account surfaces and are stored there, while any
-  explicit `claude_cli` compat runtime still receives that saved auth from
-  Codex rather than silently depending on global `~/.claude` auth state.
+  Anthropic auth under `~/.claudex`: Anthropic API-key login is the supported
+  auth mode for the native Messages API lane, while Claude.ai OAuth is stored
+  only for explicit `claude_cli` compat use because Anthropic's native
+  `/v1/messages` API rejects OAuth bearer tokens. Any explicit `claude_cli`
+  compat runtime still receives that saved auth from Codex rather than
+  silently depending on global `~/.claude` auth state.
 - When the downstream workflow changes, update the matching repo truth in the
   same change: `AGENTS.md`, `.agents/skills/*`, and `docs/fork-maintenance.md`.
 - Keep durable intent and workflow truth in repo files, not only in chat.

@@ -22,6 +22,7 @@ pub use anthropic::AnthropicLoginServer;
 pub use anthropic::AnthropicLoginServerOptions;
 pub use anthropic::AnthropicRuntimeAuth;
 pub use anthropic::AnthropicShutdownHandle;
+pub use anthropic::NATIVE_ANTHROPIC_OAUTH_UNSUPPORTED_MESSAGE;
 pub use anthropic::account_display_from_auth;
 pub use anthropic::load_anthropic_auth;
 pub use anthropic::login_with_anthropic_api_key;

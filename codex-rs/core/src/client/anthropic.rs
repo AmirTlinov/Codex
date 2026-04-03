@@ -99,8 +99,10 @@ async fn resolve_auth(
         Some(crate::auth::AnthropicRuntimeAuth::ApiKey(api_key)) => {
             AnthropicApiAuthProvider::ApiKey(api_key)
         }
-        Some(crate::auth::AnthropicRuntimeAuth::OauthAccessToken(access_token)) => {
-            AnthropicApiAuthProvider::Oauth(access_token)
+        Some(crate::auth::AnthropicRuntimeAuth::OauthAccessToken(_)) => {
+            return Err(CodexErr::UnsupportedOperation(
+                crate::auth::NATIVE_ANTHROPIC_OAUTH_UNSUPPORTED_MESSAGE.to_string(),
+            ));
         }
         None => AnthropicApiAuthProvider::None,
     })
@@ -110,15 +112,11 @@ async fn resolve_auth(
 enum AnthropicApiAuthProvider {
     None,
     ApiKey(String),
-    Oauth(String),
 }
 
 impl codex_api::AuthProvider for AnthropicApiAuthProvider {
     fn bearer_token(&self) -> Option<String> {
-        match self {
-            Self::Oauth(token) => Some(token.clone()),
-            Self::None | Self::ApiKey(_) => None,
-        }
+        None
     }
 
     fn apply_headers(&self, headers: &mut HeaderMap) {
@@ -127,11 +125,6 @@ impl codex_api::AuthProvider for AnthropicApiAuthProvider {
             Self::ApiKey(api_key) => {
                 if let Ok(header) = HeaderValue::from_str(api_key) {
                     let _ = headers.insert("x-api-key", header);
-                }
-            }
-            Self::Oauth(token) => {
-                if let Ok(header) = HeaderValue::from_str(&format!("Bearer {token}")) {
-                    let _ = headers.insert(http::header::AUTHORIZATION, header);
                 }
             }
         }

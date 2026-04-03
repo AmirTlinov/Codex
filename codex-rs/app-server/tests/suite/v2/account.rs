@@ -1615,13 +1615,41 @@ async fn anthropic_api_key_login_and_get_account() -> Result<()> {
 }
 
 #[tokio::test]
+async fn native_anthropic_oauth_login_is_rejected() -> Result<()> {
+    let codex_home = TempDir::new()?;
+    create_config_toml(
+        codex_home.path(),
+        CreateConfigTomlParams {
+            wire_api: Some("anthropic".to_string()),
+            ..Default::default()
+        },
+    )?;
+
+    let mut mcp = McpProcess::new(codex_home.path()).await?;
+    timeout(DEFAULT_READ_TIMEOUT, mcp.initialize()).await??;
+
+    let request_id = mcp.send_login_account_anthropic_oauth_request().await?;
+    let err: JSONRPCError = timeout(
+        DEFAULT_READ_TIMEOUT,
+        mcp.read_stream_until_error_message(RequestId::Integer(request_id)),
+    )
+    .await??;
+
+    assert_eq!(
+        err.error.message,
+        codex_core::auth::NATIVE_ANTHROPIC_OAUTH_UNSUPPORTED_MESSAGE
+    );
+    Ok(())
+}
+
+#[tokio::test]
 #[serial(login_port)]
 async fn anthropic_oauth_login_completes_via_browser_callback() -> Result<()> {
     let codex_home = TempDir::new()?;
     create_config_toml(
         codex_home.path(),
         CreateConfigTomlParams {
-            wire_api: Some("anthropic".to_string()),
+            wire_api: Some("claude_cli".to_string()),
             ..Default::default()
         },
     )?;
@@ -1781,6 +1809,64 @@ async fn get_account_with_expired_anthropic_oauth_degrades_to_logged_out() -> Re
                 }
             },
             "last_refresh": (Utc::now() - chrono::Duration::hours(1)).to_rfc3339()
+        }))?,
+    )?;
+
+    let mut mcp = McpProcess::new(codex_home.path()).await?;
+    timeout(DEFAULT_READ_TIMEOUT, mcp.initialize()).await??;
+
+    let request_id = mcp
+        .send_get_account_request(GetAccountParams {
+            refresh_token: false,
+        })
+        .await?;
+    let resp: JSONRPCResponse = timeout(
+        DEFAULT_READ_TIMEOUT,
+        mcp.read_stream_until_response_message(RequestId::Integer(request_id)),
+    )
+    .await??;
+    let received: GetAccountResponse = to_response(resp)?;
+    assert_eq!(
+        received,
+        GetAccountResponse {
+            account: None,
+            requires_openai_auth: false,
+            required_auth_provider: Some("anthropic".to_string()),
+        }
+    );
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn get_account_with_native_anthropic_oauth_degrades_to_logged_out() -> Result<()> {
+    let codex_home = TempDir::new()?;
+    create_config_toml(
+        codex_home.path(),
+        CreateConfigTomlParams {
+            wire_api: Some("anthropic".to_string()),
+            ..Default::default()
+        },
+    )?;
+    std::fs::write(
+        codex_home.path().join("anthropic-auth.json"),
+        serde_json::to_string_pretty(&json!({
+            "auth_mode": "oauth",
+            "api_key": null,
+            "oauth": {
+                "access_token": "oauth-access-token",
+                "refresh_token": "oauth-refresh-token",
+                "expires_at": (Utc::now() + chrono::Duration::hours(1)).to_rfc3339(),
+                "scopes": ["user:profile", "user:inference"],
+                "profile": {
+                    "email": "claude@example.com",
+                    "display_name": "Claude User",
+                    "organization_uuid": "org-anthropic",
+                    "subscription_type": "max",
+                    "rate_limit_tier": "default_claude_max_5x"
+                }
+            },
+            "last_refresh": null
         }))?,
     )?;
 

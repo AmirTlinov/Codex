@@ -45,7 +45,11 @@ description: Downstream workflow for config, MCP, plugin, skill, AGENTS, and wra
 - If the ask is about Anthropic / Claude auth in `Claudex`, do not stop at the
   PATH wrapper. The wrapper may set defaults, but the durable truth should live
   in repo-owned auth/account/runtime surfaces so `~/.claudex` owns Anthropic
-  credentials and spawned Claude runtimes receive them from Codex itself.
+  credentials and spawned Claude runtimes receive them from Codex itself. Keep
+  one hard boundary explicit: native `wire_api = "anthropic"` requires an
+  Anthropic API key, while Claude.ai OAuth is compat-only for explicit
+  `claude_cli` flows because Anthropic's native `/v1/messages` API rejects
+  OAuth bearer tokens.
 - Current downstream default is native Anthropic main-lane execution with
   `agent_backend=codex`; keep `claude_cli` as an explicit compat/fallback
   surface rather than the primary path when extending Claudex behavior.

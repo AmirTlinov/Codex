@@ -144,10 +144,10 @@ What it does:
   subagents, and a Claude-first model picker that still exposes paired OpenAI
   GPT entries when the OpenAI provider is available;
 - keeps Anthropic auth native to `Claudex`: the fork now stores Anthropic API
-  key / Claude.ai OAuth credentials under `~/.claudex`, exposes Anthropic login
-  through the app-server/TUI/CLI account surfaces, and injects that saved auth
-  into spawned `claude` subprocesses instead of silently depending on global
-  `~/.claude` login state;
+  key / Claude.ai OAuth credentials under `~/.claudex`, but only the API key is
+  valid for the native Anthropic Messages API lane; Claude.ai OAuth is kept for
+  explicit `claude_cli` compat flows and injected into spawned `claude`
+  subprocesses instead of silently depending on global `~/.claude` login state;
 - brands the runtime as `Claudex`, makes `claudex --version` report the
   current downstream short SHA, uses the same downstream product name in the
   default terminal title plus CLI update/human-output copy, points update

@@ -9,10 +9,12 @@
 
 use codex_core::ANTHROPIC_AUTH_PROVIDER_ID;
 use codex_core::CodexAuth;
+use codex_core::WireApi;
 use codex_core::auth::AnthropicAuthMode;
 use codex_core::auth::AuthCredentialsStoreMode;
 use codex_core::auth::AuthMode;
 use codex_core::auth::CLIENT_ID;
+use codex_core::auth::NATIVE_ANTHROPIC_OAUTH_UNSUPPORTED_MESSAGE;
 use codex_core::auth::load_anthropic_auth;
 use codex_core::auth::login_with_anthropic_api_key;
 use codex_core::auth::login_with_api_key;
@@ -41,6 +43,11 @@ const CHATGPT_LOGIN_DISABLED_MESSAGE: &str =
 const API_KEY_LOGIN_DISABLED_MESSAGE: &str =
     "API key login is disabled. Use ChatGPT login instead.";
 const LOGIN_SUCCESS_MESSAGE: &str = "Successfully logged in";
+
+fn native_anthropic_requires_api_key(config: &Config) -> bool {
+    config.model_provider.required_auth_provider() == Some(ANTHROPIC_AUTH_PROVIDER_ID)
+        && config.model_provider.wire_api == WireApi::Anthropic
+}
 
 /// Installs a small file-backed tracing layer for direct `codex login` flows.
 ///
@@ -145,6 +152,10 @@ pub async fn run_login_with_chatgpt(cli_config_overrides: CliConfigOverrides) ->
     let _login_log_guard = init_login_file_logging(&config);
     tracing::info!("starting browser login flow");
 
+    if native_anthropic_requires_api_key(&config) {
+        eprintln!("{NATIVE_ANTHROPIC_OAUTH_UNSUPPORTED_MESSAGE}");
+        std::process::exit(1);
+    }
     if config.model_provider.required_auth_provider() == Some(ANTHROPIC_AUTH_PROVIDER_ID) {
         match login_with_anthropic_oauth(&config).await {
             Ok(()) => {
@@ -370,6 +381,26 @@ pub async fn run_login_with_device_code_fallback_to_browser(
 pub async fn run_login_status(cli_config_overrides: CliConfigOverrides) -> ! {
     let config = load_config_or_exit(cli_config_overrides).await;
 
+    if native_anthropic_requires_api_key(&config) {
+        match load_anthropic_auth(&config.codex_home, config.cli_auth_credentials_store_mode) {
+            Ok(Some(auth)) if auth.auth_mode == AnthropicAuthMode::ApiKey => {
+                let api_key = auth.api_key.unwrap_or_default();
+                eprintln!(
+                    "Logged in to Anthropic using an API key - {}",
+                    safe_format_key(&api_key)
+                );
+                std::process::exit(0);
+            }
+            Ok(Some(_)) | Ok(None) => {
+                eprintln!("{NATIVE_ANTHROPIC_OAUTH_UNSUPPORTED_MESSAGE}");
+                std::process::exit(1);
+            }
+            Err(err) => {
+                eprintln!("Error checking login status: {err}");
+                std::process::exit(1);
+            }
+        }
+    }
     if config.model_provider.required_auth_provider() == Some(ANTHROPIC_AUTH_PROVIDER_ID) {
         match load_anthropic_auth(&config.codex_home, config.cli_auth_credentials_store_mode) {
             Ok(Some(auth)) => {

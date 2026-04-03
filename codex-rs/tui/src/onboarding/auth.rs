@@ -154,6 +154,7 @@ impl KeyboardHandler for AuthModeWidget {
                 let sign_in_state = { (*self.sign_in_state.read().unwrap()).clone() };
                 match sign_in_state {
                     SignInState::PickMode => {
+                        self.normalize_highlighted_mode();
                         self.handle_sign_in_option(self.highlighted_mode);
                     }
                     SignInState::ChatGptSuccessMessage => {
@@ -189,10 +190,20 @@ pub(crate) struct AuthModeWidget {
     pub forced_chatgpt_workspace_id: Option<String>,
     pub forced_login_method: Option<ForcedLoginMethod>,
     pub required_auth_provider: Option<String>,
+    pub anthropic_oauth_supported: bool,
     pub animations_enabled: bool,
 }
 
 impl AuthModeWidget {
+    fn normalize_highlighted_mode(&mut self) {
+        let options = self.selectable_sign_in_options();
+        if let Some(first) = options.first().copied()
+            && !options.contains(&self.highlighted_mode)
+        {
+            self.highlighted_mode = first;
+        }
+    }
+
     pub(crate) fn cancel_active_attempt(&self) {
         let mut sign_in_state = self.sign_in_state.write().unwrap();
         match &*sign_in_state {
@@ -233,6 +244,10 @@ impl AuthModeWidget {
 
     fn uses_anthropic_auth(&self) -> bool {
         self.required_auth_provider.as_deref() == Some(ANTHROPIC_AUTH_PROVIDER_ID)
+    }
+
+    fn can_use_anthropic_oauth(&self) -> bool {
+        self.uses_anthropic_auth() && self.anthropic_oauth_supported
     }
 
     fn oauth_sign_in_label(&self) -> &'static str {
@@ -279,7 +294,12 @@ impl AuthModeWidget {
     }
 
     fn displayed_sign_in_options(&self) -> Vec<SignInOption> {
-        let mut options = vec![SignInOption::ChatGpt];
+        let mut options = Vec::new();
+        if self.is_chatgpt_login_allowed()
+            && (!self.uses_anthropic_auth() || self.can_use_anthropic_oauth())
+        {
+            options.push(SignInOption::ChatGpt);
+        }
         if self.is_chatgpt_login_allowed() && !self.uses_anthropic_auth() {
             options.push(SignInOption::DeviceCode);
         }
@@ -291,7 +311,9 @@ impl AuthModeWidget {
 
     fn selectable_sign_in_options(&self) -> Vec<SignInOption> {
         let mut options = Vec::new();
-        if self.is_chatgpt_login_allowed() {
+        if self.is_chatgpt_login_allowed()
+            && (!self.uses_anthropic_auth() || self.can_use_anthropic_oauth())
+        {
             options.push(SignInOption::ChatGpt);
             if !self.uses_anthropic_auth() {
                 options.push(SignInOption::DeviceCode);
@@ -360,17 +382,31 @@ impl AuthModeWidget {
 
     fn render_pick_mode(&self, area: Rect, buf: &mut Buffer) {
         let mut lines: Vec<Line> = if self.uses_anthropic_auth() {
-            vec![
-                Line::from(vec![
-                    "  ".into(),
-                    "Sign in with Claude.ai to use Anthropic models in Claudex".into(),
-                ]),
-                Line::from(vec![
-                    "  ".into(),
-                    "or connect an Anthropic API key for usage-based billing".into(),
-                ]),
-                "".into(),
-            ]
+            if self.can_use_anthropic_oauth() {
+                vec![
+                    Line::from(vec![
+                        "  ".into(),
+                        "Sign in with Claude.ai to use Anthropic models in Claudex".into(),
+                    ]),
+                    Line::from(vec![
+                        "  ".into(),
+                        "or connect an Anthropic API key for usage-based billing".into(),
+                    ]),
+                    "".into(),
+                ]
+            } else {
+                vec![
+                    Line::from(vec![
+                        "  ".into(),
+                        "Native Anthropic in Claudex requires an Anthropic API key.".into(),
+                    ]),
+                    Line::from(vec![
+                        "  ".into(),
+                        "Claude.ai OAuth only works with the claude_cli compat backend.".into(),
+                    ]),
+                    "".into(),
+                ]
+            }
         } else {
             vec![
                 Line::from(vec![
@@ -415,8 +451,10 @@ impl AuthModeWidget {
         };
 
         let oauth_description = if !self.is_chatgpt_login_allowed() {
-            if self.uses_anthropic_auth() {
+            if self.uses_anthropic_auth() && self.can_use_anthropic_oauth() {
                 "Claude.ai login is disabled"
+            } else if self.uses_anthropic_auth() {
+                "Claude.ai OAuth is unavailable for the native Anthropic provider"
             } else {
                 "ChatGPT login is disabled"
             }
@@ -461,8 +499,10 @@ impl AuthModeWidget {
 
         if !self.is_api_login_allowed() {
             lines.push(
-                if self.uses_anthropic_auth() {
+                if self.uses_anthropic_auth() && self.can_use_anthropic_oauth() {
                     "  API key login is disabled by this workspace. Sign in with Claude.ai to continue."
+                } else if self.uses_anthropic_auth() {
+                    "  API key login is disabled by this workspace, but native Anthropic requires it."
                 } else {
                     "  API key login is disabled by this workspace. Sign in with ChatGPT to continue."
                 }
@@ -890,7 +930,7 @@ impl AuthModeWidget {
     }
 
     fn handle_existing_oauth_login(&mut self) -> bool {
-        let already_authenticated = if self.uses_anthropic_auth() {
+        let already_authenticated = if self.can_use_anthropic_oauth() {
             matches!(
                 self.login_status,
                 LoginStatus::AuthMode(AppServerAuthMode::AnthropicOauth)
@@ -913,6 +953,14 @@ impl AuthModeWidget {
 
     /// Kicks off the ChatGPT auth flow and keeps the UI state consistent with the attempt.
     fn start_chatgpt_login(&mut self) {
+        if self.uses_anthropic_auth() && !self.can_use_anthropic_oauth() {
+            self.set_error(Some(
+                codex_core::auth::NATIVE_ANTHROPIC_OAUTH_UNSUPPORTED_MESSAGE.to_string(),
+            ));
+            *self.sign_in_state.write().unwrap() = SignInState::PickMode;
+            self.request_frame.schedule_frame();
+            return;
+        }
         // If we're already authenticated with ChatGPT, don't start a new login –
         // just proceed to the success message flow.
         if self.handle_existing_oauth_login() {
@@ -1118,6 +1166,7 @@ mod tests {
             forced_chatgpt_workspace_id: None,
             forced_login_method: Some(ForcedLoginMethod::Chatgpt),
             required_auth_provider: Some("openai".to_string()),
+            anthropic_oauth_supported: false,
             animations_enabled: true,
         };
         (widget, codex_home)
@@ -1174,6 +1223,7 @@ mod tests {
     async fn anthropic_login_options_hide_device_code() {
         let (mut widget, _tmp) = widget_forced_chatgpt().await;
         widget.required_auth_provider = Some(ANTHROPIC_AUTH_PROVIDER_ID.to_string());
+        widget.anthropic_oauth_supported = true;
 
         assert_eq!(
             widget.displayed_sign_in_options(),
@@ -1183,6 +1233,40 @@ mod tests {
             widget.selectable_sign_in_options(),
             vec![SignInOption::ChatGpt]
         );
+    }
+
+    #[tokio::test]
+    async fn native_anthropic_login_options_only_offer_api_key() {
+        let (mut widget, _tmp) = widget_forced_chatgpt().await;
+        widget.required_auth_provider = Some(ANTHROPIC_AUTH_PROVIDER_ID.to_string());
+        widget.forced_login_method = None;
+        widget.anthropic_oauth_supported = false;
+
+        assert_eq!(
+            widget.displayed_sign_in_options(),
+            vec![SignInOption::ApiKey]
+        );
+        assert_eq!(
+            widget.selectable_sign_in_options(),
+            vec![SignInOption::ApiKey]
+        );
+    }
+
+    #[tokio::test]
+    async fn native_anthropic_enter_normalizes_highlight_to_api_key() {
+        let (mut widget, _tmp) = widget_forced_chatgpt().await;
+        widget.required_auth_provider = Some(ANTHROPIC_AUTH_PROVIDER_ID.to_string());
+        widget.forced_login_method = None;
+        widget.anthropic_oauth_supported = false;
+        widget.highlighted_mode = SignInOption::ChatGpt;
+
+        widget.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+
+        assert_eq!(widget.highlighted_mode, SignInOption::ApiKey);
+        assert!(matches!(
+            &*widget.sign_in_state.read().unwrap(),
+            SignInState::ApiKeyEntry(_)
+        ));
     }
 
     #[tokio::test]

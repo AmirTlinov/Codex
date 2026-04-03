@@ -586,3 +586,82 @@ async fn native_anthropic_requests_preserve_input_images() {
         }
     }
 }
+
+#[tokio::test]
+async fn native_anthropic_rejects_claude_ai_oauth_tokens() {
+    let root = TempDir::new().expect("create temp dir");
+    std::fs::write(
+        root.path().join("anthropic-auth.json"),
+        serde_json::to_string_pretty(&json!({
+            "auth_mode": "oauth",
+            "api_key": null,
+            "oauth": {
+                "access_token": "oauth-access-token",
+                "refresh_token": "oauth-refresh-token",
+                "expires_at": null,
+                "scopes": ["user:profile", "user:inference"],
+                "profile": {
+                    "email": "claude@example.com",
+                    "display_name": "Claude User",
+                    "organization_uuid": "org-anthropic",
+                    "subscription_type": "max",
+                    "rate_limit_tier": "default_claude_max_5x"
+                }
+            },
+            "last_refresh": null
+        }))
+        .expect("serialize oauth auth fixture"),
+    )
+    .expect("write oauth auth fixture");
+
+    let client = ModelClient::new(
+        /*auth_manager*/ None,
+        ThreadId::new(),
+        crate::create_anthropic_provider(),
+        crate::config::ClaudeCliConfig::default(),
+        root.path().to_path_buf(),
+        crate::auth::AuthCredentialsStoreMode::File,
+        SessionSource::Cli,
+        /*model_verbosity*/ None,
+        /*enable_request_compression*/ false,
+        /*include_timing_metrics*/ false,
+        /*beta_features_header*/ None,
+    );
+    let mut client_session = client.new_session();
+    let prompt = crate::Prompt {
+        input: vec![ResponseItem::Message {
+            id: None,
+            role: "user".to_string(),
+            content: vec![ContentItem::InputText {
+                text: "hello".to_string(),
+            }],
+            end_turn: None,
+            phase: None,
+        }],
+        ..Default::default()
+    };
+
+    let err = match client_session
+        .stream(
+            &prompt,
+            &test_model_info_with_slug("claude-opus-4-6"),
+            root.path(),
+            &test_session_telemetry(),
+            /*effort*/ None,
+            ReasoningSummary::None,
+            /*service_tier*/ None,
+            /*turn_metadata_header*/ None,
+            CancellationToken::new(),
+        )
+        .await
+    {
+        Ok(_) => panic!("native anthropic should reject Claude.ai OAuth"),
+        Err(err) => err,
+    };
+
+    assert!(
+        err.to_string()
+            .contains(crate::auth::NATIVE_ANTHROPIC_OAUTH_UNSUPPORTED_MESSAGE),
+        "expected native anthropic oauth failure message, got: {err}"
+    );
+}

@@ -35,11 +35,12 @@ This means:
 - `Claudex` now owns a native Anthropic auth lane inside `~/.claudex`:
   - `claudex login --with-api-key` stores Anthropic API key auth in
     `anthropic-auth.json`;
-  - browser login from the TUI or `claudex login` stores Claude.ai OAuth there
-    too;
-  - when `claude_cli` is used explicitly as a compat backend, Codex injects the
-    saved Anthropic auth into that process instead of depending on the user's
-    global `~/.claude` auth state;
+  - native Anthropic Messages API turns use that Anthropic API key;
+  - Claude.ai OAuth is now treated as a `claude_cli` compat-only auth mode,
+    because Anthropic's native `/v1/messages` API rejects OAuth bearer tokens;
+  - when `claude_cli` is used explicitly as a compat backend, Codex injects
+    the saved Anthropic auth into that process instead of depending on the
+    user's global `~/.claude` auth state;
 - the model picker keeps the Claude catalog front-and-center while also exposing
   paired OpenAI GPT entries for quick fallback in `claudex` when the OpenAI provider is available;
   when both providers are present, the full `/model` browser now separates them

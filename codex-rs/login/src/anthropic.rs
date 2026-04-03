@@ -55,6 +55,7 @@ const ANTHROPIC_SCOPES: &[&str] = &[
     "user:file_upload",
 ];
 const REFRESH_SKEW_SECONDS: i64 = 60;
+pub const NATIVE_ANTHROPIC_OAUTH_UNSUPPORTED_MESSAGE: &str = "Claude.ai OAuth is not supported by Claudex's native Anthropic Messages API path. Use an Anthropic API key for native Anthropic models, or switch to the claude_cli compat backend if you want to use Claude.ai subscription auth.";
 
 static LOGIN_SUCCESS_TEMPLATE: Lazy<Template> = Lazy::new(|| {
     Template::parse(include_str!("assets/success.html"))

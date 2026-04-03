@@ -195,10 +195,12 @@ use codex_core::SteerInputError;
 use codex_core::ThreadConfigSnapshot;
 use codex_core::ThreadManager;
 use codex_core::ThreadSortKey as CoreThreadSortKey;
+use codex_core::WireApi;
 use codex_core::auth::AnthropicAuthMode;
 use codex_core::auth::AnthropicLoginServerOptions;
 use codex_core::auth::AuthMode as CoreAuthMode;
 use codex_core::auth::CLIENT_ID;
+use codex_core::auth::NATIVE_ANTHROPIC_OAUTH_UNSUPPORTED_MESSAGE;
 use codex_core::auth::load_anthropic_auth;
 use codex_core::auth::login_with_anthropic_api_key;
 use codex_core::auth::login_with_api_key;
@@ -511,29 +513,8 @@ impl CodexMessageProcessor {
 
     fn current_account_updated_notification(&self) -> AccountUpdatedNotification {
         if self.required_auth_provider() == Some(ANTHROPIC_AUTH_PROVIDER_ID) {
-            let account = load_anthropic_auth(
-                &self.config.codex_home,
-                self.config.cli_auth_credentials_store_mode,
-            )
-            .ok()
-            .flatten()
-            .map(|auth| codex_core::auth::AnthropicAccountDisplay {
-                auth_mode: auth.auth_mode,
-                email: auth
-                    .oauth
-                    .as_ref()
-                    .and_then(|oauth| oauth.profile.email.clone()),
-                subscription_type: auth
-                    .oauth
-                    .as_ref()
-                    .and_then(|oauth| oauth.profile.subscription_type.clone()),
-            });
-            let auth_mode = account.as_ref().map(|account| match account.auth_mode {
-                AnthropicAuthMode::ApiKey => AuthMode::AnthropicApiKey,
-                AnthropicAuthMode::Oauth => AuthMode::AnthropicOauth,
-            });
             return AccountUpdatedNotification {
-                auth_mode,
+                auth_mode: self.current_anthropic_auth_mode(),
                 plan_type: None,
                 required_auth_provider: Some(ANTHROPIC_AUTH_PROVIDER_ID.to_string()),
             };
@@ -549,6 +530,27 @@ impl CodexMessageProcessor {
 
     fn required_auth_provider(&self) -> Option<&'static str> {
         self.config.model_provider.required_auth_provider()
+    }
+
+    fn anthropic_oauth_supported(&self) -> bool {
+        self.required_auth_provider() == Some(ANTHROPIC_AUTH_PROVIDER_ID)
+            && self.config.model_provider.wire_api == WireApi::ClaudeCli
+    }
+
+    fn current_anthropic_auth_mode(&self) -> Option<AuthMode> {
+        let auth = load_anthropic_auth(
+            &self.config.codex_home,
+            self.config.cli_auth_credentials_store_mode,
+        )
+        .ok()
+        .flatten()?;
+        match auth.auth_mode {
+            AnthropicAuthMode::ApiKey => Some(AuthMode::AnthropicApiKey),
+            AnthropicAuthMode::Oauth if self.anthropic_oauth_supported() => {
+                Some(AuthMode::AnthropicOauth)
+            }
+            AnthropicAuthMode::Oauth => None,
+        }
     }
 
     async fn load_thread(
@@ -1246,6 +1248,19 @@ impl CodexMessageProcessor {
                 .await;
             return;
         }
+        if !self.anthropic_oauth_supported() {
+            self.outgoing
+                .send_error(
+                    request_id,
+                    JSONRPCErrorError {
+                        code: INVALID_REQUEST_ERROR_CODE,
+                        message: NATIVE_ANTHROPIC_OAUTH_UNSUPPORTED_MESSAGE.to_string(),
+                        data: None,
+                    },
+                )
+                .await;
+            return;
+        }
 
         let opts = AnthropicLoginServerOptions {
             open_browser: false,
@@ -1847,18 +1862,8 @@ impl CodexMessageProcessor {
                 requires_openai_auth: Some(false),
             }
         } else if required_auth_provider == Some(ANTHROPIC_AUTH_PROVIDER_ID) {
-            let auth = load_anthropic_auth(
-                &self.config.codex_home,
-                self.config.cli_auth_credentials_store_mode,
-            )
-            .ok()
-            .flatten();
-            let auth_method = auth.as_ref().map(|auth| match auth.auth_mode {
-                AnthropicAuthMode::ApiKey => AuthMode::AnthropicApiKey,
-                AnthropicAuthMode::Oauth => AuthMode::AnthropicOauth,
-            });
             GetAuthStatusResponse {
-                auth_method,
+                auth_method: self.current_anthropic_auth_mode(),
                 auth_token: None,
                 requires_openai_auth: Some(false),
             }
@@ -1926,28 +1931,42 @@ impl CodexMessageProcessor {
         }
 
         if required_auth_provider == Some(ANTHROPIC_AUTH_PROVIDER_ID) {
-            let account = match if do_refresh {
-                resolve_anthropic_account_display_after_refresh(
-                    &self.config.codex_home,
-                    self.config.cli_auth_credentials_store_mode,
-                )
-                .await
+            let account = if self.anthropic_oauth_supported() {
+                match if do_refresh {
+                    resolve_anthropic_account_display_after_refresh(
+                        &self.config.codex_home,
+                        self.config.cli_auth_credentials_store_mode,
+                    )
+                    .await
+                } else {
+                    resolve_anthropic_account_display(
+                        &self.config.codex_home,
+                        self.config.cli_auth_credentials_store_mode,
+                    )
+                    .await
+                } {
+                    Ok(Some(account)) => Some(match account.auth_mode {
+                        AnthropicAuthMode::ApiKey => Account::AnthropicApiKey {},
+                        AnthropicAuthMode::Oauth => Account::AnthropicOauth {
+                            email: account.email,
+                            subscription_type: account.subscription_type,
+                        },
+                    }),
+                    Ok(None) | Err(_) => None,
+                }
             } else {
-                resolve_anthropic_account_display(
+                match load_anthropic_auth(
                     &self.config.codex_home,
                     self.config.cli_auth_credentials_store_mode,
                 )
-                .await
-            } {
-                Ok(Some(account)) => Some(match account.auth_mode {
-                    AnthropicAuthMode::ApiKey => Account::AnthropicApiKey {},
-                    AnthropicAuthMode::Oauth => Account::AnthropicOauth {
-                        email: account.email,
-                        subscription_type: account.subscription_type,
-                    },
-                }),
-                Ok(None) => None,
-                Err(_) => None,
+                .ok()
+                .flatten()
+                {
+                    Some(auth) if auth.auth_mode == AnthropicAuthMode::ApiKey => {
+                        Some(Account::AnthropicApiKey {})
+                    }
+                    Some(_) | None => None,
+                }
             };
 
             let response = GetAccountResponse {
