@@ -229,6 +229,7 @@ async fn run_reflective_sidecar_claude(
                 "You are a reflective Claude sidecar running under Codex. Output strict JSON only."
                     .to_string(),
             user_prompt,
+            session: crate::agent::external::ClaudeCliSession::Ephemeral,
             json_schema: Some(prompt::reflective_output_schema()),
             tools: None,
             force_toolless: true,

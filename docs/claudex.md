@@ -65,6 +65,12 @@ This downstream slice is intentionally honest and narrow:
 - the Claude Code main lane now uses Claude's structured `stream-json` output
   path instead of the older plain-text bridge, so Claudex receives real
   assistant deltas, final result metadata, and explicit carrier control events;
+- spawned Claude Code subagents now use that same structured carrier path too,
+  and delegated follow-ups continue through Claude Code's resume path instead
+  of replaying the whole bounded conversation into a fresh plain-text
+  subprocess prompt every time; if carrier resume is rejected, Claudex clears
+  the saved carrier session and the next delegated turn falls back to bounded
+  prompt replay;
 - Claude Code carrier permission requests currently fail closed in Claudex's
   main lane instead of hanging, because interactive `control_request`
   approvals are not bridged into the Codex approval flow yet;

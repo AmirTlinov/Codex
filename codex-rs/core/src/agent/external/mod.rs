@@ -22,8 +22,11 @@ use crate::error::CodexErr;
 use crate::error::Result as CodexResult;
 
 pub(crate) use self::claude_cli::ClaudeCliRequest;
+pub(crate) use self::claude_cli::ClaudeCliSession;
+pub(crate) use self::claude_cli::ClaudeCodeTurnResult;
 pub(crate) use self::claude_cli::run_claude_cli;
 pub(crate) use self::claude_cli::run_claude_cli_stream_json;
+pub(crate) use self::claude_cli::run_claude_code_turn;
 
 const MAX_EXTERNAL_AGENT_CONVERSATION_ENTRIES: usize = 12;
 
@@ -140,6 +143,7 @@ struct ExternalAgentState {
     claude_cli: ClaudeCliConfig,
     model: String,
     parent_context: Option<String>,
+    claude_session_id: Mutex<Option<String>>,
     conversation: Mutex<Vec<ConversationEntry>>,
     active_turn: Mutex<Option<ActiveTurn>>,
     next_generation: AtomicU64,
@@ -155,6 +159,7 @@ impl ExternalAgentState {
             claude_cli: request.claude_cli,
             model: request.model,
             parent_context: request.parent_context,
+            claude_session_id: Mutex::new(None),
             conversation: Mutex::new(Vec::new()),
             active_turn: Mutex::new(None),
             next_generation: AtomicU64::new(1),
@@ -176,7 +181,12 @@ impl ExternalAgentState {
 
     async fn submit(self: &Arc<Self>, operation: Op) -> CodexResult<String> {
         let user_message = operation_to_external_message(&operation)?;
-        let conversation_snapshot = self.conversation.lock().await.clone();
+        let carrier_session_id = self.claude_session_id.lock().await.clone();
+        let conversation_snapshot = if carrier_session_id.is_none() {
+            Some(self.conversation.lock().await.clone())
+        } else {
+            None
+        };
         let generation = self.next_generation.fetch_add(1, Ordering::AcqRel);
         let cancellation_token = CancellationToken::new();
         {
@@ -204,12 +214,19 @@ impl ExternalAgentState {
                 cwd: state.config_snapshot.cwd.clone(),
                 model: state.model.clone(),
                 system_prompt: build_external_agent_system_prompt(),
-                user_prompt: build_external_agent_user_prompt(
-                    state.developer_instructions.as_deref(),
-                    state.parent_context.as_deref(),
-                    conversation_snapshot.as_slice(),
-                    user_message.as_str(),
-                ),
+                user_prompt: if carrier_session_id.is_some() {
+                    build_external_agent_continuation_prompt(user_message.as_str())
+                } else {
+                    build_external_agent_user_prompt(
+                        state.developer_instructions.as_deref(),
+                        state.parent_context.as_deref(),
+                        conversation_snapshot.as_deref().unwrap_or(&[]),
+                        user_message.as_str(),
+                    )
+                },
+                session: carrier_session_id
+                    .map(ClaudeCliSession::ResumeExisting)
+                    .unwrap_or(ClaudeCliSession::Persistent),
                 json_schema: None,
                 tools: state.claude_cli.tools.clone(),
                 force_toolless: false,
@@ -218,7 +235,7 @@ impl ExternalAgentState {
                     .reasoning_effort
                     .map(ClaudeCliEffort::from)),
             };
-            let result = run_claude_cli(&state.claude_cli, request, cancellation_token).await;
+            let result = run_claude_code_turn(&state.claude_cli, request, cancellation_token).await;
             state.finish_turn(generation, result).await;
         });
 
@@ -240,7 +257,7 @@ impl ExternalAgentState {
         Ok(String::new())
     }
 
-    async fn finish_turn(&self, generation: u64, result: anyhow::Result<String>) {
+    async fn finish_turn(&self, generation: u64, result: anyhow::Result<ClaudeCodeTurnResult>) {
         let mut active_turn = self.active_turn.lock().await;
         if active_turn
             .as_ref()
@@ -253,15 +270,21 @@ impl ExternalAgentState {
 
         match result {
             Ok(output) => {
+                if let Some(session_id) = output.session_id {
+                    *self.claude_session_id.lock().await = Some(session_id);
+                }
                 self.conversation.lock().await.push(ConversationEntry {
                     role: ConversationRole::Assistant,
-                    text: output.clone(),
+                    text: output.output.clone(),
                 });
                 self.status_tx
-                    .send_replace(AgentStatus::Completed(Some(output)));
+                    .send_replace(AgentStatus::Completed(Some(output.output)));
             }
             Err(err) => {
                 let message = err.to_string();
+                if should_clear_claude_session(&message) {
+                    *self.claude_session_id.lock().await = None;
+                }
                 let status = if message.contains("Claude CLI run cancelled") {
                     AgentStatus::Interrupted
                 } else {
@@ -271,6 +294,14 @@ impl ExternalAgentState {
             }
         }
     }
+}
+
+fn should_clear_claude_session(message: &str) -> bool {
+    let lowered = message.to_ascii_lowercase();
+    lowered.contains("resume rejected")
+        || lowered.contains("cannot be resumed")
+        || lowered.contains("session not found")
+        || lowered.contains("invalid session")
 }
 
 fn operation_to_external_message(operation: &Op) -> CodexResult<String> {
@@ -340,6 +371,13 @@ fn build_external_agent_user_prompt(
         current_message.trim()
     ));
     sections.join("\n\n")
+}
+
+fn build_external_agent_continuation_prompt(current_message: &str) -> String {
+    format!(
+        "<claude_code_session_continuation>\ntrue\n</claude_code_session_continuation>\n\n<current_message>\n{}\n</current_message>",
+        current_message.trim()
+    )
 }
 
 fn bounded_conversation_entries(

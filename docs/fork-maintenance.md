@@ -149,6 +149,12 @@ What it does:
   `anthropic` Messages API lane remains API-key-only. Saved auth is injected
   into spawned Claude Code carrier processes instead of silently depending on
   global `~/.claude` login state;
+- keeps spawned Claude subagents on the same structured Claude Code carrier
+  path as the main Claude lane, and delegated follow-ups continue through
+  Claude Code's resume path instead of rehydrating a fresh plain-text
+  subprocess prompt for each message; if resume is rejected, Claudex clears
+  the saved carrier session so the next delegated turn falls back to bounded
+  prompt replay;
 - brands the runtime as `Claudex`, makes `claudex --version` report the
   current downstream short SHA, uses the same downstream product name in the
   default terminal title plus CLI update/human-output copy, points update

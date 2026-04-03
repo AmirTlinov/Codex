@@ -23,6 +23,7 @@ mod compact_transcript;
 pub use codex_thread::CodexThread;
 pub use codex_thread::ThreadConfigSnapshot;
 mod agent;
+mod claude_code_stream;
 mod codex_delegate;
 mod command_canonicalization;
 mod commit_attribution;

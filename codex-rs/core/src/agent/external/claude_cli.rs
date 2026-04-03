@@ -11,6 +11,7 @@ use tokio::process::Command;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
+use crate::claude_code_stream::ClaudeCodeStreamAccumulator;
 use crate::config::ClaudeCliConfig;
 use crate::config::ClaudeCliEffort;
 
@@ -20,10 +21,24 @@ pub(crate) struct ClaudeCliRequest {
     pub(crate) model: String,
     pub(crate) system_prompt: String,
     pub(crate) user_prompt: String,
+    pub(crate) session: ClaudeCliSession,
     pub(crate) json_schema: Option<serde_json::Value>,
     pub(crate) tools: Option<Vec<String>>,
     pub(crate) force_toolless: bool,
     pub(crate) effort: Option<ClaudeCliEffort>,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) enum ClaudeCliSession {
+    Ephemeral,
+    Persistent,
+    ResumeExisting(String),
+}
+
+#[derive(Debug)]
+pub(crate) struct ClaudeCodeTurnResult {
+    pub(crate) output: String,
+    pub(crate) session_id: Option<String>,
 }
 
 pub(crate) async fn run_claude_cli(
@@ -45,7 +60,6 @@ pub(crate) async fn run_claude_cli(
         .arg("--print")
         .arg("--output-format")
         .arg("text")
-        .arg("--no-session-persistence")
         .arg("--disable-slash-commands")
         .arg("--permission-mode")
         .arg(config.permission_mode.as_cli_arg())
@@ -53,6 +67,15 @@ pub(crate) async fn run_claude_cli(
         .arg(&request.system_prompt)
         .arg("--model")
         .arg(&request.model);
+    match &request.session {
+        ClaudeCliSession::Ephemeral => {
+            command.arg("--no-session-persistence");
+        }
+        ClaudeCliSession::Persistent => {}
+        ClaudeCliSession::ResumeExisting(session_id) => {
+            command.arg("--resume").arg(session_id);
+        }
+    }
 
     apply_anthropic_runtime_auth_env(&mut command, config).await?;
     #[cfg(unix)]
@@ -150,7 +173,6 @@ pub(crate) async fn run_claude_cli_stream_json(
         .arg("stream-json")
         .arg("--verbose")
         .arg("--include-partial-messages")
-        .arg("--no-session-persistence")
         .arg("--disable-slash-commands")
         .arg("--permission-mode")
         .arg(config.permission_mode.as_cli_arg())
@@ -158,6 +180,15 @@ pub(crate) async fn run_claude_cli_stream_json(
         .arg(&request.system_prompt)
         .arg("--model")
         .arg(&request.model);
+    match &request.session {
+        ClaudeCliSession::Ephemeral => {
+            command.arg("--no-session-persistence");
+        }
+        ClaudeCliSession::Persistent => {}
+        ClaudeCliSession::ResumeExisting(session_id) => {
+            command.arg("--resume").arg(session_id);
+        }
+    }
 
     apply_anthropic_runtime_auth_env(&mut command, config).await?;
     #[cfg(unix)]
@@ -287,6 +318,31 @@ pub(crate) async fn run_claude_cli_stream_json(
     });
 
     Ok(rx_line)
+}
+
+pub(crate) async fn run_claude_code_turn(
+    config: &ClaudeCliConfig,
+    request: ClaudeCliRequest,
+    cancellation_token: CancellationToken,
+) -> anyhow::Result<ClaudeCodeTurnResult> {
+    let mut raw_lines = run_claude_cli_stream_json(config, request, cancellation_token).await?;
+    let mut accumulator = ClaudeCodeStreamAccumulator::default();
+    while let Some(line) = raw_lines.recv().await {
+        match line {
+            Ok(line) => {
+                accumulator.push_line(&line)?;
+            }
+            Err(err) => return Err(err),
+        }
+    }
+    let summary = accumulator.finish();
+    if summary.assistant_text.trim().is_empty() {
+        anyhow::bail!("Claude Code returned empty output");
+    }
+    Ok(ClaudeCodeTurnResult {
+        output: summary.assistant_text,
+        session_id: summary.session_id,
+    })
 }
 
 fn is_permission_request_line(line: &str) -> bool {
