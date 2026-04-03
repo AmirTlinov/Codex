@@ -155,6 +155,8 @@ What it does:
   in-app update action to this clone's `scripts/install-claudex.sh`, so the
   update banner/version identity stay separate from upstream
   `openai/codex` releases.
+- after downstream Claudex runtime changes, rerun `scripts/install-claudex.sh`
+  before closure so the machine-local `claudex` command matches repo truth.
 
 The wrapper currently injects:
 

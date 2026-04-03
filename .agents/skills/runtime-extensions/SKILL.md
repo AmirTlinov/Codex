@@ -53,6 +53,10 @@ description: Downstream workflow for config, MCP, plugin, skill, AGENTS, and wra
 - Current downstream default is native Anthropic main-lane execution with
   `agent_backend=codex`; keep `claude_cli` as an explicit compat/fallback
   surface rather than the primary path when extending Claudex behavior.
+- After any change that affects Claudex runtime behavior or user-visible
+  Claudex surfaces, rebuild and reinstall the local `claudex` binary with
+  `scripts/install-claudex.sh` yourself instead of leaving the machine on a
+  stale binary.
 - If `scripts/install-claudex.sh` changes behavior, keep the wrapper, `AGENTS.md`,
   and `docs/fork-maintenance.md` / `docs/claudex.md` aligned in the same slice.
 - If a behavior is machine-local rather than repo-owned, keep it in

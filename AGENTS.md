@@ -55,6 +55,9 @@ This fork is maintained as a downstream customization layer over
   `/v1/messages` API rejects OAuth bearer tokens. Any explicit `claude_cli`
   compat runtime still receives that saved auth from Codex rather than
   silently depending on global `~/.claude` auth state.
+- If you change Claudex runtime behavior or any user-visible Claudex surface,
+  do not stop at green tests: rebuild and reinstall the local `claudex` binary
+  yourself with `scripts/install-claudex.sh` before claiming done.
 - When the downstream workflow changes, update the matching repo truth in the
   same change: `AGENTS.md`, `.agents/skills/*`, and `docs/fork-maintenance.md`.
 - Keep durable intent and workflow truth in repo files, not only in chat.
