@@ -67,6 +67,7 @@ pub enum ResponseEvent {
     Created,
     OutputItemDone(ResponseItem),
     OutputItemAdded(ResponseItem),
+    ClaudeCodePermissionRequest(ClaudeCodePermissionRequest),
     /// Emitted when the server includes `OpenAI-Model` on the stream response.
     /// This can differ from the requested model when backend safety routing applies.
     ServerModel(String),
@@ -92,6 +93,90 @@ pub enum ResponseEvent {
     },
     RateLimits(RateLimitSnapshot),
     ModelsEtag(String),
+}
+
+#[derive(Debug, Clone)]
+pub struct ClaudeCodePermissionRequest {
+    pub request_id: String,
+    pub tool_name: String,
+    pub input: Value,
+    pub tool_use_id: String,
+    pub description: Option<String>,
+    pub decision_reason: Option<String>,
+    responder: ClaudeCodeControlResponder,
+}
+
+impl ClaudeCodePermissionRequest {
+    pub fn new(
+        request_id: String,
+        tool_name: String,
+        input: Value,
+        tool_use_id: String,
+        description: Option<String>,
+        decision_reason: Option<String>,
+        responder: ClaudeCodeControlResponder,
+    ) -> Self {
+        Self {
+            request_id,
+            tool_name,
+            input,
+            tool_use_id,
+            description,
+            decision_reason,
+            responder,
+        }
+    }
+
+    pub fn responder(&self) -> ClaudeCodeControlResponder {
+        self.responder.clone()
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct ClaudeCodeControlResponder {
+    tx: mpsc::Sender<ClaudeCodeControlResponse>,
+}
+
+impl ClaudeCodeControlResponder {
+    pub fn new(tx: mpsc::Sender<ClaudeCodeControlResponse>) -> Self {
+        Self { tx }
+    }
+
+    pub async fn allow_for_request(
+        &self,
+        request_id: String,
+        updated_input: Option<Value>,
+    ) -> Result<(), String> {
+        self.tx
+            .send(ClaudeCodeControlResponse {
+                subtype: ClaudeCodeControlResponseSubtype::Allow { updated_input },
+                request_id,
+            })
+            .await
+            .map_err(|err| err.to_string())
+    }
+
+    pub async fn deny(&self, request_id: String, message: String) -> Result<(), String> {
+        self.tx
+            .send(ClaudeCodeControlResponse {
+                subtype: ClaudeCodeControlResponseSubtype::Deny { message },
+                request_id,
+            })
+            .await
+            .map_err(|err| err.to_string())
+    }
+}
+
+#[derive(Debug)]
+pub struct ClaudeCodeControlResponse {
+    pub request_id: String,
+    pub subtype: ClaudeCodeControlResponseSubtype,
+}
+
+#[derive(Debug)]
+pub enum ClaudeCodeControlResponseSubtype {
+    Allow { updated_input: Option<Value> },
+    Deny { message: String },
 }
 
 #[derive(Debug, Serialize, Clone, PartialEq)]

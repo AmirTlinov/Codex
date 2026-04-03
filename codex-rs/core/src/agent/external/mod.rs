@@ -25,7 +25,7 @@ pub(crate) use self::claude_cli::ClaudeCliRequest;
 pub(crate) use self::claude_cli::ClaudeCliSession;
 pub(crate) use self::claude_cli::ClaudeCodeTurnResult;
 pub(crate) use self::claude_cli::run_claude_cli;
-pub(crate) use self::claude_cli::run_claude_cli_stream_json;
+pub(crate) use self::claude_cli::run_claude_cli_stream_json_controlled;
 pub(crate) use self::claude_cli::run_claude_code_turn;
 
 const MAX_EXTERNAL_AGENT_CONVERSATION_ENTRIES: usize = 12;

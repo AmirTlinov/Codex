@@ -71,9 +71,14 @@ This downstream slice is intentionally honest and narrow:
   subprocess prompt every time; if carrier resume is rejected, Claudex clears
   the saved carrier session and the next delegated turn falls back to bounded
   prompt replay;
-- Claude Code carrier permission requests currently fail closed in Claudex's
-  main lane instead of hanging, because interactive `control_request`
-  approvals are not bridged into the Codex approval flow yet;
+- the Claude Code main lane now bridges supported `can_use_tool`
+  `control_request`s into Codex's existing approval surfaces:
+  - `Bash` routes through command approval;
+  - file/network tools like `Read` / `Edit` / `Write` / `Glob` / `Grep` /
+    `WebFetch` / `WebSearch` route through request-permissions;
+  - unsupported Claude control subtypes still fail closed instead of hanging;
+- spawned Claude Code subagents still use the structured carrier, but their
+  permission prompts are not bridged yet the way the main lane is;
 - the native `anthropic` lane now preserves Claude image prompts and image
   tool-result content too, so API-key Anthropic usage is no longer text-only;
 - native `anthropic` still fail-closes on Claude.ai OAuth because `/v1/messages`

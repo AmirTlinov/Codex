@@ -108,6 +108,7 @@ fn response_event_records_turn_ttft(event: &ResponseEvent) -> bool {
         | ResponseEvent::ReasoningSummaryDelta { .. }
         | ResponseEvent::ReasoningContentDelta { .. } => true,
         ResponseEvent::Created
+        | ResponseEvent::ClaudeCodePermissionRequest(_)
         | ResponseEvent::ServerModel(_)
         | ResponseEvent::ServerReasoningIncluded(_)
         | ResponseEvent::Completed { .. }

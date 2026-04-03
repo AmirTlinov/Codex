@@ -155,6 +155,11 @@ What it does:
   subprocess prompt for each message; if resume is rejected, Claudex clears
   the saved carrier session so the next delegated turn falls back to bounded
   prompt replay;
+- bridges supported Claude Code `can_use_tool` control requests in the main
+  lane into existing Codex approval surfaces instead of blanket fail-closed:
+  shell-like `Bash` requests use command approval, and basic file/network tool
+  requests use request-permissions; unsupported control subtypes still fail
+  closed;
 - brands the runtime as `Claudex`, makes `claudex --version` report the
   current downstream short SHA, uses the same downstream product name in the
   default terminal title plus CLI update/human-output copy, points update

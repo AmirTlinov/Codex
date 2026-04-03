@@ -2,6 +2,9 @@ use std::path::PathBuf;
 use std::process::Stdio;
 
 use anyhow::Context;
+use codex_api::common::ClaudeCodeControlResponder;
+use codex_api::common::ClaudeCodeControlResponse;
+use codex_api::common::ClaudeCodeControlResponseSubtype;
 use codex_utils_pty::process_group::kill_child_process_group;
 use tokio::io::AsyncBufReadExt;
 use tokio::io::AsyncReadExt;
@@ -39,6 +42,11 @@ pub(crate) enum ClaudeCliSession {
 pub(crate) struct ClaudeCodeTurnResult {
     pub(crate) output: String,
     pub(crate) session_id: Option<String>,
+}
+
+pub(crate) struct ClaudeCliControlledStream {
+    pub(crate) lines: mpsc::Receiver<anyhow::Result<String>>,
+    pub(crate) control_responder: ClaudeCodeControlResponder,
 }
 
 pub(crate) async fn run_claude_cli(
@@ -320,6 +328,182 @@ pub(crate) async fn run_claude_cli_stream_json(
     Ok(rx_line)
 }
 
+pub(crate) async fn run_claude_cli_stream_json_controlled(
+    config: &ClaudeCliConfig,
+    request: ClaudeCliRequest,
+    cancellation_token: CancellationToken,
+) -> anyhow::Result<ClaudeCliControlledStream> {
+    let executable = config
+        .path
+        .clone()
+        .unwrap_or_else(|| PathBuf::from("claude"));
+    let mut command = Command::new(&executable);
+    command
+        .kill_on_drop(true)
+        .current_dir(&request.cwd)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .arg("--print")
+        .arg("--output-format")
+        .arg("stream-json")
+        .arg("--input-format")
+        .arg("stream-json")
+        .arg("--verbose")
+        .arg("--include-partial-messages")
+        .arg("--disable-slash-commands")
+        .arg("--permission-mode")
+        .arg(config.permission_mode.as_cli_arg())
+        .arg("--system-prompt")
+        .arg(&request.system_prompt)
+        .arg("--model")
+        .arg(&request.model);
+    match &request.session {
+        ClaudeCliSession::Ephemeral => {
+            command.arg("--no-session-persistence");
+        }
+        ClaudeCliSession::Persistent => {}
+        ClaudeCliSession::ResumeExisting(session_id) => {
+            command.arg("--resume").arg(session_id);
+        }
+    }
+
+    apply_anthropic_runtime_auth_env(&mut command, config).await?;
+    #[cfg(unix)]
+    command.process_group(0);
+
+    let effort = request.effort.or(config.effort);
+    if let Some(effort) = effort {
+        command.arg("--effort").arg(effort.as_cli_arg());
+    }
+
+    if request.force_toolless {
+        command.arg("--tools").arg("");
+    } else if let Some(tools) = request.tools.or_else(|| config.tools.clone()) {
+        command.arg("--tools").arg(tools.join(","));
+        for add_dir in &config.add_dirs {
+            command.arg("--add-dir").arg(add_dir);
+        }
+    } else {
+        command.arg("--tools").arg("");
+    }
+
+    if let Some(json_schema) = request.json_schema {
+        command
+            .arg("--json-schema")
+            .arg(serde_json::to_string(&json_schema).context("serialize claude JSON schema")?);
+    }
+
+    let mut child = command.spawn().with_context(|| {
+        format!(
+            "spawn Claude CLI at {} from {}",
+            executable.display(),
+            request.cwd.display()
+        )
+    })?;
+    let stdout = child.stdout.take().context("capture Claude CLI stdout")?;
+    let mut stderr_reader = child.stderr.take().context("capture Claude CLI stderr")?;
+    let stdin_writer = child.stdin.take().context("capture Claude CLI stdin")?;
+    let (tx_line, rx_line) = mpsc::channel(1600);
+    let (tx_control, mut rx_control) = mpsc::channel::<ClaudeCodeControlResponse>(64);
+    let initial_user_message = build_stream_json_user_message(&request.user_prompt);
+
+    tokio::spawn(async move {
+        let writer_task = tokio::spawn(async move {
+            let mut stdin_writer = stdin_writer;
+            write_stream_json_line(&mut stdin_writer, &initial_user_message).await?;
+            while let Some(response) = rx_control.recv().await {
+                let payload = build_control_response_line(response);
+                write_stream_json_line(&mut stdin_writer, &payload).await?;
+            }
+            stdin_writer
+                .shutdown()
+                .await
+                .context("shutdown Claude CLI stdin")?;
+            Ok::<(), anyhow::Error>(())
+        });
+        let stderr_task = tokio::spawn(async move {
+            let mut stderr = Vec::new();
+            stderr_reader.read_to_end(&mut stderr).await?;
+            Ok::<Vec<u8>, std::io::Error>(stderr)
+        });
+        let mut lines = BufReader::new(stdout).lines();
+
+        loop {
+            tokio::select! {
+                biased;
+                _ = cancellation_token.cancelled() => {
+                    let _ = terminate_child(&mut child).await;
+                    writer_task.abort();
+                    stderr_task.abort();
+                    let _ = tx_line.send(Err(anyhow::anyhow!("Claude CLI run cancelled"))).await;
+                    return;
+                }
+                line = lines.next_line() => {
+                    match line {
+                        Ok(Some(line)) => {
+                            if line.trim().is_empty() {
+                                continue;
+                            }
+                            if tx_line.send(Ok(line)).await.is_err() {
+                                let _ = terminate_child(&mut child).await;
+                                writer_task.abort();
+                                stderr_task.abort();
+                                return;
+                            }
+                        }
+                        Ok(None) => break,
+                        Err(err) => {
+                            let _ = tx_line.send(Err(err.into())).await;
+                            writer_task.abort();
+                            stderr_task.abort();
+                            return;
+                        }
+                    }
+                }
+            }
+        }
+
+        let status = match child.wait().await {
+            Ok(status) => status,
+            Err(err) => {
+                let _ = tx_line.send(Err(err.into())).await;
+                writer_task.abort();
+                stderr_task.abort();
+                return;
+            }
+        };
+        writer_task.abort();
+        let stderr = match stderr_task.await {
+            Ok(Ok(stderr)) => stderr,
+            Ok(Err(err)) => {
+                let _ = tx_line.send(Err(err.into())).await;
+                return;
+            }
+            Err(err) => {
+                let _ = tx_line.send(Err(err.into())).await;
+                return;
+            }
+        };
+        if !status.success() {
+            let stderr_summary = String::from_utf8_lossy(&stderr).trim().to_string();
+            let message = if stderr_summary.is_empty() {
+                "Claude CLI failed".to_string()
+            } else {
+                stderr_summary
+            };
+            let _ = tx_line
+                .send(Err(anyhow::anyhow!("Claude CLI failed: {message}")))
+                .await;
+        }
+    });
+
+    Ok(ClaudeCliControlledStream {
+        lines: rx_line,
+        control_responder: ClaudeCodeControlResponder::new(tx_control),
+    })
+}
+
 pub(crate) async fn run_claude_code_turn(
     config: &ClaudeCliConfig,
     request: ClaudeCliRequest,
@@ -356,6 +540,62 @@ fn is_permission_request_line(line: &str) -> bool {
         })
         .as_deref()
         == Some("control_request")
+}
+
+fn build_stream_json_user_message(user_prompt: &str) -> serde_json::Value {
+    serde_json::json!({
+        "type": "user",
+        "message": {
+            "role": "user",
+            "content": user_prompt,
+        },
+        "parent_tool_use_id": null,
+        "session_id": "",
+    })
+}
+
+fn build_control_response_line(response: ClaudeCodeControlResponse) -> serde_json::Value {
+    let response_body = match response.subtype {
+        ClaudeCodeControlResponseSubtype::Allow { updated_input } => {
+            let mut body = serde_json::Map::new();
+            body.insert(
+                "behavior".to_string(),
+                serde_json::Value::String("allow".to_string()),
+            );
+            if let Some(updated_input) = updated_input {
+                body.insert("updatedInput".to_string(), updated_input);
+            }
+            serde_json::Value::Object(body)
+        }
+        ClaudeCodeControlResponseSubtype::Deny { message } => serde_json::json!({
+            "behavior": "deny",
+            "message": message,
+        }),
+    };
+    serde_json::json!({
+        "type": "control_response",
+        "response": {
+            "subtype": "success",
+            "request_id": response.request_id,
+            "response": response_body,
+        },
+    })
+}
+
+async fn write_stream_json_line(
+    stdin_writer: &mut tokio::process::ChildStdin,
+    value: &serde_json::Value,
+) -> anyhow::Result<()> {
+    let line = serde_json::to_string(value).context("serialize Claude stream-json stdin")?;
+    stdin_writer
+        .write_all(line.as_bytes())
+        .await
+        .context("write Claude stream-json stdin line")?;
+    stdin_writer
+        .write_all(b"\n")
+        .await
+        .context("write Claude stream-json stdin newline")?;
+    stdin_writer.flush().await.context("flush Claude CLI stdin")
 }
 
 async fn apply_anthropic_runtime_auth_env(

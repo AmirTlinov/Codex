@@ -166,6 +166,7 @@ use tracing::warn;
 use uuid::Uuid;
 
 use crate::ModelProviderInfo;
+use crate::claude_code_control::resolve_claude_code_permission_request;
 use crate::client::ModelClient;
 use crate::client::ModelClientSession;
 use crate::client_common::Prompt;
@@ -7700,6 +7701,30 @@ async fn try_run_sampling_request(
                         .await;
                     }
                     active_item = Some(turn_item);
+                }
+            }
+            ResponseEvent::ClaudeCodePermissionRequest(request) => {
+                let resolution =
+                    resolve_claude_code_permission_request(&sess, &turn_context, &request).await;
+                let responder = request.responder();
+                let request_id = request.request_id.clone();
+                let send_result = match resolution.response {
+                    codex_api::common::ClaudeCodeControlResponseSubtype::Allow {
+                        updated_input,
+                    } => responder.allow_for_request(request_id, updated_input).await,
+                    codex_api::common::ClaudeCodeControlResponseSubtype::Deny { message } => {
+                        responder.deny(request_id, message).await
+                    }
+                };
+                if let Err(err) = send_result {
+                    warn!(error = %err, "failed to send Claude Code control response");
+                }
+                if resolution.interrupt_turn {
+                    sess.interrupt_task().await;
+                    break Ok(SamplingRequestResult {
+                        needs_follow_up: false,
+                        last_agent_message,
+                    });
                 }
             }
             ResponseEvent::ServerModel(server_model) => {
