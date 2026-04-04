@@ -2377,6 +2377,7 @@ impl Config {
             .into();
         claude_cli.auth_home = Some(codex_home.clone());
         claude_cli.auth_credentials_store_mode = cfg.cli_auth_credentials_store.unwrap_or_default();
+        claude_cli.codex_self_exe = codex_self_exe.clone();
         if agent_job_max_runtime_seconds == Some(0) {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::InvalidInput,

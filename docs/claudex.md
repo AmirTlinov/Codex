@@ -71,6 +71,10 @@ This downstream slice is intentionally honest and narrow:
   subprocess prompt every time; if carrier resume is rejected, Claudex clears
   the saved carrier session and the next delegated turn falls back to bounded
   prompt replay;
+- when Claudex knows the current Codex executable path, Claude carrier runs now
+  also receive a session-scoped internal MCP config that points at
+  `codex mcp-server`, so the Claude lane can see a Codex-owned MCP bridge
+  instead of living purely on Claude built-ins;
 - the Claude Code main lane now bridges supported `can_use_tool`
   `control_request`s into Codex's existing approval surfaces:
   - `Bash` routes through command approval;

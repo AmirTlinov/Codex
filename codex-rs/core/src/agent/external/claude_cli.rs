@@ -6,6 +6,7 @@ use codex_api::common::ClaudeCodeControlResponder;
 use codex_api::common::ClaudeCodeControlResponse;
 use codex_api::common::ClaudeCodeControlResponseSubtype;
 use codex_utils_pty::process_group::kill_child_process_group;
+use tempfile::TempDir;
 use tokio::io::AsyncBufReadExt;
 use tokio::io::AsyncReadExt;
 use tokio::io::AsyncWriteExt;
@@ -48,6 +49,11 @@ pub(crate) struct ClaudeCodeTurnResult {
 pub(crate) struct ClaudeCliControlledStream {
     pub(crate) lines: mpsc::Receiver<anyhow::Result<String>>,
     pub(crate) control_responder: ClaudeCodeControlResponder,
+}
+
+struct ClaudeCliMcpConfigGuard {
+    _tempdir: TempDir,
+    path: PathBuf,
 }
 
 pub(crate) async fn run_claude_cli(
@@ -110,6 +116,10 @@ pub(crate) async fn run_claude_cli(
         command
             .arg("--json-schema")
             .arg(serde_json::to_string(&json_schema).context("serialize claude JSON schema")?);
+    }
+    let mcp_config_guard = create_codex_mcp_config_guard(config)?;
+    if let Some(mcp_config_guard) = mcp_config_guard.as_ref() {
+        command.arg("--mcp-config").arg(&mcp_config_guard.path);
     }
 
     let mut child = command.spawn().with_context(|| {
@@ -225,6 +235,10 @@ pub(crate) async fn run_claude_cli_stream_json(
             .arg("--json-schema")
             .arg(serde_json::to_string(&json_schema).context("serialize claude JSON schema")?);
     }
+    let mcp_config_guard = create_codex_mcp_config_guard(config)?;
+    if let Some(mcp_config_guard) = mcp_config_guard.as_ref() {
+        command.arg("--mcp-config").arg(&mcp_config_guard.path);
+    }
 
     let mut child = command.spawn().with_context(|| {
         format!(
@@ -240,6 +254,7 @@ pub(crate) async fn run_claude_cli_stream_json(
     let (tx_line, rx_line) = mpsc::channel(1600);
 
     tokio::spawn(async move {
+        let _mcp_config_guard = mcp_config_guard;
         let stdin_task = tokio::spawn(async move {
             stdin_writer.write_all(user_prompt.as_bytes()).await?;
             stdin_writer.shutdown().await
@@ -395,6 +410,10 @@ pub(crate) async fn run_claude_cli_stream_json_controlled(
             .arg("--json-schema")
             .arg(serde_json::to_string(&json_schema).context("serialize claude JSON schema")?);
     }
+    let mcp_config_guard = create_codex_mcp_config_guard(config)?;
+    if let Some(mcp_config_guard) = mcp_config_guard.as_ref() {
+        command.arg("--mcp-config").arg(&mcp_config_guard.path);
+    }
 
     let mut child = command.spawn().with_context(|| {
         format!(
@@ -412,6 +431,7 @@ pub(crate) async fn run_claude_cli_stream_json_controlled(
     let stdin_shutdown = CancellationToken::new();
 
     tokio::spawn(async move {
+        let _mcp_config_guard = mcp_config_guard;
         let writer_shutdown = stdin_shutdown.clone();
         let writer_task = tokio::spawn(async move {
             let mut stdin_writer = stdin_writer;
@@ -573,6 +593,34 @@ fn build_stream_json_user_message(user_prompt: &str) -> serde_json::Value {
         "parent_tool_use_id": null,
         "session_id": "",
     })
+}
+
+fn create_codex_mcp_config_guard(
+    config: &ClaudeCliConfig,
+) -> anyhow::Result<Option<ClaudeCliMcpConfigGuard>> {
+    let Some(codex_self_exe) = config.codex_self_exe.as_ref() else {
+        return Ok(None);
+    };
+    let tempdir = tempfile::tempdir().context("create Claude MCP config tempdir")?;
+    let path = tempdir.path().join("claude-codex-mcp.json");
+    let config_json = serde_json::json!({
+        "mcpServers": {
+            "codex": {
+                "type": "stdio",
+                "command": codex_self_exe,
+                "args": ["mcp-server"]
+            }
+        }
+    });
+    std::fs::write(
+        &path,
+        serde_json::to_vec(&config_json).context("serialize Claude MCP config")?,
+    )
+    .context("write Claude MCP config")?;
+    Ok(Some(ClaudeCliMcpConfigGuard {
+        _tempdir: tempdir,
+        path,
+    }))
 }
 
 fn build_control_response_line(response: ClaudeCodeControlResponse) -> serde_json::Value {

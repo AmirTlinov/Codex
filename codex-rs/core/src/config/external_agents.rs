@@ -115,6 +115,7 @@ pub struct ClaudeCliConfig {
     pub add_dirs: Vec<PathBuf>,
     pub auth_home: Option<PathBuf>,
     pub auth_credentials_store_mode: AuthCredentialsStoreMode,
+    pub codex_self_exe: Option<PathBuf>,
 }
 
 impl From<ClaudeCliToml> for ClaudeCliConfig {
@@ -138,6 +139,7 @@ impl From<ClaudeCliToml> for ClaudeCliConfig {
                 .collect(),
             auth_home: None,
             auth_credentials_store_mode: AuthCredentialsStoreMode::File,
+            codex_self_exe: None,
         }
     }
 }

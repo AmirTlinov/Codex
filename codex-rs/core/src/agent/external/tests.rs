@@ -367,6 +367,40 @@ async fn external_agent_registry_runs_claude_code_carrier_turns() {
 }
 
 #[tokio::test]
+async fn external_agent_registry_passes_codex_mcp_bridge_config_to_claude_code() {
+    let root = TempDir::new().expect("create temp dir");
+    let mock_script = mock_claude_script(&root);
+    let registry = ExternalAgentRegistry::default();
+    let thread_id = ThreadId::new();
+
+    registry
+        .spawn_agent(
+            thread_id,
+            ExternalAgentLaunchRequest {
+                host_thread: host_thread(&root, "claude-opus-4-6").await,
+                config_snapshot: test_snapshot(root.path(), "claude-opus-4-6"),
+                developer_instructions: Some("Follow repo truth".to_string()),
+                claude_cli: ClaudeCliConfig {
+                    path: Some(mock_script.script_path.clone()),
+                    codex_self_exe: Some(std::path::PathBuf::from("/tmp/codex")),
+                    ..Default::default()
+                },
+                model: "claude-opus-4-6".to_string(),
+                parent_context: Some("[1] user: parent context".to_string()),
+            },
+            text_input("first"),
+        )
+        .await
+        .expect("spawn external agent");
+
+    let status = wait_for_final_status(&registry, thread_id).await;
+    assert_eq!(status, AgentStatus::Completed(Some("run-1".to_string())));
+
+    let args_log = read_logged_invocations(&mock_script).args.join("\n");
+    assert!(args_log.contains("--mcp-config"));
+}
+
+#[tokio::test]
 async fn interrupt_keeps_last_known_good_claude_session() {
     let root = TempDir::new().expect("create temp dir");
     let mock_script = mock_interruptible_claude_script(&root);
