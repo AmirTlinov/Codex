@@ -10,6 +10,9 @@ use codex_protocol::models::ResponseItem;
 use codex_protocol::openai_models::ModelInfo;
 use codex_protocol::protocol::SessionSource;
 use codex_protocol::protocol::SubAgentSource;
+use codex_tools::JsonSchema;
+use codex_tools::ResponsesApiTool;
+use codex_tools::ToolSpec;
 use futures::StreamExt;
 use pretty_assertions::assert_eq;
 use serde_json::json;
@@ -78,6 +81,21 @@ fn test_model_info_with_slug(slug: &str) -> ModelInfo {
     model_info.slug = slug.to_string();
     model_info.display_name = slug.to_string();
     model_info
+}
+
+fn test_function_tool(name: &str, description: &str) -> ToolSpec {
+    ToolSpec::Function(ResponsesApiTool {
+        name: name.to_string(),
+        description: description.to_string(),
+        strict: false,
+        defer_loading: None,
+        parameters: JsonSchema::Object {
+            properties: std::collections::BTreeMap::new(),
+            required: None,
+            additional_properties: Some(false.into()),
+        },
+        output_schema: None,
+    })
 }
 
 fn test_session_telemetry() -> SessionTelemetry {
@@ -330,6 +348,123 @@ async fn stream_routes_main_turns_to_claude_cli_provider() {
     let args_log = std::fs::read_to_string(args_log_path).expect("read args log");
     assert!(args_log.contains("Follow repo truth"));
     assert!(args_log.contains("claude-opus-4-6"));
+}
+
+#[tokio::test]
+async fn stream_prepends_runtime_truth_and_tool_inventory_to_claude_user_prompt() {
+    let root = TempDir::new().expect("create temp dir");
+    let (script_path, stdin_log_path, args_log_path) = write_mock_claude_script(&root);
+    let client = ModelClient::new(
+        /*auth_manager*/ None,
+        ThreadId::new(),
+        crate::model_provider_info::create_claude_cli_provider(),
+        crate::config::ClaudeCliConfig {
+            path: Some(script_path),
+            ..Default::default()
+        },
+        root.path().to_path_buf(),
+        crate::auth::AuthCredentialsStoreMode::File,
+        SessionSource::Cli,
+        /*model_verbosity*/ None,
+        /*enable_request_compression*/ false,
+        /*include_timing_metrics*/ false,
+        /*beta_features_header*/ None,
+    );
+    let mut client_session = client.new_session();
+    let shell = crate::shell::Shell {
+        shell_type: crate::shell::ShellType::Bash,
+        shell_path: std::path::PathBuf::from("/bin/bash"),
+        shell_snapshot: crate::shell::empty_shell_snapshot_receiver(),
+    };
+    let environment_context = crate::environment_context::EnvironmentContext::new(
+        Some(root.path().to_path_buf()),
+        shell,
+        Some("2026-04-04".to_string()),
+        Some("Europe/Moscow".to_string()),
+        /*network*/ None,
+        Some("- explorer: claude-sonnet-4-6\n- reviewer: gpt-5.4".to_string()),
+    )
+    .serialize_to_xml();
+    let mut prompt = crate::Prompt::default();
+    prompt.base_instructions.text = "Follow repo truth".to_string();
+    prompt.input = vec![
+        ResponseItem::Message {
+            id: None,
+            role: "developer".to_string(),
+            content: vec![ContentItem::InputText {
+                text: "<collaboration_mode>\nThe `request_user_input` tool is available in Default mode.\n</collaboration_mode>".to_string(),
+            }],
+            end_turn: None,
+            phase: None,
+        },
+        ResponseItem::Message {
+            id: None,
+            role: "user".to_string(),
+            content: vec![ContentItem::InputText {
+                text: environment_context,
+            }],
+            end_turn: None,
+            phase: None,
+        },
+        ResponseItem::Message {
+            id: None,
+            role: "user".to_string(),
+            content: vec![ContentItem::InputText {
+                text: "Какие субагенты и модели тебе доступны?".to_string(),
+            }],
+            end_turn: None,
+            phase: None,
+        },
+    ];
+    prompt.tools = vec![
+        test_function_tool(
+            "spawn_agent",
+            "Spawn a sub-agent for a well-scoped task.\n\n- Claude Opus 4.6 (`claude-opus-4-6`): flagship Claude worker.\n- GPT-5.4 (`gpt-5.4`): general frontier worker.\n\n### When to delegate\nUse only when the user explicitly asks for sub-agents.",
+        ),
+        test_function_tool(
+            "exec_command",
+            "Runs a command in a PTY and returns output or a session id for continued interaction.",
+        ),
+    ];
+
+    let mut stream = client_session
+        .stream(
+            &prompt,
+            &test_model_info_with_slug("claude-opus-4-6"),
+            root.path(),
+            &test_session_telemetry(),
+            /*effort*/ None,
+            ReasoningSummary::None,
+            /*service_tier*/ None,
+            /*turn_metadata_header*/ None,
+            CancellationToken::new(),
+        )
+        .await
+        .expect("claude stream should succeed");
+
+    while let Some(event) = stream.next().await {
+        if matches!(
+            event.expect("stream event"),
+            crate::client_common::ResponseEvent::Completed { .. }
+        ) {
+            break;
+        }
+    }
+
+    let stdin_log = std::fs::read_to_string(stdin_log_path).expect("read stdin log");
+    assert!(stdin_log.contains("<codex_runtime_truth>"));
+    assert!(stdin_log.contains("The `request_user_input` tool is available in Default mode."));
+    assert!(stdin_log.contains("<environment_context>"));
+    assert!(stdin_log.contains("- explorer: claude-sonnet-4-6"));
+    assert!(stdin_log.contains("Current Codex tool inventory: spawn_agent, exec_command"));
+    assert!(stdin_log.contains("Claude Opus 4.6 (`claude-opus-4-6`)"));
+    assert!(stdin_log.contains("Runs a command in a PTY"));
+    assert!(stdin_log.contains("Какие субагенты и модели тебе доступны?"));
+
+    let args_log = std::fs::read_to_string(args_log_path).expect("read args log");
+    assert!(args_log.contains("Treat that block as authoritative for this turn."));
+    assert!(!args_log.contains("<environment_context>"));
+    assert!(!args_log.contains("Claude Opus 4.6 (`claude-opus-4-6`)"));
 }
 
 #[tokio::test]

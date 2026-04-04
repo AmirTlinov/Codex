@@ -161,6 +161,11 @@ What it does:
   requests use request-permissions; `approval_policy=never` auto-allows the
   bridge so bypassPermissions does not dead-end; unsupported control subtypes
   still fail closed;
+- prepends a dedicated `<codex_runtime_truth>` block to the main Claude Code
+  stdin prompt, so Claude gets current collaboration-mode / permissions / apps
+  / skills / plugins sections, contextual runtime blocks such as
+  `environment_context` with subagents, and a compact summary of Codex's
+  current tool inventory without inflating the Claude `--system-prompt` argv;
 - gives external Claude agents a real child-thread host so supported approval
   prompts now surface on that child thread too, instead of remaining trapped
   inside a status-only external runner;

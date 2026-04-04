@@ -18,6 +18,7 @@ use codex_protocol::models::ContentItem;
 use codex_protocol::models::ResponseItem;
 use codex_protocol::openai_models::ModelInfo;
 use codex_protocol::openai_models::ReasoningEffort as ReasoningEffortConfig;
+use codex_tools::ToolSpec;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
@@ -32,6 +33,12 @@ const CODEX_MCP_BRIDGE_PROMPT: &str = concat!(
     "Prefer this bridge when you need Codex MCP servers, Codex-native tool behavior, or capabilities ",
     "that are not directly available through Claude Code built-ins."
 );
+const CLAUDE_RUNTIME_TRUTH_PROMPT: &str = concat!(
+    "The user prompt may include a `<codex_runtime_truth>` block with current Codex runtime context.\n",
+    "Treat that block as authoritative for this turn.\n",
+    "When it includes collaboration-mode, permissions, environment, subagent, or tool-inventory updates, ",
+    "prefer the latest such update over older conversation text or guesses."
+);
 
 pub(super) async fn stream_claude_cli_turn(
     claude_cli: &ClaudeCliConfig,
@@ -41,7 +48,7 @@ pub(super) async fn stream_claude_cli_turn(
     effort: Option<ReasoningEffortConfig>,
     cancellation_token: CancellationToken,
 ) -> Result<ResponseStream> {
-    let user_prompt = render_claude_turn_prompt(&prompt.input)?;
+    let rendered_prompt = render_claude_prompt(prompt)?;
     let controlled = run_claude_cli_stream_json_controlled(
         claude_cli,
         ClaudeCliRequest {
@@ -50,8 +57,10 @@ pub(super) async fn stream_claude_cli_turn(
             system_prompt: build_system_prompt(
                 &prompt.base_instructions.text,
                 claude_cli.codex_self_exe.is_some(),
+                /*include_runtime_truth_guidance*/
+                !rendered_prompt.runtime_sections.is_empty(),
             ),
-            user_prompt,
+            user_prompt: rendered_prompt.user_prompt,
             session: ClaudeCliSession::Ephemeral,
             json_schema: prompt.output_schema.clone(),
             tools: claude_cli.tools.clone(),
@@ -139,7 +148,16 @@ pub(super) async fn stream_claude_cli_turn(
     Ok(ResponseStream { rx_event })
 }
 
-fn build_system_prompt(base_instructions: &str, codex_mcp_bridge_available: bool) -> String {
+struct RenderedClaudePrompt {
+    runtime_sections: Vec<String>,
+    user_prompt: String,
+}
+
+fn build_system_prompt(
+    base_instructions: &str,
+    codex_mcp_bridge_available: bool,
+    include_runtime_truth_guidance: bool,
+) -> String {
     let trimmed = base_instructions.trim();
     let mut sections = Vec::new();
     if !trimmed.is_empty() {
@@ -149,27 +167,178 @@ fn build_system_prompt(base_instructions: &str, codex_mcp_bridge_available: bool
     if codex_mcp_bridge_available {
         sections.push(CODEX_MCP_BRIDGE_PROMPT.to_string());
     }
+    if include_runtime_truth_guidance {
+        sections.push(CLAUDE_RUNTIME_TRUTH_PROMPT.to_string());
+    }
     sections.join("\n\n")
 }
 
-fn render_claude_turn_prompt(items: &[ResponseItem]) -> Result<String> {
-    let mut sections = Vec::new();
-    for item in items {
-        if let Some(section) = render_item(item)? {
-            sections.push(section);
+fn render_claude_prompt(prompt: &Prompt) -> Result<RenderedClaudePrompt> {
+    let mut runtime_sections = Vec::new();
+    let mut conversation_sections = Vec::new();
+
+    for item in &prompt.input {
+        match item {
+            ResponseItem::Message { role, content, .. } if role == "developer" => {
+                if let Some(text) = content_items_to_text(content) {
+                    let trimmed = text.trim();
+                    if !trimmed.is_empty() {
+                        runtime_sections.push(format!(
+                            "<codex_runtime_update role=\"developer\">\n{trimmed}\n</codex_runtime_update>"
+                        ));
+                    }
+                }
+            }
+            ResponseItem::Message { role, content, .. }
+                if role == "user" && is_contextual_user_message_content(content) =>
+            {
+                if let Some(text) = content_items_to_text(content) {
+                    let trimmed = text.trim();
+                    if !trimmed.is_empty() {
+                        runtime_sections.push(format!(
+                            "<codex_runtime_update role=\"contextual_user\">\n{trimmed}\n</codex_runtime_update>"
+                        ));
+                    }
+                }
+            }
+            _ => {
+                if let Some(section) = render_item(item)? {
+                    conversation_sections.push(section);
+                }
+            }
         }
     }
-    if sections.is_empty() {
-        Ok(
-            "<conversation_context>\nNo prior turn items were provided.\n</conversation_context>"
-                .to_string(),
-        )
-    } else {
-        Ok(format!(
-            "<conversation_context>\n{}\n</conversation_context>",
-            sections.join("\n\n")
-        ))
+
+    if let Some(tool_summary) = render_tool_summary(&prompt.tools) {
+        runtime_sections.push(tool_summary);
     }
+
+    let user_prompt = render_claude_user_prompt(&runtime_sections, &conversation_sections);
+    Ok(RenderedClaudePrompt {
+        runtime_sections,
+        user_prompt,
+    })
+}
+
+fn render_claude_user_prompt(
+    runtime_sections: &[String],
+    conversation_sections: &[String],
+) -> String {
+    let mut sections = Vec::new();
+    if !runtime_sections.is_empty() {
+        sections.push(format!(
+            "<codex_runtime_truth>\n{}\n</codex_runtime_truth>",
+            runtime_sections.join("\n\n")
+        ));
+    }
+    sections.push(render_conversation_context(conversation_sections));
+    sections.join("\n\n")
+}
+
+fn render_conversation_context(sections: &[String]) -> String {
+    if sections.is_empty() {
+        return
+            "<conversation_context>\nNo prior turn items were provided.\n</conversation_context>"
+                .to_string();
+    }
+    format!(
+        "<conversation_context>\n{}\n</conversation_context>",
+        sections.join("\n\n")
+    )
+}
+
+fn render_tool_summary(tools: &[ToolSpec]) -> Option<String> {
+    if tools.is_empty() {
+        return None;
+    }
+
+    let tool_names = tools
+        .iter()
+        .map(ToolSpec::name)
+        .collect::<Vec<_>>()
+        .join(", ");
+    let mut sections = vec![
+        "The following tool names come from Codex's current turn-level tool inventory.".to_string(),
+        "They describe what Codex itself can do in this turn, not necessarily direct Claude Code built-ins. When you need one of these capabilities from the Claude carrier, prefer the Codex bridge or a Codex-run worker instead of claiming direct built-in access.".to_string(),
+        format!("Current Codex tool inventory: {tool_names}"),
+    ];
+    let detailed_tools = tools
+        .iter()
+        .filter_map(render_tool_detail)
+        .collect::<Vec<_>>();
+    if !detailed_tools.is_empty() {
+        sections.push(detailed_tools.join("\n\n"));
+    }
+    Some(format!(
+        "<codex_available_tools>\n{}\n</codex_available_tools>",
+        sections.join("\n\n")
+    ))
+}
+
+fn render_tool_detail(tool: &ToolSpec) -> Option<String> {
+    let (name, description) = match tool {
+        ToolSpec::Function(tool) => (tool.name.as_str(), tool.description.as_str()),
+        ToolSpec::Freeform(tool) => (tool.name.as_str(), tool.description.as_str()),
+        ToolSpec::ToolSearch { description, .. } => ("tool_search", description.as_str()),
+        ToolSpec::LocalShell {} => {
+            return Some(
+                "<tool name=\"local_shell\">\nRuns a local shell command and returns its output.\n</tool>"
+                    .to_string(),
+            );
+        }
+        ToolSpec::WebSearch { .. } => {
+            return Some(
+                "<tool name=\"web_search\">\nPerforms web search when the current model/runtime supports it.\n</tool>"
+                    .to_string(),
+            );
+        }
+        ToolSpec::ImageGeneration { .. } => {
+            return Some(
+                "<tool name=\"image_generation\">\nGenerates images when the current model/runtime supports it.\n</tool>"
+                    .to_string(),
+            );
+        }
+    };
+
+    if !matches!(
+        name,
+        "spawn_agent"
+            | "send_input"
+            | "wait_agent"
+            | "close_agent"
+            | "request_user_input"
+            | "update_plan"
+            | "exec_command"
+            | "write_stdin"
+            | "js_repl"
+            | "apply_patch"
+    ) {
+        return None;
+    }
+
+    let description = compact_tool_description(name, description);
+    (!description.is_empty()).then(|| format!("<tool name=\"{name}\">\n{description}\n</tool>"))
+}
+
+fn compact_tool_description(name: &str, description: &str) -> String {
+    let trimmed = description.trim();
+    if trimmed.is_empty() {
+        return String::new();
+    }
+    if name == "spawn_agent" {
+        return trimmed
+            .split("\n### ")
+            .next()
+            .unwrap_or(trimmed)
+            .trim()
+            .to_string();
+    }
+    trimmed
+        .split("\n\n")
+        .next()
+        .unwrap_or(trimmed)
+        .trim()
+        .to_string()
 }
 
 fn render_item(item: &ResponseItem) -> Result<Option<String>> {

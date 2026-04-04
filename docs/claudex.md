@@ -80,6 +80,14 @@ This downstream slice is intentionally honest and narrow:
   `mcp__codex__codex-reply` when they need Codex-owned tools or Codex-run
   workers, and `mcp__codex__codex-shell` for exact shell-command execution,
   instead of guessing that only Claude built-ins exist;
+- the main Claude Code lane now prepends a dedicated
+  `<codex_runtime_truth>` block to Claude's stdin prompt instead of burying
+  current mode/tool context only inside the flattened conversation transcript:
+  collaboration-mode / permissions / apps / skills / plugins developer blocks,
+  contextual runtime blocks like `environment_context` + subagents, and a
+  compact summary of Codex's current tool inventory now ride in an
+  authoritative runtime capsule, while the system prompt only carries the
+  bounded instruction to trust that capsule;
 - the bridge now exposes a narrow first pilot tool too:
   `mcp__codex__codex-shell`, which starts a Codex-owned worker session for one
   exact shell command and returns its output;
