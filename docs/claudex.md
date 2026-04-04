@@ -95,12 +95,13 @@ This downstream slice is intentionally honest and narrow:
   the current bridge/direct tool summary, while continuation turns only resend
   the smaller mutable runtime/tool delta instead of duplicating the whole
   static inventory on every resume;
-- `spawn_agent` now treats explicit provider/model selection as owning the
-  child runtime too: if a Claude-backed parent asks for `model_provider =
-  "openai"` (or a GPT parent asks for `model_provider = "anthropic"`), Claudex
-  flips the child `agent_backend` to the matching runtime instead of silently
-  keeping the parent Claude carrier/backend and spawning the wrong kind of
-  agent;
+- `spawn_agent` now treats the effective child provider as owning the child
+  runtime too: if the parent session has already switched providers, or if a
+  Claude-backed parent explicitly asks for `model_provider = "openai"` (or a
+  GPT parent asks for `model_provider = "anthropic"`), Claudex now flips the
+  child `agent_backend` to the matching runtime and reselects a compatible
+  default model when needed instead of silently keeping the wrong Claude
+  carrier/backend;
 - the `spawn_agent` model inventory shown to Claude-backed turns is now merged
   across the active picker-visible provider pair, so a Claude session can see
   paired OpenAI GPT models in the same authoritative inventory that powers the

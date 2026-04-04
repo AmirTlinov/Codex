@@ -229,6 +229,7 @@ fn build_agent_shared_config(turn: &TurnContext) -> Result<Config, FunctionCallE
     let mut config = (*base_config).clone();
     config.model = Some(turn.model_info.slug.clone());
     config.model_provider = turn.provider.clone();
+    config.agent_backend = spawn_agent_backend_for_provider(&turn.provider);
     config.model_reasoning_effort = turn.reasoning_effort;
     config.model_reasoning_summary = Some(turn.reasoning_summary);
     config.developer_instructions = turn.developer_instructions.clone();
@@ -372,6 +373,60 @@ pub(crate) fn spawn_agent_backend_for_provider(provider: &ModelProviderInfo) -> 
         crate::WireApi::ClaudeCode => AgentBackend::ClaudeCode,
         crate::WireApi::Anthropic | crate::WireApi::Responses => AgentBackend::Codex,
     }
+}
+
+pub(crate) async fn reconcile_spawn_agent_provider_runtime(
+    session: &Session,
+    turn: &TurnContext,
+    config: &mut Config,
+) -> Result<(), FunctionCallError> {
+    config.agent_backend = spawn_agent_backend_for_provider(&config.model_provider);
+
+    let provider_models_manager =
+        models_manager_for_provider(session, config, config.model_provider.clone());
+    let provider_models = provider_models_manager
+        .list_models(RefreshStrategy::Offline)
+        .await;
+
+    let current_model = config
+        .model
+        .clone()
+        .unwrap_or_else(|| turn.model_info.slug.clone());
+    let selected_model_name = if provider_models
+        .iter()
+        .any(|model| model.model == current_model)
+    {
+        current_model
+    } else {
+        provider_models
+            .iter()
+            .find(|model| model.is_default)
+            .or_else(|| provider_models.first())
+            .map(|model| model.model.clone())
+            .ok_or_else(|| {
+                FunctionCallError::RespondToModel(format!(
+                    "No models are available for model_provider `{}`",
+                    config.model_provider_id
+                ))
+            })?
+    };
+    let selected_model_info = provider_models_manager
+        .get_model_info(&selected_model_name, config)
+        .await;
+    config.model = Some(selected_model_name);
+
+    if let Some(reasoning_effort) = config.model_reasoning_effort
+        && !selected_model_info
+            .supported_reasoning_levels
+            .iter()
+            .any(|preset| preset.effort == reasoning_effort)
+    {
+        config.model_reasoning_effort = selected_model_info.default_reasoning_level;
+    } else if config.model_reasoning_effort.is_none() {
+        config.model_reasoning_effort = selected_model_info.default_reasoning_level;
+    }
+
+    Ok(())
 }
 
 async fn resolve_requested_provider_and_models(

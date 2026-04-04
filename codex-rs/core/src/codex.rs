@@ -5875,7 +5875,7 @@ fn spawn_agent_available_models(
     }
 
     for provider_id in
-        crate::model_picker_provider_ids(&config.model_providers, &config.model_provider_id)
+        spawn_agent_inventory_provider_ids(&config.model_providers, &config.model_provider_id)
     {
         if provider_id == config.model_provider_id {
             continue;
@@ -5902,6 +5902,51 @@ fn spawn_agent_available_models(
     }
 
     visible_models
+}
+
+fn spawn_agent_inventory_provider_ids(
+    model_providers: &HashMap<String, ModelProviderInfo>,
+    active_provider_id: &str,
+) -> Vec<String> {
+    let mut provider_ids = vec![active_provider_id.to_string()];
+    let Some(active_provider) = model_providers.get(active_provider_id) else {
+        return provider_ids;
+    };
+
+    let paired_provider_id = match active_provider.wire_api {
+        crate::WireApi::Responses => preferred_claude_spawn_provider_id(model_providers),
+        crate::WireApi::Anthropic | crate::WireApi::ClaudeCode => model_providers
+            .contains_key(crate::OPENAI_PROVIDER_ID)
+            .then(|| crate::OPENAI_PROVIDER_ID.to_string()),
+    };
+    if let Some(paired_provider_id) = paired_provider_id
+        && paired_provider_id != active_provider_id
+    {
+        provider_ids.push(paired_provider_id);
+    }
+
+    provider_ids
+}
+
+fn preferred_claude_spawn_provider_id(
+    model_providers: &HashMap<String, ModelProviderInfo>,
+) -> Option<String> {
+    if model_providers.contains_key(crate::CLAUDE_CODE_PROVIDER_ID) {
+        return Some(crate::CLAUDE_CODE_PROVIDER_ID.to_string());
+    }
+    if let Some((provider_id, _)) = model_providers
+        .iter()
+        .find(|(_, provider)| provider.wire_api == crate::WireApi::ClaudeCode)
+    {
+        return Some(provider_id.clone());
+    }
+    if model_providers.contains_key(crate::ANTHROPIC_PROVIDER_ID) {
+        return Some(crate::ANTHROPIC_PROVIDER_ID.to_string());
+    }
+    model_providers
+        .iter()
+        .find(|(_, provider)| provider.wire_api == crate::WireApi::Anthropic)
+        .map(|(provider_id, _)| provider_id.clone())
 }
 
 async fn spawn_review_thread(

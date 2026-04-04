@@ -172,10 +172,12 @@ What it does:
   role/model inventory, and the current bridge/direct tool summary, while
   continuation turns resend only the smaller mutable runtime/tool delta instead
   of duplicating the whole static inventory into every resumed carrier turn;
-- keeps `spawn_agent` provider/model overrides honest under Claudex defaults:
-  when a Claude-backed parent explicitly selects an OpenAI/native-Anthropic
-  child (or vice versa), the child `agent_backend` now flips to the matching
-  runtime instead of silently inheriting the wrong Claude carrier backend;
+- keeps `spawn_agent` provider ownership honest under Claudex defaults: if the
+  parent session has already switched providers, or if a Claude-backed parent
+  explicitly selects an OpenAI/native-Anthropic child (or vice versa), the
+  child `agent_backend` now flips to the matching runtime and reselects a
+  provider-compatible default model when needed instead of silently inheriting
+  the wrong Claude carrier backend;
 - broadens the `spawn_agent` model inventory exposed to Claude-backed turns so
   the tool description now reflects the active picker-visible provider pair
   (for example Claude plus OpenAI) instead of only the current provider's
