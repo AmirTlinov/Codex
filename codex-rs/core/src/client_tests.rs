@@ -171,6 +171,45 @@ fn write_mock_claude_script(
     (script_path, stdin_log_path, args_log_path)
 }
 
+fn write_mock_claude_waits_for_stdin_shutdown_script(
+    root: &TempDir,
+) -> (std::path::PathBuf, std::path::PathBuf) {
+    let script_path = root.path().join("mock-claude-waits-for-stdin-shutdown.sh");
+    let stdin_log_path = root.path().join("stdin-shutdown.log");
+    std::fs::write(
+        &script_path,
+        format!(
+            r#"#!/usr/bin/env bash
+set -euo pipefail
+IFS= read -r stdin_payload
+printf '%s\n--\n' "$stdin_payload" > '{}'
+cat <<'EOF'
+{{"type":"system","subtype":"init","session_id":"mock-session","tools":[],"mcp_servers":[],"model":"claude-opus-4-6","permissionMode":"bypassPermissions","slash_commands":[],"apiKeySource":"none","claude_code_version":"test","output_style":"default","agents":[],"skills":[],"plugins":[],"uuid":"init-1"}}
+{{"type":"assistant","message":{{"model":"claude-opus-4-6","id":"msg-1","type":"message","role":"assistant","content":[{{"type":"text","text":"claude-main-eof-ok"}}],"stop_reason":null,"stop_sequence":null,"stop_details":null,"usage":{{"input_tokens":3,"cache_creation_input_tokens":0,"cache_read_input_tokens":0,"output_tokens":2,"service_tier":"standard","inference_geo":"not_available"}},"context_management":null}},"parent_tool_use_id":null,"session_id":"mock-session","uuid":"assistant-1"}}
+{{"type":"result","subtype":"success","is_error":false,"duration_ms":10,"duration_api_ms":10,"num_turns":1,"result":"claude-main-eof-ok","stop_reason":"end_turn","session_id":"mock-session","total_cost_usd":0.0,"usage":{{"input_tokens":3,"cache_creation_input_tokens":0,"cache_read_input_tokens":0,"output_tokens":2}},"modelUsage":{{}},"permission_denials":[],"uuid":"result-1"}}
+EOF
+while IFS= read -r trailing_line; do
+  printf '%s\n--\n' "$trailing_line" >> '{}'
+done
+"#,
+            stdin_log_path.display(),
+            stdin_log_path.display(),
+        ),
+    )
+    .expect("write stdin-shutdown mock claude script");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mut permissions = std::fs::metadata(&script_path)
+            .expect("stdin-shutdown mock claude metadata")
+            .permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(&script_path, permissions)
+            .expect("chmod stdin-shutdown mock claude");
+    }
+    (script_path, stdin_log_path)
+}
+
 #[tokio::test]
 async fn stream_routes_main_turns_to_claude_cli_provider() {
     let root = TempDir::new().expect("create temp dir");
@@ -248,6 +287,87 @@ async fn stream_routes_main_turns_to_claude_cli_provider() {
     let args_log = std::fs::read_to_string(args_log_path).expect("read args log");
     assert!(args_log.contains("Follow repo truth"));
     assert!(args_log.contains("claude-opus-4-6"));
+}
+
+#[tokio::test]
+async fn stream_closes_claude_stdin_after_terminal_result() {
+    let root = TempDir::new().expect("create temp dir");
+    let (script_path, stdin_log_path) = write_mock_claude_waits_for_stdin_shutdown_script(&root);
+    let client = ModelClient::new(
+        /*auth_manager*/ None,
+        ThreadId::new(),
+        crate::model_provider_info::create_claude_cli_provider(),
+        crate::config::ClaudeCliConfig {
+            path: Some(script_path),
+            ..Default::default()
+        },
+        root.path().to_path_buf(),
+        crate::auth::AuthCredentialsStoreMode::File,
+        SessionSource::Cli,
+        /*model_verbosity*/ None,
+        /*enable_request_compression*/ false,
+        /*include_timing_metrics*/ false,
+        /*beta_features_header*/ None,
+    );
+    let mut client_session = client.new_session();
+    let prompt = crate::Prompt {
+        input: vec![ResponseItem::Message {
+            id: None,
+            role: "user".to_string(),
+            content: vec![ContentItem::InputText {
+                text: "Say hello from Claude after EOF.".to_string(),
+            }],
+            end_turn: None,
+            phase: None,
+        }],
+        ..Default::default()
+    };
+
+    let mut stream = client_session
+        .stream(
+            &prompt,
+            &test_model_info_with_slug("claude-opus-4-6"),
+            root.path(),
+            &test_session_telemetry(),
+            /*effort*/ None,
+            ReasoningSummary::None,
+            /*service_tier*/ None,
+            /*turn_metadata_header*/ None,
+            CancellationToken::new(),
+        )
+        .await
+        .expect("claude stream should start");
+
+    let mut saw_message = false;
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        while let Some(event) = stream.next().await {
+            match event.expect("stream event") {
+                crate::client_common::ResponseEvent::OutputItemDone(ResponseItem::Message {
+                    content,
+                    ..
+                }) => {
+                    assert_eq!(
+                        content,
+                        vec![ContentItem::OutputText {
+                            text: "claude-main-eof-ok".to_string()
+                        }]
+                    );
+                    saw_message = true;
+                }
+                crate::client_common::ResponseEvent::Completed { .. } => break,
+                _ => {}
+            }
+        }
+    })
+    .await
+    .expect("main Claude lane should finish once terminal result arrives");
+
+    assert!(saw_message, "expected assistant message before completion");
+    let stdin_log = std::fs::read_to_string(stdin_log_path).expect("read stdin-shutdown log");
+    assert!(
+        stdin_log.contains("Say hello from Claude after EOF."),
+        "expected initial stream-json user message to be written"
+    );
 }
 
 #[tokio::test]
