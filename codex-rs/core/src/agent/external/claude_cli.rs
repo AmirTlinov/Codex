@@ -409,14 +409,24 @@ pub(crate) async fn run_claude_cli_stream_json_controlled(
     let (tx_line, rx_line) = mpsc::channel(1600);
     let (tx_control, mut rx_control) = mpsc::channel::<ClaudeCodeControlResponse>(64);
     let initial_user_message = build_stream_json_user_message(&request.user_prompt);
+    let stdin_shutdown = CancellationToken::new();
 
     tokio::spawn(async move {
+        let writer_shutdown = stdin_shutdown.clone();
         let writer_task = tokio::spawn(async move {
             let mut stdin_writer = stdin_writer;
             write_stream_json_line(&mut stdin_writer, &initial_user_message).await?;
-            while let Some(response) = rx_control.recv().await {
-                let payload = build_control_response_line(response);
-                write_stream_json_line(&mut stdin_writer, &payload).await?;
+            loop {
+                tokio::select! {
+                    _ = writer_shutdown.cancelled() => break,
+                    response = rx_control.recv() => match response {
+                        Some(response) => {
+                            let payload = build_control_response_line(response);
+                            write_stream_json_line(&mut stdin_writer, &payload).await?;
+                        }
+                        None => break,
+                    },
+                }
             }
             stdin_writer
                 .shutdown()
@@ -447,14 +457,21 @@ pub(crate) async fn run_claude_cli_stream_json_controlled(
                             if line.trim().is_empty() {
                                 continue;
                             }
+                            let closes_stdin = is_terminal_result_line(&line);
                             if tx_line.send(Ok(line)).await.is_err() {
                                 let _ = terminate_child(&mut child).await;
                                 writer_task.abort();
                                 stderr_task.abort();
                                 return;
                             }
+                            if closes_stdin {
+                                stdin_shutdown.cancel();
+                            }
                         }
-                        Ok(None) => break,
+                        Ok(None) => {
+                            stdin_shutdown.cancel();
+                            break;
+                        }
                         Err(err) => {
                             let _ = tx_line.send(Err(err.into())).await;
                             writer_task.abort();
@@ -584,6 +601,19 @@ fn build_control_response_line(response: ClaudeCodeControlResponse) -> serde_jso
             "response": response_body,
         },
     })
+}
+
+fn is_terminal_result_line(line: &str) -> bool {
+    serde_json::from_str::<serde_json::Value>(line)
+        .ok()
+        .and_then(|value| {
+            value
+                .get("type")
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_string)
+        })
+        .as_deref()
+        == Some("result")
 }
 
 async fn write_stream_json_line(

@@ -1,17 +1,17 @@
 use std::path::Path;
 use std::sync::Arc;
 
-use codex_api::common::ClaudeCodeControlResponseSubtype;
 use codex_api::common::ClaudeCodeControlResponder;
+use codex_api::common::ClaudeCodeControlResponseSubtype;
 use codex_api::common::ClaudeCodePermissionRequest;
 use codex_protocol::request_permissions::RequestPermissionProfile;
 use codex_protocol::request_permissions::RequestPermissionsArgs;
 use codex_utils_absolute_path::AbsolutePathBuf;
 use serde_json::Value;
 
+use crate::codex::ExternalCommandApprovalRequest;
 use crate::codex::Session;
 use crate::codex::TurnContext;
-use crate::codex::ExternalCommandApprovalRequest;
 use crate::protocol::AskForApproval;
 use crate::protocol::ReviewDecision;
 
@@ -29,53 +29,67 @@ pub(crate) fn parse_control_request_line(
     line: &str,
     control_responder: &ClaudeCodeControlResponder,
 ) -> std::result::Result<ControlRequestParseOutcome, String> {
-    let value: serde_json::Value =
-        serde_json::from_str(line).map_err(|err| format!("parse Claude Code control_request: {err}"))?;
+    let value: serde_json::Value = serde_json::from_str(line)
+        .map_err(|err| format!("parse Claude Code control_request: {err}"))?;
     if value.get("type").and_then(serde_json::Value::as_str) != Some("control_request") {
         return Ok(ControlRequestParseOutcome::NotControlRequest);
     }
     let request = value
         .get("request")
         .and_then(serde_json::Value::as_object)
-        .ok_or_else(|| "Claude Code carrier emitted malformed control_request payload".to_string())?;
+        .ok_or_else(|| {
+            "Claude Code carrier emitted malformed control_request payload".to_string()
+        })?;
     let subtype = request
         .get("subtype")
         .and_then(serde_json::Value::as_str)
-        .ok_or_else(|| "Claude Code carrier emitted malformed control_request subtype".to_string())?;
+        .ok_or_else(|| {
+            "Claude Code carrier emitted malformed control_request subtype".to_string()
+        })?;
     if subtype != "can_use_tool" {
-        return Err("Claude Code carrier emitted an unsupported control_request subtype".to_string());
+        return Err(
+            "Claude Code carrier emitted an unsupported control_request subtype".to_string(),
+        );
     }
     let input = request
         .get("input")
         .cloned()
         .ok_or_else(|| "Claude Code carrier emitted malformed can_use_tool input".to_string())?;
-    Ok(ControlRequestParseOutcome::Supported(ClaudeCodePermissionRequest::new(
-        value
-            .get("request_id")
-            .and_then(serde_json::Value::as_str)
-            .ok_or_else(|| "Claude Code carrier emitted malformed can_use_tool request_id".to_string())?
-            .to_string(),
-        request
-            .get("tool_name")
-            .and_then(serde_json::Value::as_str)
-            .ok_or_else(|| "Claude Code carrier emitted malformed can_use_tool tool_name".to_string())?
-            .to_string(),
-        input,
-        request
-            .get("tool_use_id")
-            .and_then(serde_json::Value::as_str)
-            .ok_or_else(|| "Claude Code carrier emitted malformed can_use_tool tool_use_id".to_string())?
-            .to_string(),
-        request
-            .get("description")
-            .and_then(serde_json::Value::as_str)
-            .map(str::to_string),
-        request
-            .get("decision_reason")
-            .and_then(serde_json::Value::as_str)
-            .map(str::to_string),
-        control_responder.clone(),
-    )))
+    Ok(ControlRequestParseOutcome::Supported(
+        ClaudeCodePermissionRequest::new(
+            value
+                .get("request_id")
+                .and_then(serde_json::Value::as_str)
+                .ok_or_else(|| {
+                    "Claude Code carrier emitted malformed can_use_tool request_id".to_string()
+                })?
+                .to_string(),
+            request
+                .get("tool_name")
+                .and_then(serde_json::Value::as_str)
+                .ok_or_else(|| {
+                    "Claude Code carrier emitted malformed can_use_tool tool_name".to_string()
+                })?
+                .to_string(),
+            input,
+            request
+                .get("tool_use_id")
+                .and_then(serde_json::Value::as_str)
+                .ok_or_else(|| {
+                    "Claude Code carrier emitted malformed can_use_tool tool_use_id".to_string()
+                })?
+                .to_string(),
+            request
+                .get("description")
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_string),
+            request
+                .get("decision_reason")
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_string),
+            control_responder.clone(),
+        ),
+    ))
 }
 
 pub(crate) async fn resolve_claude_code_permission_request(
@@ -226,7 +240,9 @@ async fn resolve_external_bash_permission_request(
         .and_then(Value::as_str)
         .map(str::to_owned)
     else {
-        return denied_resolution("Claude Code Bash request did not include a command.".to_string());
+        return denied_resolution(
+            "Claude Code Bash request did not include a command.".to_string(),
+        );
     };
 
     let decision = sess
@@ -300,17 +316,8 @@ fn requested_permissions_for_tool(
     cwd: &Path,
 ) -> Option<RequestPermissionProfile> {
     match tool_name {
-        "Read"
-        | "FileReadTool"
-        | "NotebookRead"
-        | "NotebookReadTool"
-        | "Glob"
-        | "GlobTool"
-        | "Grep"
-        | "GrepTool"
-        | "LSP"
-        | "LS"
-        | "ListDir" => {
+        "Read" | "FileReadTool" | "NotebookRead" | "NotebookReadTool" | "Glob" | "GlobTool"
+        | "Grep" | "GrepTool" | "LSP" | "LS" | "ListDir" => {
             let paths = resolve_paths(input, cwd);
             (!paths.is_empty()).then_some(RequestPermissionProfile {
                 file_system: Some(codex_protocol::models::FileSystemPermissions {
@@ -320,12 +327,7 @@ fn requested_permissions_for_tool(
                 ..RequestPermissionProfile::default()
             })
         }
-        "Write"
-        | "Edit"
-        | "MultiEdit"
-        | "FileWriteTool"
-        | "FileEditTool"
-        | "NotebookEdit"
+        "Write" | "Edit" | "MultiEdit" | "FileWriteTool" | "FileEditTool" | "NotebookEdit"
         | "NotebookEditTool" => {
             let paths = resolve_paths(input, cwd);
             (!paths.is_empty()).then_some(RequestPermissionProfile {
@@ -338,10 +340,10 @@ fn requested_permissions_for_tool(
         }
         "WebFetch" | "WebFetchTool" | "WebSearch" | "WebSearchTool" => {
             Some(RequestPermissionProfile {
-            network: Some(codex_protocol::models::NetworkPermissions {
-                enabled: Some(true),
-            }),
-            ..RequestPermissionProfile::default()
+                network: Some(codex_protocol::models::NetworkPermissions {
+                    enabled: Some(true),
+                }),
+                ..RequestPermissionProfile::default()
             })
         }
         _ => None,

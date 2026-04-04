@@ -77,9 +77,7 @@ pub(super) async fn stream_claude_cli_turn(
                         }
                         Ok(ControlRequestParseOutcome::NotControlRequest) => {}
                         Err(message) => {
-                            let _ = tx_event
-                                .send(Err(CodexErr::Stream(message, None)))
-                                .await;
+                            let _ = tx_event.send(Err(CodexErr::Stream(message, None))).await;
                             return;
                         }
                     }

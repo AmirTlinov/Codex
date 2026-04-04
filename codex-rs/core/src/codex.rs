@@ -3247,10 +3247,8 @@ impl Session {
             }
         }
         let available_decisions = ExecApprovalRequestEvent::default_available_decisions(
-            /*network_approval_context*/ None,
-            /*proposed_execpolicy_amendment*/ None,
-            /*proposed_network_policy_amendments*/ None,
-            /*additional_permissions*/ None,
+            /*network_approval_context*/ None, /*proposed_execpolicy_amendment*/ None,
+            /*proposed_network_policy_amendments*/ None, /*additional_permissions*/ None,
         );
         let event = EventMsg::ExecApprovalRequest(ExecApprovalRequestEvent {
             call_id,
@@ -3266,7 +3264,11 @@ impl Session {
             additional_permissions: None,
             available_decisions: Some(available_decisions),
         });
-        self.send_event_raw(Event { id: turn_id, msg: event }).await;
+        self.send_event_raw(Event {
+            id: turn_id,
+            msg: event,
+        })
+        .await;
         match approval_policy {
             AskForApproval::Never => ReviewDecision::Approved,
             _ => rx_approve.await.unwrap_or(ReviewDecision::Abort),
@@ -3408,7 +3410,11 @@ impl Session {
             reason: args.reason,
             permissions: args.permissions,
         });
-        self.send_event_raw(Event { id: turn_id, msg: event }).await;
+        self.send_event_raw(Event {
+            id: turn_id,
+            msg: event,
+        })
+        .await;
         rx_response.await.ok()
     }
 

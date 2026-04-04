@@ -30,6 +30,8 @@ use codex_protocol::protocol::TurnStartedEvent;
 use codex_protocol::request_permissions::PermissionGrantScope;
 use codex_protocol::request_permissions::RequestPermissionsResponse;
 use pretty_assertions::assert_eq;
+use std::sync::atomic::AtomicBool;
+use std::sync::atomic::Ordering;
 use tempfile::TempDir;
 use tokio::time::Duration;
 use tokio::time::sleep;
@@ -105,11 +107,7 @@ fn mock_claude_permission_script(root: &TempDir) -> MockClaudeScript {
         "exit 13".to_string(),
     ]
     .join("\n");
-    std::fs::write(
-        &script_path,
-        script,
-    )
-    .expect("write mock Claude permission script");
+    std::fs::write(&script_path, script).expect("write mock Claude permission script");
     let mut permissions = std::fs::metadata(&script_path)
         .expect("mock Claude permission metadata")
         .permissions();
@@ -117,8 +115,7 @@ fn mock_claude_permission_script(root: &TempDir) -> MockClaudeScript {
     {
         use std::os::unix::fs::PermissionsExt;
         permissions.set_mode(0o755);
-        std::fs::set_permissions(&script_path, permissions)
-            .expect("chmod mock Claude permission");
+        std::fs::set_permissions(&script_path, permissions).expect("chmod mock Claude permission");
     }
     MockClaudeScript {
         script_path,
@@ -170,9 +167,15 @@ fn mock_claude_bash_permission_script(root: &TempDir) -> MockClaudeScript {
 }
 
 fn mock_claude_interruptible_permission_script(root: &TempDir) -> MockClaudeScript {
-    let script_path = root.path().join("mock-control-claude-interrupt-permission.sh");
-    let stdin_log_path = root.path().join("control-claude-interrupt-permission.stdin.log");
-    let count_path = root.path().join("control-claude-interrupt-permission.count");
+    let script_path = root
+        .path()
+        .join("mock-control-claude-interrupt-permission.sh");
+    let stdin_log_path = root
+        .path()
+        .join("control-claude-interrupt-permission.stdin.log");
+    let count_path = root
+        .path()
+        .join("control-claude-interrupt-permission.count");
     let script = [
         "#!/usr/bin/env bash".to_string(),
         "set -euo pipefail".to_string(),
@@ -746,7 +749,11 @@ async fn external_claude_agent_routes_permission_requests_through_child_thread()
 
     let thread_id = harness
         .control
-        .spawn_agent(config, text_input("read AGENTS via child approval"), /*session_source*/ None)
+        .spawn_agent(
+            config,
+            text_input("read AGENTS via child approval"),
+            /*session_source*/ None,
+        )
         .await
         .expect("spawn external Claude agent");
     let child_thread = harness
@@ -835,7 +842,10 @@ async fn external_claude_agent_routes_bash_approval_through_child_thread() {
         .expect("approve external child bash request");
 
     let status = wait_for_final_agent_status(&harness.control, thread_id).await;
-    assert_eq!(status, AgentStatus::Completed(Some("bash-approved".to_string())));
+    assert_eq!(
+        status,
+        AgentStatus::Completed(Some("bash-approved".to_string()))
+    );
 
     let stdin_log = std::fs::read_to_string(&mock_claude.stdin_log_path)
         .expect("read bash permission stdin log");
@@ -891,14 +901,150 @@ async fn external_claude_interrupt_clears_pending_child_thread_permission_wait()
         .send_input(thread_id, text_input("run after interrupt"))
         .await
         .expect("send follow-up after interrupt");
-    let status = wait_for_agent_status_change(&harness.control, thread_id, &AgentStatus::Interrupted)
-        .await;
+    let status =
+        wait_for_agent_status_change(&harness.control, thread_id, &AgentStatus::Interrupted).await;
     let status = if matches!(status, AgentStatus::Completed(_)) {
         status
     } else {
         wait_for_final_agent_status(&harness.control, thread_id).await
     };
-    assert_eq!(status, AgentStatus::Completed(Some("after-interrupt".to_string())));
+    assert_eq!(
+        status,
+        AgentStatus::Completed(Some("after-interrupt".to_string()))
+    );
+}
+
+#[tokio::test]
+#[ignore = "requires live Claude Code carrier auth"]
+async fn live_external_claude_child_thread_bash_roundtrip() {
+    let harness = AgentControlHarness::new().await;
+    let Some(claude_path) = which::which("claude").ok() else {
+        return;
+    };
+    let repo_root = std::env::current_dir()
+        .expect("current dir")
+        .ancestors()
+        .find(|path| path.join("AGENTS.md").is_file())
+        .map(std::path::Path::to_path_buf)
+        .expect("find repo root with AGENTS.md");
+    let repo_root_abs: codex_utils_absolute_path::AbsolutePathBuf = repo_root
+        .clone()
+        .try_into()
+        .expect("repo root should be absolute");
+    let agents_path = repo_root.join("AGENTS.md");
+    let live_auth_home = std::env::var_os("CODEX_CLAUDE_LIVE_AUTH_HOME")
+        .or_else(|| std::env::var_os("CLAUDEX_HOME"))
+        .map(std::path::PathBuf::from)
+        .or_else(|| dirs::home_dir().map(|home| home.join(".claudex")))
+        .filter(|path| path.is_dir())
+        .expect("set CODEX_CLAUDE_LIVE_AUTH_HOME or ensure ~/.claudex exists");
+    let live_auth = codex_login::resolve_anthropic_runtime_auth(
+        &live_auth_home,
+        harness.config.claude_cli.auth_credentials_store_mode,
+    )
+    .await
+    .expect("resolve live Claude auth");
+    assert!(
+        live_auth.is_some(),
+        "live Claude auth home must contain Anthropic auth"
+    );
+    let mut config = harness.config.clone();
+    config.cwd = repo_root_abs;
+    config.agent_backend = crate::config::AgentBackend::ClaudeCode;
+    config.claude_cli.path = Some(claude_path);
+    config.claude_cli.tools = Some(vec!["Bash".to_string()]);
+    config.claude_cli.add_dirs = vec![repo_root];
+    config.claude_cli.auth_home = Some(live_auth_home);
+    config.permissions.approval_policy = Constrained::allow_any(AskForApproval::OnRequest);
+
+    let thread_id = harness
+        .control
+        .spawn_agent(
+            config,
+            text_input(&format!(
+                "Run a bash command to read {} and return the first non-empty Markdown heading exactly. Do not answer from memory.",
+                agents_path.display()
+            )),
+            /*session_source*/ None,
+        )
+        .await
+        .expect("spawn live external Claude agent");
+    let child_thread = harness
+        .manager
+        .get_thread(thread_id)
+        .await
+        .expect("live external child thread host should exist");
+    let stop_approvals = std::sync::Arc::new(AtomicBool::new(false));
+    let approval_task = {
+        let child_thread = child_thread.clone();
+        let stop_approvals = stop_approvals.clone();
+        tokio::spawn(async move {
+            while !stop_approvals.load(Ordering::Relaxed) {
+                let event = match timeout(Duration::from_secs(5), child_thread.next_event()).await {
+                    Ok(event) => event.expect("child thread event"),
+                    Err(_) if stop_approvals.load(Ordering::Relaxed) => break,
+                    Err(_) => continue,
+                };
+                match event.msg {
+                    EventMsg::RequestPermissions(request) => {
+                        child_thread
+                            .submit(Op::RequestPermissionsResponse {
+                                id: request.call_id.clone(),
+                                response: RequestPermissionsResponse {
+                                    permissions: request.permissions,
+                                    scope: PermissionGrantScope::Turn,
+                                },
+                            })
+                            .await
+                            .expect("approve live child permission request");
+                    }
+                    EventMsg::ExecApprovalRequest(request) => {
+                        child_thread
+                            .submit(Op::ExecApproval {
+                                id: request.effective_approval_id(),
+                                turn_id: Some(request.turn_id),
+                                decision: ReviewDecision::Approved,
+                            })
+                            .await
+                            .expect("approve live child exec request");
+                    }
+                    EventMsg::Error(err) => {
+                        panic!(
+                            "unexpected child thread error during live Claude roundtrip: {err:?}"
+                        );
+                    }
+                    _ => {}
+                }
+            }
+        })
+    };
+
+    let status = timeout(Duration::from_secs(120), async {
+        loop {
+            let status = harness.control.get_status(thread_id).await;
+            if matches!(
+                status,
+                AgentStatus::Completed(_)
+                    | AgentStatus::Errored(_)
+                    | AgentStatus::Interrupted
+                    | AgentStatus::Shutdown
+            ) {
+                break status;
+            }
+            sleep(Duration::from_millis(50)).await;
+        }
+    })
+    .await
+    .expect("live external agent should finish after approval");
+    stop_approvals.store(true, Ordering::Relaxed);
+    approval_task.await.expect("join live approval task");
+    let AgentStatus::Completed(Some(output)) = status else {
+        panic!("expected completed output from live Claude child");
+    };
+    assert!(
+        output.contains("# Rust/codex-rs"),
+        "live Claude child output should preserve the AGENTS heading: {output}"
+    );
 }
 
 #[tokio::test]

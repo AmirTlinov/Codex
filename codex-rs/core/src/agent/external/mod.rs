@@ -7,19 +7,20 @@ use std::sync::atomic::Ordering;
 
 use codex_protocol::ThreadId;
 use codex_protocol::models::ResponseItem;
-use codex_protocol::protocol::Event;
 use codex_protocol::protocol::AgentStatus;
+use codex_protocol::protocol::Event;
 use codex_protocol::protocol::Op;
 use tokio::sync::Mutex;
 use tokio::sync::watch;
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
+use crate::CodexThread;
 use crate::agent::control::render_input_preview;
-use crate::codex_thread::ThreadConfigSnapshot;
 use crate::claude_code_control::ControlRequestParseOutcome;
 use crate::claude_code_control::parse_control_request_line;
 use crate::claude_code_control::resolve_external_claude_code_permission_request;
+use crate::codex_thread::ThreadConfigSnapshot;
 use crate::compact_transcript::render_compact_transcript;
 use crate::config::ClaudeCliConfig;
 use crate::config::ClaudeCliEffort;
@@ -27,7 +28,6 @@ use crate::error::CodexErr;
 use crate::error::Result as CodexResult;
 use crate::protocol::EventMsg;
 use crate::protocol::WarningEvent;
-use crate::CodexThread;
 
 pub(crate) use self::claude_cli::ClaudeCliRequest;
 pub(crate) use self::claude_cli::ClaudeCliSession;
@@ -410,7 +410,7 @@ impl ExternalAgentState {
         let mut accumulator = crate::claude_code_stream::ClaudeCodeStreamAccumulator::default();
 
         while let Some(line) = raw_lines.recv().await {
-                    match line {
+            match line {
                 Ok(line) => match parse_control_request_line(&line, &control_responder) {
                     Ok(ControlRequestParseOutcome::Supported(permission_request)) => {
                         let resolution = resolve_external_claude_code_permission_request(
