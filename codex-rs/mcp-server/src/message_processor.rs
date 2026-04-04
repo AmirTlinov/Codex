@@ -32,8 +32,10 @@ use serde_json::json;
 use tokio::sync::Mutex;
 use tokio::task;
 
+use crate::codex_tool_config::CodexShellToolCallParam;
 use crate::codex_tool_config::CodexToolCallParam;
 use crate::codex_tool_config::CodexToolCallReplyParam;
+use crate::codex_tool_config::create_tool_for_codex_shell_tool_call_param;
 use crate::codex_tool_config::create_tool_for_codex_tool_call_param;
 use crate::codex_tool_config::create_tool_for_codex_tool_call_reply_param;
 use crate::outgoing_message::OutgoingMessageSender;
@@ -321,6 +323,7 @@ impl MessageProcessor {
             meta: None,
             tools: vec![
                 create_tool_for_codex_tool_call_param(),
+                create_tool_for_codex_shell_tool_call_param(),
                 create_tool_for_codex_tool_call_reply_param(),
             ],
             next_cursor: None,
@@ -337,6 +340,7 @@ impl MessageProcessor {
 
         match name.as_ref() {
             "codex" => self.handle_tool_call_codex(id, arguments).await,
+            "codex-shell" => self.handle_tool_call_codex_shell(id, arguments).await,
             "codex-reply" => {
                 self.handle_tool_call_codex_session_reply(id, arguments)
                     .await
@@ -403,6 +407,67 @@ impl MessageProcessor {
             }
         };
 
+        self.spawn_codex_tool_session(id, initial_prompt, config);
+    }
+
+    async fn handle_tool_call_codex_shell(
+        &self,
+        id: RequestId,
+        arguments: Option<rmcp::model::JsonObject>,
+    ) {
+        let arguments = arguments.map(serde_json::Value::Object);
+        let (initial_prompt, config): (String, Config) = match arguments {
+            Some(json_val) => match serde_json::from_value::<CodexShellToolCallParam>(json_val) {
+                Ok(tool_cfg) => match tool_cfg
+                    .into_codex_tool_call()
+                    .into_config(self.arg0_paths.clone())
+                    .await
+                {
+                    Ok(cfg) => cfg,
+                    Err(e) => {
+                        let result = CallToolResult {
+                            content: vec![rmcp::model::Content::text(format!(
+                                "Failed to load Codex shell configuration from overrides: {e}"
+                            ))],
+                            structured_content: None,
+                            is_error: Some(true),
+                            meta: None,
+                        };
+                        self.outgoing.send_response(id, result).await;
+                        return;
+                    }
+                },
+                Err(e) => {
+                    let result = CallToolResult {
+                        content: vec![rmcp::model::Content::text(format!(
+                            "Failed to parse configuration for Codex shell tool: {e}"
+                        ))],
+                        structured_content: None,
+                        is_error: Some(true),
+                        meta: None,
+                    };
+                    self.outgoing.send_response(id, result).await;
+                    return;
+                }
+            },
+            None => {
+                let result = CallToolResult {
+                    content: vec![rmcp::model::Content::text(
+                        "Missing arguments for codex-shell tool-call; the `command` field is required.",
+                    )],
+                    structured_content: None,
+                    is_error: Some(true),
+                    meta: None,
+                };
+                self.outgoing.send_response(id, result).await;
+                return;
+            }
+        };
+
+        self.spawn_codex_tool_session(id, initial_prompt, config);
+    }
+
+    fn spawn_codex_tool_session(&self, id: RequestId, initial_prompt: String, config: Config) {
         // Clone outgoing and server to move into async task.
         let outgoing = self.outgoing.clone();
         let thread_manager = self.thread_manager.clone();

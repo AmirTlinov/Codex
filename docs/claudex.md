@@ -78,7 +78,11 @@ This downstream slice is intentionally honest and narrow:
 - that internal bridge is also called out in the Claude system prompt, so main
   and external Claude lanes know to prefer `mcp__codex__codex` /
   `mcp__codex__codex-reply` when they need Codex-owned tools or Codex-run
-  workers instead of guessing that only Claude built-ins exist;
+  workers, and `mcp__codex__codex-shell` for exact shell-command execution,
+  instead of guessing that only Claude built-ins exist;
+- the bridge now exposes a narrow first pilot tool too:
+  `mcp__codex__codex-shell`, which starts a Codex-owned worker session for one
+  exact shell command and returns its output;
 - the Claude Code main lane now bridges supported `can_use_tool`
   `control_request`s into Codex's existing approval surfaces:
   - `Bash` routes through command approval;

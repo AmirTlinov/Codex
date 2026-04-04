@@ -27,8 +27,8 @@ const CLAUDE_BRIDGE_PROMPT: &str = concat!(
 );
 const CODEX_MCP_BRIDGE_PROMPT: &str = concat!(
     "An internal Codex MCP bridge is available in this session.\n",
-    "If you need Codex-owned tools or a Codex-run worker, use `mcp__codex__codex` to start that task ",
-    "and `mcp__codex__codex-reply` to continue it.\n",
+    "If you need Codex-owned tools or a Codex-run worker, use `mcp__codex__codex` to start that task, ",
+    "`mcp__codex__codex-reply` to continue it, and `mcp__codex__codex-shell` for exact shell commands.\n",
     "Prefer this bridge when you need Codex MCP servers, Codex-native tool behavior, or capabilities ",
     "that are not directly available through Claude Code built-ins."
 );

@@ -499,7 +499,7 @@ fn build_external_agent_system_prompt_with_bridge(codex_mcp_bridge_available: bo
     ];
     if codex_mcp_bridge_available {
         sections.push(
-            "An internal Codex MCP bridge is available in this session. If you need Codex-owned tools or a Codex-run worker, use `mcp__codex__codex` to start that task and `mcp__codex__codex-reply` to continue it. Prefer this bridge when you need Codex MCP servers, Codex-native tool behavior, or capabilities that are not directly available through Claude Code built-ins.".to_string(),
+            "An internal Codex MCP bridge is available in this session. If you need Codex-owned tools or a Codex-run worker, use `mcp__codex__codex` to start that task, `mcp__codex__codex-reply` to continue it, and `mcp__codex__codex-shell` for exact shell commands. Prefer this bridge when you need Codex MCP servers, Codex-native tool behavior, or capabilities that are not directly available through Claude Code built-ins.".to_string(),
         );
     }
     sections.join("\n\n")
