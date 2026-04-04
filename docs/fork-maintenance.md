@@ -170,7 +170,9 @@ What it does:
   raw `<tool_call>...</tool_call>` adapter: Claude emits compact JSON blocks,
   Claudex translates them into real `FunctionCall` / `CustomToolCall` items,
   and the normal Codex tool loop handles execution instead of leaking the
-  markup into user-visible assistant text;
+  markup into user-visible assistant text; the same prompt surface now carries
+  exact input schemas and concrete examples for the important direct tools so
+  Claude follows canonical payload keys and nested structures;
 - prepends the same kind of `<codex_runtime_truth>` capsule to spawned Claude
   subagent prompts: the initial delegated prompt carries current delegated
   runtime/provider state, visible picker models, the current `spawn_agent`

@@ -388,6 +388,7 @@ fn render_tool_summary(tools: &[ToolSpec]) -> Option<String> {
     let mut sections = vec![
         "The following direct Claudex tool names are callable from this Claude turn via raw `<tool_call>` blocks.".to_string(),
         "Use `arguments` JSON for function-like tools and `input` string for freeform tools.".to_string(),
+        "Follow the exact field names and required structure shown below. Do not invent aliases, placeholder keys, or abbreviated payloads.".to_string(),
         format!("Current direct Claudex tool inventory: {tool_names}"),
     ];
     let detailed_tools = direct_tools
@@ -404,10 +405,32 @@ fn render_tool_summary(tools: &[ToolSpec]) -> Option<String> {
 }
 
 fn render_tool_detail(tool: &ToolSpec) -> Option<String> {
-    let (name, description) = match tool {
-        ToolSpec::Function(tool) => (tool.name.as_str(), tool.description.as_str()),
-        ToolSpec::Freeform(tool) => (tool.name.as_str(), tool.description.as_str()),
-        ToolSpec::ToolSearch { description, .. } => ("tool_search", description.as_str()),
+    let (name, description, input_schema, input_format) = match tool {
+        ToolSpec::Function(tool) => (
+            tool.name.as_str(),
+            tool.description.as_str(),
+            serde_json::to_string_pretty(&tool.parameters).ok(),
+            None,
+        ),
+        ToolSpec::Freeform(tool) => (
+            tool.name.as_str(),
+            tool.description.as_str(),
+            None,
+            Some(format!(
+                "syntax: {}\ndefinition: {}",
+                tool.format.syntax, tool.format.definition
+            )),
+        ),
+        ToolSpec::ToolSearch {
+            description,
+            parameters,
+            ..
+        } => (
+            "tool_search",
+            description.as_str(),
+            serde_json::to_string_pretty(parameters).ok(),
+            None,
+        ),
         ToolSpec::LocalShell {} => {
             return Some(
                 "<tool name=\"local_shell\">\nRuns a local shell command and returns its output.\n</tool>"
@@ -445,7 +468,28 @@ fn render_tool_detail(tool: &ToolSpec) -> Option<String> {
     }
 
     let description = compact_tool_description(name, description);
-    (!description.is_empty()).then(|| format!("<tool name=\"{name}\">\n{description}\n</tool>"))
+    if description.is_empty() {
+        return None;
+    }
+
+    let mut sections = vec![description];
+    if let Some(input_schema) = input_schema.filter(|schema| !schema.trim().is_empty()) {
+        sections.push(format!("<input_schema>\n{input_schema}\n</input_schema>"));
+    }
+    if let Some(input_format) = input_format.filter(|format| !format.trim().is_empty()) {
+        sections.push(format!(
+            "<input_format>\n{}\n</input_format>",
+            input_format.trim()
+        ));
+    }
+    if let Some(example) = tool_call_example(name) {
+        sections.push(format!("<example>\n{example}\n</example>"));
+    }
+
+    Some(format!(
+        "<tool name=\"{name}\">\n{}\n</tool>",
+        sections.join("\n")
+    ))
 }
 
 fn compact_tool_description(name: &str, description: &str) -> String {
@@ -467,6 +511,43 @@ fn compact_tool_description(name: &str, description: &str) -> String {
         .unwrap_or(trimmed)
         .trim()
         .to_string()
+}
+
+fn tool_call_example(name: &str) -> Option<&'static str> {
+    match name {
+        "spawn_agent" => Some(
+            r#"{"name":"spawn_agent","arguments":{"task_name":"scout","message":"Check the failing test and report the root cause.","model":"gpt-5.4","reasoning_effort":"medium"}}"#,
+        ),
+        "send_input" => Some(
+            r#"{"name":"send_input","arguments":{"target":"agent-id","message":"Continue with the next bounded step.","interrupt":false}}"#,
+        ),
+        "wait_agent" => {
+            Some(r#"{"name":"wait_agent","arguments":{"targets":["agent-id"],"timeout_ms":30000}}"#)
+        }
+        "close_agent" => Some(r#"{"name":"close_agent","arguments":{"target":"agent-id"}}"#),
+        "request_user_input" => Some(
+            r#"{"name":"request_user_input","arguments":{"questions":[{"id":"model_choice","header":"Model","question":"Which model should I use?","options":[{"label":"GPT-5.4 (Recommended)","description":"Best default for the current task."},{"label":"Claude Opus 4.6","description":"Use if deeper Claude-style reflection is preferred."}]}]}}"#,
+        ),
+        "update_plan" => Some(
+            r#"{"name":"update_plan","arguments":{"explanation":"Narrowing to the failing test before patching.","plan":[{"step":"Reproduce the failing test","status":"in_progress"},{"step":"Patch the root cause","status":"pending"},{"step":"Run the targeted proof","status":"pending"}]}}"#,
+        ),
+        "exec_command" => Some(
+            r#"{"name":"exec_command","arguments":{"cmd":"git status --short","workdir":"/repo","yield_time_ms":1000,"max_output_tokens":1200}}"#,
+        ),
+        "write_stdin" => Some(
+            r#"{"name":"write_stdin","arguments":{"session_id":123,"chars":"q","yield_time_ms":1000}}"#,
+        ),
+        "tool_search" => Some(
+            r#"{"name":"tool_search","arguments":{"query":"browser screenshot tool","max_num_results":5}}"#,
+        ),
+        "js_repl" => Some(
+            r#"{"name":"js_repl","input":"// codex-js-repl: timeout_ms=15000\nawait Promise.resolve('hello')" }"#,
+        ),
+        "apply_patch" => Some(
+            "*** Begin Patch\n*** Update File: path/to/file.txt\n@@\n-old\n+new\n*** End Patch",
+        ),
+        _ => None,
+    }
 }
 
 fn render_item(item: &ResponseItem) -> Result<Option<String>> {

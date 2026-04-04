@@ -128,7 +128,10 @@ This downstream slice is intentionally honest and narrow:
   `CustomToolCall` items instead of leaking the markup into the user-visible
   transcript, so direct tools like `spawn_agent`, `wait_agent`,
   `exec_command`, MCP tools, and freeform tools can run through the normal
-  Codex tool loop;
+  Codex tool loop; the direct-tool inventory now also includes exact input
+  schemas and concrete payload examples for the important tools, so Claude is
+  less likely to invent malformed keys like `command` instead of `cmd` or
+  partial `request_user_input` payloads;
 - spawned Claude Code subagents now use a real child thread host too, so
   supported carrier permission prompts surface on the child thread through the
   same Codex approval/request-permissions UI rather than dying inside the

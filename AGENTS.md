@@ -53,7 +53,9 @@ This fork is maintained as a downstream customization layer over
   The main Claude Code lane now also has a direct Claudex tool adapter: raw
   `<tool_call>...</tool_call>` blocks from Claude are translated into normal
   Codex `FunctionCall` / `CustomToolCall` items instead of leaking as plain
-  assistant text.
+  assistant text, and the direct-tool prompt now includes exact input schemas
+  plus concrete examples for complex tools so Claude uses canonical payload
+  keys instead of inventing malformed arguments.
   `Claudex` also owns Anthropic auth under `~/.claudex`: Claude.ai OAuth and
   Anthropic API-key login both belong to the Claude Code lane, while the
   native `/v1/messages` lane remains API-key-only because Anthropic rejects

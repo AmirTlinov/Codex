@@ -475,9 +475,12 @@ async fn stream_prepends_runtime_truth_and_tool_inventory_to_claude_user_prompt(
     assert!(stdin_log.contains("The `request_user_input` tool is available in Default mode."));
     assert!(stdin_log.contains("<environment_context>"));
     assert!(stdin_log.contains("- explorer: claude-sonnet-4-6"));
-    assert!(stdin_log.contains("Current Codex tool inventory: spawn_agent, exec_command"));
+    assert!(stdin_log.contains("Current direct Claudex tool inventory: spawn_agent, exec_command"));
     assert!(stdin_log.contains("Claude Opus 4.6 (`claude-opus-4-6`)"));
     assert!(stdin_log.contains("Runs a command in a PTY"));
+    assert!(stdin_log.contains("Follow the exact field names and required structure shown below."));
+    assert!(stdin_log.contains("<input_schema>"));
+    assert!(stdin_log.contains("<example>"));
     assert!(stdin_log.contains("Какие субагенты и модели тебе доступны?"));
 
     let args_log = std::fs::read_to_string(args_log_path).expect("read args log");
