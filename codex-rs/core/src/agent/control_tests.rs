@@ -61,6 +61,14 @@ async fn test_config() -> (TempDir, Config) {
     test_config_with_cli_overrides(Vec::new()).await
 }
 
+async fn write_role_config(home: &TempDir, name: &str, contents: &str) -> std::path::PathBuf {
+    let path = home.path().join(name);
+    tokio::fs::write(&path, contents)
+        .await
+        .expect("write role config");
+    path
+}
+
 fn text_input(text: &str) -> Op {
     vec![UserInput::Text {
         text: text.to_string(),
@@ -79,6 +87,11 @@ struct AgentControlHarness {
 struct MockClaudeScript {
     script_path: std::path::PathBuf,
     stdin_log_path: std::path::PathBuf,
+}
+
+struct MockClaudeArgsScript {
+    script_path: std::path::PathBuf,
+    args_log_path: std::path::PathBuf,
 }
 
 fn mock_claude_permission_script(root: &TempDir) -> MockClaudeScript {
@@ -274,6 +287,42 @@ fn mock_claude_script(root: &TempDir) -> MockClaudeScript {
     MockClaudeScript {
         script_path,
         stdin_log_path,
+    }
+}
+
+fn mock_claude_args_script(root: &TempDir) -> MockClaudeArgsScript {
+    let script_path = root.path().join("mock-control-claude-args.sh");
+    let args_log_path = root.path().join("control-claude.args.log");
+    std::fs::write(
+        &script_path,
+        format!(
+            r#"#!/usr/bin/env bash
+set -euo pipefail
+IFS= read -r _stdin_payload
+printf '%s\n' "$@" > '{}'
+session_id='123e4567-e89b-12d3-a456-426614174099'
+cat <<EOF
+{{"type":"system","subtype":"init","session_id":"$session_id","tools":[],"mcp_servers":[],"model":"claude-opus-4-6","permissionMode":"bypassPermissions","slash_commands":[],"apiKeySource":"none","claude_code_version":"test","output_style":"default","agents":[],"skills":[],"plugins":[],"uuid":"init-1"}}
+{{"type":"assistant","message":{{"model":"claude-opus-4-6","id":"msg-1","type":"message","role":"assistant","content":[{{"type":"text","text":"role-mcp-ok"}}],"stop_reason":null,"stop_sequence":null,"stop_details":null,"usage":{{"input_tokens":3,"cache_creation_input_tokens":0,"cache_read_input_tokens":0,"output_tokens":2,"service_tier":"standard","inference_geo":"not_available"}},"context_management":null}},"parent_tool_use_id":null,"session_id":"$session_id","uuid":"assistant-1"}}
+{{"type":"result","subtype":"success","is_error":false,"duration_ms":10,"duration_api_ms":10,"num_turns":1,"result":"role-mcp-ok","stop_reason":"end_turn","session_id":"$session_id","total_cost_usd":0.0,"usage":{{"input_tokens":3,"cache_creation_input_tokens":0,"cache_read_input_tokens":0,"output_tokens":2}},"modelUsage":{{}},"permission_denials":[],"uuid":"result-1"}}
+EOF
+"#,
+            args_log_path.display(),
+        ),
+    )
+    .expect("write mock Claude args script");
+    let mut permissions = std::fs::metadata(&script_path)
+        .expect("mock Claude args metadata")
+        .permissions();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(&script_path, permissions).expect("chmod mock Claude args");
+    }
+    MockClaudeArgsScript {
+        script_path,
+        args_log_path,
     }
 }
 
@@ -1045,6 +1094,52 @@ async fn live_external_claude_child_thread_bash_roundtrip() {
         output.contains("# Rust/codex-rs"),
         "live Claude child output should preserve the AGENTS heading: {output}"
     );
+}
+
+#[tokio::test]
+async fn spawn_agent_role_preserves_codex_self_exe_for_external_claude_mcp_bridge() {
+    let harness = AgentControlHarness::new().await;
+    let mock_claude = mock_claude_args_script(&harness._home);
+    let role_path = write_role_config(
+        &harness._home,
+        "claude-role.toml",
+        &format!(
+            "developer_instructions = \"Stay focused\"\nagent_backend = \"claude_code\"\n[claude_code]\npath = \"{}\"",
+            mock_claude.script_path.display()
+        ),
+    )
+    .await;
+
+    let mut config = harness.config.clone();
+    config.codex_self_exe = Some(std::path::PathBuf::from("/tmp/codex"));
+    config.agent_backend = crate::config::AgentBackend::ClaudeCode;
+    config.agent_roles.insert(
+        "custom".to_string(),
+        AgentRoleConfig {
+            description: None,
+            config_file: Some(role_path),
+            nickname_candidates: None,
+        },
+    );
+
+    crate::agent::role::apply_role_to_config(&mut config, Some("custom"))
+        .await
+        .expect("custom role should apply");
+
+    let thread_id = harness
+        .control
+        .spawn_agent(config, text_input("hello"), /*session_source*/ None)
+        .await
+        .expect("spawn external Claude agent through control path");
+
+    let status = wait_for_final_agent_status(&harness.control, thread_id).await;
+    assert_eq!(
+        status,
+        AgentStatus::Completed(Some("role-mcp-ok".to_string()))
+    );
+
+    let args_log = std::fs::read_to_string(&mock_claude.args_log_path).expect("read args log");
+    assert!(args_log.contains("--mcp-config"));
 }
 
 #[tokio::test]
