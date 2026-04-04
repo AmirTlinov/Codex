@@ -2,6 +2,8 @@ use super::*;
 use crate::agent::external::claude_cli::run_claude_code_turn;
 use pretty_assertions::assert_eq;
 use tempfile::TempDir;
+use tokio::time::Duration;
+use tokio::time::timeout;
 
 use crate::CodexAuth;
 use crate::CodexThread;
@@ -276,7 +278,12 @@ async fn external_agent_registry_closes_claude_stdin_after_terminal_result() {
         .await
         .expect("spawn external agent");
 
-    let status = wait_for_final_status(&registry, thread_id).await;
+    let status = timeout(
+        Duration::from_secs(5),
+        wait_for_final_status(&registry, thread_id),
+    )
+    .await
+    .expect("external Claude agent should finish after terminal result");
     assert_eq!(status, AgentStatus::Completed(Some("run-1".to_string())));
 }
 
