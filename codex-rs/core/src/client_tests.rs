@@ -271,6 +271,25 @@ EOF
     (script_path, args_log_path, mcp_config_log_path)
 }
 
+fn write_mock_claude_tool_call_script(root: &TempDir) -> std::path::PathBuf {
+    let script_path = root.path().join("mock-claude-tool-call.sh");
+    std::fs::write(
+        &script_path,
+        "#!/usr/bin/env bash\nset -euo pipefail\nIFS= read -r _stdin_payload\ncat <<'EOF'\n{\"type\":\"system\",\"subtype\":\"init\",\"session_id\":\"mock-session\",\"tools\":[],\"mcp_servers\":[],\"model\":\"claude-opus-4-6\",\"permissionMode\":\"bypassPermissions\",\"slash_commands\":[],\"apiKeySource\":\"none\",\"claude_code_version\":\"test\",\"output_style\":\"default\",\"agents\":[],\"skills\":[],\"plugins\":[],\"uuid\":\"init-1\"}\n{\"type\":\"assistant\",\"message\":{\"model\":\"claude-opus-4-6\",\"id\":\"msg-1\",\"type\":\"message\",\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":\"Launching worker.\\n\\n<tool_call>{\\\"name\\\":\\\"spawn_agent\\\",\\\"arguments\\\":{\\\"model\\\":\\\"gpt-5.4\\\",\\\"message\\\":\\\"ping\\\",\\\"reasoning_effort\\\":\\\"low\\\"}}</tool_call>\"}],\"stop_reason\":null,\"stop_sequence\":null,\"stop_details\":null,\"usage\":{\"input_tokens\":3,\"cache_creation_input_tokens\":0,\"cache_read_input_tokens\":0,\"output_tokens\":2,\"service_tier\":\"standard\",\"inference_geo\":\"not_available\"},\"context_management\":null},\"parent_tool_use_id\":null,\"session_id\":\"mock-session\",\"uuid\":\"assistant-1\"}\n{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":false,\"duration_ms\":10,\"duration_api_ms\":10,\"num_turns\":1,\"result\":\"Launching worker.\\n\\n<tool_call>{\\\"name\\\":\\\"spawn_agent\\\",\\\"arguments\\\":{\\\"model\\\":\\\"gpt-5.4\\\",\\\"message\\\":\\\"ping\\\",\\\"reasoning_effort\\\":\\\"low\\\"}}</tool_call>\",\"stop_reason\":\"end_turn\",\"session_id\":\"mock-session\",\"total_cost_usd\":0.0,\"usage\":{\"input_tokens\":3,\"cache_creation_input_tokens\":0,\"cache_read_input_tokens\":0,\"output_tokens\":2},\"modelUsage\":{},\"permission_denials\":[],\"uuid\":\"result-1\"}\nEOF\n",
+    )
+    .expect("write tool-call mock claude script");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mut permissions = std::fs::metadata(&script_path)
+            .expect("tool-call mock claude metadata")
+            .permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(&script_path, permissions).expect("chmod tool-call mock claude");
+    }
+    script_path
+}
+
 #[tokio::test]
 async fn stream_routes_main_turns_to_claude_cli_provider() {
     let root = TempDir::new().expect("create temp dir");
@@ -628,6 +647,98 @@ async fn stream_passes_codex_mcp_bridge_config_to_claude_code() {
             }
         })
     );
+}
+
+#[tokio::test]
+async fn stream_translates_claude_tool_call_markup_into_codex_tool_items() {
+    let root = TempDir::new().expect("create temp dir");
+    let script_path = write_mock_claude_tool_call_script(&root);
+    let client = ModelClient::new(
+        /*auth_manager*/ None,
+        ThreadId::new(),
+        crate::create_claude_code_provider(),
+        crate::config::ClaudeCliConfig {
+            path: Some(script_path),
+            ..Default::default()
+        },
+        root.path().to_path_buf(),
+        crate::auth::AuthCredentialsStoreMode::File,
+        SessionSource::Cli,
+        /*model_verbosity*/ None,
+        /*enable_request_compression*/ false,
+        /*include_timing_metrics*/ false,
+        /*beta_features_header*/ None,
+    );
+    let mut client_session = client.new_session();
+    let prompt = crate::Prompt {
+        input: vec![ResponseItem::Message {
+            id: None,
+            role: "user".to_string(),
+            content: vec![ContentItem::InputText {
+                text: "Launch a worker".to_string(),
+            }],
+            end_turn: None,
+            phase: None,
+        }],
+        tools: vec![test_function_tool("spawn_agent", "Spawn a worker")],
+        ..Default::default()
+    };
+
+    let mut stream = client_session
+        .stream(
+            &prompt,
+            &test_model_info_with_slug("claude-opus-4-6"),
+            root.path(),
+            &test_session_telemetry(),
+            /*effort*/ None,
+            ReasoningSummary::None,
+            /*service_tier*/ None,
+            /*turn_metadata_header*/ None,
+            CancellationToken::new(),
+        )
+        .await
+        .expect("claude stream should succeed");
+
+    let mut saw_visible_text = false;
+    let mut saw_tool_call = false;
+    while let Some(event) = stream.next().await {
+        match event.expect("stream event") {
+            crate::client_common::ResponseEvent::OutputItemDone(ResponseItem::Message {
+                content,
+                ..
+            }) => {
+                assert_eq!(
+                    content,
+                    vec![ContentItem::OutputText {
+                        text: "Launching worker.".to_string(),
+                    }]
+                );
+                saw_visible_text = true;
+            }
+            crate::client_common::ResponseEvent::OutputItemDone(ResponseItem::FunctionCall {
+                name,
+                arguments,
+                ..
+            }) => {
+                assert_eq!(name, "spawn_agent");
+                assert_eq!(
+                    serde_json::from_str::<serde_json::Value>(&arguments)
+                        .expect("tool arguments should be valid json"),
+                    json!({
+                        "message": "ping",
+                        "model": "gpt-5.4",
+                        "reasoning_effort": "low"
+                    })
+                );
+                saw_tool_call = true;
+            }
+            crate::client_common::ResponseEvent::Completed { .. } => break,
+            _ => {}
+        }
+    }
+
+    assert!(saw_visible_text);
+    assert!(saw_tool_call);
 }
 
 #[tokio::test]

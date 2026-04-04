@@ -122,6 +122,13 @@ This downstream slice is intentionally honest and narrow:
   or child external-agent thread), so the TUI/history surfaces show Claude tool
   activity instead of only showing the approval prompt with no visible tool
   lifecycle;
+- the main Claude Code lane now has a direct Claudex tool adapter too: when
+  Claude emits raw `<tool_call>...</tool_call>` blocks for current turn-level
+  Codex tools, Claudex translates them into real `FunctionCall` /
+  `CustomToolCall` items instead of leaking the markup into the user-visible
+  transcript, so direct tools like `spawn_agent`, `wait_agent`,
+  `exec_command`, MCP tools, and freeform tools can run through the normal
+  Codex tool loop;
 - spawned Claude Code subagents now use a real child thread host too, so
   supported carrier permission prompts surface on the child thread through the
   same Codex approval/request-permissions UI rather than dying inside the

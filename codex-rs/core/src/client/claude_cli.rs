@@ -5,6 +5,8 @@ use crate::claude_code_control::ClaudeControlRequest;
 use crate::claude_code_control::ControlRequestParseOutcome;
 use crate::claude_code_control::parse_control_request_line;
 use crate::claude_code_stream::ClaudeCodeStreamAccumulator;
+use crate::client::claude_tool_call_markup::ClaudeToolCallPayload;
+use crate::client::claude_tool_call_markup::parse_claude_tool_call_markup;
 use crate::client_common::Prompt;
 use crate::client_common::ResponseEvent;
 use crate::client_common::ResponseStream;
@@ -25,6 +27,13 @@ use tokio_util::sync::CancellationToken;
 const CLAUDE_BRIDGE_PROMPT: &str = concat!(
     "You are the main assistant running inside Codex through Claude Code.\n",
     "Return the assistant response that should appear in the Codex conversation."
+);
+const CLAUDE_DIRECT_TOOL_CALL_PROMPT: &str = concat!(
+    "Direct Claudex tool execution is available in this session.\n",
+    "When you need a Codex-native tool, emit one or more raw `<tool_call>...</tool_call>` blocks with no markdown fences.\n",
+    "Each block must contain compact JSON of the form `{\"name\":\"tool_name\",\"arguments\":{...}}` for function-like tools or `{\"name\":\"tool_name\",\"input\":\"...\"}` for freeform tools.\n",
+    "Do not invent placeholder results such as `$AGENT_ID`; wait for the actual tool result before issuing dependent follow-up tool calls.\n",
+    "Use normal prose only for user-visible text outside those raw `<tool_call>` blocks."
 );
 const CODEX_MCP_BRIDGE_PROMPT: &str = concat!(
     "An internal Codex MCP bridge is available in this session.\n",
@@ -49,6 +58,7 @@ pub(super) async fn stream_claude_cli_turn(
     cancellation_token: CancellationToken,
 ) -> Result<ResponseStream> {
     let rendered_prompt = render_claude_prompt(prompt)?;
+    let prompt_tools = prompt.tools.clone();
     let controlled = run_claude_cli_stream_json_controlled(
         claude_cli,
         ClaudeCliRequest {
@@ -56,6 +66,7 @@ pub(super) async fn stream_claude_cli_turn(
             model: model_info.slug.clone(),
             system_prompt: build_system_prompt(
                 &prompt.base_instructions.text,
+                !prompt.tools.is_empty(),
                 claude_cli.codex_self_exe.is_some(),
                 /*include_runtime_truth_guidance*/
                 !rendered_prompt.runtime_sections.is_empty(),
@@ -122,8 +133,18 @@ pub(super) async fn stream_claude_cli_turn(
                         }
                     };
                     for event in events {
-                        if tx_event.send(Ok(event)).await.is_err() {
-                            return;
+                        let translated_events =
+                            match translate_claude_output_event(event, &prompt_tools) {
+                                Ok(events) => events,
+                                Err(err) => {
+                                    let _ = tx_event.send(Err(err)).await;
+                                    return;
+                                }
+                            };
+                        for translated_event in translated_events {
+                            if tx_event.send(Ok(translated_event)).await.is_err() {
+                                return;
+                            }
                         }
                     }
                 }
@@ -148,6 +169,99 @@ pub(super) async fn stream_claude_cli_turn(
     Ok(ResponseStream { rx_event })
 }
 
+fn translate_claude_output_event(
+    event: ResponseEvent,
+    tools: &[ToolSpec],
+) -> Result<Vec<ResponseEvent>> {
+    let ResponseEvent::OutputItemDone(ResponseItem::Message {
+        id,
+        role,
+        content,
+        end_turn,
+        phase,
+    }) = event
+    else {
+        return Ok(vec![event]);
+    };
+
+    if role != "assistant" {
+        return Ok(vec![ResponseEvent::OutputItemDone(ResponseItem::Message {
+            id,
+            role,
+            content,
+            end_turn,
+            phase,
+        })]);
+    }
+
+    let Some(raw_text) = content_items_to_text(&content) else {
+        return Ok(vec![ResponseEvent::OutputItemDone(ResponseItem::Message {
+            id,
+            role,
+            content,
+            end_turn,
+            phase,
+        })]);
+    };
+
+    let Some(parsed) = parse_claude_tool_call_markup(&raw_text, tools)
+        .map_err(|message| CodexErr::Stream(message, None))?
+    else {
+        return Ok(vec![ResponseEvent::OutputItemDone(ResponseItem::Message {
+            id,
+            role,
+            content,
+            end_turn,
+            phase,
+        })]);
+    };
+
+    let base_id = id.unwrap_or_else(|| "claude-code".to_string());
+    let mut events = Vec::new();
+    if !parsed.visible_text.is_empty() {
+        events.push(ResponseEvent::OutputItemDone(ResponseItem::Message {
+            id: Some(base_id.clone()),
+            role: "assistant".to_string(),
+            content: vec![ContentItem::OutputText {
+                text: parsed.visible_text,
+            }],
+            end_turn: None,
+            phase,
+        }));
+    }
+
+    for (index, call) in parsed.tool_calls.into_iter().enumerate() {
+        let call_id = format!("{base_id}-tool-call-{}", index + 1);
+        let item_id = Some(format!("{base_id}-tool-item-{}", index + 1));
+        let item = match call.payload {
+            ClaudeToolCallPayload::Function { arguments } => ResponseItem::FunctionCall {
+                id: item_id,
+                name: call.name,
+                namespace: None,
+                arguments,
+                call_id,
+            },
+            ClaudeToolCallPayload::Custom { input } => ResponseItem::CustomToolCall {
+                id: item_id,
+                status: None,
+                call_id,
+                name: call.name,
+                input,
+            },
+        };
+        events.push(ResponseEvent::OutputItemDone(item));
+    }
+
+    if events.is_empty() {
+        return Err(CodexErr::Stream(
+            "Claude Code emitted only empty <tool_call> blocks".to_string(),
+            None,
+        ));
+    }
+
+    Ok(events)
+}
+
 struct RenderedClaudePrompt {
     runtime_sections: Vec<String>,
     user_prompt: String,
@@ -155,6 +269,7 @@ struct RenderedClaudePrompt {
 
 fn build_system_prompt(
     base_instructions: &str,
+    direct_codex_tools_available: bool,
     codex_mcp_bridge_available: bool,
     include_runtime_truth_guidance: bool,
 ) -> String {
@@ -164,6 +279,9 @@ fn build_system_prompt(
         sections.push(trimmed.to_string());
     }
     sections.push(CLAUDE_BRIDGE_PROMPT.to_string());
+    if direct_codex_tools_available {
+        sections.push(CLAUDE_DIRECT_TOOL_CALL_PROMPT.to_string());
+    }
     if codex_mcp_bridge_available {
         sections.push(CODEX_MCP_BRIDGE_PROMPT.to_string());
     }
@@ -248,23 +366,33 @@ fn render_conversation_context(sections: &[String]) -> String {
 }
 
 fn render_tool_summary(tools: &[ToolSpec]) -> Option<String> {
-    if tools.is_empty() {
+    let direct_tools = tools
+        .iter()
+        .filter(|tool| {
+            matches!(
+                tool,
+                ToolSpec::Function(_) | ToolSpec::Freeform(_) | ToolSpec::ToolSearch { .. }
+            )
+        })
+        .collect::<Vec<_>>();
+
+    if direct_tools.is_empty() {
         return None;
     }
 
-    let tool_names = tools
+    let tool_names = direct_tools
         .iter()
-        .map(ToolSpec::name)
+        .map(|tool| tool.name())
         .collect::<Vec<_>>()
         .join(", ");
     let mut sections = vec![
-        "The following tool names come from Codex's current turn-level tool inventory.".to_string(),
-        "They describe what Codex itself can do in this turn, not necessarily direct Claude Code built-ins. When you need one of these capabilities from the Claude carrier, prefer the Codex bridge or a Codex-run worker instead of claiming direct built-in access.".to_string(),
-        format!("Current Codex tool inventory: {tool_names}"),
+        "The following direct Claudex tool names are callable from this Claude turn via raw `<tool_call>` blocks.".to_string(),
+        "Use `arguments` JSON for function-like tools and `input` string for freeform tools.".to_string(),
+        format!("Current direct Claudex tool inventory: {tool_names}"),
     ];
-    let detailed_tools = tools
+    let detailed_tools = direct_tools
         .iter()
-        .filter_map(render_tool_detail)
+        .filter_map(|tool| render_tool_detail(tool))
         .collect::<Vec<_>>();
     if !detailed_tools.is_empty() {
         sections.push(detailed_tools.join("\n\n"));

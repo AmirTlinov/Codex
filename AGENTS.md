@@ -50,6 +50,10 @@ This fork is maintained as a downstream customization layer over
   Claude Code carrier/backend (`model_provider=claude_code`,
   `agent_backend=claude_code`) while keeping the direct native Anthropic
   Messages API lane available as a separate provider for API-key usage.
+  The main Claude Code lane now also has a direct Claudex tool adapter: raw
+  `<tool_call>...</tool_call>` blocks from Claude are translated into normal
+  Codex `FunctionCall` / `CustomToolCall` items instead of leaking as plain
+  assistant text.
   `Claudex` also owns Anthropic auth under `~/.claudex`: Claude.ai OAuth and
   Anthropic API-key login both belong to the Claude Code lane, while the
   native `/v1/messages` lane remains API-key-only because Anthropic rejects

@@ -25,6 +25,7 @@
 
 mod anthropic;
 mod claude_cli;
+mod claude_tool_call_markup;
 
 use std::collections::HashMap;
 use std::sync::Arc;

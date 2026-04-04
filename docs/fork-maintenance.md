@@ -166,6 +166,11 @@ What it does:
   / skills / plugins sections, contextual runtime blocks such as
   `environment_context` with subagents, and a compact summary of Codex's
   current tool inventory without inflating the Claude `--system-prompt` argv;
+- lets the main Claude Code lane invoke direct Codex tools through a formal
+  raw `<tool_call>...</tool_call>` adapter: Claude emits compact JSON blocks,
+  Claudex translates them into real `FunctionCall` / `CustomToolCall` items,
+  and the normal Codex tool loop handles execution instead of leaking the
+  markup into user-visible assistant text;
 - prepends the same kind of `<codex_runtime_truth>` capsule to spawned Claude
   subagent prompts: the initial delegated prompt carries current delegated
   runtime/provider state, visible picker models, the current `spawn_agent`
