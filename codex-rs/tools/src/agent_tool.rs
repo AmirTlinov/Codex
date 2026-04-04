@@ -2,6 +2,7 @@ use crate::JsonSchema;
 use crate::ResponsesApiTool;
 use crate::ToolSpec;
 use codex_protocol::openai_models::ModelPreset;
+use codex_protocol::openai_models::ReasoningEffort;
 use serde_json::Value;
 use serde_json::json;
 use std::collections::BTreeMap;
@@ -711,20 +712,51 @@ fn spawn_agent_models_description(models: &[ModelPreset]) -> String {
             let efforts = model
                 .supported_reasoning_efforts
                 .iter()
-                .map(|preset| format!("{} ({})", preset.effort, preset.description))
+                .map(|preset| {
+                    format!(
+                        "{} ({})",
+                        spawn_agent_reasoning_effort_label(model, preset.effort),
+                        preset.description
+                    )
+                })
                 .collect::<Vec<_>>()
                 .join(", ");
+            let default_effort =
+                spawn_agent_reasoning_effort_label(model, model.default_reasoning_effort);
+            let supported_efforts = if efforts.is_empty() {
+                "none".to_string()
+            } else {
+                efforts
+            };
             format!(
                 "- {} (`{}`): {} Default reasoning effort: {}. Supported reasoning efforts: {}.",
                 model.display_name,
                 model.model,
                 model.description,
-                model.default_reasoning_effort,
-                efforts
+                default_effort,
+                supported_efforts
             )
         })
         .collect::<Vec<_>>()
         .join("\n")
+}
+
+fn spawn_agent_reasoning_effort_label(
+    model: &ModelPreset,
+    effort: ReasoningEffort,
+) -> &'static str {
+    if model.model == "claude-opus-4-6" && effort == ReasoningEffort::XHigh {
+        "max"
+    } else {
+        match effort {
+            ReasoningEffort::None => "none",
+            ReasoningEffort::Minimal => "minimal",
+            ReasoningEffort::Low => "low",
+            ReasoningEffort::Medium => "medium",
+            ReasoningEffort::High => "high",
+            ReasoningEffort::XHigh => "xhigh",
+        }
+    }
 }
 
 fn wait_agent_tool_parameters_v1(options: WaitAgentTimeoutOptions) -> JsonSchema {

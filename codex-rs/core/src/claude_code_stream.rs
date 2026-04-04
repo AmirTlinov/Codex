@@ -93,26 +93,12 @@ impl ClaudeCodeStreamAccumulator {
                     .map(str::to_string);
             }
             Some("content_block_start") => {
-                if event
+                let block_type = event
                     .get("content_block")
                     .and_then(|block| block.get("type"))
-                    .and_then(serde_json::Value::as_str)
-                    == Some("text")
-                    && self.active_message_id.is_none()
-                {
-                    self.partial_text.clear();
-                    let item_id = self
-                        .response_id
-                        .clone()
-                        .unwrap_or_else(|| format!("claude-code-{}", Uuid::new_v4()));
-                    self.active_message_id = Some(item_id.clone());
-                    events.push(ResponseEvent::OutputItemAdded(ResponseItem::Message {
-                        id: Some(item_id),
-                        role: "assistant".to_string(),
-                        content: Vec::new(),
-                        end_turn: None,
-                        phase: None,
-                    }));
+                    .and_then(serde_json::Value::as_str);
+                if matches!(block_type, Some("text" | "thinking" | "redacted_thinking")) {
+                    self.ensure_active_message_started(&mut events);
                 }
             }
             Some("content_block_delta") => {
@@ -122,6 +108,7 @@ impl ClaudeCodeStreamAccumulator {
                 match delta.get("type").and_then(serde_json::Value::as_str) {
                     Some("text_delta") => {
                         if let Some(text) = delta.get("text").and_then(serde_json::Value::as_str) {
+                            self.ensure_active_message_started(&mut events);
                             self.partial_text.push_str(text);
                             events.push(ResponseEvent::OutputTextDelta(text.to_string()));
                         }
@@ -130,6 +117,7 @@ impl ClaudeCodeStreamAccumulator {
                         if let Some(text) =
                             delta.get("thinking").and_then(serde_json::Value::as_str)
                         {
+                            self.ensure_active_message_started(&mut events);
                             events.push(ResponseEvent::ReasoningContentDelta {
                                 delta: text.to_string(),
                                 content_index: 0,
@@ -204,6 +192,27 @@ impl ClaudeCodeStreamAccumulator {
             self.session_id = Some(session_id.to_string());
         }
     }
+
+    fn ensure_active_message_started(&mut self, events: &mut Vec<ResponseEvent>) {
+        if self.active_message_id.is_some() {
+            return;
+        }
+
+        self.partial_text.clear();
+        let item_id = self
+            .response_id
+            .clone()
+            .or_else(|| self.session_id.clone())
+            .unwrap_or_else(|| format!("claude-code-{}", Uuid::new_v4()));
+        self.active_message_id = Some(item_id.clone());
+        events.push(ResponseEvent::OutputItemAdded(ResponseItem::Message {
+            id: Some(item_id),
+            role: "assistant".to_string(),
+            content: Vec::new(),
+            end_turn: None,
+            phase: None,
+        }));
+    }
 }
 
 fn extract_text_content(content: Option<&serde_json::Value>) -> Option<String> {
@@ -248,4 +257,138 @@ pub(crate) fn parse_token_usage(usage: Option<&serde_json::Value>) -> Option<Tok
         reasoning_output_tokens: 0,
         total_tokens: input_tokens + output_tokens,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::ClaudeCodeStreamAccumulator;
+    use codex_api::common::ResponseEvent;
+    use codex_protocol::models::ContentItem;
+    use codex_protocol::models::ResponseItem;
+    use pretty_assertions::assert_eq;
+
+    fn expect_single_event(events: Vec<ResponseEvent>) -> ResponseEvent {
+        assert_eq!(events.len(), 1);
+        events.into_iter().next().expect("single event")
+    }
+
+    #[test]
+    fn thinking_blocks_start_the_assistant_item_before_reasoning_deltas() {
+        let mut accumulator = ClaudeCodeStreamAccumulator::default();
+
+        let created = accumulator
+            .push_line(
+                r#"{"type":"system","subtype":"init","session_id":"mock-session","uuid":"init-1"}"#,
+            )
+            .expect("system init should parse");
+        assert!(matches!(
+            expect_single_event(created),
+            ResponseEvent::Created
+        ));
+
+        let message_start = accumulator
+            .push_line(
+                r#"{"type":"stream_event","event":{"type":"message_start","message":{"id":"msg-1","type":"message","role":"assistant","content":[]}},"session_id":"mock-session","uuid":"event-1"}"#,
+            )
+            .expect("message_start should parse");
+        assert!(message_start.is_empty());
+
+        let thinking_start = accumulator
+            .push_line(
+                r#"{"type":"stream_event","event":{"type":"content_block_start","index":0,"content_block":{"type":"thinking","thinking":""}},"session_id":"mock-session","uuid":"event-2"}"#,
+            )
+            .expect("thinking block start should parse");
+        assert!(matches!(
+            expect_single_event(thinking_start),
+            ResponseEvent::OutputItemAdded(ResponseItem::Message {
+                id: Some(id),
+                role,
+                content,
+                end_turn: None,
+                phase: None,
+            }) if id == "msg-1" && role == "assistant" && content.is_empty()
+        ));
+
+        let thinking_delta = accumulator
+            .push_line(
+                r#"{"type":"stream_event","event":{"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":"first thought"}},"session_id":"mock-session","uuid":"event-3"}"#,
+            )
+            .expect("thinking delta should parse");
+        assert!(matches!(
+            expect_single_event(thinking_delta),
+            ResponseEvent::ReasoningContentDelta { delta, content_index }
+                if delta == "first thought" && content_index == 0
+        ));
+
+        let text_delta = accumulator
+            .push_line(
+                r#"{"type":"stream_event","event":{"type":"content_block_delta","index":1,"delta":{"type":"text_delta","text":"hello"}},"session_id":"mock-session","uuid":"event-4"}"#,
+            )
+            .expect("text delta should parse");
+        assert!(matches!(
+            expect_single_event(text_delta),
+            ResponseEvent::OutputTextDelta(delta) if delta == "hello"
+        ));
+
+        let assistant = accumulator
+            .push_line(
+                r#"{"type":"assistant","message":{"id":"msg-1","type":"message","role":"assistant","content":[{"type":"text","text":"hello"}]}}"#,
+            )
+            .expect("assistant payload should parse");
+        assert!(matches!(
+            expect_single_event(assistant),
+            ResponseEvent::OutputItemDone(ResponseItem::Message {
+                id: Some(id),
+                role,
+                content,
+                end_turn: Some(true),
+                phase: None,
+            }) if id == "msg-1"
+                && role == "assistant"
+                && content == vec![ContentItem::OutputText {
+                    text: "hello".to_string(),
+                }]
+        ));
+
+        let summary = accumulator.finish();
+        assert_eq!(summary.response_id, "msg-1");
+        assert_eq!(summary.assistant_text, "hello");
+    }
+
+    #[test]
+    fn thinking_deltas_without_a_prior_block_start_still_seed_the_assistant_item() {
+        let mut accumulator = ClaudeCodeStreamAccumulator::default();
+
+        let message_start = accumulator
+            .push_line(
+                r#"{"type":"stream_event","event":{"type":"message_start","message":{"id":"msg-2","type":"message","role":"assistant","content":[]}},"session_id":"mock-session","uuid":"event-1"}"#,
+            )
+            .expect("message_start should parse");
+        assert!(matches!(
+            expect_single_event(message_start),
+            ResponseEvent::Created
+        ));
+
+        let events = accumulator
+            .push_line(
+                r#"{"type":"stream_event","event":{"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":"orphan thought"}},"session_id":"mock-session","uuid":"event-2"}"#,
+            )
+            .expect("thinking delta should parse");
+        assert_eq!(events.len(), 2);
+        assert!(matches!(
+            &events[0],
+            ResponseEvent::OutputItemAdded(ResponseItem::Message {
+                id: Some(id),
+                role,
+                content,
+                end_turn: None,
+                phase: None,
+            }) if id == "msg-2" && role == "assistant" && content.is_empty()
+        ));
+        assert!(matches!(
+            &events[1],
+            ResponseEvent::ReasoningContentDelta { delta, content_index }
+                if delta == "orphan thought" && *content_index == 0
+        ));
+    }
 }

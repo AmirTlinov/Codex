@@ -26,6 +26,41 @@ fn model_preset(id: &str, show_in_picker: bool) -> ModelPreset {
     }
 }
 
+fn claude_opus_preset() -> ModelPreset {
+    ModelPreset {
+        id: "claude-opus-4-6".to_string(),
+        model: "claude-opus-4-6".to_string(),
+        display_name: "Claude Opus 4.6".to_string(),
+        description: "Claude flagship".to_string(),
+        default_reasoning_effort: ReasoningEffort::High,
+        supported_reasoning_efforts: vec![
+            ReasoningEffortPreset {
+                effort: ReasoningEffort::Low,
+                description: "Fast".to_string(),
+            },
+            ReasoningEffortPreset {
+                effort: ReasoningEffort::Medium,
+                description: "Balanced".to_string(),
+            },
+            ReasoningEffortPreset {
+                effort: ReasoningEffort::High,
+                description: "Deep".to_string(),
+            },
+            ReasoningEffortPreset {
+                effort: ReasoningEffort::XHigh,
+                description: "Maximum effort".to_string(),
+            },
+        ],
+        supports_personality: false,
+        is_default: false,
+        upgrade: None,
+        show_in_picker: true,
+        availability_nux: None,
+        supported_in_api: true,
+        input_modalities: Vec::new(),
+    }
+}
+
 #[test]
 fn spawn_agent_tool_v2_requires_task_name_and_lists_visible_models() {
     let tool = create_spawn_agent_tool_v2(SpawnAgentToolOptions {
@@ -75,6 +110,29 @@ fn spawn_agent_tool_v2_requires_task_name_and_lists_visible_models() {
         output_schema.expect("spawn_agent output schema")["required"],
         json!(["agent_id", "task_name", "nickname"])
     );
+}
+
+#[test]
+fn spawn_agent_tool_v2_uses_claude_max_label_and_none_for_effortless_models() {
+    let mut haiku = model_preset("haiku", /*show_in_picker*/ true);
+    haiku.display_name = "Claude Haiku 4.5".to_string();
+    haiku.model = "haiku".to_string();
+    haiku.supported_reasoning_efforts = Vec::new();
+    haiku.default_reasoning_effort = ReasoningEffort::Low;
+
+    let tool = create_spawn_agent_tool_v2(SpawnAgentToolOptions {
+        available_models: &[claude_opus_preset(), haiku],
+        agent_type_description: "role help".to_string(),
+    });
+
+    let ToolSpec::Function(ResponsesApiTool { description, .. }) = tool else {
+        panic!("spawn_agent should be a function tool");
+    };
+
+    assert!(description.contains("Claude Opus 4.6 (`claude-opus-4-6`)"));
+    assert!(description.contains("Supported reasoning efforts: low (Fast), medium (Balanced), high (Deep), max (Maximum effort)."));
+    assert!(description.contains("Claude Haiku 4.5 (`haiku`)"));
+    assert!(description.contains("Claude Haiku 4.5 (`haiku`): haiku description Default reasoning effort: low. Supported reasoning efforts: none."));
 }
 
 #[test]
