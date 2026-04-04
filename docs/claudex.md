@@ -88,6 +88,13 @@ This downstream slice is intentionally honest and narrow:
   compact summary of Codex's current tool inventory now ride in an
   authoritative runtime capsule, while the system prompt only carries the
   bounded instruction to trust that capsule;
+- spawned Claude Code subagents now prepend their own
+  `<codex_runtime_truth>` block too: the initial delegated prompt carries the
+  current delegated runtime, visible model providers, picker-visible model
+  inventory, the same `spawn_agent` role/model inventory Codex exposes, and
+  the current bridge/direct tool summary, while continuation turns only resend
+  the smaller mutable runtime/tool delta instead of duplicating the whole
+  static inventory on every resume;
 - the bridge now exposes a narrow first pilot tool too:
   `mcp__codex__codex-shell`, which starts a Codex-owned worker session for one
   exact shell command and returns its output;

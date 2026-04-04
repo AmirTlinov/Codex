@@ -628,10 +628,89 @@ async fn interrupted_or_rejected_resume_clears_claude_session_for_future_turns()
     assert!(stdin_entries[2].contains("parent context"));
 }
 
+#[tokio::test]
+async fn external_agent_registry_prepends_runtime_truth_and_role_inventory_to_prompt() {
+    let root = TempDir::new().expect("create temp dir");
+    let mock_script = mock_claude_script(&root);
+    let registry = ExternalAgentRegistry::default();
+    let thread_id = ThreadId::new();
+    registry
+        .spawn_agent(
+            thread_id,
+            ExternalAgentLaunchRequest {
+                host_thread: host_thread(&root, "claude-opus-4-6").await,
+                config_snapshot: test_snapshot(root.path(), "claude-opus-4-6"),
+                developer_instructions: Some("Follow repo truth".to_string()),
+                claude_cli: ClaudeCliConfig {
+                    path: Some(mock_script.script_path.clone()),
+                    codex_self_exe: Some(root.path().join("fake-codex")),
+                    tools: Some(vec!["Read".to_string(), "Bash".to_string()]),
+                    ..Default::default()
+                },
+                model: "claude-opus-4-6".to_string(),
+                parent_context: Some("[1] user: parent context".to_string()),
+            },
+            text_input("which subagents and models are available?"),
+        )
+        .await
+        .expect("spawn external agent");
+    assert_eq!(
+        wait_for_final_status(&registry, thread_id).await,
+        AgentStatus::Completed(Some("run-1".to_string()))
+    );
+
+    let invocations = read_logged_invocations(&mock_script);
+    let stdin = invocations.stdin.first().expect("first stdin invocation");
+    assert!(stdin.contains("<codex_runtime_truth>"));
+    assert!(stdin.contains("mode: delegated_subagent"));
+    assert!(stdin.contains("active_model_provider: claude_code"));
+    assert!(stdin.contains("visible_model_providers: claude_code, openai"));
+    assert!(stdin.contains("Follow repo truth"));
+    assert!(stdin.contains("parent context"));
+    assert!(stdin.contains("<codex_subagent_roles>"));
+    assert!(stdin.contains("explorer: {"));
+    assert!(stdin.contains("<codex_available_models>"));
+    assert!(stdin.contains("Anthropic [claude_code]:"));
+    assert!(stdin.contains("Claude Opus 4.6 (`claude-opus-4-6`)"));
+    assert!(stdin.contains("OpenAI [openai]:"));
+    assert!(stdin.contains("Current direct Claude Code carrier tool allowlist: Read, Bash"));
+    assert!(stdin.contains("Current Codex bridge tool inventory: mcp__codex__codex, mcp__codex__codex-reply, mcp__codex__codex-shell"));
+
+    registry
+        .send_input(thread_id, text_input("follow-up inventory check"))
+        .await
+        .expect("send follow-up input");
+    let status = wait_for_status_change(
+        &registry,
+        thread_id,
+        &AgentStatus::Completed(Some("run-1".to_string())),
+    )
+    .await;
+    let status = if matches!(status, AgentStatus::Completed(_)) {
+        status
+    } else {
+        wait_for_final_status(&registry, thread_id).await
+    };
+    assert_eq!(status, AgentStatus::Completed(Some("run-2".to_string())));
+
+    let invocations = read_logged_invocations(&mock_script);
+    let follow_up_stdin = invocations.stdin.get(1).expect("second stdin invocation");
+    assert!(follow_up_stdin.contains("<codex_runtime_truth>"));
+    assert!(follow_up_stdin.contains("mode: delegated_subagent"));
+    assert!(!follow_up_stdin.contains("<codex_subagent_roles>"));
+    assert!(!follow_up_stdin.contains("<codex_available_models>"));
+    assert!(!follow_up_stdin.contains("Follow repo truth"));
+    assert!(!follow_up_stdin.contains("parent context"));
+}
+
 #[test]
 fn external_agent_continuation_prompt_only_carries_current_message() {
-    let prompt = build_external_agent_continuation_prompt("follow-up task");
+    let prompt = build_external_agent_continuation_prompt(
+        "<external_agent_runtime>\nmode: delegated_subagent\n</external_agent_runtime>",
+        "follow-up task",
+    );
     assert!(prompt.contains("follow-up task"));
+    assert!(prompt.contains("<codex_runtime_truth>"));
     assert!(!prompt.contains("Follow repo truth"));
     assert!(!prompt.contains("parent context"));
 }
@@ -661,12 +740,12 @@ fn external_agent_user_prompt_bounds_old_conversation_entries() {
         .collect::<Vec<_>>();
 
     let prompt = build_external_agent_user_prompt(
-        Some("Follow repo truth"),
-        Some("parent context"),
+        "<external_agent_runtime>\nmode: delegated_subagent\n</external_agent_runtime>",
         &conversation,
         "latest task",
     );
 
+    assert!(prompt.contains("<codex_runtime_truth>"));
     assert!(prompt.contains("turn-16"));
     assert!(!prompt.contains("turn-01"));
     assert!(prompt.contains("<subagent_conversation_omission>"));

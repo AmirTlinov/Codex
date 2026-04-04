@@ -166,6 +166,12 @@ What it does:
   / skills / plugins sections, contextual runtime blocks such as
   `environment_context` with subagents, and a compact summary of Codex's
   current tool inventory without inflating the Claude `--system-prompt` argv;
+- prepends the same kind of `<codex_runtime_truth>` capsule to spawned Claude
+  subagent prompts: the initial delegated prompt carries current delegated
+  runtime/provider state, visible picker models, the current `spawn_agent`
+  role/model inventory, and the current bridge/direct tool summary, while
+  continuation turns resend only the smaller mutable runtime/tool delta instead
+  of duplicating the whole static inventory into every resumed carrier turn;
 - gives external Claude agents a real child-thread host so supported approval
   prompts now surface on that child thread too, instead of remaining trapped
   inside a status-only external runner;

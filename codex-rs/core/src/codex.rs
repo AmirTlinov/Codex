@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::collections::HashMap;
 use std::collections::HashSet;
 use std::fmt::Debug;
@@ -23,6 +24,7 @@ use crate::compact::InitialContextInjection;
 use crate::compact::run_inline_auto_compact_task;
 use crate::compact::should_use_remote_compact_task;
 use crate::compact_remote::run_inline_remote_auto_compact_task;
+use crate::config::AgentRoleConfig;
 use crate::config::ConstraintError;
 use crate::config::ManagedFeatures;
 use crate::connectors;
@@ -419,6 +421,18 @@ pub struct CodexSpawnOk {
     pub conversation_id: ThreadId,
 }
 
+#[derive(Clone)]
+pub(crate) struct ExternalAgentPromptSnapshot {
+    pub(crate) model_provider_id: String,
+    pub(crate) model: String,
+    pub(crate) approval_policy: AskForApproval,
+    pub(crate) sandbox_policy: SandboxPolicy,
+    pub(crate) cwd: PathBuf,
+    pub(crate) codex_home: PathBuf,
+    pub(crate) model_providers: HashMap<String, ModelProviderInfo>,
+    pub(crate) agent_roles: BTreeMap<String, AgentRoleConfig>,
+}
+
 pub(crate) struct CodexSpawnArgs {
     pub(crate) config: Config,
     pub(crate) auth_manager: Arc<AuthManager>,
@@ -787,6 +801,21 @@ impl Codex {
     pub(crate) async fn thread_config_snapshot(&self) -> ThreadConfigSnapshot {
         let state = self.session.state.lock().await;
         state.session_configuration.thread_config_snapshot()
+    }
+
+    pub(crate) async fn external_agent_prompt_snapshot(&self) -> ExternalAgentPromptSnapshot {
+        let state = self.session.state.lock().await;
+        let per_turn_config = Session::build_per_turn_config(&state.session_configuration);
+        ExternalAgentPromptSnapshot {
+            model_provider_id: per_turn_config.model_provider_id.clone(),
+            model: per_turn_config.model.clone().unwrap_or_default(),
+            approval_policy: per_turn_config.permissions.approval_policy.value(),
+            sandbox_policy: per_turn_config.permissions.sandbox_policy.get().clone(),
+            cwd: per_turn_config.cwd.to_path_buf(),
+            codex_home: per_turn_config.codex_home.clone(),
+            model_providers: per_turn_config.model_providers.clone(),
+            agent_roles: per_turn_config.agent_roles.clone(),
+        }
     }
 
     pub(crate) fn state_db(&self) -> Option<state_db::StateDbHandle> {
