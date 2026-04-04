@@ -128,9 +128,14 @@ This downstream slice is intentionally honest and narrow:
 - Anthropic web search / image-generation special built-ins are not yet mapped
   into native Anthropic tool calls, so the native Messages path currently
   focuses on the normal Codex function/custom/local-shell/tool-search surfaces;
-- `Claude Haiku 4.6` intentionally stays on the stable `haiku` alias; Opus
-  exposes `Low/Medium/High/Max`, Sonnet stops at `High`, and Haiku skips the
-  reasoning picker entirely.
+- `Claude Haiku 4.5` intentionally stays on the stable `haiku` alias on the
+  Claude Code lane; the native Anthropic lane uses the current
+  `claude-haiku-4-5` model id instead of the Claude Code alias. Opus exposes
+  `Low/Medium/High/Max`, Sonnet stops at `High`, and Haiku skips the reasoning
+  picker entirely.
+- Claudex still does **not** surface Claude Code's optional `[1m]` model
+  variants in the picker/runtime yet, so the bundled Claude catalog currently
+  reflects the base model ids rather than the extended-context aliases.
 - if you want a different Claude default model, pass `claudex -m <model>` or
   override it in config.
 

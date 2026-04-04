@@ -521,7 +521,7 @@ impl ModelsManager {
         match provider.wire_api {
             WireApi::Responses => Self::load_remote_models_from_file(),
             WireApi::Anthropic | WireApi::ClaudeCode => {
-                Self::load_bundled_claude_models(Self::claude_capabilities(provider.wire_api))
+                Self::load_bundled_claude_models(provider.wire_api)
             }
         }
     }
@@ -532,9 +532,31 @@ impl ModelsManager {
         Ok(response.models)
     }
 
-    fn load_bundled_claude_models(
-        capabilities: ClaudeModelCapabilities,
-    ) -> Result<Vec<ModelInfo>, std::io::Error> {
+    fn load_bundled_claude_models(wire_api: WireApi) -> Result<Vec<ModelInfo>, std::io::Error> {
+        let capabilities = Self::claude_capabilities(wire_api);
+        let haiku_definition = match wire_api {
+            WireApi::Anthropic => ClaudeModelDefinition {
+                slug: "claude-haiku-4-5",
+                display_name: "Claude Haiku 4.5",
+                description: "Fast Claude model for quick iterations, narrow fixes, and lightweight turns.",
+                default_reasoning_level: Some(codex_protocol::openai_models::ReasoningEffort::Low),
+                supported_reasoning_levels: Vec::new(),
+                priority: 2,
+                context_window: 200_000,
+            },
+            WireApi::ClaudeCode => ClaudeModelDefinition {
+                slug: "haiku",
+                display_name: "Claude Haiku 4.5",
+                description: "Fast Claude model for quick iterations, narrow fixes, and lightweight turns.",
+                default_reasoning_level: Some(codex_protocol::openai_models::ReasoningEffort::Low),
+                supported_reasoning_levels: Vec::new(),
+                priority: 2,
+                context_window: 200_000,
+            },
+            WireApi::Responses => {
+                unreachable!("Claude bundled models are only used for Anthropic lanes")
+            }
+        };
         Ok(vec![
             Self::claude_model(
                 &capabilities,
@@ -596,20 +618,7 @@ impl ModelsManager {
                     context_window: 200_000,
                 },
             ),
-            Self::claude_model(
-                &capabilities,
-                ClaudeModelDefinition {
-                    slug: "haiku",
-                    display_name: "Claude Haiku 4.6",
-                    description: "Fast Claude model for quick iterations, narrow fixes, and lightweight turns.",
-                    default_reasoning_level: Some(
-                        codex_protocol::openai_models::ReasoningEffort::Low,
-                    ),
-                    supported_reasoning_levels: Vec::new(),
-                    priority: 2,
-                    context_window: 200_000,
-                },
-            ),
+            Self::claude_model(&capabilities, haiku_definition),
         ])
     }
 

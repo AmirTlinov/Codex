@@ -1670,7 +1670,7 @@ async fn claude_model_picker_popup_snapshot() {
         ),
         preset(
             "haiku",
-            "Claude Haiku 4.6",
+            "Claude Haiku 4.5",
             "Fast Claude model for quick iterations, narrow fixes, and lightweight turns.",
             false,
         ),
@@ -2077,7 +2077,7 @@ async fn claude_haiku_reasoning_popup_skips_selection() {
     let preset = ModelPreset {
         id: "haiku".to_string(),
         model: "haiku".to_string(),
-        display_name: "Claude Haiku 4.6".to_string(),
+        display_name: "Claude Haiku 4.5".to_string(),
         description: "Fast Claude model for quick iterations, narrow fixes, and lightweight turns."
             .to_string(),
         default_reasoning_effort: ReasoningEffortConfig::Low,
