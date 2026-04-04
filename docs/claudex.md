@@ -106,6 +106,10 @@ This downstream slice is intentionally honest and narrow:
   across the active picker-visible provider pair, so a Claude session can see
   paired OpenAI GPT models in the same authoritative inventory that powers the
   tool description instead of only seeing the current provider's catalog;
+- that `spawn_agent` inventory is now also the default resolution boundary for
+  provider-less child model picks, so hidden providers like local OSS lanes no
+  longer make `gpt-5.4` ambiguous in Claude-backed turns; if you really want a
+  hidden/non-default provider, pass `model_provider` explicitly;
 - the bridge now exposes a narrow first pilot tool too:
   `mcp__codex__codex-shell`, which starts a Codex-owned worker session for one
   exact shell command and returns its output;

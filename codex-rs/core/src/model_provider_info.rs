@@ -490,6 +490,52 @@ pub fn model_picker_provider_ids(
     provider_ids
 }
 
+pub(crate) fn spawn_agent_provider_ids(
+    model_providers: &HashMap<String, ModelProviderInfo>,
+    active_provider_id: &str,
+) -> Vec<String> {
+    let active_provider_id = canonical_claude_provider_id(active_provider_id);
+    let mut provider_ids = vec![active_provider_id.to_string()];
+    let Some(active_provider) = model_providers.get(active_provider_id) else {
+        return provider_ids;
+    };
+
+    let paired_provider_id = match active_provider.wire_api {
+        WireApi::Responses => preferred_claude_spawn_provider_id(model_providers),
+        WireApi::Anthropic | WireApi::ClaudeCode => model_providers
+            .contains_key(OPENAI_PROVIDER_ID)
+            .then(|| OPENAI_PROVIDER_ID.to_string()),
+    };
+    if let Some(paired_provider_id) = paired_provider_id
+        && paired_provider_id != active_provider_id
+    {
+        provider_ids.push(paired_provider_id);
+    }
+
+    provider_ids
+}
+
+fn preferred_claude_spawn_provider_id(
+    model_providers: &HashMap<String, ModelProviderInfo>,
+) -> Option<String> {
+    if model_providers.contains_key(CLAUDE_CODE_PROVIDER_ID) {
+        return Some(CLAUDE_CODE_PROVIDER_ID.to_string());
+    }
+    if let Some((provider_id, _)) = model_providers
+        .iter()
+        .find(|(_, provider)| provider.wire_api == WireApi::ClaudeCode)
+    {
+        return Some(provider_id.clone());
+    }
+    if model_providers.contains_key(ANTHROPIC_PROVIDER_ID) {
+        return Some(ANTHROPIC_PROVIDER_ID.to_string());
+    }
+    model_providers
+        .iter()
+        .find(|(_, provider)| provider.wire_api == WireApi::Anthropic)
+        .map(|(provider_id, _)| provider_id.clone())
+}
+
 pub fn canonical_claude_provider_id(provider_id: &str) -> &str {
     if provider_id == CLAUDE_CLI_PROVIDER_ID {
         CLAUDE_CODE_PROVIDER_ID

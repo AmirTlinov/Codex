@@ -464,42 +464,36 @@ async fn resolve_requested_provider_and_models(
     }
 
     if let Some(requested_model) = requested_model {
-        let current_models = session
-            .services
-            .models_manager
-            .list_models(RefreshStrategy::Offline)
-            .await;
-        if current_models
+        let inventory_provider_ids = crate::model_provider_info::spawn_agent_provider_ids(
+            &config.model_providers,
+            &config.model_provider_id,
+        );
+        let inventory_provider_ids_set = inventory_provider_ids
             .iter()
-            .any(|model| model.model == requested_model)
-        {
-            return Ok((
-                config.model_provider_id.clone(),
-                config.model_provider.clone(),
-                current_models,
-                models_manager_for_provider(session, config, config.model_provider.clone()),
-            ));
-        }
+            .cloned()
+            .collect::<std::collections::HashSet<_>>();
 
-        let mut matches = Vec::new();
-        for (provider_id, provider) in &config.model_providers {
-            if provider_id == &config.model_provider_id {
-                continue;
-            }
+        let mut visible_matches = Vec::new();
+        for provider_id in &inventory_provider_ids {
+            let provider = if provider_id == &config.model_provider_id {
+                config.model_provider.clone()
+            } else {
+                let Some(provider) = config.model_providers.get(provider_id).cloned() else {
+                    continue;
+                };
+                provider
+            };
             let manager = models_manager_for_provider(session, config, provider.clone());
             let models = manager.list_models(RefreshStrategy::Offline).await;
             if models.iter().any(|model| model.model == requested_model) {
-                matches.push((provider_id.clone(), provider.clone(), models, manager));
+                visible_matches.push((provider_id.clone(), provider, models, manager));
             }
         }
 
-        return match matches.len() {
-            0 => Err(FunctionCallError::RespondToModel(format!(
-                "Unknown model `{requested_model}` for spawn_agent."
-            ))),
-            1 => Ok(matches.remove(0)),
-            _ => {
-                let providers = matches
+        return match visible_matches.len() {
+            1 => Ok(visible_matches.remove(0)),
+            n if n > 1 => {
+                let providers = visible_matches
                     .iter()
                     .map(|(provider_id, ..)| provider_id.as_str())
                     .collect::<Vec<_>>()
@@ -507,6 +501,33 @@ async fn resolve_requested_provider_and_models(
                 Err(FunctionCallError::RespondToModel(format!(
                     "Model `{requested_model}` is available from multiple providers ({providers}). Pass model_provider explicitly."
                 )))
+            }
+            _ => {
+                let mut hidden_matches = Vec::new();
+                for (provider_id, provider) in &config.model_providers {
+                    if inventory_provider_ids_set.contains(provider_id) {
+                        continue;
+                    }
+                    let manager = models_manager_for_provider(session, config, provider.clone());
+                    let models = manager.list_models(RefreshStrategy::Offline).await;
+                    if models.iter().any(|model| model.model == requested_model) {
+                        hidden_matches.push(provider_id.as_str());
+                    }
+                }
+
+                match hidden_matches.len() {
+                    0 => Err(FunctionCallError::RespondToModel(format!(
+                        "Unknown model `{requested_model}` for spawn_agent."
+                    ))),
+                    1 => Err(FunctionCallError::RespondToModel(format!(
+                        "Model `{requested_model}` is available from non-default provider ({}). Pass model_provider explicitly.",
+                        hidden_matches.join(", ")
+                    ))),
+                    _ => Err(FunctionCallError::RespondToModel(format!(
+                        "Model `{requested_model}` is available from non-default providers ({}). Pass model_provider explicitly.",
+                        hidden_matches.join(", ")
+                    ))),
+                }
             }
         };
     }

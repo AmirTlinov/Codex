@@ -706,39 +706,35 @@ fn spawn_agent_models_description(models: &[ModelPreset]) -> String {
         return "No picker-visible models are currently loaded.".to_string();
     }
 
-    visible_models
-        .into_iter()
-        .map(|model| {
-            let efforts = model
-                .supported_reasoning_efforts
-                .iter()
-                .map(|preset| {
-                    format!(
-                        "{} ({})",
-                        spawn_agent_reasoning_effort_label(model, preset.effort),
-                        preset.description
-                    )
-                })
-                .collect::<Vec<_>>()
-                .join(", ");
-            let default_effort =
-                spawn_agent_reasoning_effort_label(model, model.default_reasoning_effort);
-            let supported_efforts = if efforts.is_empty() {
-                "none".to_string()
-            } else {
-                efforts
-            };
-            format!(
-                "- {} (`{}`): {} Default reasoning effort: {}. Supported reasoning efforts: {}.",
-                model.display_name,
-                model.model,
-                model.description,
-                default_effort,
-                supported_efforts
-            )
-        })
-        .collect::<Vec<_>>()
-        .join("\n")
+    let mut sections = vec![
+        "If you omit `model_provider`, Codex searches the current spawn inventory shown below. Pass `model_provider` explicitly only when you need a different provider than that default inventory.".to_string(),
+    ];
+    sections.extend(visible_models.into_iter().map(|model| {
+        let efforts = model
+            .supported_reasoning_efforts
+            .iter()
+            .map(|preset| {
+                format!(
+                    "{} ({})",
+                    spawn_agent_reasoning_effort_label(model, preset.effort),
+                    preset.description
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(", ");
+        let default_effort =
+            spawn_agent_reasoning_effort_label(model, model.default_reasoning_effort);
+        let supported_efforts = if efforts.is_empty() {
+            "none".to_string()
+        } else {
+            efforts
+        };
+        format!(
+            "- {} (`{}`): {} Default reasoning effort: {}. Supported reasoning efforts: {}.",
+            model.display_name, model.model, model.description, default_effort, supported_efforts
+        )
+    }));
+    sections.join("\n")
 }
 
 fn spawn_agent_reasoning_effort_label(

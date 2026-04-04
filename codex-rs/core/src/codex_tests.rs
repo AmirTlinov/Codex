@@ -2386,6 +2386,11 @@ async fn spawn_agent_available_models_pair_claude_code_with_openai() {
 
     assert!(available_ids.contains(&"claude-opus-4-6"));
     assert!(available_ids.contains(&"gpt-5.4"));
+    let openai_gpt = available_models
+        .iter()
+        .find(|preset| preset.model == "gpt-5.4")
+        .expect("paired openai model should be present");
+    assert!(openai_gpt.display_name.contains("[OpenAI]"));
     assert_eq!(
         available_ids
             .iter()
@@ -2423,6 +2428,11 @@ async fn spawn_agent_available_models_pair_openai_with_claude_code() {
 
     assert!(available_ids.contains(&"gpt-5.4"));
     assert!(available_ids.contains(&"claude-opus-4-6"));
+    let paired_claude = available_models
+        .iter()
+        .find(|preset| preset.model == "claude-opus-4-6")
+        .expect("paired claude model should be present");
+    assert!(paired_claude.display_name.contains("[Claude Code]"));
     assert_eq!(
         available_ids
             .iter()

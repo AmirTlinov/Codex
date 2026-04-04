@@ -61,6 +61,10 @@ This fork is maintained as a downstream customization layer over
   native `/v1/messages` lane remains API-key-only because Anthropic rejects
   OAuth bearer tokens there. Claude Code carrier runtime still receives saved
   auth from Codex rather than silently depending on global `~/.claude` state.
+  `spawn_agent` model picks now resolve inside the same visible provider
+  inventory Claudex advertises to the current turn; if a task really needs a
+  hidden or non-default provider, require `model_provider` explicitly instead
+  of letting hidden providers create ambiguous defaults.
 - If you change Claudex runtime behavior or any user-visible Claudex surface,
   do not stop at green tests: rebuild and reinstall the local `claudex` binary
   yourself with `scripts/install-claudex.sh` before claiming done.

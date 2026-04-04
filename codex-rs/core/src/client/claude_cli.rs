@@ -516,7 +516,7 @@ fn compact_tool_description(name: &str, description: &str) -> String {
 fn tool_call_example(name: &str) -> Option<&'static str> {
     match name {
         "spawn_agent" => Some(
-            r#"{"name":"spawn_agent","arguments":{"task_name":"scout","message":"Check the failing test and report the root cause.","model":"gpt-5.4","reasoning_effort":"medium"}}"#,
+            r#"{"name":"spawn_agent","arguments":{"task_name":"scout","message":"Check the failing test and report the root cause.","model_provider":"openai","model":"gpt-5.4","reasoning_effort":"medium"}}"#,
         ),
         "send_input" => Some(
             r#"{"name":"send_input","arguments":{"target":"agent-id","message":"Continue with the next bounded step.","interrupt":false}}"#,

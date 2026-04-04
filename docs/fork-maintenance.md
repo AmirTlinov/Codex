@@ -189,6 +189,10 @@ What it does:
   the tool description now reflects the active picker-visible provider pair
   (for example Claude plus OpenAI) instead of only the current provider's
   catalog;
+- aligns `spawn_agent` runtime resolution with that same visible provider
+  inventory, so hidden providers like `lmstudio` / `ollama` no longer make a
+  Claude-requested `gpt-5.4` ambiguous unless the caller explicitly asks for
+  one of those non-default providers via `model_provider`;
 - gives external Claude agents a real child-thread host so supported approval
   prompts now surface on that child thread too, instead of remaining trapped
   inside a status-only external runner;

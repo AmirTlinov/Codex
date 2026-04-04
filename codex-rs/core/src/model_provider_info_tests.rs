@@ -249,6 +249,32 @@ fn model_picker_provider_ids_leaves_openai_sessions_unpaired() {
 }
 
 #[test]
+fn spawn_agent_provider_ids_pair_builtin_claude_with_openai() {
+    let providers = built_in_model_providers(/*openai_base_url*/ None);
+
+    assert_eq!(
+        spawn_agent_provider_ids(&providers, CLAUDE_CLI_PROVIDER_ID),
+        vec![
+            CLAUDE_CODE_PROVIDER_ID.to_string(),
+            OPENAI_PROVIDER_ID.to_string()
+        ]
+    );
+}
+
+#[test]
+fn spawn_agent_provider_ids_pair_openai_with_builtin_claude() {
+    let providers = built_in_model_providers(/*openai_base_url*/ None);
+
+    assert_eq!(
+        spawn_agent_provider_ids(&providers, OPENAI_PROVIDER_ID),
+        vec![
+            OPENAI_PROVIDER_ID.to_string(),
+            CLAUDE_CODE_PROVIDER_ID.to_string()
+        ]
+    );
+}
+
+#[test]
 fn required_auth_provider_maps_openai_and_claude_cli() {
     let openai = ModelProviderInfo::create_openai_provider(/*base_url*/ None);
     let anthropic = create_anthropic_provider();
