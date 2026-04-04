@@ -475,6 +475,7 @@ async fn stream_passes_codex_mcp_bridge_config_to_claude_code() {
 
     let args_log = std::fs::read_to_string(args_log_path).expect("read mcp args log");
     assert!(args_log.contains("--mcp-config"));
+    assert!(args_log.contains("mcp__codex__codex"));
     let mcp_config: serde_json::Value = serde_json::from_str(
         &std::fs::read_to_string(mcp_config_log_path).expect("read mcp config log"),
     )

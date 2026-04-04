@@ -1140,6 +1140,7 @@ async fn spawn_agent_role_preserves_codex_self_exe_for_external_claude_mcp_bridg
 
     let args_log = std::fs::read_to_string(&mock_claude.args_log_path).expect("read args log");
     assert!(args_log.contains("--mcp-config"));
+    assert!(args_log.contains("mcp__codex__codex"));
 }
 
 #[tokio::test]

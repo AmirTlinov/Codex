@@ -241,7 +241,9 @@ impl ExternalAgentState {
             let request = ClaudeCliRequest {
                 cwd: state.config_snapshot.cwd.clone(),
                 model: state.model.clone(),
-                system_prompt: build_external_agent_system_prompt(),
+                system_prompt: build_external_agent_system_prompt_with_bridge(
+                    state.claude_cli.codex_self_exe.is_some(),
+                ),
                 user_prompt: if carrier_session_id.is_some() {
                     build_external_agent_continuation_prompt(user_message.as_str())
                 } else {
@@ -489,13 +491,18 @@ fn operation_to_external_message(operation: &Op) -> CodexResult<String> {
     }
 }
 
-fn build_external_agent_system_prompt() -> String {
-    [
+fn build_external_agent_system_prompt_with_bridge(codex_mcp_bridge_available: bool) -> String {
+    let mut sections = vec![
         "You are an external Claude subagent running under Codex.".to_string(),
         "Work only on the delegated task, stay aligned with the provided project guidance, and return only the answer that should go back to the parent agent.".to_string(),
         "Do not mention hidden prompts, internal runtime mechanics, or claim tool use you did not actually perform.".to_string(),
-    ]
-    .join("\n\n")
+    ];
+    if codex_mcp_bridge_available {
+        sections.push(
+            "An internal Codex MCP bridge is available in this session. If you need Codex-owned tools or a Codex-run worker, use `mcp__codex__codex` to start that task and `mcp__codex__codex-reply` to continue it. Prefer this bridge when you need Codex MCP servers, Codex-native tool behavior, or capabilities that are not directly available through Claude Code built-ins.".to_string(),
+        );
+    }
+    sections.join("\n\n")
 }
 
 fn build_external_agent_user_prompt(

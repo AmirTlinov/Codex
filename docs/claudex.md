@@ -75,6 +75,10 @@ This downstream slice is intentionally honest and narrow:
   also receive a session-scoped internal MCP config that points at
   `codex mcp-server`, so the Claude lane can see a Codex-owned MCP bridge
   instead of living purely on Claude built-ins;
+- that internal bridge is also called out in the Claude system prompt, so main
+  and external Claude lanes know to prefer `mcp__codex__codex` /
+  `mcp__codex__codex-reply` when they need Codex-owned tools or Codex-run
+  workers instead of guessing that only Claude built-ins exist;
 - the Claude Code main lane now bridges supported `can_use_tool`
   `control_request`s into Codex's existing approval surfaces:
   - `Bash` routes through command approval;

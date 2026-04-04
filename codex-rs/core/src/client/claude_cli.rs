@@ -25,6 +25,13 @@ const CLAUDE_BRIDGE_PROMPT: &str = concat!(
     "You are the main assistant running inside Codex through Claude Code.\n",
     "Return the assistant response that should appear in the Codex conversation."
 );
+const CODEX_MCP_BRIDGE_PROMPT: &str = concat!(
+    "An internal Codex MCP bridge is available in this session.\n",
+    "If you need Codex-owned tools or a Codex-run worker, use `mcp__codex__codex` to start that task ",
+    "and `mcp__codex__codex-reply` to continue it.\n",
+    "Prefer this bridge when you need Codex MCP servers, Codex-native tool behavior, or capabilities ",
+    "that are not directly available through Claude Code built-ins."
+);
 
 pub(super) async fn stream_claude_cli_turn(
     claude_cli: &ClaudeCliConfig,
@@ -40,7 +47,10 @@ pub(super) async fn stream_claude_cli_turn(
         ClaudeCliRequest {
             cwd: cwd.to_path_buf(),
             model: model_info.slug.clone(),
-            system_prompt: build_system_prompt(&prompt.base_instructions.text),
+            system_prompt: build_system_prompt(
+                &prompt.base_instructions.text,
+                claude_cli.codex_self_exe.is_some(),
+            ),
             user_prompt,
             session: ClaudeCliSession::Ephemeral,
             json_schema: prompt.output_schema.clone(),
@@ -129,12 +139,17 @@ pub(super) async fn stream_claude_cli_turn(
     Ok(ResponseStream { rx_event })
 }
 
-fn build_system_prompt(base_instructions: &str) -> String {
+fn build_system_prompt(base_instructions: &str, codex_mcp_bridge_available: bool) -> String {
     let trimmed = base_instructions.trim();
-    if trimmed.is_empty() {
-        return CLAUDE_BRIDGE_PROMPT.to_string();
+    let mut sections = Vec::new();
+    if !trimmed.is_empty() {
+        sections.push(trimmed.to_string());
     }
-    format!("{trimmed}\n\n{CLAUDE_BRIDGE_PROMPT}")
+    sections.push(CLAUDE_BRIDGE_PROMPT.to_string());
+    if codex_mcp_bridge_available {
+        sections.push(CODEX_MCP_BRIDGE_PROMPT.to_string());
+    }
+    sections.join("\n\n")
 }
 
 fn render_claude_turn_prompt(items: &[ResponseItem]) -> Result<String> {
