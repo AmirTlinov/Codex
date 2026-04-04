@@ -1,6 +1,7 @@
 use crate::agent::external::ClaudeCliRequest;
 use crate::agent::external::ClaudeCliSession;
 use crate::agent::external::run_claude_cli_stream_json_controlled;
+use crate::claude_code_control::ClaudeControlRequest;
 use crate::claude_code_control::ControlRequestParseOutcome;
 use crate::claude_code_control::parse_control_request_line;
 use crate::claude_code_stream::ClaudeCodeStreamAccumulator;
@@ -63,7 +64,9 @@ pub(super) async fn stream_claude_cli_turn(
             match line {
                 Ok(line) => {
                     match parse_control_request_line(&line, &control_responder) {
-                        Ok(ControlRequestParseOutcome::Supported(permission_request)) => {
+                        Ok(ControlRequestParseOutcome::ControlRequest(
+                            ClaudeControlRequest::CanUseTool(permission_request),
+                        )) => {
                             if tx_event
                                 .send(Ok(ResponseEvent::ClaudeCodePermissionRequest(
                                     permission_request,
@@ -74,6 +77,15 @@ pub(super) async fn stream_claude_cli_turn(
                                 return;
                             }
                             continue;
+                        }
+                        Ok(ControlRequestParseOutcome::ControlRequest(
+                            ClaudeControlRequest::UnsupportedSubtype { subtype },
+                        )) => {
+                            let message = format!(
+                                "Claude Code carrier emitted an unsupported control_request subtype `{subtype}`"
+                            );
+                            let _ = tx_event.send(Err(CodexErr::Stream(message, None))).await;
+                            return;
                         }
                         Ok(ControlRequestParseOutcome::NotControlRequest) => {}
                         Err(message) => {

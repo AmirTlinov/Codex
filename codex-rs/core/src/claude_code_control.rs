@@ -7,7 +7,9 @@ use codex_api::common::ClaudeCodePermissionRequest;
 use codex_protocol::request_permissions::RequestPermissionProfile;
 use codex_protocol::request_permissions::RequestPermissionsArgs;
 use codex_utils_absolute_path::AbsolutePathBuf;
+use serde_json::Map;
 use serde_json::Value;
+use tracing::warn;
 
 use crate::codex::ExternalCommandApprovalRequest;
 use crate::codex::Session;
@@ -20,76 +22,56 @@ pub(crate) struct ClaudeCodePermissionResolution {
     pub(crate) interrupt_turn: bool,
 }
 
+#[derive(Debug)]
 pub(crate) enum ControlRequestParseOutcome {
     NotControlRequest,
-    Supported(ClaudeCodePermissionRequest),
+    ControlRequest(ClaudeControlRequest),
+}
+
+#[derive(Debug)]
+pub(crate) enum ClaudeControlRequest {
+    CanUseTool(ClaudeCodePermissionRequest),
+    UnsupportedSubtype { subtype: String },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ClaudeCodeToolClass {
+    Command,
+    ReadFs,
+    WriteFs,
+    Network,
+    Unknown,
 }
 
 pub(crate) fn parse_control_request_line(
     line: &str,
     control_responder: &ClaudeCodeControlResponder,
 ) -> std::result::Result<ControlRequestParseOutcome, String> {
-    let value: serde_json::Value = serde_json::from_str(line)
+    let value: Value = serde_json::from_str(line)
         .map_err(|err| format!("parse Claude Code control_request: {err}"))?;
-    if value.get("type").and_then(serde_json::Value::as_str) != Some("control_request") {
+    if value.get("type").and_then(Value::as_str) != Some("control_request") {
         return Ok(ControlRequestParseOutcome::NotControlRequest);
     }
     let request = value
         .get("request")
-        .and_then(serde_json::Value::as_object)
+        .and_then(Value::as_object)
         .ok_or_else(|| {
             "Claude Code carrier emitted malformed control_request payload".to_string()
         })?;
-    let subtype = request
-        .get("subtype")
-        .and_then(serde_json::Value::as_str)
-        .ok_or_else(|| {
-            "Claude Code carrier emitted malformed control_request subtype".to_string()
-        })?;
-    if subtype != "can_use_tool" {
-        return Err(
-            "Claude Code carrier emitted an unsupported control_request subtype".to_string(),
-        );
-    }
-    let input = request
-        .get("input")
-        .cloned()
-        .ok_or_else(|| "Claude Code carrier emitted malformed can_use_tool input".to_string())?;
-    Ok(ControlRequestParseOutcome::Supported(
-        ClaudeCodePermissionRequest::new(
-            value
-                .get("request_id")
-                .and_then(serde_json::Value::as_str)
-                .ok_or_else(|| {
-                    "Claude Code carrier emitted malformed can_use_tool request_id".to_string()
-                })?
-                .to_string(),
-            request
-                .get("tool_name")
-                .and_then(serde_json::Value::as_str)
-                .ok_or_else(|| {
-                    "Claude Code carrier emitted malformed can_use_tool tool_name".to_string()
-                })?
-                .to_string(),
-            input,
-            request
-                .get("tool_use_id")
-                .and_then(serde_json::Value::as_str)
-                .ok_or_else(|| {
-                    "Claude Code carrier emitted malformed can_use_tool tool_use_id".to_string()
-                })?
-                .to_string(),
-            request
-                .get("description")
-                .and_then(serde_json::Value::as_str)
-                .map(str::to_string),
-            request
-                .get("decision_reason")
-                .and_then(serde_json::Value::as_str)
-                .map(str::to_string),
-            control_responder.clone(),
-        ),
-    ))
+    let subtype = required_request_str_field(request, "subtype", "control_request subtype")?;
+
+    let control_request = match subtype {
+        "can_use_tool" => ClaudeControlRequest::CanUseTool(parse_can_use_tool_request(
+            &value,
+            request,
+            control_responder,
+        )?),
+        _ => ClaudeControlRequest::UnsupportedSubtype {
+            subtype: subtype.to_string(),
+        },
+    };
+
+    Ok(ControlRequestParseOutcome::ControlRequest(control_request))
 }
 
 pub(crate) async fn resolve_claude_code_permission_request(
@@ -100,38 +82,46 @@ pub(crate) async fn resolve_claude_code_permission_request(
     if approval_policy_auto_allows_claude_control(turn_context.approval_policy.value()) {
         return allowed_resolution();
     }
-    if is_bash_tool(&request.tool_name) {
-        return resolve_bash_permission_request(sess, turn_context, request).await;
-    }
 
-    let Some(permissions) = requested_permissions_for_tool(
-        &request.tool_name,
-        &request.input,
-        turn_context.cwd.as_path(),
-    ) else {
-        return denied_resolution(format!(
-            "Claudex does not yet know how to approve Claude Code tool `{}` with these inputs.",
-            request.tool_name
-        ));
-    };
+    let tool_class = classify_tool_name(&request.tool_name);
+    match tool_class {
+        ClaudeCodeToolClass::Command => {
+            resolve_bash_permission_request(sess, turn_context, request).await
+        }
+        ClaudeCodeToolClass::ReadFs
+        | ClaudeCodeToolClass::WriteFs
+        | ClaudeCodeToolClass::Network => {
+            let Some(permissions) = requested_permissions_for_tool_class(
+                tool_class,
+                &request.input,
+                turn_context.cwd.as_path(),
+            ) else {
+                return denied_resolution(malformed_tool_input_message(request));
+            };
 
-    let response = sess
-        .request_permissions(
-            turn_context.as_ref(),
-            request.request_id.clone(),
-            RequestPermissionsArgs {
-                reason: Some(permission_reason(request)),
-                permissions,
-            },
-        )
-        .await;
+            let response = sess
+                .request_permissions(
+                    turn_context.as_ref(),
+                    request.request_id.clone(),
+                    RequestPermissionsArgs {
+                        reason: Some(permission_reason(request)),
+                        permissions,
+                    },
+                )
+                .await;
 
-    match response {
-        Some(response) if !response.permissions.is_empty() => allowed_resolution(),
-        _ => denied_resolution(format!(
-            "Permission denied for Claude Code tool `{}`",
-            request.tool_name
-        )),
+            match response {
+                Some(response) if !response.permissions.is_empty() => allowed_resolution(),
+                _ => denied_resolution(format!(
+                    "Permission denied for Claude Code tool `{}`",
+                    request.tool_name
+                )),
+            }
+        }
+        ClaudeCodeToolClass::Unknown => {
+            warn!(tool_name = %request.tool_name, "unknown Claude Code tool requested");
+            denied_resolution(unknown_tool_message(request))
+        }
     }
 }
 
@@ -145,52 +135,129 @@ pub(crate) async fn resolve_external_claude_code_permission_request(
     if approval_policy_auto_allows_claude_control(approval_policy) {
         return allowed_resolution();
     }
-    if is_bash_tool(&request.tool_name) {
-        return resolve_external_bash_permission_request(
-            sess,
-            approval_policy,
-            turn_id,
-            cwd,
-            request,
-        )
-        .await;
-    }
 
-    let Some(permissions) = requested_permissions_for_tool(&request.tool_name, &request.input, cwd)
-    else {
-        return denied_resolution(format!(
-            "Claudex does not yet know how to approve Claude Code tool `{}` with these inputs.",
-            request.tool_name
-        ));
-    };
+    let tool_class = classify_tool_name(&request.tool_name);
+    match tool_class {
+        ClaudeCodeToolClass::Command => {
+            resolve_external_bash_permission_request(sess, approval_policy, turn_id, cwd, request)
+                .await
+        }
+        ClaudeCodeToolClass::ReadFs
+        | ClaudeCodeToolClass::WriteFs
+        | ClaudeCodeToolClass::Network => {
+            let Some(permissions) =
+                requested_permissions_for_tool_class(tool_class, &request.input, cwd)
+            else {
+                return denied_resolution(malformed_tool_input_message(request));
+            };
 
-    let response = sess
-        .request_external_permissions(
-            approval_policy,
-            turn_id.to_string(),
-            request.request_id.clone(),
-            RequestPermissionsArgs {
-                reason: Some(permission_reason(request)),
-                permissions,
-            },
-        )
-        .await;
+            let response = sess
+                .request_external_permissions(
+                    approval_policy,
+                    turn_id.to_string(),
+                    request.request_id.clone(),
+                    RequestPermissionsArgs {
+                        reason: Some(permission_reason(request)),
+                        permissions,
+                    },
+                )
+                .await;
 
-    match response {
-        Some(response) if !response.permissions.is_empty() => allowed_resolution(),
-        _ => denied_resolution(format!(
-            "Permission denied for Claude Code tool `{}`",
-            request.tool_name
-        )),
+            match response {
+                Some(response) if !response.permissions.is_empty() => allowed_resolution(),
+                _ => denied_resolution(format!(
+                    "Permission denied for Claude Code tool `{}`",
+                    request.tool_name
+                )),
+            }
+        }
+        ClaudeCodeToolClass::Unknown => {
+            warn!(tool_name = %request.tool_name, "unknown Claude Code tool requested");
+            denied_resolution(unknown_tool_message(request))
+        }
     }
 }
 
-fn is_bash_tool(tool_name: &str) -> bool {
-    matches!(tool_name, "Bash" | "BashTool")
+fn parse_can_use_tool_request(
+    root: &Value,
+    request: &Map<String, Value>,
+    control_responder: &ClaudeCodeControlResponder,
+) -> std::result::Result<ClaudeCodePermissionRequest, String> {
+    let input = request
+        .get("input")
+        .cloned()
+        .ok_or_else(|| "Claude Code carrier emitted malformed can_use_tool input".to_string())?;
+
+    Ok(ClaudeCodePermissionRequest::new(
+        required_root_str_field(root, "request_id", "can_use_tool request_id")?.to_string(),
+        required_request_str_field(request, "tool_name", "can_use_tool tool_name")?.to_string(),
+        input,
+        required_request_str_field(request, "tool_use_id", "can_use_tool tool_use_id")?.to_string(),
+        request
+            .get("description")
+            .and_then(Value::as_str)
+            .map(str::to_string),
+        request
+            .get("decision_reason")
+            .and_then(Value::as_str)
+            .map(str::to_string),
+        control_responder.clone(),
+    ))
+}
+
+fn required_request_str_field<'a>(
+    request: &'a Map<String, Value>,
+    field: &str,
+    label: &str,
+) -> std::result::Result<&'a str, String> {
+    request
+        .get(field)
+        .and_then(Value::as_str)
+        .ok_or_else(|| format!("Claude Code carrier emitted malformed {label}"))
+}
+
+fn required_root_str_field<'a>(
+    root: &'a Value,
+    field: &str,
+    label: &str,
+) -> std::result::Result<&'a str, String> {
+    root.get(field)
+        .and_then(Value::as_str)
+        .ok_or_else(|| format!("Claude Code carrier emitted malformed {label}"))
 }
 
 fn approval_policy_auto_allows_claude_control(approval_policy: AskForApproval) -> bool {
     matches!(approval_policy, AskForApproval::Never)
+}
+
+fn classify_tool_name(tool_name: &str) -> ClaudeCodeToolClass {
+    match tool_name {
+        "Bash" | "BashTool" => ClaudeCodeToolClass::Command,
+        "Read"
+        | "FileReadTool"
+        | "NotebookRead"
+        | "NotebookReadTool"
+        | "NotebookReadCell"
+        | "NotebookReadCellTool"
+        | "Glob"
+        | "GlobTool"
+        | "Grep"
+        | "GrepTool"
+        | "LSP"
+        | "LS"
+        | "ListDir" => ClaudeCodeToolClass::ReadFs,
+        "Write"
+        | "Edit"
+        | "MultiEdit"
+        | "FileWriteTool"
+        | "FileEditTool"
+        | "NotebookEdit"
+        | "NotebookEditTool"
+        | "NotebookEditCell"
+        | "NotebookEditCellTool" => ClaudeCodeToolClass::WriteFs,
+        "WebFetch" | "WebFetchTool" | "WebSearch" | "WebSearchTool" => ClaudeCodeToolClass::Network,
+        _ => ClaudeCodeToolClass::Unknown,
+    }
 }
 
 async fn resolve_bash_permission_request(
@@ -310,14 +377,27 @@ fn denied_resolution(message: String) -> ClaudeCodePermissionResolution {
     }
 }
 
-fn requested_permissions_for_tool(
-    tool_name: &str,
+fn unknown_tool_message(request: &ClaudeCodePermissionRequest) -> String {
+    format!(
+        "Claudex does not yet know how to approve Claude Code tool `{}` with these inputs.",
+        request.tool_name
+    )
+}
+
+fn malformed_tool_input_message(request: &ClaudeCodePermissionRequest) -> String {
+    format!(
+        "Claude Code tool `{}` did not include the inputs Claudex needs to request permission.",
+        request.tool_name
+    )
+}
+
+fn requested_permissions_for_tool_class(
+    tool_class: ClaudeCodeToolClass,
     input: &Value,
     cwd: &Path,
 ) -> Option<RequestPermissionProfile> {
-    match tool_name {
-        "Read" | "FileReadTool" | "NotebookRead" | "NotebookReadTool" | "Glob" | "GlobTool"
-        | "Grep" | "GrepTool" | "LSP" | "LS" | "ListDir" => {
+    match tool_class {
+        ClaudeCodeToolClass::ReadFs => {
             let paths = resolve_paths(input, cwd);
             (!paths.is_empty()).then_some(RequestPermissionProfile {
                 file_system: Some(codex_protocol::models::FileSystemPermissions {
@@ -327,8 +407,7 @@ fn requested_permissions_for_tool(
                 ..RequestPermissionProfile::default()
             })
         }
-        "Write" | "Edit" | "MultiEdit" | "FileWriteTool" | "FileEditTool" | "NotebookEdit"
-        | "NotebookEditTool" => {
+        ClaudeCodeToolClass::WriteFs => {
             let paths = resolve_paths(input, cwd);
             (!paths.is_empty()).then_some(RequestPermissionProfile {
                 file_system: Some(codex_protocol::models::FileSystemPermissions {
@@ -338,15 +417,13 @@ fn requested_permissions_for_tool(
                 ..RequestPermissionProfile::default()
             })
         }
-        "WebFetch" | "WebFetchTool" | "WebSearch" | "WebSearchTool" => {
-            Some(RequestPermissionProfile {
-                network: Some(codex_protocol::models::NetworkPermissions {
-                    enabled: Some(true),
-                }),
-                ..RequestPermissionProfile::default()
-            })
-        }
-        _ => None,
+        ClaudeCodeToolClass::Network => Some(RequestPermissionProfile {
+            network: Some(codex_protocol::models::NetworkPermissions {
+                enabled: Some(true),
+            }),
+            ..RequestPermissionProfile::default()
+        }),
+        ClaudeCodeToolClass::Command | ClaudeCodeToolClass::Unknown => None,
     }
 }
 

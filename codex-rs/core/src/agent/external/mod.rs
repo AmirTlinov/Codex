@@ -17,6 +17,7 @@ use uuid::Uuid;
 
 use crate::CodexThread;
 use crate::agent::control::render_input_preview;
+use crate::claude_code_control::ClaudeControlRequest;
 use crate::claude_code_control::ControlRequestParseOutcome;
 use crate::claude_code_control::parse_control_request_line;
 use crate::claude_code_control::resolve_external_claude_code_permission_request;
@@ -412,7 +413,9 @@ impl ExternalAgentState {
         while let Some(line) = raw_lines.recv().await {
             match line {
                 Ok(line) => match parse_control_request_line(&line, &control_responder) {
-                    Ok(ControlRequestParseOutcome::Supported(permission_request)) => {
+                    Ok(ControlRequestParseOutcome::ControlRequest(
+                        ClaudeControlRequest::CanUseTool(permission_request),
+                    )) => {
                         let resolution = resolve_external_claude_code_permission_request(
                             &self.host_thread.codex.session,
                             self.config_snapshot.approval_policy,
@@ -440,6 +443,13 @@ impl ExternalAgentState {
                         if resolution.interrupt_turn {
                             cancellation_token.cancel();
                         }
+                    }
+                    Ok(ControlRequestParseOutcome::ControlRequest(
+                        ClaudeControlRequest::UnsupportedSubtype { subtype },
+                    )) => {
+                        anyhow::bail!(
+                            "Claude Code carrier emitted an unsupported control_request subtype `{subtype}`"
+                        )
                     }
                     Ok(ControlRequestParseOutcome::NotControlRequest) => {
                         let _ = accumulator.push_line(&line)?;
