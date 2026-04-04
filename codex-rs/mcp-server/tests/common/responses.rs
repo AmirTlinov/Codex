@@ -45,3 +45,47 @@ pub fn create_apply_patch_sse_response(
         responses::ev_completed(&response_id),
     ]))
 }
+
+pub fn create_exec_command_sse_response(call_id: &str) -> anyhow::Result<String> {
+    let (cmd, args) = if cfg!(windows) {
+        ("cmd.exe", vec!["/d", "/c", "echo hi"])
+    } else {
+        ("/bin/sh", vec!["-c", "echo hi"])
+    };
+    let command = std::iter::once(cmd.to_string())
+        .chain(args.into_iter().map(str::to_string))
+        .collect::<Vec<_>>();
+    let arguments = serde_json::to_string(&json!({
+        "cmd": command.join(" "),
+        "yield_time_ms": 500,
+    }))?;
+    let response_id = format!("resp-{call_id}");
+    Ok(responses::sse(vec![
+        responses::ev_response_created(&response_id),
+        responses::ev_function_call(call_id, "exec_command", &arguments),
+        responses::ev_completed(&response_id),
+    ]))
+}
+
+pub fn create_request_user_input_sse_response(call_id: &str) -> anyhow::Result<String> {
+    let arguments = serde_json::to_string(&json!({
+        "questions": [{
+            "id": "confirm_path",
+            "header": "Confirm",
+            "question": "Proceed with the plan?",
+            "options": [{
+                "label": "Yes (Recommended)",
+                "description": "Continue the current plan.",
+            }, {
+                "label": "No",
+                "description": "Stop and revisit the approach.",
+            }]
+        }]
+    }))?;
+    let response_id = format!("resp-{call_id}");
+    Ok(responses::sse(vec![
+        responses::ev_response_created(&response_id),
+        responses::ev_function_call(call_id, "request_user_input", &arguments),
+        responses::ev_completed(&response_id),
+    ]))
+}

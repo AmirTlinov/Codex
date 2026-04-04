@@ -10,6 +10,7 @@ use tokio::process::ChildStdin;
 use tokio::process::ChildStdout;
 
 use anyhow::Context;
+use codex_mcp_server::CodexShellToolCallParam;
 use codex_mcp_server::CodexToolCallParam;
 use codex_terminal_detection::user_agent;
 
@@ -219,6 +220,26 @@ impl McpProcess {
         .await
     }
 
+    pub async fn send_codex_shell_tool_call(
+        &mut self,
+        params: CodexShellToolCallParam,
+    ) -> anyhow::Result<i64> {
+        let codex_tool_call_params = CallToolRequestParams {
+            meta: None,
+            name: "codex-shell".into(),
+            arguments: Some(match serde_json::to_value(params)? {
+                serde_json::Value::Object(map) => map,
+                _ => unreachable!("params serialize to object"),
+            }),
+            task: None,
+        };
+        self.send_request(
+            "tools/call",
+            Some(serde_json::to_value(codex_tool_call_params)?),
+        )
+        .await
+    }
+
     async fn send_request(
         &mut self,
         method: &str,
@@ -308,6 +329,66 @@ impl McpProcess {
             match message {
                 JsonRpcMessage::Notification(_) => {
                     eprintln!("notification: {message:?}");
+                }
+                JsonRpcMessage::Request(_) => {
+                    anyhow::bail!("unexpected JSONRPCMessage::Request: {message:?}");
+                }
+                JsonRpcMessage::Error(_) => {
+                    anyhow::bail!("unexpected JSONRPCMessage::Error: {message:?}");
+                }
+                JsonRpcMessage::Response(jsonrpc_response) => {
+                    if jsonrpc_response.id == request_id {
+                        return Ok(jsonrpc_response);
+                    }
+                }
+            }
+        }
+    }
+
+    pub async fn read_stream_until_response_message_rejecting_codex_truth(
+        &mut self,
+        request_id: RequestId,
+        forbidden_event_types: &[&str],
+        forbidden_function_names: &[&str],
+    ) -> anyhow::Result<JsonRpcResponse<serde_json::Value>> {
+        eprintln!(
+            "in read_stream_until_response_message_rejecting_codex_truth({request_id:?}, {forbidden_event_types:?}, {forbidden_function_names:?})"
+        );
+
+        loop {
+            let message = self.read_jsonrpc_message().await?;
+            match message {
+                JsonRpcMessage::Notification(notification) => {
+                    if notification.notification.method == "codex/event"
+                        && let Some(params) = &notification.notification.params
+                        && let Some(event_type) = params
+                            .get("msg")
+                            .and_then(|msg| msg.get("type"))
+                            .and_then(|value| value.as_str())
+                        && forbidden_event_types.contains(&event_type)
+                    {
+                        anyhow::bail!(
+                            "unexpected codex/event notification before response: {event_type}"
+                        );
+                    }
+                    if notification.notification.method == "codex/event"
+                        && let Some(params) = &notification.notification.params
+                        && let Some("raw_response_item") = params
+                            .get("msg")
+                            .and_then(|msg| msg.get("type"))
+                            .and_then(|value| value.as_str())
+                        && let Some(function_name) = params
+                            .get("msg")
+                            .and_then(|msg| msg.get("item"))
+                            .and_then(|item| item.get("name"))
+                            .and_then(|value| value.as_str())
+                        && forbidden_function_names.contains(&function_name)
+                    {
+                        anyhow::bail!(
+                            "unexpected raw_response_item function_call before response: {function_name}"
+                        );
+                    }
+                    eprintln!("notification: {notification:?}");
                 }
                 JsonRpcMessage::Request(_) => {
                     anyhow::bail!("unexpected JSONRPCMessage::Request: {message:?}");

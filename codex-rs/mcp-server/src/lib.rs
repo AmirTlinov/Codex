@@ -37,6 +37,7 @@ use crate::outgoing_message::OutgoingJsonRpcMessage;
 use crate::outgoing_message::OutgoingMessage;
 use crate::outgoing_message::OutgoingMessageSender;
 
+pub use crate::codex_tool_config::CodexShellToolCallParam;
 pub use crate::codex_tool_config::CodexToolCallParam;
 pub use crate::codex_tool_config::CodexToolCallReplyParam;
 pub use crate::exec_approval::ExecApprovalElicitRequestParams;

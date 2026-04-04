@@ -4,6 +4,7 @@ use std::path::Path;
 use std::path::PathBuf;
 
 use codex_core::spawn::CODEX_SANDBOX_NETWORK_DISABLED_ENV_VAR;
+use codex_mcp_server::CodexShellToolCallParam;
 use codex_mcp_server::CodexToolCallParam;
 use codex_mcp_server::ExecApprovalElicitRequestParams;
 use codex_mcp_server::ExecApprovalResponse;
@@ -24,8 +25,10 @@ use wiremock::MockServer;
 use core_test_support::skip_if_no_network;
 use mcp_test_support::McpProcess;
 use mcp_test_support::create_apply_patch_sse_response;
+use mcp_test_support::create_exec_command_sse_response;
 use mcp_test_support::create_final_assistant_message_sse_response;
 use mcp_test_support::create_mock_responses_server;
+use mcp_test_support::create_request_user_input_sse_response;
 use mcp_test_support::create_shell_command_sse_response;
 use mcp_test_support::format_with_current_shell;
 
@@ -174,6 +177,415 @@ async fn shell_command_approval_triggers_elicitation() -> anyhow::Result<()> {
     );
 
     assert!(created_file.is_file(), "created file should exist");
+
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn test_codex_shell_tool_triggers_elicitation_and_returns_output() {
+    if env::var(CODEX_SANDBOX_NETWORK_DISABLED_ENV_VAR).is_ok() {
+        println!(
+            "Skipping test because it cannot execute when network is disabled in a Codex sandbox."
+        );
+        return;
+    }
+
+    if let Err(err) = codex_shell_tool_triggers_elicitation_and_returns_output().await {
+        panic!("failure: {err}");
+    }
+}
+
+async fn codex_shell_tool_triggers_elicitation_and_returns_output() -> anyhow::Result<()> {
+    let workdir_for_shell = TempDir::new()?;
+    let expected_output = "codex-shell-ok";
+    let shell_command = if cfg!(windows) {
+        vec!["Write-Output".to_string(), expected_output.to_string()]
+    } else {
+        vec!["printf".to_string(), expected_output.to_string()]
+    };
+    let expected_shell_command =
+        format_with_current_shell(&shlex::try_join(shell_command.iter().map(String::as_str))?);
+
+    let McpHandle {
+        process: mut mcp_process,
+        server: _server,
+        dir: _dir,
+    } = create_mcp_process(vec![
+        create_shell_command_sse_response(
+            shell_command.clone(),
+            Some(workdir_for_shell.path()),
+            Some(5_000),
+            "call1234",
+        )?,
+        create_final_assistant_message_sse_response("shell complete")?,
+    ])
+    .await?;
+
+    let codex_request_id = mcp_process
+        .send_codex_shell_tool_call(CodexShellToolCallParam {
+            command: shlex::try_join(shell_command.iter().map(String::as_str))?,
+            cwd: Some(workdir_for_shell.path().to_string_lossy().to_string()),
+            approval_policy: None,
+            sandbox: None,
+            profile: None,
+            config: None,
+        })
+        .await?;
+    let elicitation_request = timeout(
+        DEFAULT_READ_TIMEOUT,
+        mcp_process.read_stream_until_request_message(),
+    )
+    .await??;
+
+    assert_eq!(elicitation_request.jsonrpc, JsonRpcVersion2_0);
+    assert_eq!(elicitation_request.request.method, "elicitation/create");
+
+    let elicitation_request_id = elicitation_request.id.clone();
+    let params = serde_json::from_value::<ExecApprovalElicitRequestParams>(
+        elicitation_request
+            .request
+            .params
+            .clone()
+            .ok_or_else(|| anyhow::anyhow!("elicitation_request.params must be set"))?,
+    )?;
+    assert_eq!(
+        elicitation_request.request.params,
+        Some(create_expected_elicitation_request_params(
+            expected_shell_command,
+            workdir_for_shell.path(),
+            codex_request_id.to_string(),
+            params.codex_event_id.clone(),
+            params.thread_id,
+        )?)
+    );
+
+    mcp_process
+        .send_response(
+            elicitation_request_id,
+            serde_json::to_value(ExecApprovalResponse {
+                decision: ReviewDecision::Approved,
+            })?,
+        )
+        .await?;
+
+    let _task_complete = timeout(
+        DEFAULT_READ_TIMEOUT,
+        mcp_process.read_stream_until_legacy_task_complete_notification(),
+    )
+    .await??;
+
+    let codex_response = timeout(
+        DEFAULT_READ_TIMEOUT,
+        mcp_process.read_stream_until_response_message_rejecting_codex_truth(
+            RequestId::Number(codex_request_id),
+            &["exec_approval_request", "warning"],
+            &[],
+        ),
+    )
+    .await??;
+    assert_eq!(codex_response.jsonrpc, JsonRpcVersion2_0);
+    assert_eq!(codex_response.id, RequestId::Number(codex_request_id));
+    let Some(content) = codex_response.result["structuredContent"]["content"].as_str() else {
+        panic!("codex-shell response should contain text content");
+    };
+    assert!(content.contains(expected_output), "{content}");
+    assert_eq!(codex_response.result.get("isError"), None);
+
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn test_codex_shell_tool_rejects_request_user_input_without_leaking_notification() {
+    if env::var(CODEX_SANDBOX_NETWORK_DISABLED_ENV_VAR).is_ok() {
+        println!(
+            "Skipping test because it cannot execute when network is disabled in a Codex sandbox."
+        );
+        return;
+    }
+
+    if let Err(err) =
+        codex_shell_tool_rejects_request_user_input_without_leaking_notification().await
+    {
+        panic!("failure: {err}");
+    }
+}
+
+async fn codex_shell_tool_rejects_request_user_input_without_leaking_notification()
+-> anyhow::Result<()> {
+    let workdir_for_shell = TempDir::new()?;
+    let McpHandle {
+        process: mut mcp_process,
+        server: _server,
+        dir: _dir,
+    } = create_mcp_process_with_features(
+        vec![create_request_user_input_sse_response("call1234")?],
+        "default_mode_request_user_input = true",
+    )
+    .await?;
+
+    let codex_request_id = mcp_process
+        .send_codex_shell_tool_call(CodexShellToolCallParam {
+            command: "printf codex-shell-ok".to_string(),
+            cwd: Some(workdir_for_shell.path().to_string_lossy().to_string()),
+            approval_policy: None,
+            sandbox: None,
+            profile: None,
+            config: None,
+        })
+        .await?;
+
+    let codex_response = timeout(
+        DEFAULT_READ_TIMEOUT,
+        mcp_process.read_stream_until_response_message_rejecting_codex_truth(
+            RequestId::Number(codex_request_id),
+            &["request_user_input", "warning"],
+            &["request_user_input"],
+        ),
+    )
+    .await??;
+    assert_eq!(codex_response.jsonrpc, JsonRpcVersion2_0);
+    assert_eq!(codex_response.id, RequestId::Number(codex_request_id));
+    assert_eq!(codex_response.result["isError"], true);
+    assert_eq!(
+        codex_response.result["content"][0]["text"],
+        "codex-shell worker attempted unsupported non-shell surface: request_user_input"
+    );
+
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn test_codex_shell_tool_rejects_missing_shell_execution() {
+    if env::var(CODEX_SANDBOX_NETWORK_DISABLED_ENV_VAR).is_ok() {
+        println!(
+            "Skipping test because it cannot execute when network is disabled in a Codex sandbox."
+        );
+        return;
+    }
+
+    if let Err(err) = codex_shell_tool_rejects_missing_shell_execution().await {
+        panic!("failure: {err}");
+    }
+}
+
+async fn codex_shell_tool_rejects_missing_shell_execution() -> anyhow::Result<()> {
+    let workdir_for_shell = TempDir::new()?;
+    let McpHandle {
+        process: mut mcp_process,
+        server: _server,
+        dir: _dir,
+    } = create_mcp_process(vec![create_final_assistant_message_sse_response("done")?]).await?;
+
+    let codex_request_id = mcp_process
+        .send_codex_shell_tool_call(CodexShellToolCallParam {
+            command: "printf codex-shell-ok".to_string(),
+            cwd: Some(workdir_for_shell.path().to_string_lossy().to_string()),
+            approval_policy: None,
+            sandbox: None,
+            profile: None,
+            config: None,
+        })
+        .await?;
+
+    let codex_response = timeout(
+        DEFAULT_READ_TIMEOUT,
+        mcp_process.read_stream_until_response_message_rejecting_codex_truth(
+            RequestId::Number(codex_request_id),
+            &["task_complete", "warning"],
+            &[],
+        ),
+    )
+    .await??;
+    assert_eq!(codex_response.jsonrpc, JsonRpcVersion2_0);
+    assert_eq!(codex_response.id, RequestId::Number(codex_request_id));
+    assert_eq!(codex_response.result["isError"], true);
+    assert_eq!(
+        codex_response.result["content"][0]["text"],
+        "codex-shell worker did not execute the requested shell command"
+    );
+
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn test_codex_shell_tool_rejects_unexpected_command_without_approval_before_exec_begin() {
+    if env::var(CODEX_SANDBOX_NETWORK_DISABLED_ENV_VAR).is_ok() {
+        println!(
+            "Skipping test because it cannot execute when network is disabled in a Codex sandbox."
+        );
+        return;
+    }
+
+    if let Err(err) =
+        codex_shell_tool_rejects_unexpected_command_without_approval_before_exec_begin().await
+    {
+        panic!("failure: {err}");
+    }
+}
+
+async fn codex_shell_tool_rejects_unexpected_command_without_approval_before_exec_begin()
+-> anyhow::Result<()> {
+    let workdir_for_shell = TempDir::new()?;
+    let McpHandle {
+        process: mut mcp_process,
+        server: _server,
+        dir: _dir,
+    } = create_mcp_process(vec![create_exec_command_sse_response("call1234")?]).await?;
+
+    let codex_request_id = mcp_process
+        .send_codex_shell_tool_call(serde_json::from_value(json!({
+            "command": "printf codex-shell-ok",
+            "cwd": workdir_for_shell.path().to_string_lossy(),
+            "approval-policy": "never",
+        }))?)
+        .await?;
+
+    let codex_response = timeout(
+        DEFAULT_READ_TIMEOUT,
+        mcp_process.read_stream_until_response_message_rejecting_codex_truth(
+            RequestId::Number(codex_request_id),
+            &["exec_command_begin", "warning"],
+            &["exec_command"],
+        ),
+    )
+    .await??;
+    assert_eq!(codex_response.jsonrpc, JsonRpcVersion2_0);
+    assert_eq!(codex_response.id, RequestId::Number(codex_request_id));
+    assert_eq!(codex_response.result["isError"], true);
+    let Some(message) = codex_response.result["content"][0]["text"].as_str() else {
+        panic!("codex-shell mismatch response should include text");
+    };
+    assert!(
+        message.contains("codex-shell worker executed an unexpected command"),
+        "{message}"
+    );
+
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn test_codex_shell_tool_rejects_non_shell_surfaces() {
+    if env::var(CODEX_SANDBOX_NETWORK_DISABLED_ENV_VAR).is_ok() {
+        println!(
+            "Skipping test because it cannot execute when network is disabled in a Codex sandbox."
+        );
+        return;
+    }
+
+    if let Err(err) = codex_shell_tool_rejects_non_shell_surfaces().await {
+        panic!("failure: {err}");
+    }
+}
+
+async fn codex_shell_tool_rejects_non_shell_surfaces() -> anyhow::Result<()> {
+    if cfg!(windows) {
+        return Ok(());
+    }
+
+    let cwd = TempDir::new()?;
+    let test_file = cwd.path().join("destination_file.txt");
+    std::fs::write(&test_file, "original content\n")?;
+    let patch_content = format!(
+        "*** Begin Patch\n*** Update File: {}\n-original content\n+modified content\n*** End Patch",
+        test_file.as_path().to_string_lossy()
+    );
+
+    let McpHandle {
+        process: mut mcp_process,
+        server: _server,
+        dir: _dir,
+    } = create_mcp_process(vec![create_apply_patch_sse_response(
+        &patch_content,
+        "call1234",
+    )?])
+    .await?;
+
+    let codex_request_id = mcp_process
+        .send_codex_shell_tool_call(CodexShellToolCallParam {
+            command: "printf codex-shell-ok".to_string(),
+            cwd: Some(cwd.path().to_string_lossy().to_string()),
+            approval_policy: None,
+            sandbox: None,
+            profile: None,
+            config: None,
+        })
+        .await?;
+
+    let codex_response = timeout(
+        DEFAULT_READ_TIMEOUT,
+        mcp_process.read_stream_until_response_message_rejecting_codex_truth(
+            RequestId::Number(codex_request_id),
+            &["patch_apply_begin", "patch_apply_end", "warning"],
+            &[],
+        ),
+    )
+    .await??;
+    assert_eq!(codex_response.jsonrpc, JsonRpcVersion2_0);
+    assert_eq!(codex_response.id, RequestId::Number(codex_request_id));
+    assert_eq!(codex_response.result["isError"], true);
+    assert_eq!(
+        codex_response.result["content"][0]["text"],
+        "codex-shell worker attempted unsupported non-shell surface: patch application"
+    );
+
+    let file_contents = std::fs::read_to_string(test_file.as_path())?;
+    assert_eq!(file_contents, "original content\n");
+
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn test_codex_shell_tool_rejects_unexpected_command_before_approval() {
+    if env::var(CODEX_SANDBOX_NETWORK_DISABLED_ENV_VAR).is_ok() {
+        println!(
+            "Skipping test because it cannot execute when network is disabled in a Codex sandbox."
+        );
+        return;
+    }
+
+    if let Err(err) = codex_shell_tool_rejects_unexpected_command_before_approval().await {
+        panic!("failure: {err}");
+    }
+}
+
+async fn codex_shell_tool_rejects_unexpected_command_before_approval() -> anyhow::Result<()> {
+    let workdir_for_shell = TempDir::new()?;
+    let McpHandle {
+        process: mut mcp_process,
+        server: _server,
+        dir: _dir,
+    } = create_mcp_process(vec![create_exec_command_sse_response("call1234")?]).await?;
+
+    let codex_request_id = mcp_process
+        .send_codex_shell_tool_call(CodexShellToolCallParam {
+            command: "printf codex-shell-ok".to_string(),
+            cwd: Some(workdir_for_shell.path().to_string_lossy().to_string()),
+            approval_policy: None,
+            sandbox: None,
+            profile: None,
+            config: None,
+        })
+        .await?;
+
+    let codex_response = timeout(
+        DEFAULT_READ_TIMEOUT,
+        mcp_process.read_stream_until_response_message_rejecting_codex_truth(
+            RequestId::Number(codex_request_id),
+            &["exec_approval_request", "warning"],
+            &["exec_command"],
+        ),
+    )
+    .await??;
+    assert_eq!(codex_response.jsonrpc, JsonRpcVersion2_0);
+    assert_eq!(codex_response.id, RequestId::Number(codex_request_id));
+    assert_eq!(codex_response.result["isError"], true);
+    let Some(message) = codex_response.result["content"][0]["text"].as_str() else {
+        panic!("codex-shell mismatch response should include text");
+    };
+    assert!(
+        message.contains("codex-shell worker requested approval for an unexpected command"),
+        "{message}"
+    );
 
     Ok(())
 }
@@ -475,9 +887,16 @@ pub struct McpHandle {
 }
 
 async fn create_mcp_process(responses: Vec<String>) -> anyhow::Result<McpHandle> {
+    create_mcp_process_with_features(responses, "").await
+}
+
+async fn create_mcp_process_with_features(
+    responses: Vec<String>,
+    feature_toml: &str,
+) -> anyhow::Result<McpHandle> {
     let server = create_mock_responses_server(responses).await;
     let codex_home = TempDir::new()?;
-    create_config_toml(codex_home.path(), &server.uri())?;
+    create_config_toml_with_features(codex_home.path(), &server.uri(), feature_toml)?;
     let mut mcp_process = McpProcess::new(codex_home.path()).await?;
     timeout(DEFAULT_READ_TIMEOUT, mcp_process.initialize()).await??;
     Ok(McpHandle {
@@ -491,6 +910,14 @@ async fn create_mcp_process(responses: Vec<String>) -> anyhow::Result<McpHandle>
 /// It also uses `approval_policy = "untrusted"` so that we exercise the
 /// elicitation code path for shell commands.
 fn create_config_toml(codex_home: &Path, server_uri: &str) -> std::io::Result<()> {
+    create_config_toml_with_features(codex_home, server_uri, "")
+}
+
+fn create_config_toml_with_features(
+    codex_home: &Path,
+    server_uri: &str,
+    feature_toml: &str,
+) -> std::io::Result<()> {
     let config_toml = codex_home.join("config.toml");
     std::fs::write(
         config_toml,
@@ -510,6 +937,7 @@ request_max_retries = 0
 stream_max_retries = 0
 
 [features]
+{feature_toml}
 "#
         ),
     )

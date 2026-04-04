@@ -366,7 +366,7 @@ impl MessageProcessor {
         let (initial_prompt, config): (String, Config) = match arguments {
             Some(json_val) => match serde_json::from_value::<CodexToolCallParam>(json_val) {
                 Ok(tool_cfg) => match tool_cfg.into_config(self.arg0_paths.clone()).await {
-                    Ok(cfg) => cfg,
+                    Ok((command, cfg)) => (command, cfg),
                     Err(e) => {
                         let result = CallToolResult {
                             content: vec![rmcp::model::Content::text(format!(
@@ -418,11 +418,7 @@ impl MessageProcessor {
         let arguments = arguments.map(serde_json::Value::Object);
         let (initial_prompt, config): (String, Config) = match arguments {
             Some(json_val) => match serde_json::from_value::<CodexShellToolCallParam>(json_val) {
-                Ok(tool_cfg) => match tool_cfg
-                    .into_codex_tool_call()
-                    .into_config(self.arg0_paths.clone())
-                    .await
-                {
+                Ok(tool_cfg) => match tool_cfg.into_config(self.arg0_paths.clone()).await {
                     Ok(cfg) => cfg,
                     Err(e) => {
                         let result = CallToolResult {
@@ -463,8 +459,7 @@ impl MessageProcessor {
                 return;
             }
         };
-
-        self.spawn_codex_tool_session(id, initial_prompt, config);
+        self.spawn_codex_shell_tool_session(id, initial_prompt, config);
     }
 
     fn spawn_codex_tool_session(&self, id: RequestId, initial_prompt: String, config: Config) {
@@ -480,6 +475,24 @@ impl MessageProcessor {
             crate::codex_tool_runner::run_codex_tool_session(
                 id,
                 initial_prompt,
+                config,
+                outgoing,
+                thread_manager,
+                running_requests_id_to_codex_uuid,
+            )
+            .await;
+        });
+    }
+
+    fn spawn_codex_shell_tool_session(&self, id: RequestId, prompt: String, config: Config) {
+        let outgoing = self.outgoing.clone();
+        let thread_manager = self.thread_manager.clone();
+        let running_requests_id_to_codex_uuid = self.running_requests_id_to_codex_uuid.clone();
+
+        task::spawn(async move {
+            crate::codex_tool_runner::run_codex_shell_tool_session(
+                id,
+                prompt,
                 config,
                 outgoing,
                 thread_manager,

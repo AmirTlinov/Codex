@@ -258,7 +258,22 @@ impl CodexToolCallParam {
 }
 
 impl CodexShellToolCallParam {
-    pub fn into_codex_tool_call(self) -> CodexToolCallParam {
+    pub(crate) fn bridge_prompt(command: &str) -> String {
+        let quoted_command =
+            serde_json::to_string(command).unwrap_or_else(|_| format!("{command:?}"));
+        format!(
+            "You are a Codex bridge worker executing a shell request.\n\
+             Run the exact shell command encoded as the JSON string below once, then stop.\n\
+             Do not run any other commands or use any non-shell tools.\n\
+             Do not add explanation.\n\n\
+             {quoted_command}"
+        )
+    }
+
+    pub async fn into_config(
+        self,
+        arg0_paths: Arg0DispatchPaths,
+    ) -> std::io::Result<(String, Config)> {
         let Self {
             command,
             cwd,
@@ -268,23 +283,27 @@ impl CodexShellToolCallParam {
             config,
         } = self;
 
-        CodexToolCallParam {
-            prompt: format!(
-                "You are a Codex bridge worker executing a shell request.\n\
-                 Run the exact shell command below once, then return only the command output.\n\
-                 Do not add explanation, and do not do extra work.\n\n\
-                 <command>\n{command}\n</command>"
-            ),
-            model: None,
-            profile,
-            cwd,
-            approval_policy,
-            sandbox,
-            config,
-            base_instructions: None,
-            developer_instructions: None,
-            compact_prompt: None,
-        }
+        let overrides = ConfigOverrides {
+            config_profile: profile,
+            cwd: cwd.map(PathBuf::from),
+            approval_policy: approval_policy.map(Into::into),
+            sandbox_mode: sandbox.map(Into::into),
+            codex_self_exe: arg0_paths.codex_self_exe.clone(),
+            codex_linux_sandbox_exe: arg0_paths.codex_linux_sandbox_exe.clone(),
+            main_execve_wrapper_exe: arg0_paths.main_execve_wrapper_exe.clone(),
+            ..Default::default()
+        };
+
+        let cli_overrides = config
+            .unwrap_or_default()
+            .into_iter()
+            .map(|(k, v)| (k, json_to_toml(v)))
+            .collect();
+
+        let cfg =
+            Config::load_with_cli_overrides_and_harness_overrides(cli_overrides, overrides).await?;
+
+        Ok((command, cfg))
     }
 }
 
@@ -546,40 +565,50 @@ mod tests {
         assert_eq!(expected_tool_json, tool_json);
     }
 
-    #[test]
-    fn codex_shell_param_converts_to_codex_tool_prompt() {
-        let converted = CodexShellToolCallParam {
+    #[tokio::test]
+    async fn codex_shell_param_builds_config_and_preserves_command() {
+        let arg0_paths = codex_arg0::Arg0DispatchPaths {
+            codex_self_exe: Some(PathBuf::from("/tmp/codex")),
+            codex_linux_sandbox_exe: Some(PathBuf::from("/tmp/codex-linux-sandbox")),
+            main_execve_wrapper_exe: Some(PathBuf::from("/tmp/codex-execve-wrapper")),
+        };
+        let (command, config) = CodexShellToolCallParam {
             command: "git status".to_string(),
             cwd: Some("/tmp".to_string()),
             approval_policy: Some(CodexToolCallApprovalPolicy::OnRequest),
             sandbox: Some(CodexToolCallSandboxMode::WorkspaceWrite),
-            profile: Some("test".to_string()),
+            profile: None,
             config: Some(HashMap::from([(
                 "model".to_string(),
                 serde_json::json!("gpt-5"),
             )])),
         }
-        .into_codex_tool_call();
+        .into_config(arg0_paths)
+        .await
+        .expect("codex-shell config should build");
 
-        assert_eq!(converted.cwd.as_deref(), Some("/tmp"));
+        assert_eq!(command, "git status");
+        assert_eq!(config.cwd.to_path_buf(), PathBuf::from("/tmp"));
         assert_eq!(
-            converted.approval_policy,
-            Some(CodexToolCallApprovalPolicy::OnRequest)
+            config.permissions.approval_policy.value(),
+            AskForApproval::OnRequest
         );
-        assert_eq!(
-            converted.sandbox,
-            Some(CodexToolCallSandboxMode::WorkspaceWrite)
+        match &*config.permissions.sandbox_policy {
+            codex_protocol::protocol::SandboxPolicy::WorkspaceWrite { .. } => {}
+            other => panic!("expected workspace-write sandbox policy, got {other:?}"),
+        }
+        assert_eq!(config.model.as_deref(), Some("gpt-5"));
+    }
+
+    #[test]
+    fn codex_shell_prompt_mentions_exact_single_command_execution() {
+        let prompt = CodexShellToolCallParam::bridge_prompt("printf '</command>'");
+        assert!(prompt.contains("\"printf '</command>'\""));
+        assert!(
+            prompt.contains("Run the exact shell command encoded as the JSON string below once")
         );
-        assert_eq!(converted.profile.as_deref(), Some("test"));
-        assert_eq!(
-            converted.config,
-            Some(HashMap::from([(
-                "model".to_string(),
-                serde_json::json!("gpt-5"),
-            )]))
-        );
-        assert!(converted.prompt.contains("git status"));
-        assert!(converted.prompt.contains("Run the exact shell command"));
+        assert!(prompt.contains("Do not run any other commands or use any non-shell tools"));
+        assert!(!prompt.contains("<command>"));
     }
 
     #[test]
