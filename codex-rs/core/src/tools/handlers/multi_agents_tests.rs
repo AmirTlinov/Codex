@@ -1759,6 +1759,77 @@ async fn multi_agent_v2_spawn_can_switch_from_anthropic_to_openai_provider() {
 }
 
 #[tokio::test]
+async fn multi_agent_v2_spawn_can_switch_from_claude_code_to_openai_provider() {
+    let (mut session, mut turn, rx) = make_session_and_context_with_rx().await;
+    let manager = thread_manager();
+    let root = manager
+        .start_thread((*turn.config).clone())
+        .await
+        .expect("root thread should start");
+    Arc::get_mut(&mut session)
+        .expect("session should be uniquely owned")
+        .services
+        .agent_control = manager.agent_control();
+    Arc::get_mut(&mut session)
+        .expect("session should be uniquely owned")
+        .conversation_id = root.thread_id;
+    let mut config = (*turn.config).clone();
+    config.agent_backend = crate::config::AgentBackend::ClaudeCode;
+    config.model_provider_id = crate::CLAUDE_CODE_PROVIDER_ID.to_string();
+    config.model_provider = crate::create_claude_code_provider();
+    config.model = Some("claude-opus-4-6".to_string());
+    config
+        .features
+        .enable(Feature::MultiAgentV2)
+        .expect("test config should allow feature update");
+    Arc::get_mut(&mut turn)
+        .expect("turn should be uniquely owned")
+        .provider = config.model_provider.clone();
+    Arc::get_mut(&mut turn)
+        .expect("turn should be uniquely owned")
+        .config = Arc::new(config);
+    let output = SpawnAgentHandlerV2
+        .handle(invocation(
+            session.clone(),
+            turn.clone(),
+            "spawn_agent",
+            function_payload(json!({
+                "message": "handle the GPT-only path",
+                "task_name": "gpt_worker",
+                "model_provider": "openai",
+                "model": "gpt-5.4"
+            })),
+        ))
+        .await
+        .expect("spawn_agent should succeed");
+    let (content, _) = expect_text_output(output);
+    let result: serde_json::Value =
+        serde_json::from_str(&content).expect("spawn_agent result should be json");
+    assert_eq!(result["task_name"], "/root/gpt_worker");
+    let _spawn_begin = timeout(std::time::Duration::from_secs(2), rx.recv())
+        .await
+        .expect("spawn begin event should arrive")
+        .expect("channel open");
+    let spawn_end = timeout(std::time::Duration::from_secs(2), rx.recv())
+        .await
+        .expect("spawn end event should arrive")
+        .expect("channel open");
+    let EventMsg::CollabAgentSpawnEnd(payload) = spawn_end.msg else {
+        panic!("expected CollabAgentSpawnEnd event");
+    };
+    let thread_id = payload.new_thread_id.expect("new thread id");
+    let snapshot = manager
+        .get_thread(thread_id)
+        .await
+        .expect("spawned agent thread should exist")
+        .config_snapshot()
+        .await;
+
+    assert_eq!(snapshot.model_provider_id, crate::OPENAI_PROVIDER_ID);
+    assert_eq!(snapshot.model, "gpt-5.4");
+}
+
+#[tokio::test]
 async fn spawn_agent_reapplies_runtime_sandbox_after_role_config() {
     fn pick_allowed_sandbox_policy(
         constraint: &crate::config::Constrained<SandboxPolicy>,

@@ -2,6 +2,7 @@ use crate::ModelProviderInfo;
 use crate::agent::AgentStatus;
 use crate::codex::Session;
 use crate::codex::TurnContext;
+use crate::config::AgentBackend;
 use crate::config::Config;
 use crate::error::CodexErr;
 use crate::function_tool::FunctionCallError;
@@ -289,25 +290,6 @@ pub(crate) async fn apply_requested_spawn_agent_model_overrides(
         return Ok(());
     }
 
-    if config.agent_backend.is_claude_cli() {
-        if let Some(requested_model_provider) = requested_model_provider
-            && requested_model_provider != crate::ANTHROPIC_PROVIDER_ID
-            && requested_model_provider != crate::CLAUDE_CLI_PROVIDER_ID
-        {
-            return Err(FunctionCallError::RespondToModel(
-                "model_provider overrides are not supported when agent_backend=claude_cli"
-                    .to_string(),
-            ));
-        }
-        if let Some(requested_model) = requested_model {
-            config.model = Some(requested_model.to_string());
-        }
-        if let Some(reasoning_effort) = requested_reasoning_effort {
-            config.model_reasoning_effort = Some(reasoning_effort);
-        }
-        return Ok(());
-    }
-
     let (provider_id, provider, provider_models, provider_models_manager) =
         resolve_requested_provider_and_models(
             session,
@@ -319,6 +301,9 @@ pub(crate) async fn apply_requested_spawn_agent_model_overrides(
 
     config.model_provider_id = provider_id;
     config.model_provider = provider;
+    if requested_model_provider.is_some() || requested_model.is_some() {
+        config.agent_backend = spawn_agent_backend_for_provider(&config.model_provider);
+    }
 
     if let Some(requested_model) = requested_model {
         let selected_model_name = find_spawn_agent_model_name(&provider_models, requested_model)?;
@@ -380,6 +365,13 @@ pub(crate) async fn apply_requested_spawn_agent_model_overrides(
     }
 
     Ok(())
+}
+
+pub(crate) fn spawn_agent_backend_for_provider(provider: &ModelProviderInfo) -> AgentBackend {
+    match provider.wire_api {
+        crate::WireApi::ClaudeCode => AgentBackend::ClaudeCode,
+        crate::WireApi::Anthropic | crate::WireApi::Responses => AgentBackend::Codex,
+    }
 }
 
 async fn resolve_requested_provider_and_models(

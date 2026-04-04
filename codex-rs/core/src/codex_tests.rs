@@ -2356,6 +2356,46 @@ pub(crate) async fn make_session_configuration_for_tests() -> SessionConfigurati
 }
 
 #[tokio::test]
+async fn spawn_agent_available_models_pair_claude_code_with_openai() {
+    let codex_home = tempfile::tempdir().expect("create temp dir");
+    let mut config = build_test_config(codex_home.path()).await;
+    config.model_provider_id = crate::CLAUDE_CODE_PROVIDER_ID.to_string();
+    config.model_provider = crate::create_claude_code_provider();
+    config.model = Some("claude-opus-4-6".to_string());
+    let auth_manager = AuthManager::from_auth_for_testing(CodexAuth::from_api_key("Test API Key"));
+    let models_manager = ModelsManager::new_with_provider(
+        config.codex_home.clone(),
+        Arc::clone(&auth_manager),
+        /*model_catalog*/ None,
+        crate::models_manager::collaboration_mode_presets::CollaborationModesConfig::default(),
+        config.model_provider.clone(),
+    );
+
+    let available_models = spawn_agent_available_models(
+        &config,
+        &Some(Arc::clone(&auth_manager)),
+        models_manager
+            .list_models(crate::models_manager::manager::RefreshStrategy::Offline)
+            .await,
+        /*default_mode_request_user_input*/ false,
+    );
+    let available_ids = available_models
+        .iter()
+        .map(|preset| preset.model.as_str())
+        .collect::<Vec<_>>();
+
+    assert!(available_ids.contains(&"claude-opus-4-6"));
+    assert!(available_ids.contains(&"gpt-5.4"));
+    assert_eq!(
+        available_ids
+            .iter()
+            .filter(|model| **model == "claude-opus-4-6")
+            .count(),
+        1
+    );
+}
+
+#[tokio::test]
 async fn session_configuration_apply_preserves_split_file_system_policy_on_cwd_only_update() {
     let mut session_configuration = make_session_configuration_for_tests().await;
     let workspace = tempfile::tempdir().expect("create temp dir");

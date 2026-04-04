@@ -71,9 +71,13 @@ impl ToolHandler for Handler {
             args.reasoning_effort,
         )
         .await?;
+        let provider_before_role = config.model_provider_id.clone();
         apply_role_to_config(&mut config, role_name)
             .await
             .map_err(FunctionCallError::RespondToModel)?;
+        if config.model_provider_id != provider_before_role {
+            config.agent_backend = spawn_agent_backend_for_provider(&config.model_provider);
+        }
         apply_spawn_agent_runtime_overrides(&mut config, turn.as_ref())?;
         apply_spawn_agent_overrides(&mut config, child_depth);
 

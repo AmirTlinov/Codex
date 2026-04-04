@@ -975,11 +975,17 @@ impl TurnContext {
             /*developer_instructions*/ None,
         );
         let features = self.features.clone();
-        let tools_config = ToolsConfig::new(&ToolsConfigParams {
-            model_info: &model_info,
-            available_models: &models_manager
+        let available_models = spawn_agent_available_models(
+            &config,
+            &self.auth_manager,
+            models_manager
                 .list_models(RefreshStrategy::OnlineIfUncached)
                 .await,
+            features.enabled(Feature::DefaultModeRequestUserInput),
+        );
+        let tools_config = ToolsConfig::new(&ToolsConfigParams {
+            model_info: &model_info,
+            available_models: &available_models,
             features: &features,
             web_search_mode: self.tools_config.web_search_mode,
             session_source: self.session_source.clone(),
@@ -1435,6 +1441,24 @@ impl Session {
             .flatten()
     }
 
+    fn paired_spawn_agent_models_manager(
+        config: &Config,
+        auth_manager: &Arc<AuthManager>,
+        provider_id: &str,
+        default_mode_request_user_input: bool,
+    ) -> Option<ModelsManager> {
+        let provider = config.model_providers.get(provider_id)?.clone();
+        Some(ModelsManager::new_with_provider(
+            config.codex_home.clone(),
+            Arc::clone(auth_manager),
+            /*model_catalog*/ None,
+            CollaborationModesConfig {
+                default_mode_request_user_input,
+            },
+            provider,
+        ))
+    }
+
     fn validate_provider_model_pair(
         &self,
         updates: &SessionSettingsUpdate,
@@ -1591,9 +1615,17 @@ impl Session {
         let auth_manager_for_context = auth_manager;
         let provider_for_context = provider;
         let session_telemetry_for_context = session_telemetry;
+        let available_models = spawn_agent_available_models(
+            &per_turn_config,
+            &auth_manager_for_context,
+            models_manager.try_list_models().unwrap_or_default(),
+            per_turn_config
+                .features
+                .enabled(Feature::DefaultModeRequestUserInput),
+        );
         let tools_config = ToolsConfig::new(&ToolsConfigParams {
             model_info: &model_info,
-            available_models: &models_manager.try_list_models().unwrap_or_default(),
+            available_models: &available_models,
             features: &per_turn_config.features,
             web_search_mode: Some(per_turn_config.web_search_mode.value()),
             session_source: session_source.clone(),
@@ -5827,6 +5859,51 @@ mod handlers {
 }
 
 /// Spawn a review thread using the given prompt.
+fn spawn_agent_available_models(
+    config: &Config,
+    auth_manager: &Option<Arc<AuthManager>>,
+    current_models: Vec<codex_protocol::openai_models::ModelPreset>,
+    default_mode_request_user_input: bool,
+) -> Vec<codex_protocol::openai_models::ModelPreset> {
+    let mut visible_models = Vec::new();
+    let mut seen_model_ids = HashSet::new();
+
+    for model in current_models {
+        if seen_model_ids.insert(model.model.clone()) {
+            visible_models.push(model);
+        }
+    }
+
+    for provider_id in
+        crate::model_picker_provider_ids(&config.model_providers, &config.model_provider_id)
+    {
+        if provider_id == config.model_provider_id {
+            continue;
+        }
+        let Some(auth_manager) = auth_manager.as_ref() else {
+            break;
+        };
+        let Some(models_manager) = Session::paired_spawn_agent_models_manager(
+            config,
+            auth_manager,
+            &provider_id,
+            default_mode_request_user_input,
+        ) else {
+            continue;
+        };
+        let Ok(provider_models) = models_manager.try_list_models() else {
+            continue;
+        };
+        for model in provider_models {
+            if seen_model_ids.insert(model.model.clone()) {
+                visible_models.push(model);
+            }
+        }
+    }
+
+    visible_models
+}
+
 async fn spawn_review_thread(
     sess: Arc<Session>,
     config: Arc<Config>,
@@ -5848,13 +5925,19 @@ async fn spawn_review_thread(
     let _ = review_features.disable(Feature::WebSearchRequest);
     let _ = review_features.disable(Feature::WebSearchCached);
     let review_web_search_mode = WebSearchMode::Disabled;
-    let tools_config = ToolsConfig::new(&ToolsConfigParams {
-        model_info: &review_model_info,
-        available_models: &sess
-            .services
+    let review_auth_manager = Some(Arc::clone(&sess.services.auth_manager));
+    let available_models = spawn_agent_available_models(
+        config.as_ref(),
+        &review_auth_manager,
+        sess.services
             .models_manager
             .list_models(RefreshStrategy::OnlineIfUncached)
             .await,
+        review_features.enabled(Feature::DefaultModeRequestUserInput),
+    );
+    let tools_config = ToolsConfig::new(&ToolsConfigParams {
+        model_info: &review_model_info,
+        available_models: &available_models,
         features: &review_features,
         web_search_mode: Some(review_web_search_mode),
         session_source: parent_turn_context.session_source.clone(),
