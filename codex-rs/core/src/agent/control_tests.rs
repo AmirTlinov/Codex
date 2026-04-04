@@ -20,6 +20,8 @@ use codex_protocol::protocol::AskForApproval;
 use codex_protocol::protocol::ErrorEvent;
 use codex_protocol::protocol::EventMsg;
 use codex_protocol::protocol::InterAgentCommunication;
+use codex_protocol::protocol::McpToolCallBeginEvent;
+use codex_protocol::protocol::McpToolCallEndEvent;
 use codex_protocol::protocol::ReviewDecision;
 use codex_protocol::protocol::SessionSource;
 use codex_protocol::protocol::SubAgentSource;
@@ -92,6 +94,48 @@ struct MockClaudeScript {
 struct MockClaudeArgsScript {
     script_path: std::path::PathBuf,
     args_log_path: std::path::PathBuf,
+}
+
+fn expect_child_claude_tool_begin(
+    msg: EventMsg,
+    call_id: &str,
+    tool: &str,
+    arguments: serde_json::Value,
+) {
+    let EventMsg::McpToolCallBegin(McpToolCallBeginEvent {
+        call_id: actual_call_id,
+        invocation,
+    }) = msg
+    else {
+        panic!("expected child MCP tool begin event");
+    };
+    assert_eq!(actual_call_id, call_id);
+    assert_eq!(invocation.server, "claude_code");
+    assert_eq!(invocation.tool, tool);
+    assert_eq!(invocation.arguments, Some(arguments));
+}
+
+fn expect_child_claude_tool_end(msg: EventMsg, call_id: &str, tool: &str, expected_text: &str) {
+    let EventMsg::McpToolCallEnd(McpToolCallEndEvent {
+        call_id: actual_call_id,
+        invocation,
+        result,
+        ..
+    }) = msg
+    else {
+        panic!("expected child MCP tool end event");
+    };
+    assert_eq!(actual_call_id, call_id);
+    assert_eq!(invocation.server, "claude_code");
+    assert_eq!(invocation.tool, tool);
+    let result = result.expect("Claude child tool event should succeed after approval");
+    assert_eq!(
+        result.content,
+        vec![serde_json::json!({
+            "type": "text",
+            "text": expected_text,
+        })]
+    );
 }
 
 fn mock_claude_permission_script(root: &TempDir) -> MockClaudeScript {
@@ -811,7 +855,24 @@ async fn external_claude_agent_routes_permission_requests_through_child_thread()
         .await
         .expect("external child thread host should exist");
 
-    let request = timeout(Duration::from_secs(5), async {
+    let begin_event = timeout(Duration::from_secs(5), async {
+        loop {
+            let event = child_thread.next_event().await.expect("child thread event");
+            if matches!(event.msg, EventMsg::McpToolCallBegin(_)) {
+                break event.msg;
+            }
+        }
+    })
+    .await
+    .expect("tool begin should arrive");
+    expect_child_claude_tool_begin(
+        begin_event,
+        "tool-1",
+        "Read",
+        serde_json::json!({ "file_path": "AGENTS.md" }),
+    );
+
+    let request_event = timeout(Duration::from_secs(5), async {
         loop {
             let event = child_thread.next_event().await.expect("child thread event");
             if matches!(event.msg, EventMsg::RequestPermissions(_)) {
@@ -821,7 +882,7 @@ async fn external_claude_agent_routes_permission_requests_through_child_thread()
     })
     .await
     .expect("permission request should arrive");
-    let EventMsg::RequestPermissions(request) = request else {
+    let EventMsg::RequestPermissions(request) = request_event else {
         panic!("expected request_permissions event");
     };
     child_thread
@@ -837,6 +898,23 @@ async fn external_claude_agent_routes_permission_requests_through_child_thread()
 
     let status = wait_for_final_agent_status(&harness.control, thread_id).await;
     assert_eq!(status, AgentStatus::Completed(Some("approved".to_string())));
+
+    let end_event = timeout(Duration::from_secs(5), async {
+        loop {
+            let event = child_thread.next_event().await.expect("child thread event");
+            if matches!(event.msg, EventMsg::McpToolCallEnd(_)) {
+                break event.msg;
+            }
+        }
+    })
+    .await
+    .expect("tool end should arrive");
+    expect_child_claude_tool_end(
+        end_event,
+        "tool-1",
+        "Read",
+        "Claude Code tool `Read` permission granted by Claudex.",
+    );
 
     let stdin_log =
         std::fs::read_to_string(&mock_claude.stdin_log_path).expect("read permission stdin log");
@@ -868,7 +946,24 @@ async fn external_claude_agent_routes_bash_approval_through_child_thread() {
         .await
         .expect("external child thread host should exist");
 
-    let request = timeout(Duration::from_secs(5), async {
+    let begin_event = timeout(Duration::from_secs(5), async {
+        loop {
+            let event = child_thread.next_event().await.expect("child thread event");
+            if matches!(event.msg, EventMsg::McpToolCallBegin(_)) {
+                break event.msg;
+            }
+        }
+    })
+    .await
+    .expect("tool begin should arrive");
+    expect_child_claude_tool_begin(
+        begin_event,
+        "tool-bash-1",
+        "Bash",
+        serde_json::json!({ "command": "git status" }),
+    );
+
+    let request_event = timeout(Duration::from_secs(5), async {
         loop {
             let event = child_thread.next_event().await.expect("child thread event");
             if matches!(event.msg, EventMsg::ExecApprovalRequest(_)) {
@@ -878,7 +973,7 @@ async fn external_claude_agent_routes_bash_approval_through_child_thread() {
     })
     .await
     .expect("bash exec approval request should arrive");
-    let EventMsg::ExecApprovalRequest(request) = request else {
+    let EventMsg::ExecApprovalRequest(request) = request_event else {
         panic!("expected exec approval request");
     };
     child_thread
@@ -894,6 +989,23 @@ async fn external_claude_agent_routes_bash_approval_through_child_thread() {
     assert_eq!(
         status,
         AgentStatus::Completed(Some("bash-approved".to_string()))
+    );
+
+    let end_event = timeout(Duration::from_secs(5), async {
+        loop {
+            let event = child_thread.next_event().await.expect("child thread event");
+            if matches!(event.msg, EventMsg::McpToolCallEnd(_)) {
+                break event.msg;
+            }
+        }
+    })
+    .await
+    .expect("tool end should arrive");
+    expect_child_claude_tool_end(
+        end_event,
+        "tool-bash-1",
+        "Bash",
+        "Claude Code tool `Bash` permission granted by Claudex.",
     );
 
     let stdin_log = std::fs::read_to_string(&mock_claude.stdin_log_path)

@@ -1,9 +1,13 @@
 use std::path::Path;
 use std::sync::Arc;
+use std::time::Duration;
+use std::time::Instant;
 
 use codex_api::common::ClaudeCodeControlResponder;
 use codex_api::common::ClaudeCodeControlResponseSubtype;
 use codex_api::common::ClaudeCodePermissionRequest;
+use codex_protocol::mcp::CallToolResult;
+use codex_protocol::protocol::Event;
 use codex_protocol::request_permissions::RequestPermissionProfile;
 use codex_protocol::request_permissions::RequestPermissionsArgs;
 use codex_utils_absolute_path::AbsolutePathBuf;
@@ -15,6 +19,10 @@ use crate::codex::ExternalCommandApprovalRequest;
 use crate::codex::Session;
 use crate::codex::TurnContext;
 use crate::protocol::AskForApproval;
+use crate::protocol::EventMsg;
+use crate::protocol::McpInvocation;
+use crate::protocol::McpToolCallBeginEvent;
+use crate::protocol::McpToolCallEndEvent;
 use crate::protocol::ReviewDecision;
 
 pub(crate) struct ClaudeCodePermissionResolution {
@@ -79,50 +87,65 @@ pub(crate) async fn resolve_claude_code_permission_request(
     turn_context: &Arc<TurnContext>,
     request: &ClaudeCodePermissionRequest,
 ) -> ClaudeCodePermissionResolution {
-    if approval_policy_auto_allows_claude_control(turn_context.approval_policy.value()) {
-        return allowed_resolution();
-    }
+    let started_at = Instant::now();
+    emit_claude_tool_call_begin_in_turn(sess, turn_context.as_ref(), request).await;
+    let resolution =
+        if approval_policy_auto_allows_claude_control(turn_context.approval_policy.value()) {
+            allowed_resolution()
+        } else {
+            let tool_class = classify_tool_name(&request.tool_name);
+            match tool_class {
+                ClaudeCodeToolClass::Command => {
+                    resolve_bash_permission_request(sess, turn_context, request).await
+                }
+                ClaudeCodeToolClass::ReadFs
+                | ClaudeCodeToolClass::WriteFs
+                | ClaudeCodeToolClass::Network => {
+                    match requested_permissions_for_tool_class(
+                        tool_class,
+                        &request.input,
+                        turn_context.cwd.as_path(),
+                    ) {
+                        Some(permissions) => {
+                            let response = sess
+                                .request_permissions(
+                                    turn_context.as_ref(),
+                                    request.request_id.clone(),
+                                    RequestPermissionsArgs {
+                                        reason: Some(permission_reason(request)),
+                                        permissions,
+                                    },
+                                )
+                                .await;
 
-    let tool_class = classify_tool_name(&request.tool_name);
-    match tool_class {
-        ClaudeCodeToolClass::Command => {
-            resolve_bash_permission_request(sess, turn_context, request).await
-        }
-        ClaudeCodeToolClass::ReadFs
-        | ClaudeCodeToolClass::WriteFs
-        | ClaudeCodeToolClass::Network => {
-            let Some(permissions) = requested_permissions_for_tool_class(
-                tool_class,
-                &request.input,
-                turn_context.cwd.as_path(),
-            ) else {
-                return denied_resolution(malformed_tool_input_message(request));
-            };
-
-            let response = sess
-                .request_permissions(
-                    turn_context.as_ref(),
-                    request.request_id.clone(),
-                    RequestPermissionsArgs {
-                        reason: Some(permission_reason(request)),
-                        permissions,
-                    },
-                )
-                .await;
-
-            match response {
-                Some(response) if !response.permissions.is_empty() => allowed_resolution(),
-                _ => denied_resolution(format!(
-                    "Permission denied for Claude Code tool `{}`",
-                    request.tool_name
-                )),
+                            match response {
+                                Some(response) if !response.permissions.is_empty() => {
+                                    allowed_resolution()
+                                }
+                                _ => denied_resolution(format!(
+                                    "Permission denied for Claude Code tool `{}`",
+                                    request.tool_name
+                                )),
+                            }
+                        }
+                        None => denied_resolution(malformed_tool_input_message(request)),
+                    }
+                }
+                ClaudeCodeToolClass::Unknown => {
+                    warn!(tool_name = %request.tool_name, "unknown Claude Code tool requested");
+                    denied_resolution(unknown_tool_message(request))
+                }
             }
-        }
-        ClaudeCodeToolClass::Unknown => {
-            warn!(tool_name = %request.tool_name, "unknown Claude Code tool requested");
-            denied_resolution(unknown_tool_message(request))
-        }
-    }
+        };
+    emit_claude_tool_call_end_in_turn(
+        sess,
+        turn_context.as_ref(),
+        request,
+        started_at.elapsed(),
+        &resolution,
+    )
+    .await;
+    resolution
 }
 
 pub(crate) async fn resolve_external_claude_code_permission_request(
@@ -132,49 +155,158 @@ pub(crate) async fn resolve_external_claude_code_permission_request(
     cwd: &Path,
     request: &ClaudeCodePermissionRequest,
 ) -> ClaudeCodePermissionResolution {
-    if approval_policy_auto_allows_claude_control(approval_policy) {
-        return allowed_resolution();
-    }
-
-    let tool_class = classify_tool_name(&request.tool_name);
-    match tool_class {
-        ClaudeCodeToolClass::Command => {
-            resolve_external_bash_permission_request(sess, approval_policy, turn_id, cwd, request)
-                .await
-        }
-        ClaudeCodeToolClass::ReadFs
-        | ClaudeCodeToolClass::WriteFs
-        | ClaudeCodeToolClass::Network => {
-            let Some(permissions) =
-                requested_permissions_for_tool_class(tool_class, &request.input, cwd)
-            else {
-                return denied_resolution(malformed_tool_input_message(request));
-            };
-
-            let response = sess
-                .request_external_permissions(
+    let started_at = Instant::now();
+    emit_external_claude_tool_call_begin(sess, turn_id, request).await;
+    let resolution = if approval_policy_auto_allows_claude_control(approval_policy) {
+        allowed_resolution()
+    } else {
+        let tool_class = classify_tool_name(&request.tool_name);
+        match tool_class {
+            ClaudeCodeToolClass::Command => {
+                resolve_external_bash_permission_request(
+                    sess,
                     approval_policy,
-                    turn_id.to_string(),
-                    request.request_id.clone(),
-                    RequestPermissionsArgs {
-                        reason: Some(permission_reason(request)),
-                        permissions,
-                    },
+                    turn_id,
+                    cwd,
+                    request,
                 )
-                .await;
+                .await
+            }
+            ClaudeCodeToolClass::ReadFs
+            | ClaudeCodeToolClass::WriteFs
+            | ClaudeCodeToolClass::Network => {
+                match requested_permissions_for_tool_class(tool_class, &request.input, cwd) {
+                    Some(permissions) => {
+                        let response = sess
+                            .request_external_permissions(
+                                approval_policy,
+                                turn_id.to_string(),
+                                request.request_id.clone(),
+                                RequestPermissionsArgs {
+                                    reason: Some(permission_reason(request)),
+                                    permissions,
+                                },
+                            )
+                            .await;
 
-            match response {
-                Some(response) if !response.permissions.is_empty() => allowed_resolution(),
-                _ => denied_resolution(format!(
-                    "Permission denied for Claude Code tool `{}`",
-                    request.tool_name
-                )),
+                        match response {
+                            Some(response) if !response.permissions.is_empty() => {
+                                allowed_resolution()
+                            }
+                            _ => denied_resolution(format!(
+                                "Permission denied for Claude Code tool `{}`",
+                                request.tool_name
+                            )),
+                        }
+                    }
+                    None => denied_resolution(malformed_tool_input_message(request)),
+                }
+            }
+            ClaudeCodeToolClass::Unknown => {
+                warn!(tool_name = %request.tool_name, "unknown Claude Code tool requested");
+                denied_resolution(unknown_tool_message(request))
             }
         }
-        ClaudeCodeToolClass::Unknown => {
-            warn!(tool_name = %request.tool_name, "unknown Claude Code tool requested");
-            denied_resolution(unknown_tool_message(request))
-        }
+    };
+    emit_external_claude_tool_call_end(sess, turn_id, request, started_at.elapsed(), &resolution)
+        .await;
+    resolution
+}
+
+async fn emit_claude_tool_call_begin_in_turn(
+    sess: &Arc<Session>,
+    turn_context: &TurnContext,
+    request: &ClaudeCodePermissionRequest,
+) {
+    sess.send_event(
+        turn_context,
+        EventMsg::McpToolCallBegin(McpToolCallBeginEvent {
+            call_id: request.tool_use_id.clone(),
+            invocation: claude_tool_invocation(request),
+        }),
+    )
+    .await;
+}
+
+async fn emit_external_claude_tool_call_begin(
+    sess: &Arc<Session>,
+    turn_id: &str,
+    request: &ClaudeCodePermissionRequest,
+) {
+    sess.send_event_raw(Event {
+        id: turn_id.to_string(),
+        msg: EventMsg::McpToolCallBegin(McpToolCallBeginEvent {
+            call_id: request.tool_use_id.clone(),
+            invocation: claude_tool_invocation(request),
+        }),
+    })
+    .await;
+}
+
+async fn emit_claude_tool_call_end_in_turn(
+    sess: &Arc<Session>,
+    turn_context: &TurnContext,
+    request: &ClaudeCodePermissionRequest,
+    duration: Duration,
+    resolution: &ClaudeCodePermissionResolution,
+) {
+    sess.send_event(
+        turn_context,
+        EventMsg::McpToolCallEnd(McpToolCallEndEvent {
+            call_id: request.tool_use_id.clone(),
+            invocation: claude_tool_invocation(request),
+            duration,
+            result: claude_tool_call_result(request, resolution),
+        }),
+    )
+    .await;
+}
+
+async fn emit_external_claude_tool_call_end(
+    sess: &Arc<Session>,
+    turn_id: &str,
+    request: &ClaudeCodePermissionRequest,
+    duration: Duration,
+    resolution: &ClaudeCodePermissionResolution,
+) {
+    sess.send_event_raw(Event {
+        id: turn_id.to_string(),
+        msg: EventMsg::McpToolCallEnd(McpToolCallEndEvent {
+            call_id: request.tool_use_id.clone(),
+            invocation: claude_tool_invocation(request),
+            duration,
+            result: claude_tool_call_result(request, resolution),
+        }),
+    })
+    .await;
+}
+
+fn claude_tool_invocation(request: &ClaudeCodePermissionRequest) -> McpInvocation {
+    McpInvocation {
+        server: "claude_code".to_string(),
+        tool: request.tool_name.clone(),
+        arguments: Some(request.input.clone()),
+    }
+}
+
+fn claude_tool_call_result(
+    request: &ClaudeCodePermissionRequest,
+    resolution: &ClaudeCodePermissionResolution,
+) -> Result<CallToolResult, String> {
+    match &resolution.response {
+        ClaudeCodeControlResponseSubtype::Allow { .. } => Ok(CallToolResult {
+            content: vec![serde_json::json!({
+                "type": "text",
+                "text": format!(
+                    "Claude Code tool `{}` permission granted by Claudex.",
+                    request.tool_name
+                ),
+            })],
+            structured_content: None,
+            is_error: None,
+            meta: None,
+        }),
+        ClaudeCodeControlResponseSubtype::Deny { message } => Err(message.clone()),
     }
 }
 

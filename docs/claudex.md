@@ -117,6 +117,11 @@ This downstream slice is intentionally honest and narrow:
   - `approval_policy=never` / bypassPermissions auto-allows these carrier
     requests instead of accidentally turning them into denials;
   - unsupported Claude control subtypes still fail closed instead of hanging;
+- supported Claude carrier tool requests now also emit synthetic
+  `McpToolCallBegin` / `McpToolCallEnd` events on the owning thread (main lane
+  or child external-agent thread), so the TUI/history surfaces show Claude tool
+  activity instead of only showing the approval prompt with no visible tool
+  lifecycle;
 - spawned Claude Code subagents now use a real child thread host too, so
   supported carrier permission prompts surface on the child thread through the
   same Codex approval/request-permissions UI rather than dying inside the

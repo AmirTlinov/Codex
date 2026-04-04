@@ -16,11 +16,74 @@ use codex_api::common::ClaudeCodeControlResponder;
 use codex_api::common::ClaudeCodeControlResponseSubtype;
 use codex_api::common::ClaudeCodePermissionRequest;
 use codex_protocol::protocol::EventMsg;
+use codex_protocol::protocol::McpToolCallBeginEvent;
+use codex_protocol::protocol::McpToolCallEndEvent;
 use codex_protocol::request_permissions::PermissionGrantScope;
 use codex_protocol::request_permissions::RequestPermissionProfile;
 use codex_protocol::request_permissions::RequestPermissionsResponse;
 use pretty_assertions::assert_eq;
 use serde_json::json;
+
+fn expect_claude_tool_begin(
+    msg: EventMsg,
+    call_id: &str,
+    tool: &str,
+    arguments: serde_json::Value,
+) {
+    let EventMsg::McpToolCallBegin(McpToolCallBeginEvent {
+        call_id: actual_call_id,
+        invocation,
+    }) = msg
+    else {
+        panic!("expected MCP tool begin event");
+    };
+    assert_eq!(actual_call_id, call_id);
+    assert_eq!(invocation.server, "claude_code");
+    assert_eq!(invocation.tool, tool);
+    assert_eq!(invocation.arguments, Some(arguments));
+}
+
+fn expect_claude_tool_end(
+    msg: EventMsg,
+    call_id: &str,
+    tool: &str,
+    expected_result: Result<&str, &str>,
+) {
+    let EventMsg::McpToolCallEnd(McpToolCallEndEvent {
+        call_id: actual_call_id,
+        invocation,
+        result,
+        ..
+    }) = msg
+    else {
+        panic!("expected MCP tool end event");
+    };
+    assert_eq!(actual_call_id, call_id);
+    assert_eq!(invocation.server, "claude_code");
+    assert_eq!(invocation.tool, tool);
+
+    match (result, expected_result) {
+        (Ok(result), Ok(expected_text)) => {
+            assert_eq!(result.is_error, None);
+            assert_eq!(
+                result.content,
+                vec![json!({
+                    "type": "text",
+                    "text": expected_text,
+                })]
+            );
+        }
+        (Err(actual_error), Err(expected_substring)) => {
+            assert!(
+                actual_error.contains(expected_substring),
+                "expected `{actual_error}` to contain `{expected_substring}`"
+            );
+        }
+        (actual, expected) => {
+            panic!("unexpected end result {actual:?} for expectation {expected:?}")
+        }
+    }
+}
 
 #[test]
 fn parse_non_control_request_returns_not_control_request() {
@@ -156,11 +219,28 @@ async fn unknown_tool_is_denied_explicitly_without_prompting() {
             if message.contains("FutureTool")
     ));
     assert!(!outcome.interrupt_turn);
+    let begin_event = tokio::time::timeout(StdDuration::from_secs(1), rx.recv())
+        .await
+        .expect("tool begin event timed out")
+        .expect("tool begin event missing");
+    expect_claude_tool_begin(begin_event.msg, "tool-unknown", "FutureTool", json!({}));
+
+    let end_event = tokio::time::timeout(StdDuration::from_secs(1), rx.recv())
+        .await
+        .expect("tool end event timed out")
+        .expect("tool end event missing");
+    expect_claude_tool_end(
+        end_event.msg,
+        "tool-unknown",
+        "FutureTool",
+        Err("FutureTool"),
+    );
+
     assert!(
         tokio::time::timeout(StdDuration::from_millis(100), rx.recv())
             .await
             .is_err(),
-        "unknown tools should fail closed before prompting"
+        "unknown tools should fail closed before prompting for approval"
     );
 }
 
@@ -194,6 +274,17 @@ async fn bash_permission_requests_route_through_exec_approval() {
 
     let request_event = tokio::time::timeout(StdDuration::from_secs(1), rx.recv())
         .await
+        .expect("tool begin event timed out")
+        .expect("tool begin event missing");
+    expect_claude_tool_begin(
+        request_event.msg,
+        "tool-1",
+        "Bash",
+        json!({ "command": "git status" }),
+    );
+
+    let request_event = tokio::time::timeout(StdDuration::from_secs(1), rx.recv())
+        .await
         .expect("exec approval request timed out")
         .expect("exec approval event missing");
     let EventMsg::ExecApprovalRequest(event) = request_event.msg else {
@@ -217,6 +308,17 @@ async fn bash_permission_requests_route_through_exec_approval() {
         }
     ));
     assert!(!outcome.interrupt_turn);
+
+    let end_event = tokio::time::timeout(StdDuration::from_secs(1), rx.recv())
+        .await
+        .expect("tool end event timed out")
+        .expect("tool end event missing");
+    expect_claude_tool_end(
+        end_event.msg,
+        "tool-1",
+        "Bash",
+        Ok("Claude Code tool `Bash` permission granted by Claudex."),
+    );
 }
 
 #[tokio::test]
@@ -255,6 +357,17 @@ async fn read_permission_requests_route_through_request_permissions() {
 
     let request_event = tokio::time::timeout(StdDuration::from_secs(1), rx.recv())
         .await
+        .expect("tool begin event timed out")
+        .expect("tool begin event missing");
+    expect_claude_tool_begin(
+        request_event.msg,
+        "tool-2",
+        "Read",
+        json!({ "file_path": "AGENTS.md" }),
+    );
+
+    let request_event = tokio::time::timeout(StdDuration::from_secs(1), rx.recv())
+        .await
         .expect("request_permissions event timed out")
         .expect("request_permissions event missing");
     let EventMsg::RequestPermissions(event) = request_event.msg else {
@@ -285,11 +398,22 @@ async fn read_permission_requests_route_through_request_permissions() {
     assert!(!outcome.interrupt_turn);
     let RequestPermissionProfile { file_system, .. } = event.permissions;
     assert!(file_system.is_some());
+
+    let end_event = tokio::time::timeout(StdDuration::from_secs(1), rx.recv())
+        .await
+        .expect("tool end event timed out")
+        .expect("tool end event missing");
+    expect_claude_tool_end(
+        end_event.msg,
+        "tool-2",
+        "Read",
+        Ok("Claude Code tool `Read` permission granted by Claudex."),
+    );
 }
 
 #[tokio::test]
 async fn approval_policy_never_auto_allows_claude_permission_requests() {
-    let (session, mut turn_context, _rx) = make_session_and_context_with_rx().await;
+    let (session, mut turn_context, rx) = make_session_and_context_with_rx().await;
     *session.active_turn.lock().await = Some(ActiveTurn::default());
     Arc::get_mut(&mut turn_context)
         .expect("single turn context ref")
@@ -319,4 +443,21 @@ async fn approval_policy_never_auto_allows_claude_permission_requests() {
         }
     ));
     assert!(!outcome.interrupt_turn);
+
+    let begin_event = tokio::time::timeout(StdDuration::from_secs(1), rx.recv())
+        .await
+        .expect("tool begin event timed out")
+        .expect("tool begin event missing");
+    expect_claude_tool_begin(begin_event.msg, "tool-never", "TodoWrite", json!({}));
+
+    let end_event = tokio::time::timeout(StdDuration::from_secs(1), rx.recv())
+        .await
+        .expect("tool end event timed out")
+        .expect("tool end event missing");
+    expect_claude_tool_end(
+        end_event.msg,
+        "tool-never",
+        "TodoWrite",
+        Ok("Claude Code tool `TodoWrite` permission granted by Claudex."),
+    );
 }
