@@ -288,7 +288,12 @@ impl ExternalAgentState {
                     .map(ClaudeCliEffort::from)),
             };
             let result = state
-                .run_external_claude_turn(request, host_turn_id.clone(), cancellation_token)
+                .run_external_claude_turn(
+                    request,
+                    host_turn_id.clone(),
+                    host_truncation_policy,
+                    cancellation_token,
+                )
                 .await;
             state
                 .finish_turn(generation, host_turn_id, host_truncation_policy, result)
@@ -336,7 +341,9 @@ impl ExternalAgentState {
                 if let Some(session_id) = output.session_id {
                     *self.claude_session_id.lock().await = Some(session_id);
                 }
-                if output.response_items.is_empty() {
+                if output.recorded_response_items_live {
+                    // The child-thread host already received raw response items during the turn.
+                } else if output.response_items.is_empty() {
                     self.record_host_message(
                         host_turn_id.as_str(),
                         host_truncation_policy,
@@ -502,6 +509,7 @@ impl ExternalAgentState {
         &self,
         request: ClaudeCliRequest,
         host_turn_id: String,
+        host_truncation_policy: codex_protocol::protocol::TruncationPolicy,
         cancellation_token: CancellationToken,
     ) -> anyhow::Result<ClaudeCodeTurnResult> {
         let controlled = run_claude_cli_stream_json_controlled(
@@ -513,7 +521,7 @@ impl ExternalAgentState {
         let mut raw_lines = controlled.lines;
         let control_responder = controlled.control_responder;
         let mut accumulator = crate::claude_code_stream::ClaudeCodeStreamAccumulator::default();
-        let mut response_items = Vec::new();
+        let mut recorded_response_items_live = false;
 
         while let Some(line) = raw_lines.recv().await {
             match line {
@@ -558,7 +566,19 @@ impl ExternalAgentState {
                     }
                     Ok(ControlRequestParseOutcome::NotControlRequest) => {
                         let events = accumulator.push_line(&line)?;
-                        response_items.extend(completed_response_items(&events));
+                        let response_items = completed_response_items(&events);
+                        if !response_items.is_empty() {
+                            self.host_thread
+                                .codex
+                                .session
+                                .record_external_host_items(
+                                    host_turn_id.as_str(),
+                                    host_truncation_policy,
+                                    &response_items,
+                                )
+                                .await;
+                            recorded_response_items_live = true;
+                        }
                     }
                     Err(message) => anyhow::bail!(message),
                 },
@@ -573,7 +593,8 @@ impl ExternalAgentState {
         Ok(ClaudeCodeTurnResult {
             output: summary.assistant_text,
             session_id: summary.session_id,
-            response_items,
+            response_items: Vec::new(),
+            recorded_response_items_live,
         })
     }
 }

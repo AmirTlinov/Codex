@@ -196,9 +196,9 @@ What it does:
 - gives external Claude agents a real child-thread host so supported approval
   prompts now surface on that child thread too, instead of remaining trapped
   inside a status-only external runner;
-- preserves structured Claude `tool_use` items in external child-thread raw
-  response history instead of flattening delegated Claude turns down to plain
-  assistant text only;
+- streams structured Claude `tool_use` items into external child-thread raw
+  response history as delegated turns run, instead of flattening those Claude
+  turns down to plain assistant text only;
 - brands the runtime as `Claudex`, makes `claudex --version` report the
   current downstream short SHA, uses the same downstream product name in the
   default terminal title plus CLI update/human-output copy, points update

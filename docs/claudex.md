@@ -71,10 +71,10 @@ This downstream slice is intentionally honest and narrow:
   subprocess prompt every time; if carrier resume is rejected, Claudex clears
   the saved carrier session and the next delegated turn falls back to bounded
   prompt replay;
-- external Claude child threads now persist structured Claude `tool_use`
-  blocks into normal Codex raw response history instead of collapsing them
-  down to assistant text only, so downstream TUI/app-server surfaces can see
-  those tool calls after the delegated turn completes;
+- external Claude child threads now stream structured Claude `tool_use`
+  blocks into normal Codex raw response history as the delegated turn runs,
+  instead of collapsing them down to assistant text only, so downstream
+  TUI/app-server surfaces can see those tool calls before turn completion too;
 - when Claudex knows the current Codex executable path, Claude carrier runs now
   also receive a session-scoped internal MCP config that points at
   `codex mcp-server`, so the Claude lane can see a Codex-owned MCP bridge

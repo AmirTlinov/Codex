@@ -48,6 +48,7 @@ pub(crate) struct ClaudeCodeTurnResult {
     pub(crate) output: String,
     pub(crate) session_id: Option<String>,
     pub(crate) response_items: Vec<ResponseItem>,
+    pub(crate) recorded_response_items_live: bool,
 }
 
 pub(crate) struct ClaudeCliControlledStream {
@@ -573,6 +574,7 @@ pub(crate) async fn run_claude_code_turn(
         output: summary.assistant_text,
         session_id: summary.session_id,
         response_items,
+        recorded_response_items_live: false,
     })
 }
 

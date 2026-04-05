@@ -283,11 +283,10 @@ fn mock_claude_structured_tool_script(root: &TempDir) -> MockClaudeScript {
         "IFS= read -r first_line".to_string(),
         format!("printf '%s\\n--\\n' \"$first_line\" >> '{}'", stdin_log_path.display()),
         "session_id='123e4567-e89b-12d3-a456-4266141740ad'".to_string(),
-        "cat <<'EOF'".to_string(),
-        "{\"type\":\"system\",\"subtype\":\"init\",\"session_id\":\"123e4567-e89b-12d3-a456-4266141740ad\",\"tools\":[],\"mcp_servers\":[],\"model\":\"claude-opus-4-6\",\"permissionMode\":\"bypassPermissions\",\"slash_commands\":[],\"apiKeySource\":\"none\",\"claude_code_version\":\"test\",\"output_style\":\"default\",\"agents\":[],\"skills\":[],\"plugins\":[],\"uuid\":\"init-1\"}".to_string(),
-        "{\"type\":\"assistant\",\"message\":{\"model\":\"claude-opus-4-6\",\"id\":\"msg-structured\",\"type\":\"message\",\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":\"Running shell.\"},{\"type\":\"tool_use\",\"id\":\"toolu-1\",\"name\":\"mcp__codex__codex-shell\",\"input\":{\"command\":\"printf hi\"}},{\"type\":\"text\",\"text\":\"Done.\"}],\"stop_reason\":null,\"stop_sequence\":null,\"stop_details\":null,\"usage\":{\"input_tokens\":3,\"cache_creation_input_tokens\":0,\"cache_read_input_tokens\":0,\"output_tokens\":2,\"service_tier\":\"standard\",\"inference_geo\":\"not_available\"},\"context_management\":null},\"parent_tool_use_id\":null,\"session_id\":\"123e4567-e89b-12d3-a456-4266141740ad\",\"uuid\":\"assistant-1\"}".to_string(),
-        "{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":false,\"duration_ms\":10,\"duration_api_ms\":10,\"num_turns\":1,\"result\":\"Running shell.Done.\",\"stop_reason\":\"end_turn\",\"session_id\":\"123e4567-e89b-12d3-a456-4266141740ad\",\"total_cost_usd\":0.0,\"usage\":{\"input_tokens\":3,\"cache_creation_input_tokens\":0,\"cache_read_input_tokens\":0,\"output_tokens\":2},\"modelUsage\":{},\"permission_denials\":[],\"uuid\":\"result-1\"}".to_string(),
-        "EOF".to_string(),
+        "printf '%s\\n' '{\"type\":\"system\",\"subtype\":\"init\",\"session_id\":\"123e4567-e89b-12d3-a456-4266141740ad\",\"tools\":[],\"mcp_servers\":[],\"model\":\"claude-opus-4-6\",\"permissionMode\":\"bypassPermissions\",\"slash_commands\":[],\"apiKeySource\":\"none\",\"claude_code_version\":\"test\",\"output_style\":\"default\",\"agents\":[],\"skills\":[],\"plugins\":[],\"uuid\":\"init-1\"}'".to_string(),
+        "printf '%s\\n' '{\"type\":\"assistant\",\"message\":{\"model\":\"claude-opus-4-6\",\"id\":\"msg-structured\",\"type\":\"message\",\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":\"Running shell.\"},{\"type\":\"tool_use\",\"id\":\"toolu-1\",\"name\":\"mcp__codex__codex-shell\",\"input\":{\"command\":\"printf hi\"}},{\"type\":\"text\",\"text\":\"Done.\"}],\"stop_reason\":null,\"stop_sequence\":null,\"stop_details\":null,\"usage\":{\"input_tokens\":3,\"cache_creation_input_tokens\":0,\"cache_read_input_tokens\":0,\"output_tokens\":2,\"service_tier\":\"standard\",\"inference_geo\":\"not_available\"},\"context_management\":null},\"parent_tool_use_id\":null,\"session_id\":\"123e4567-e89b-12d3-a456-4266141740ad\",\"uuid\":\"assistant-1\"}'".to_string(),
+        "sleep 1".to_string(),
+        "printf '%s\\n' '{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":false,\"duration_ms\":10,\"duration_api_ms\":10,\"num_turns\":1,\"result\":\"Running shell.Done.\",\"stop_reason\":\"end_turn\",\"session_id\":\"123e4567-e89b-12d3-a456-4266141740ad\",\"total_cost_usd\":0.0,\"usage\":{\"input_tokens\":3,\"cache_creation_input_tokens\":0,\"cache_read_input_tokens\":0,\"output_tokens\":2},\"modelUsage\":{},\"permission_denials\":[],\"uuid\":\"result-1\"}'".to_string(),
     ]
     .join("\n");
     std::fs::write(&script_path, script).expect("write mock Claude structured tool script");
@@ -1069,6 +1068,42 @@ async fn external_claude_agent_persists_structured_tool_use_into_child_thread_hi
         .get_thread(thread_id)
         .await
         .expect("external child thread host should exist");
+
+    let tool_event = timeout(Duration::from_secs(5), async {
+        loop {
+            let event = child_thread.next_event().await.expect("child thread event");
+            if matches!(
+                event.msg,
+                EventMsg::RawResponseItem(codex_protocol::protocol::RawResponseItemEvent {
+                    item: ResponseItem::FunctionCall { .. },
+                })
+            ) {
+                break event.msg;
+            }
+        }
+    })
+    .await
+    .expect("structured Claude tool use should surface before turn completion");
+    assert!(matches!(
+        tool_event,
+        EventMsg::RawResponseItem(codex_protocol::protocol::RawResponseItemEvent {
+            item: ResponseItem::FunctionCall {
+                name,
+                namespace: None,
+                arguments,
+                call_id,
+                ..
+            },
+        }) if name == "mcp__codex__codex-shell"
+            && call_id == "toolu-1"
+            && serde_json::from_str::<serde_json::Value>(&arguments)
+                .expect("tool arguments should be valid json")
+                == serde_json::json!({ "command": "printf hi" })
+    ));
+    assert_eq!(
+        harness.control.get_status(thread_id).await,
+        AgentStatus::Running
+    );
 
     let status = wait_for_final_agent_status(&harness.control, thread_id).await;
     assert_eq!(
