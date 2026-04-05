@@ -39,6 +39,7 @@ use crate::protocol::WarningEvent;
 pub(crate) use self::claude_cli::ClaudeCliRequest;
 pub(crate) use self::claude_cli::ClaudeCliSession;
 pub(crate) use self::claude_cli::ClaudeCodeTurnResult;
+pub(crate) use self::claude_cli::bridge_preferred_claude_carrier_tools;
 pub(crate) use self::claude_cli::run_claude_cli;
 pub(crate) use self::claude_cli::run_claude_cli_stream_json_controlled;
 
@@ -486,8 +487,12 @@ impl ExternalAgentState {
                 sections.push(available_models);
             }
         }
-        sections.push(render_external_tool_summary(
+        let carrier_tools = bridge_preferred_claude_carrier_tools(
             self.claude_cli.tools.as_deref(),
+            self.claude_cli.codex_self_exe.is_some(),
+        );
+        sections.push(render_external_tool_summary(
+            carrier_tools.as_deref(),
             self.claude_cli.codex_self_exe.is_some(),
         ));
         sections.join("\n\n")
@@ -635,7 +640,7 @@ fn build_external_agent_system_prompt_with_bridge(
     ];
     if codex_mcp_bridge_available {
         sections.push(
-            "An internal Codex MCP bridge is available in this session. If you need Codex-owned tools or a Codex-run worker, use `mcp__codex__codex` to start that task, `mcp__codex__codex-reply` to continue it, and `mcp__codex__codex-shell` for exact shell commands. When you need a specific Codex provider, pass `model-provider` to `mcp__codex__codex` (for example `openai` or `claude_code`). Prefer this bridge when you need Codex MCP servers, Codex-native tool behavior, or capabilities that are not directly available through Claude Code built-ins.".to_string(),
+            "An internal Codex MCP bridge is available in this session. For shell, filesystem, network, or other Codex-owned execution work, treat that bridge as authoritative: use `mcp__codex__codex` to start bounded Codex work, `mcp__codex__codex-reply` to continue it, and `mcp__codex__codex-shell` for exact shell commands. When you need a specific Codex provider, pass `model-provider` to `mcp__codex__codex` (for example `openai` or `claude_code`). Claude Code carrier built-ins are compat-only in this bridge-first path.".to_string(),
         );
     }
     if include_runtime_truth_guidance {
@@ -711,13 +716,14 @@ fn render_external_tool_summary(
     ];
     match direct_claude_tools {
         Some(tools) if !tools.is_empty() => sections.push(format!(
-            "Current direct Claude Code carrier tool allowlist: {}",
+            "Current direct Claude Code carrier compat allowlist: {}",
             tools.join(", ")
         )),
-        _ => sections.push(
-            "Current direct Claude Code carrier tools are controlled by Claude Code defaults for this session."
+        _ if codex_mcp_bridge_available => sections.push(
+            "Current direct Claude Code carrier compat allowlist: none. Use the internal Codex bridge for command, filesystem, and network work."
                 .to_string(),
         ),
+        _ => sections.push("Current direct Claude Code carrier tool allowlist: none.".to_string()),
     }
     if codex_mcp_bridge_available {
         sections.push(
@@ -726,6 +732,10 @@ fn render_external_tool_summary(
         );
         sections.push(
             "`mcp__codex__codex` accepts `model-provider` when this delegated Claude turn needs a specific Codex provider such as `openai` or `claude_code`."
+                .to_string(),
+        );
+        sections.push(
+            "Bridge-first rule: shell, filesystem, network, and other Codex-owned execution should go through those Codex bridge tools instead of Claude Code carrier built-ins."
                 .to_string(),
         );
     }

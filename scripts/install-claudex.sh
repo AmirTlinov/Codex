@@ -97,6 +97,7 @@ debug_binary="$debug_binary"
 profile="\${CLAUDEX_PROFILE:-auto}"
 claudex_home="\${CLAUDEX_HOME:-$HOME/.claudex}"
 source_home="\${CLAUDEX_SOURCE_HOME:-$HOME/.codex}"
+claudex_home_seeded_this_launch=0
 
 dir_has_entries() {
   local dir="\$1"
@@ -132,6 +133,7 @@ seed_home_if_needed() {
 
   if dir_has_entries "\$source_home"; then
     cp -a "\$source_home"/. "\$claudex_home"/
+    claudex_home_seeded_this_launch=1
   fi
 }
 
@@ -177,6 +179,28 @@ PY_REBASE
 }
 
 rebase_home_local_paths_if_needed
+
+finalize_seed_marker_if_needed() {
+  if [[ "\$claudex_home_seeded_this_launch" != "1" ]]; then
+    return
+  fi
+
+  local config_file marker_path config_sha1
+  config_file="\$claudex_home/config.toml"
+  marker_path="\$claudex_home/.claudex_seeded_from_codex"
+  if [[ ! -f "\$config_file" ]]; then
+    return
+  fi
+
+  config_sha1="\$(sha1sum "\$config_file" | awk '{print \$1}')"
+  cat > "\$marker_path" <<EOF
+version=1
+source_home=\$(canonicalize_path "\$source_home")
+config_sha1=\$config_sha1
+EOF
+}
+
+finalize_seed_marker_if_needed
 export CODEX_HOME="\$claudex_home"
 
 current_branch() {

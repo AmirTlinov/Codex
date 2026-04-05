@@ -46,6 +46,7 @@ pub enum ReasoningEffort {
     #[default]
     Medium,
     High,
+    #[serde(alias = "max")]
     XHigh,
 }
 
@@ -568,6 +569,7 @@ mod tests {
     fn reasoning_effort_from_str_accepts_known_values() {
         assert_eq!("high".parse(), Ok(ReasoningEffort::High));
         assert_eq!("minimal".parse(), Ok(ReasoningEffort::Minimal));
+        assert_eq!("max".parse(), Ok(ReasoningEffort::XHigh));
     }
 
     #[test]

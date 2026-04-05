@@ -29,8 +29,9 @@ const CLAUDE_BRIDGE_PROMPT: &str = concat!(
     "Return the assistant response that should appear in the Codex conversation."
 );
 const CLAUDE_DIRECT_TOOL_CALL_PROMPT: &str = concat!(
-    "Direct Claudex tool execution is available in this session.\n",
-    "When you need a Codex-native tool, emit one or more raw `<tool_call>...</tool_call>` blocks with no markdown fences.\n",
+    "Some explicitly advertised Codex tools may be called directly in this session.\n",
+    "When the runtime truth says the internal Codex bridge is authoritative for shell, filesystem, network, or other Codex-owned execution work, use that bridge instead of raw `<tool_call>` blocks for those operations.\n",
+    "Use raw `<tool_call>...</tool_call>` blocks only for the explicitly listed direct Codex tools in the runtime truth, with no markdown fences.\n",
     "Each block must contain compact JSON of the form `{\"name\":\"tool_name\",\"arguments\":{...}}` for function-like tools or `{\"name\":\"tool_name\",\"input\":\"...\"}` for freeform tools.\n",
     "Do not invent placeholder results such as `$AGENT_ID`; wait for the actual tool result before issuing dependent follow-up tool calls.\n",
     "Use normal prose only for user-visible text outside those raw `<tool_call>` blocks."
@@ -59,7 +60,7 @@ pub(super) async fn stream_claude_cli_turn(
     effort: Option<ReasoningEffortConfig>,
     cancellation_token: CancellationToken,
 ) -> Result<ResponseStream> {
-    let rendered_prompt = render_claude_prompt(prompt)?;
+    let rendered_prompt = render_claude_prompt(prompt, claude_cli.codex_self_exe.is_some())?;
     let prompt_tools = prompt.tools.clone();
     let controlled = run_claude_cli_stream_json_controlled(
         claude_cli,
@@ -68,7 +69,7 @@ pub(super) async fn stream_claude_cli_turn(
             model: model_info.slug.clone(),
             system_prompt: build_system_prompt(
                 &prompt.base_instructions.text,
-                !prompt.tools.is_empty(),
+                rendered_prompt.has_direct_codex_tools,
                 claude_cli.codex_self_exe.is_some(),
                 /*include_runtime_truth_guidance*/
                 !rendered_prompt.runtime_sections.is_empty(),
@@ -267,6 +268,7 @@ fn translate_claude_output_event(
 struct RenderedClaudePrompt {
     runtime_sections: Vec<String>,
     user_prompt: String,
+    has_direct_codex_tools: bool,
 }
 
 fn build_system_prompt(
@@ -293,7 +295,10 @@ fn build_system_prompt(
     sections.join("\n\n")
 }
 
-fn render_claude_prompt(prompt: &Prompt) -> Result<RenderedClaudePrompt> {
+fn render_claude_prompt(
+    prompt: &Prompt,
+    codex_mcp_bridge_available: bool,
+) -> Result<RenderedClaudePrompt> {
     let mut runtime_sections = Vec::new();
     let mut conversation_sections = Vec::new();
 
@@ -329,7 +334,12 @@ fn render_claude_prompt(prompt: &Prompt) -> Result<RenderedClaudePrompt> {
         }
     }
 
-    if let Some(tool_summary) = render_tool_summary(&prompt.tools) {
+    let direct_tool_inventory =
+        direct_claude_runtime_tools(&prompt.tools, codex_mcp_bridge_available);
+    let has_direct_codex_tools = !direct_tool_inventory.is_empty();
+    if let Some(tool_summary) =
+        render_tool_summary(&direct_tool_inventory, codex_mcp_bridge_available)
+    {
         runtime_sections.push(tool_summary);
     }
 
@@ -337,6 +347,7 @@ fn render_claude_prompt(prompt: &Prompt) -> Result<RenderedClaudePrompt> {
     Ok(RenderedClaudePrompt {
         runtime_sections,
         user_prompt,
+        has_direct_codex_tools,
     })
 }
 
@@ -367,8 +378,11 @@ fn render_conversation_context(sections: &[String]) -> String {
     )
 }
 
-fn render_tool_summary(tools: &[ToolSpec]) -> Option<String> {
-    let direct_tools = tools
+fn direct_claude_runtime_tools(
+    tools: &[ToolSpec],
+    codex_mcp_bridge_available: bool,
+) -> Vec<&ToolSpec> {
+    tools
         .iter()
         .filter(|tool| {
             matches!(
@@ -376,8 +390,21 @@ fn render_tool_summary(tools: &[ToolSpec]) -> Option<String> {
                 ToolSpec::Function(_) | ToolSpec::Freeform(_) | ToolSpec::ToolSearch { .. }
             )
         })
-        .collect::<Vec<_>>();
+        .filter(|tool| claude_should_advertise_direct_tool(tool, codex_mcp_bridge_available))
+        .collect::<Vec<_>>()
+}
 
+fn claude_should_advertise_direct_tool(tool: &ToolSpec, codex_mcp_bridge_available: bool) -> bool {
+    if !codex_mcp_bridge_available {
+        return true;
+    }
+    !matches!(tool.name(), "exec_command" | "write_stdin" | "apply_patch")
+}
+
+fn render_tool_summary(
+    direct_tools: &[&ToolSpec],
+    codex_mcp_bridge_available: bool,
+) -> Option<String> {
     if direct_tools.is_empty() {
         return None;
     }
@@ -388,7 +415,11 @@ fn render_tool_summary(tools: &[ToolSpec]) -> Option<String> {
         .collect::<Vec<_>>()
         .join(", ");
     let mut sections = vec![
-        "The following direct Claudex tool names are callable from this Claude turn via raw `<tool_call>` blocks.".to_string(),
+        if codex_mcp_bridge_available {
+            "The internal Codex bridge is authoritative for shell, filesystem, network, and other Codex-owned execution work in this Claude turn. Use raw `<tool_call>` blocks only for the explicitly listed direct Codex control-plane tools below.".to_string()
+        } else {
+            "The following direct Claudex tool names are callable from this Claude turn via raw `<tool_call>` blocks.".to_string()
+        },
         "Use `arguments` JSON for function-like tools and `input` string for freeform tools.".to_string(),
         "Follow the exact field names and required structure shown below. Do not invent aliases, placeholder keys, or abbreviated payloads.".to_string(),
         format!("Current direct Claudex tool inventory: {tool_names}"),

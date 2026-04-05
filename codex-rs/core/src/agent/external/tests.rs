@@ -302,6 +302,23 @@ fn split_log_entries(log: String) -> Vec<String> {
         .collect()
 }
 
+#[test]
+fn bridge_preferred_claude_carrier_tools_filters_bridge_overlaps() {
+    let filtered = bridge_preferred_claude_carrier_tools(
+        Some(&["Read".to_string(), "Bash".to_string(), "Task".to_string()]),
+        /*codex_mcp_bridge_available*/ true,
+    )
+    .expect("filtered tools");
+    assert_eq!(filtered, vec!["Task".to_string()]);
+
+    let unfiltered = bridge_preferred_claude_carrier_tools(
+        Some(&["Read".to_string(), "Bash".to_string()]),
+        /*codex_mcp_bridge_available*/ false,
+    )
+    .expect("unfiltered tools");
+    assert_eq!(unfiltered, vec!["Read".to_string(), "Bash".to_string()]);
+}
+
 #[tokio::test]
 async fn external_agent_registry_closes_claude_stdin_after_terminal_result() {
     let root = TempDir::new().expect("create temp dir");
@@ -835,11 +852,39 @@ async fn external_agent_registry_prepends_runtime_truth_and_role_inventory_to_pr
     assert!(stdin.contains("Anthropic [claude_code]:"));
     assert!(stdin.contains("Claude Opus 4.6 (`claude-opus-4-6`)"));
     assert!(stdin.contains("OpenAI [openai]:"));
-    assert!(stdin.contains("Current direct Claude Code carrier tool allowlist: Read, Bash"));
+    assert!(stdin.contains("Current direct Claude Code carrier compat allowlist: none."));
     assert!(stdin.contains("Current Codex bridge tool inventory: mcp__codex__codex, mcp__codex__codex-reply, mcp__codex__codex-shell"));
     assert!(stdin.contains(
         "`mcp__codex__codex` accepts `model-provider` when this delegated Claude turn needs a specific Codex provider such as `openai` or `claude_code`."
     ));
+    assert!(stdin.contains("Bridge-first rule: shell, filesystem, network, and other Codex-owned execution should go through those Codex bridge tools instead of Claude Code carrier built-ins."));
+    let args_lines = invocations
+        .args
+        .first()
+        .expect("first args invocation")
+        .lines()
+        .collect::<Vec<_>>();
+    let tools_index = args_lines
+        .iter()
+        .position(|line| *line == "--tools")
+        .expect("Claude args should include --tools");
+    assert_eq!(args_lines.get(tools_index + 1), Some(&""));
+    assert!(
+        !invocations
+            .args
+            .first()
+            .expect("first args invocation")
+            .contains("Read"),
+        "bridge-first external Claude path should not advertise carrier Read when Codex bridge is available"
+    );
+    assert!(
+        !invocations
+            .args
+            .first()
+            .expect("first args invocation")
+            .contains("Bash"),
+        "bridge-first external Claude path should not advertise carrier Bash when Codex bridge is available"
+    );
 
     registry
         .send_input(thread_id, text_input("follow-up inventory check"))

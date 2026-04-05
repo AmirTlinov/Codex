@@ -392,6 +392,16 @@ fn classify_tool_name(tool_name: &str) -> ClaudeCodeToolClass {
     }
 }
 
+pub(crate) fn claude_tool_overlaps_codex_bridge(tool_name: &str) -> bool {
+    matches!(
+        classify_tool_name(tool_name),
+        ClaudeCodeToolClass::Command
+            | ClaudeCodeToolClass::ReadFs
+            | ClaudeCodeToolClass::WriteFs
+            | ClaudeCodeToolClass::Network
+    )
+}
+
 async fn resolve_bash_permission_request(
     sess: &Arc<Session>,
     turn_context: &Arc<TurnContext>,

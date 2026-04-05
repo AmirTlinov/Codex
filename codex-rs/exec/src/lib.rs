@@ -257,7 +257,7 @@ pub async fn run_main(cli: Cli, arg0_paths: Arg0DispatchPaths) -> anyhow::Result
     };
 
     #[allow(clippy::print_stderr)]
-    let config_toml = match load_config_as_toml_with_cli_overrides(
+    let mut config_toml = match load_config_as_toml_with_cli_overrides(
         &codex_home,
         &config_cwd,
         cli_kv_overrides.clone(),
@@ -281,6 +281,26 @@ pub async fn run_main(cli: Cli, arg0_paths: Arg0DispatchPaths) -> anyhow::Result
             std::process::exit(1);
         }
     };
+    if let Err(err) =
+        codex_core::personality_migration::maybe_migrate_personality(&codex_home, &config_toml)
+            .await
+    {
+        tracing::warn!(error = %err, "Failed to run personality migration");
+    }
+    match codex_core::claudex_home_migration::maybe_migrate_claudex_home(&codex_home).await {
+        Ok(codex_core::claudex_home_migration::ClaudexHomeMigrationStatus::Applied) => {
+            config_toml = load_config_as_toml_with_cli_overrides(
+                &codex_home,
+                &config_cwd,
+                cli_kv_overrides.clone(),
+            )
+            .await?;
+        }
+        Ok(_) => {}
+        Err(err) => {
+            tracing::warn!(error = %err, "Failed to run Claudex home migration");
+        }
+    }
 
     let chatgpt_base_url = config_toml
         .chatgpt_base_url

@@ -15,6 +15,7 @@ use tokio::process::Command;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
+use crate::claude_code_control::claude_tool_overlaps_codex_bridge;
 #[cfg(test)]
 use crate::claude_code_stream::ClaudeCodeStreamAccumulator;
 #[cfg(test)]
@@ -77,6 +78,22 @@ impl ClaudeCodeTurnResult {
     }
 }
 
+pub(crate) fn bridge_preferred_claude_carrier_tools(
+    direct_claude_tools: Option<&[String]>,
+    codex_mcp_bridge_available: bool,
+) -> Option<Vec<String>> {
+    direct_claude_tools.map(|tools| {
+        if !codex_mcp_bridge_available {
+            return tools.to_vec();
+        }
+        tools
+            .iter()
+            .filter(|tool| !claude_tool_overlaps_codex_bridge(tool))
+            .cloned()
+            .collect()
+    })
+}
+
 pub(crate) struct ClaudeCliControlledStream {
     pub(crate) lines: mpsc::Receiver<anyhow::Result<String>>,
     pub(crate) control_responder: ClaudeCodeControlResponder,
@@ -132,12 +149,23 @@ pub(crate) async fn run_claude_cli(
         command.arg("--effort").arg(effort.as_cli_arg());
     }
 
+    let mcp_config_guard = create_codex_mcp_config_guard(config)?;
+    let carrier_tools =
+        bridge_preferred_claude_carrier_tools(request.tools.as_deref(), mcp_config_guard.is_some())
+            .or_else(|| {
+                bridge_preferred_claude_carrier_tools(
+                    config.tools.as_deref(),
+                    mcp_config_guard.is_some(),
+                )
+            });
     if request.force_toolless {
         command.arg("--tools").arg("");
-    } else if let Some(tools) = request.tools.or_else(|| config.tools.clone()) {
+    } else if let Some(tools) = carrier_tools {
         command.arg("--tools").arg(tools.join(","));
-        for add_dir in &config.add_dirs {
-            command.arg("--add-dir").arg(add_dir);
+        if !tools.is_empty() {
+            for add_dir in &config.add_dirs {
+                command.arg("--add-dir").arg(add_dir);
+            }
         }
     } else {
         command.arg("--tools").arg("");
@@ -148,7 +176,6 @@ pub(crate) async fn run_claude_cli(
             .arg("--json-schema")
             .arg(serde_json::to_string(&json_schema).context("serialize claude JSON schema")?);
     }
-    let mcp_config_guard = create_codex_mcp_config_guard(config)?;
     if let Some(mcp_config_guard) = mcp_config_guard.as_ref() {
         command.arg("--mcp-config").arg(&mcp_config_guard.path);
     }
@@ -250,12 +277,23 @@ pub(crate) async fn run_claude_cli_stream_json(
         command.arg("--effort").arg(effort.as_cli_arg());
     }
 
+    let mcp_config_guard = create_codex_mcp_config_guard(config)?;
+    let carrier_tools =
+        bridge_preferred_claude_carrier_tools(request.tools.as_deref(), mcp_config_guard.is_some())
+            .or_else(|| {
+                bridge_preferred_claude_carrier_tools(
+                    config.tools.as_deref(),
+                    mcp_config_guard.is_some(),
+                )
+            });
     if request.force_toolless {
         command.arg("--tools").arg("");
-    } else if let Some(tools) = request.tools.or_else(|| config.tools.clone()) {
+    } else if let Some(tools) = carrier_tools {
         command.arg("--tools").arg(tools.join(","));
-        for add_dir in &config.add_dirs {
-            command.arg("--add-dir").arg(add_dir);
+        if !tools.is_empty() {
+            for add_dir in &config.add_dirs {
+                command.arg("--add-dir").arg(add_dir);
+            }
         }
     } else {
         command.arg("--tools").arg("");
@@ -266,7 +304,6 @@ pub(crate) async fn run_claude_cli_stream_json(
             .arg("--json-schema")
             .arg(serde_json::to_string(&json_schema).context("serialize claude JSON schema")?);
     }
-    let mcp_config_guard = create_codex_mcp_config_guard(config)?;
     if let Some(mcp_config_guard) = mcp_config_guard.as_ref() {
         command.arg("--mcp-config").arg(&mcp_config_guard.path);
     }
@@ -425,12 +462,23 @@ pub(crate) async fn run_claude_cli_stream_json_controlled(
         command.arg("--effort").arg(effort.as_cli_arg());
     }
 
+    let mcp_config_guard = create_codex_mcp_config_guard(config)?;
+    let carrier_tools =
+        bridge_preferred_claude_carrier_tools(request.tools.as_deref(), mcp_config_guard.is_some())
+            .or_else(|| {
+                bridge_preferred_claude_carrier_tools(
+                    config.tools.as_deref(),
+                    mcp_config_guard.is_some(),
+                )
+            });
     if request.force_toolless {
         command.arg("--tools").arg("");
-    } else if let Some(tools) = request.tools.or_else(|| config.tools.clone()) {
+    } else if let Some(tools) = carrier_tools {
         command.arg("--tools").arg(tools.join(","));
-        for add_dir in &config.add_dirs {
-            command.arg("--add-dir").arg(add_dir);
+        if !tools.is_empty() {
+            for add_dir in &config.add_dirs {
+                command.arg("--add-dir").arg(add_dir);
+            }
         }
     } else {
         command.arg("--tools").arg("");
@@ -441,7 +489,6 @@ pub(crate) async fn run_claude_cli_stream_json_controlled(
             .arg("--json-schema")
             .arg(serde_json::to_string(&json_schema).context("serialize claude JSON schema")?);
     }
-    let mcp_config_guard = create_codex_mcp_config_guard(config)?;
     if let Some(mcp_config_guard) = mcp_config_guard.as_ref() {
         command.arg("--mcp-config").arg(&mcp_config_guard.path);
     }

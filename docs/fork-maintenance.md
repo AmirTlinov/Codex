@@ -210,6 +210,11 @@ What it does:
   `model-provider` override, so Claude-backed turns can start Codex-owned
   sessions against `openai` vs `claude_code` deterministically instead of
   guessing from only the current lane;
+- marks freshly copied `~/.claudex` homes as installer-seeded and only then
+  allows the downstream one-shot config migration to rewrite untouched legacy
+  OpenAI/GPT defaults to the current `claude_code` / `Claude Opus 4.6` /
+  `max` Claudex defaults, so user-managed homes are not silently rewritten by
+  a broad runtime heuristic;
 - brands the runtime as `Claudex`, makes `claudex --version` report the
   current downstream short SHA, uses the same downstream product name in the
   default terminal title plus CLI update/human-output copy, points update

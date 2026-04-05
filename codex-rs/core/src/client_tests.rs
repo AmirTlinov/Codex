@@ -10,6 +10,8 @@ use codex_protocol::models::ResponseItem;
 use codex_protocol::openai_models::ModelInfo;
 use codex_protocol::protocol::SessionSource;
 use codex_protocol::protocol::SubAgentSource;
+use codex_tools::FreeformTool;
+use codex_tools::FreeformToolFormat;
 use codex_tools::JsonSchema;
 use codex_tools::ResponsesApiTool;
 use codex_tools::ToolSpec;
@@ -95,6 +97,18 @@ fn test_function_tool(name: &str, description: &str) -> ToolSpec {
             additional_properties: Some(false.into()),
         },
         output_schema: None,
+    })
+}
+
+fn test_freeform_tool(name: &str, description: &str, syntax: &str, definition: &str) -> ToolSpec {
+    ToolSpec::Freeform(FreeformTool {
+        name: name.to_string(),
+        description: description.to_string(),
+        format: FreeformToolFormat {
+            r#type: "grammar".to_string(),
+            syntax: syntax.to_string(),
+            definition: definition.to_string(),
+        },
     })
 }
 
@@ -527,6 +541,92 @@ async fn stream_prepends_runtime_truth_and_tool_inventory_to_claude_user_prompt(
     assert!(args_log.contains("Treat that block as authoritative for this turn."));
     assert!(!args_log.contains("<environment_context>"));
     assert!(!args_log.contains("Claude Opus 4.6 (`claude-opus-4-6`)"));
+}
+
+#[tokio::test]
+async fn stream_bridge_first_runtime_truth_hides_exec_surfaces_from_direct_inventory() {
+    let root = TempDir::new().expect("create temp dir");
+    let (script_path, stdin_log_path, args_log_path) = write_mock_claude_script(&root);
+    let client = ModelClient::new(
+        /*auth_manager*/ None,
+        ThreadId::new(),
+        crate::create_claude_code_provider(),
+        crate::config::ClaudeCliConfig {
+            path: Some(script_path),
+            codex_self_exe: Some(std::path::PathBuf::from("/tmp/codex")),
+            ..Default::default()
+        },
+        root.path().to_path_buf(),
+        crate::auth::AuthCredentialsStoreMode::File,
+        SessionSource::Cli,
+        /*model_verbosity*/ None,
+        /*enable_request_compression*/ false,
+        /*include_timing_metrics*/ false,
+        /*beta_features_header*/ None,
+    );
+    let mut client_session = client.new_session();
+    let mut prompt = crate::Prompt::default();
+    prompt.base_instructions.text = "Use the bridge-first runtime.".to_string();
+    prompt.input = vec![ResponseItem::Message {
+        id: None,
+        role: "user".to_string(),
+        content: vec![ContentItem::InputText {
+            text: "Inspect AGENTS.md and spawn a GPT worker if needed.".to_string(),
+        }],
+        end_turn: None,
+        phase: None,
+    }];
+    prompt.tools = vec![
+        test_function_tool("spawn_agent", "Spawn a sub-agent for a well-scoped task."),
+        test_function_tool(
+            "exec_command",
+            "Runs a command in a PTY and returns output or a session id for continued interaction.",
+        ),
+        test_freeform_tool(
+            "apply_patch",
+            "Apply a patch to the working tree.",
+            "patch",
+            "Unified patch payload.",
+        ),
+    ];
+
+    let mut stream = client_session
+        .stream(
+            &prompt,
+            &test_model_info_with_slug("claude-opus-4-6"),
+            root.path(),
+            &test_session_telemetry(),
+            /*effort*/ None,
+            ReasoningSummary::None,
+            /*service_tier*/ None,
+            /*turn_metadata_header*/ None,
+            CancellationToken::new(),
+        )
+        .await
+        .expect("claude stream should succeed");
+
+    while let Some(event) = stream.next().await {
+        if matches!(
+            event.expect("stream event"),
+            crate::client_common::ResponseEvent::Completed { .. }
+        ) {
+            break;
+        }
+    }
+
+    let stdin_log = std::fs::read_to_string(stdin_log_path).expect("read stdin log");
+    assert!(stdin_log.contains("<codex_runtime_truth>"));
+    assert!(stdin_log.contains(
+        "The internal Codex bridge is authoritative for shell, filesystem, network, and other Codex-owned execution work in this Claude turn."
+    ));
+    assert!(stdin_log.contains("Current direct Claudex tool inventory: spawn_agent"));
+    assert!(
+        !stdin_log.contains("Current direct Claudex tool inventory: spawn_agent, exec_command")
+    );
+    assert!(!stdin_log.contains("apply_patch"));
+
+    let args_log = std::fs::read_to_string(args_log_path).expect("read args log");
+    assert!(args_log.contains("--mcp-config"));
 }
 
 #[tokio::test]

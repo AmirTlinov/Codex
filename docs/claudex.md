@@ -18,8 +18,11 @@ source home, then rebases home-local absolute paths inside the copied
 instead of falling back to `~/.codex`. Existing non-empty homes get that same
 target-only path repair on launch. Override the destination with
 `CLAUDEX_HOME=/path/to/home` and the copy source with
-`CLAUDEX_SOURCE_HOME=/path/to/source`. You can force the binary choice with
-`CLAUDEX_PROFILE=debug|release`.
+`CLAUDEX_SOURCE_HOME=/path/to/source`. Fresh copied homes now also get a
+Claudex-owned seed marker so the downstream one-shot home migration only
+rewrites defaults on homes that the wrapper itself seeded, instead of
+rewriting arbitrary user-managed `~/.claudex` configs. You can force the
+binary choice with `CLAUDEX_PROFILE=debug|release`.
 
 - `model_provider=claude_code`
 - `model=claude-opus-4-6`
@@ -129,6 +132,13 @@ This downstream slice is intentionally honest and narrow:
 - the bridge now exposes a narrow first pilot tool too:
   `mcp__codex__codex-shell`, which starts a Codex-owned worker session for one
   exact shell command and returns its output;
+- when that internal Codex bridge is available, the default Claude Code lane
+  now treats overlapping Claude carrier shell/filesystem/network built-ins as
+  compat-only surfaces instead of the normal path: runtime truth advertises
+  the Codex bridge as authoritative, the main-lane direct-tool inventory hides
+  overlapping `exec_command` / `write_stdin` / `apply_patch` surfaces, and the
+  external Claude carrier allowlist strips overlapping Claude built-ins like
+  `Bash` / `Read` before launching the carrier;
 - the Claude Code main lane now bridges supported `can_use_tool`
   `control_request`s into Codex's existing approval surfaces:
   - `Bash` routes through command approval;
@@ -156,6 +166,14 @@ This downstream slice is intentionally honest and narrow:
   supported carrier permission prompts surface on the child thread through the
   same Codex approval/request-permissions UI rather than dying inside the
   opaque external runner;
+- wrapper-seeded `~/.claudex` homes now get a one-shot downstream migration
+  marker path too: if a freshly seeded home still carries the untouched legacy
+  OpenAI/GPT defaults, Claudex promotes that copied config to
+  `model_provider = "claude_code"`, `agent_backend = "claude_code"`,
+  `model = "claude-opus-4-6"`, and provider-native `model_reasoning_effort =
+  "max"` / `plan_mode_reasoning_effort = "max"`; user-managed homes without
+  the installer seed marker are left alone instead of being rewritten
+  opportunistically;
 - the native `anthropic` lane now preserves Claude image prompts and image
   tool-result content too, so API-key Anthropic usage is no longer text-only;
 - native `anthropic` still fail-closes on Claude.ai OAuth because `/v1/messages`

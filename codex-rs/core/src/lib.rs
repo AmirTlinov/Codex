@@ -25,6 +25,7 @@ pub use codex_thread::ThreadConfigSnapshot;
 mod agent;
 mod claude_code_control;
 mod claude_code_stream;
+pub mod claudex_home_migration;
 mod codex_delegate;
 mod command_canonicalization;
 mod commit_attribution;

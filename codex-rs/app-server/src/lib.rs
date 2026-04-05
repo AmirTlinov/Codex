@@ -378,7 +378,7 @@ pub async fn run_main_with_transport(
         .build()
         .await
     {
-        Ok(config) => {
+        Ok(mut config) => {
             let effective_toml = config.config_layer_stack.effective_config();
             match effective_toml.try_into() {
                 Ok(config_toml) => {
@@ -389,6 +389,32 @@ pub async fn run_main_with_transport(
                     .await
                     {
                         warn!(error = %err, "Failed to run personality migration");
+                    }
+                    match codex_core::claudex_home_migration::maybe_migrate_claudex_home(
+                        &config.codex_home,
+                    )
+                    .await
+                    {
+                        Ok(
+                            codex_core::claudex_home_migration::ClaudexHomeMigrationStatus::Applied,
+                        ) => {
+                            match ConfigBuilder::default()
+                                .cli_overrides(cli_kv_overrides.clone())
+                                .loader_overrides(loader_overrides.clone())
+                                .build()
+                                .await
+                            {
+                                Ok(reloaded) => config = reloaded,
+                                Err(err) => warn!(
+                                    error = %err,
+                                    "Failed to reload config after Claudex home migration"
+                                ),
+                            }
+                        }
+                        Ok(_) => {}
+                        Err(err) => {
+                            warn!(error = %err, "Failed to run Claudex home migration");
+                        }
                     }
                 }
                 Err(err) => {
