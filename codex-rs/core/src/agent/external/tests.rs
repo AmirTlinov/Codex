@@ -598,7 +598,7 @@ async fn run_claude_code_turn_allows_tool_only_output_when_response_items_presen
     .await
     .expect("tool-only Claude output should still succeed");
 
-    assert!(result.output.is_empty());
+    assert_eq!(result.assistant_text, None);
     assert_eq!(
         result.response_items,
         vec![ResponseItem::FunctionCall {
@@ -639,6 +639,49 @@ async fn external_agent_registry_allows_tool_only_claude_turn_with_response_item
 
     let status = wait_for_final_status(&registry, thread_id).await;
     assert_eq!(status, AgentStatus::Completed(None));
+}
+
+#[tokio::test]
+async fn finish_turn_errors_when_claude_result_has_no_text_or_items() {
+    let root = TempDir::new().expect("create temp dir");
+    let state = Arc::new(ExternalAgentState::new(ExternalAgentLaunchRequest {
+        host_thread: host_thread(&root, "claude-opus-4-6").await,
+        config_snapshot: test_snapshot(root.path(), "claude-opus-4-6"),
+        developer_instructions: Some("Follow repo truth".to_string()),
+        claude_cli: ClaudeCliConfig::default(),
+        model: "claude-opus-4-6".to_string(),
+        parent_context: Some("[1] user: parent context".to_string()),
+    }));
+    let generation = 1;
+    {
+        let mut active_turn = state.active_turn.lock().await;
+        *active_turn = Some(ExternalActiveTurn {
+            generation,
+            cancellation_token: tokio_util::sync::CancellationToken::new(),
+        });
+    }
+    let host_turn_context = state.begin_host_turn().await;
+
+    state
+        .finish_turn(
+            generation,
+            host_turn_context.sub_id.clone(),
+            host_turn_context.truncation_policy,
+            Ok(ClaudeCodeTurnResult {
+                assistant_text: None,
+                session_id: Some("session-id".to_string()),
+                response_items: Vec::new(),
+                recorded_response_items_live: false,
+            }),
+        )
+        .await;
+
+    assert_eq!(
+        state.status(),
+        AgentStatus::Errored(
+            "Claude Code turn completed without assistant text or response items".to_string()
+        )
+    );
 }
 
 #[tokio::test]

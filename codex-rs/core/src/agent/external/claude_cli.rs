@@ -45,7 +45,7 @@ pub(crate) enum ClaudeCliSession {
 
 #[derive(Debug)]
 pub(crate) struct ClaudeCodeTurnResult {
-    pub(crate) output: String,
+    pub(crate) assistant_text: Option<String>,
     pub(crate) session_id: Option<String>,
     pub(crate) response_items: Vec<ResponseItem>,
     pub(crate) recorded_response_items_live: bool,
@@ -570,8 +570,10 @@ pub(crate) async fn run_claude_code_turn(
     if summary.assistant_text.trim().is_empty() && response_items.is_empty() {
         anyhow::bail!("Claude Code returned empty output");
     }
+    let assistant_text =
+        (!summary.assistant_text.trim().is_empty()).then_some(summary.assistant_text);
     Ok(ClaudeCodeTurnResult {
-        output: summary.assistant_text,
+        assistant_text,
         session_id: summary.session_id,
         response_items,
         recorded_response_items_live: false,

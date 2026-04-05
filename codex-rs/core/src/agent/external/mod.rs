@@ -344,6 +344,14 @@ impl ExternalAgentState {
                 if output.recorded_response_items_live {
                     // The child-thread host already received raw response items during the turn.
                 } else if output.response_items.is_empty() {
+                    let Some(text) = output.assistant_text.as_ref() else {
+                        self.status_tx.send_replace(AgentStatus::Errored(
+                            "Claude Code turn completed without assistant text or response items"
+                                .to_string(),
+                        ));
+                        self.finish_host_turn().await;
+                        return;
+                    };
                     self.record_host_message(
                         host_turn_id.as_str(),
                         host_truncation_policy,
@@ -351,7 +359,7 @@ impl ExternalAgentState {
                             id: None,
                             role: "assistant".to_string(),
                             content: vec![codex_protocol::models::ContentItem::OutputText {
-                                text: output.output.clone(),
+                                text: text.clone(),
                             }],
                             end_turn: Some(true),
                             phase: None,
@@ -369,16 +377,14 @@ impl ExternalAgentState {
                         )
                         .await;
                 }
-                let completed_output =
-                    (!output.output.trim().is_empty()).then(|| output.output.clone());
-                if let Some(text) = completed_output.as_ref() {
+                if let Some(text) = output.assistant_text.as_ref() {
                     self.conversation.lock().await.push(ConversationEntry {
                         role: ConversationRole::Assistant,
                         text: text.clone(),
                     });
                 }
                 self.status_tx
-                    .send_replace(AgentStatus::Completed(completed_output));
+                    .send_replace(AgentStatus::Completed(output.assistant_text));
             }
             Err(err) => {
                 let message = err.to_string();
@@ -594,8 +600,10 @@ impl ExternalAgentState {
         if summary.assistant_text.trim().is_empty() && !recorded_response_items_live {
             anyhow::bail!("Claude Code returned empty output");
         }
+        let assistant_text =
+            (!summary.assistant_text.trim().is_empty()).then_some(summary.assistant_text);
         Ok(ClaudeCodeTurnResult {
-            output: summary.assistant_text,
+            assistant_text,
             session_id: summary.session_id,
             response_items: Vec::new(),
             recorded_response_items_live,
