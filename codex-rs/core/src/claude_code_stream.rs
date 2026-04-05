@@ -24,6 +24,16 @@ pub(crate) struct ClaudeCodeTurnSummary {
     pub(crate) assistant_text: String,
 }
 
+pub(crate) fn completed_response_items(events: &[ResponseEvent]) -> Vec<ResponseItem> {
+    events
+        .iter()
+        .filter_map(|event| match event {
+            ResponseEvent::OutputItemDone(item) => Some(item.clone()),
+            _ => None,
+        })
+        .collect()
+}
+
 impl ClaudeCodeStreamAccumulator {
     pub(crate) fn push_line(&mut self, line: &str) -> anyhow::Result<Vec<ResponseEvent>> {
         let value: serde_json::Value =

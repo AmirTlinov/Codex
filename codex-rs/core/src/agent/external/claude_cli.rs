@@ -17,8 +17,11 @@ use tokio_util::sync::CancellationToken;
 
 #[cfg(test)]
 use crate::claude_code_stream::ClaudeCodeStreamAccumulator;
+#[cfg(test)]
+use crate::claude_code_stream::completed_response_items;
 use crate::config::ClaudeCliConfig;
 use crate::config::ClaudeCliEffort;
+use codex_protocol::models::ResponseItem;
 
 #[derive(Debug, Clone)]
 pub(crate) struct ClaudeCliRequest {
@@ -44,6 +47,7 @@ pub(crate) enum ClaudeCliSession {
 pub(crate) struct ClaudeCodeTurnResult {
     pub(crate) output: String,
     pub(crate) session_id: Option<String>,
+    pub(crate) response_items: Vec<ResponseItem>,
 }
 
 pub(crate) struct ClaudeCliControlledStream {
@@ -551,10 +555,12 @@ pub(crate) async fn run_claude_code_turn(
 ) -> anyhow::Result<ClaudeCodeTurnResult> {
     let mut raw_lines = run_claude_cli_stream_json(config, request, cancellation_token).await?;
     let mut accumulator = ClaudeCodeStreamAccumulator::default();
+    let mut response_items = Vec::new();
     while let Some(line) = raw_lines.recv().await {
         match line {
             Ok(line) => {
-                accumulator.push_line(&line)?;
+                let events = accumulator.push_line(&line)?;
+                response_items.extend(completed_response_items(&events));
             }
             Err(err) => return Err(err),
         }
@@ -566,6 +572,7 @@ pub(crate) async fn run_claude_code_turn(
     Ok(ClaudeCodeTurnResult {
         output: summary.assistant_text,
         session_id: summary.session_id,
+        response_items,
     })
 }
 

@@ -22,6 +22,7 @@ use crate::claude_code_control::ClaudeControlRequest;
 use crate::claude_code_control::ControlRequestParseOutcome;
 use crate::claude_code_control::parse_control_request_line;
 use crate::claude_code_control::resolve_external_claude_code_permission_request;
+use crate::claude_code_stream::completed_response_items;
 use crate::codex_thread::ThreadConfigSnapshot;
 use crate::compact_transcript::render_compact_transcript;
 use crate::config::ClaudeCliConfig;
@@ -335,20 +336,32 @@ impl ExternalAgentState {
                 if let Some(session_id) = output.session_id {
                     *self.claude_session_id.lock().await = Some(session_id);
                 }
-                self.record_host_message(
-                    host_turn_id.as_str(),
-                    host_truncation_policy,
-                    ResponseItem::Message {
-                        id: None,
-                        role: "assistant".to_string(),
-                        content: vec![codex_protocol::models::ContentItem::OutputText {
-                            text: output.output.clone(),
-                        }],
-                        end_turn: Some(true),
-                        phase: None,
-                    },
-                )
-                .await;
+                if output.response_items.is_empty() {
+                    self.record_host_message(
+                        host_turn_id.as_str(),
+                        host_truncation_policy,
+                        ResponseItem::Message {
+                            id: None,
+                            role: "assistant".to_string(),
+                            content: vec![codex_protocol::models::ContentItem::OutputText {
+                                text: output.output.clone(),
+                            }],
+                            end_turn: Some(true),
+                            phase: None,
+                        },
+                    )
+                    .await;
+                } else {
+                    self.host_thread
+                        .codex
+                        .session
+                        .record_external_host_items(
+                            host_turn_id.as_str(),
+                            host_truncation_policy,
+                            &output.response_items,
+                        )
+                        .await;
+                }
                 self.conversation.lock().await.push(ConversationEntry {
                     role: ConversationRole::Assistant,
                     text: output.output.clone(),
@@ -500,6 +513,7 @@ impl ExternalAgentState {
         let mut raw_lines = controlled.lines;
         let control_responder = controlled.control_responder;
         let mut accumulator = crate::claude_code_stream::ClaudeCodeStreamAccumulator::default();
+        let mut response_items = Vec::new();
 
         while let Some(line) = raw_lines.recv().await {
             match line {
@@ -543,7 +557,8 @@ impl ExternalAgentState {
                         )
                     }
                     Ok(ControlRequestParseOutcome::NotControlRequest) => {
-                        let _ = accumulator.push_line(&line)?;
+                        let events = accumulator.push_line(&line)?;
+                        response_items.extend(completed_response_items(&events));
                     }
                     Err(message) => anyhow::bail!(message),
                 },
@@ -558,6 +573,7 @@ impl ExternalAgentState {
         Ok(ClaudeCodeTurnResult {
             output: summary.assistant_text,
             session_id: summary.session_id,
+            response_items,
         })
     }
 }
