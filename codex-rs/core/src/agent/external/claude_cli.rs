@@ -51,6 +51,32 @@ pub(crate) struct ClaudeCodeTurnResult {
     pub(crate) recorded_response_items_live: bool,
 }
 
+impl ClaudeCodeTurnResult {
+    /// Normalize Claude carrier summary output into the external-agent result contract.
+    ///
+    /// `recorded_response_items_live` may be `true` only when the caller has already persisted
+    /// the corresponding response items into the owning Codex turn/thread history.
+    pub(crate) fn from_carrier_summary(
+        assistant_text: String,
+        session_id: Option<String>,
+        response_items: Vec<ResponseItem>,
+        recorded_response_items_live: bool,
+    ) -> anyhow::Result<Self> {
+        if assistant_text.trim().is_empty()
+            && response_items.is_empty()
+            && !recorded_response_items_live
+        {
+            anyhow::bail!("Claude Code returned empty output");
+        }
+        Ok(Self {
+            assistant_text: (!assistant_text.trim().is_empty()).then_some(assistant_text),
+            session_id,
+            response_items,
+            recorded_response_items_live,
+        })
+    }
+}
+
 pub(crate) struct ClaudeCliControlledStream {
     pub(crate) lines: mpsc::Receiver<anyhow::Result<String>>,
     pub(crate) control_responder: ClaudeCodeControlResponder,
@@ -567,17 +593,12 @@ pub(crate) async fn run_claude_code_turn(
         }
     }
     let summary = accumulator.finish();
-    if summary.assistant_text.trim().is_empty() && response_items.is_empty() {
-        anyhow::bail!("Claude Code returned empty output");
-    }
-    let assistant_text =
-        (!summary.assistant_text.trim().is_empty()).then_some(summary.assistant_text);
-    Ok(ClaudeCodeTurnResult {
-        assistant_text,
-        session_id: summary.session_id,
+    ClaudeCodeTurnResult::from_carrier_summary(
+        summary.assistant_text,
+        summary.session_id,
         response_items,
-        recorded_response_items_live: false,
-    })
+        /*recorded_response_items_live*/ false,
+    )
 }
 
 #[cfg(test)]
@@ -752,4 +773,56 @@ async fn terminate_child(child: &mut tokio::process::Child) -> anyhow::Result<()
     child.start_kill().context("kill Claude CLI")?;
     let _ = child.wait().await;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::ClaudeCodeTurnResult;
+    use codex_protocol::models::ResponseItem;
+    use pretty_assertions::assert_eq;
+
+    #[test]
+    fn carrier_summary_rejects_empty_turn_without_text_or_items() {
+        let error = ClaudeCodeTurnResult::from_carrier_summary(
+            String::new(),
+            /*session_id*/ None,
+            Vec::new(),
+            /*recorded_response_items_live*/ false,
+        )
+        .expect_err("empty Claude summary should fail");
+        assert!(error.to_string().contains("empty output"));
+    }
+
+    #[test]
+    fn carrier_summary_normalizes_tool_only_turn_with_response_items() {
+        let result = ClaudeCodeTurnResult::from_carrier_summary(
+            "   ".to_string(),
+            Some("session-id".to_string()),
+            vec![ResponseItem::FunctionCall {
+                id: Some("msg-1-tool-item-1".to_string()),
+                name: "mcp__codex__codex-shell".to_string(),
+                namespace: None,
+                arguments: serde_json::json!({ "command": "printf hi" }).to_string(),
+                call_id: "toolu-tool-only-1".to_string(),
+            }],
+            /*recorded_response_items_live*/ false,
+        )
+        .expect("tool-only Claude summary should succeed");
+        assert_eq!(result.assistant_text, None);
+        assert_eq!(result.session_id, Some("session-id".to_string()));
+    }
+
+    #[test]
+    fn carrier_summary_normalizes_live_recorded_tool_only_turn() {
+        let result = ClaudeCodeTurnResult::from_carrier_summary(
+            "   ".to_string(),
+            Some("session-id".to_string()),
+            Vec::new(),
+            /*recorded_response_items_live*/ true,
+        )
+        .expect("live-recorded tool-only Claude summary should succeed");
+        assert_eq!(result.assistant_text, None);
+        assert_eq!(result.session_id, Some("session-id".to_string()));
+        assert!(result.recorded_response_items_live);
+    }
 }

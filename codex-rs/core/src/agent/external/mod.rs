@@ -597,17 +597,12 @@ impl ExternalAgentState {
         }
 
         let summary = accumulator.finish();
-        if summary.assistant_text.trim().is_empty() && !recorded_response_items_live {
-            anyhow::bail!("Claude Code returned empty output");
-        }
-        let assistant_text =
-            (!summary.assistant_text.trim().is_empty()).then_some(summary.assistant_text);
-        Ok(ClaudeCodeTurnResult {
-            assistant_text,
-            session_id: summary.session_id,
-            response_items: Vec::new(),
+        ClaudeCodeTurnResult::from_carrier_summary(
+            summary.assistant_text,
+            summary.session_id,
+            Vec::new(),
             recorded_response_items_live,
-        })
+        )
     }
 }
 
