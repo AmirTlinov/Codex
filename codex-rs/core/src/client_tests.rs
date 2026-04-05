@@ -654,6 +654,9 @@ async fn stream_passes_codex_mcp_bridge_config_to_claude_code() {
     assert!(args_log.contains("--mcp-config"));
     assert!(args_log.contains("mcp__codex__codex"));
     assert!(args_log.contains("mcp__codex__codex-shell"));
+    assert!(args_log.contains(
+        "pass `model-provider` to `mcp__codex__codex` (for example `openai` or `claude_code`)"
+    ));
     let mcp_config: serde_json::Value = serde_json::from_str(
         &std::fs::read_to_string(mcp_config_log_path).expect("read mcp config log"),
     )

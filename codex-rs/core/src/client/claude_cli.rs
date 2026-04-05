@@ -39,6 +39,8 @@ const CODEX_MCP_BRIDGE_PROMPT: &str = concat!(
     "An internal Codex MCP bridge is available in this session.\n",
     "If you need Codex-owned tools or a Codex-run worker, use `mcp__codex__codex` to start that task, ",
     "`mcp__codex__codex-reply` to continue it, and `mcp__codex__codex-shell` for exact shell commands.\n",
+    "When you need a specific Codex provider, pass `model-provider` to `mcp__codex__codex` ",
+    "(for example `openai` or `claude_code`).\n",
     "Prefer this bridge when you need Codex MCP servers, Codex-native tool behavior, or capabilities ",
     "that are not directly available through Claude Code built-ins."
 );

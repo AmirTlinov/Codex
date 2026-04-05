@@ -199,6 +199,10 @@ What it does:
 - streams structured Claude `tool_use` items into external child-thread raw
   response history as delegated turns run, instead of flattening those Claude
   turns down to plain assistant text only;
+- extends the internal `mcp__codex__codex` bridge surface with an explicit
+  `model-provider` override, so Claude-backed turns can start Codex-owned
+  sessions against `openai` vs `claude_code` deterministically instead of
+  guessing from only the current lane;
 - brands the runtime as `Claudex`, makes `claudex --version` report the
   current downstream short SHA, uses the same downstream product name in the
   default terminal title plus CLI update/human-output copy, points update

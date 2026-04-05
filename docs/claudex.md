@@ -83,7 +83,10 @@ This downstream slice is intentionally honest and narrow:
   and external Claude lanes know to prefer `mcp__codex__codex` /
   `mcp__codex__codex-reply` when they need Codex-owned tools or Codex-run
   workers, and `mcp__codex__codex-shell` for exact shell-command execution,
-  instead of guessing that only Claude built-ins exist;
+  instead of guessing that only Claude built-ins exist; when a Claude turn
+  needs a specific Codex provider, `mcp__codex__codex` now also accepts an
+  explicit `model-provider` override (for example `openai` or
+  `claude_code`);
 - the main Claude Code lane now prepends a dedicated
   `<codex_runtime_truth>` block to Claude's stdin prompt instead of burying
   current mode/tool context only inside the flattened conversation transcript:

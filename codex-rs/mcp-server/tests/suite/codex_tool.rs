@@ -845,6 +845,91 @@ async fn codex_tool_passes_base_instructions() -> anyhow::Result<()> {
     Ok(())
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn codex_tool_honors_explicit_model_provider_override() {
+    skip_if_no_network!();
+
+    if let Err(err) = codex_tool_honors_explicit_model_provider_override_impl().await {
+        panic!("failure: {err}");
+    }
+}
+
+async fn codex_tool_honors_explicit_model_provider_override_impl() -> anyhow::Result<()> {
+    let server =
+        create_mock_responses_server(vec![create_final_assistant_message_sse_response("Done!")?])
+            .await;
+
+    let codex_home = TempDir::new()?;
+    std::fs::write(
+        codex_home.path().join("config.toml"),
+        format!(
+            r#"
+model = "mock-model"
+approval_policy = "never"
+sandbox_policy = "workspace-write"
+
+model_provider = "mock_provider"
+
+[model_providers.mock_provider]
+name = "Mock provider"
+base_url = "{}/v1"
+wire_api = "responses"
+request_max_retries = 0
+stream_max_retries = 0
+
+[model_providers.mock_provider_alt]
+name = "Mock provider alt"
+base_url = "{}/v1"
+wire_api = "responses"
+request_max_retries = 0
+stream_max_retries = 0
+"#,
+            server.uri(),
+            server.uri()
+        ),
+    )?;
+
+    let mut mcp_process = McpProcess::new(codex_home.path()).await?;
+    timeout(DEFAULT_READ_TIMEOUT, mcp_process.initialize()).await??;
+
+    let codex_request_id = mcp_process
+        .send_codex_tool_call(CodexToolCallParam {
+            prompt: "Say hello".to_string(),
+            model_provider: Some("mock_provider_alt".to_string()),
+            ..Default::default()
+        })
+        .await?;
+
+    let session_configured = timeout(
+        DEFAULT_READ_TIMEOUT,
+        mcp_process.read_stream_until_codex_event_notification("session_configured"),
+    )
+    .await??;
+    let Some(params) = session_configured.notification.params else {
+        panic!("session configured notification should include params");
+    };
+    assert_eq!(params["msg"]["type"], json!("session_configured"));
+    assert_eq!(params["msg"]["model"], json!("mock-model"));
+    assert_eq!(
+        params["msg"]["model_provider_id"],
+        json!("mock_provider_alt")
+    );
+
+    let codex_response = timeout(
+        DEFAULT_READ_TIMEOUT,
+        mcp_process.read_stream_until_response_message(RequestId::Number(codex_request_id)),
+    )
+    .await??;
+    assert_eq!(codex_response.jsonrpc, JsonRpcVersion2_0);
+    assert_eq!(codex_response.id, RequestId::Number(codex_request_id));
+    assert_eq!(
+        codex_response.result["structuredContent"]["content"],
+        json!("Done!")
+    );
+
+    Ok(())
+}
+
 fn create_expected_patch_approval_elicitation_request_params(
     changes: HashMap<PathBuf, FileChange>,
     grant_root: Option<PathBuf>,

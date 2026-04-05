@@ -28,6 +28,15 @@ pub struct CodexToolCallParam {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
 
+    /// Optional override for the model provider id (for example `openai` or
+    /// `claude_code`).
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        alias = "model_provider"
+    )]
+    pub model_provider: Option<String>,
+
     /// Configuration profile from config.toml to specify default options.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub profile: Option<String>,
@@ -218,6 +227,7 @@ impl CodexToolCallParam {
         let Self {
             prompt,
             model,
+            model_provider,
             profile,
             cwd,
             approval_policy,
@@ -231,6 +241,7 @@ impl CodexToolCallParam {
         // Build the `ConfigOverrides` recognized by codex-core.
         let overrides = ConfigOverrides {
             model,
+            model_provider,
             config_profile: profile,
             cwd: cwd.map(PathBuf::from),
             approval_policy: approval_policy.map(Into::into),
@@ -450,6 +461,10 @@ mod tests {
                 "description": "Optional override for the model name (e.g. 'gpt-5.2', 'gpt-5.2-codex').",
                 "type": "string"
               },
+              "model-provider": {
+                "description": "Optional override for the model provider id (for example `openai` or `claude_code`).",
+                "type": "string"
+              },
               "profile": {
                 "description": "Configuration profile from config.toml to specify default options.",
                 "type": "string"
@@ -598,6 +613,67 @@ mod tests {
             other => panic!("expected workspace-write sandbox policy, got {other:?}"),
         }
         assert_eq!(config.model.as_deref(), Some("gpt-5"));
+    }
+
+    #[tokio::test]
+    async fn codex_param_builds_config_and_preserves_model_provider() {
+        let arg0_paths = codex_arg0::Arg0DispatchPaths {
+            codex_self_exe: Some(PathBuf::from("/tmp/codex")),
+            codex_linux_sandbox_exe: Some(PathBuf::from("/tmp/codex-linux-sandbox")),
+            main_execve_wrapper_exe: Some(PathBuf::from("/tmp/codex-execve-wrapper")),
+        };
+        let (prompt, config) = CodexToolCallParam {
+            prompt: "delegate to gpt".to_string(),
+            model: Some("gpt-5.4".to_string()),
+            model_provider: Some("openai".to_string()),
+            profile: None,
+            cwd: Some("/tmp".to_string()),
+            approval_policy: Some(CodexToolCallApprovalPolicy::OnRequest),
+            sandbox: Some(CodexToolCallSandboxMode::WorkspaceWrite),
+            config: None,
+            base_instructions: None,
+            developer_instructions: None,
+            compact_prompt: None,
+        }
+        .into_config(arg0_paths)
+        .await
+        .expect("codex config should build");
+
+        assert_eq!(prompt, "delegate to gpt");
+        assert_eq!(config.model.as_deref(), Some("gpt-5.4"));
+        assert_eq!(config.model_provider_id, "openai");
+        assert_eq!(
+            config.model_provider.wire_api,
+            codex_core::WireApi::Responses
+        );
+    }
+
+    #[tokio::test]
+    async fn codex_param_accepts_snake_case_model_provider_alias() {
+        let arg0_paths = codex_arg0::Arg0DispatchPaths {
+            codex_self_exe: Some(PathBuf::from("/tmp/codex")),
+            codex_linux_sandbox_exe: Some(PathBuf::from("/tmp/codex-linux-sandbox")),
+            main_execve_wrapper_exe: Some(PathBuf::from("/tmp/codex-execve-wrapper")),
+        };
+        let param = serde_json::from_value::<CodexToolCallParam>(serde_json::json!({
+            "prompt": "delegate to claude",
+            "model": "claude-opus-4-6",
+            "model_provider": "claude_cli",
+        }))
+        .expect("snake_case alias should deserialize");
+
+        let (prompt, config) = param
+            .into_config(arg0_paths)
+            .await
+            .expect("codex config should build");
+
+        assert_eq!(prompt, "delegate to claude");
+        assert_eq!(config.model.as_deref(), Some("claude-opus-4-6"));
+        assert_eq!(config.model_provider_id, "claude_code");
+        assert_eq!(
+            config.model_provider.wire_api,
+            codex_core::WireApi::ClaudeCode
+        );
     }
 
     #[test]

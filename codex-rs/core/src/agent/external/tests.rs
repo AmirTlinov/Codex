@@ -675,6 +675,9 @@ async fn external_agent_registry_prepends_runtime_truth_and_role_inventory_to_pr
     assert!(stdin.contains("OpenAI [openai]:"));
     assert!(stdin.contains("Current direct Claude Code carrier tool allowlist: Read, Bash"));
     assert!(stdin.contains("Current Codex bridge tool inventory: mcp__codex__codex, mcp__codex__codex-reply, mcp__codex__codex-shell"));
+    assert!(stdin.contains(
+        "`mcp__codex__codex` accepts `model-provider` when this delegated Claude turn needs a specific Codex provider such as `openai` or `claude_code`."
+    ));
 
     registry
         .send_input(thread_id, text_input("follow-up inventory check"))

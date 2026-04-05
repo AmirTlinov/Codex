@@ -448,6 +448,48 @@ impl McpProcess {
             }
         }
     }
+
+    pub async fn read_stream_until_codex_event_notification(
+        &mut self,
+        event_type: &str,
+    ) -> anyhow::Result<JsonRpcNotification<CustomNotification>> {
+        eprintln!("in read_stream_until_codex_event_notification({event_type})");
+
+        loop {
+            let message = self.read_jsonrpc_message().await?;
+            match message {
+                JsonRpcMessage::Notification(notification) => {
+                    let is_match = if notification.notification.method == "codex/event" {
+                        if let Some(params) = &notification.notification.params {
+                            params
+                                .get("msg")
+                                .and_then(|msg| msg.get("type"))
+                                .and_then(|value| value.as_str())
+                                == Some(event_type)
+                        } else {
+                            false
+                        }
+                    } else {
+                        false
+                    };
+
+                    if is_match {
+                        return Ok(notification);
+                    }
+                    eprintln!("ignoring notification: {notification:?}");
+                }
+                JsonRpcMessage::Request(_) => {
+                    anyhow::bail!("unexpected JSONRPCMessage::Request: {message:?}");
+                }
+                JsonRpcMessage::Error(_) => {
+                    anyhow::bail!("unexpected JSONRPCMessage::Error: {message:?}");
+                }
+                JsonRpcMessage::Response(_) => {
+                    anyhow::bail!("unexpected JSONRPCMessage::Response: {message:?}");
+                }
+            }
+        }
+    }
 }
 
 impl Drop for McpProcess {
