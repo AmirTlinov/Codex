@@ -111,6 +111,53 @@ async fn turn_started_uses_runtime_context_window_before_first_token_count() {
         "expected /status to avoid raw config context window, got: {context_line}"
     );
 }
+
+#[tokio::test]
+async fn switching_from_gpt_to_claude_updates_context_window_hint() {
+    let (mut chat, _rx, _ops) = make_chatwidget_manual(Some("gpt-5.4")).await;
+
+    chat.handle_codex_event(Event {
+        id: "token-before-switch".into(),
+        msg: EventMsg::TokenCount(TokenCountEvent {
+            info: Some(make_token_info(
+                /*total_tokens*/ 120_000, /*context_window*/ 1_000_000,
+            )),
+            rate_limits: None,
+        }),
+    });
+    assert_eq!(
+        chat.status_line_value_for_item(&crate::bottom_pane::StatusLineItem::ContextWindowSize),
+        Some("1M window".to_string())
+    );
+
+    chat.set_model_provider(
+        codex_core::CLAUDE_CODE_PROVIDER_ID,
+        codex_core::create_claude_code_provider(),
+    );
+    chat.set_model("claude-opus-4-6");
+
+    assert_eq!(
+        chat.status_line_value_for_item(&crate::bottom_pane::StatusLineItem::ContextWindowSize),
+        Some("190K window".to_string())
+    );
+    assert_eq!(chat.bottom_pane.context_window_percent(), Some(39));
+}
+
+#[tokio::test]
+async fn claude_opus_status_line_uses_max_label_on_claude_code() {
+    let (mut chat, _rx, _ops) = make_chatwidget_manual(Some("claude-opus-4-6")).await;
+    chat.set_model_provider(
+        codex_core::CLAUDE_CODE_PROVIDER_ID,
+        codex_core::create_claude_code_provider(),
+    );
+    chat.config.tui_status_line = Some(vec!["model-with-reasoning".to_string()]);
+    chat.set_reasoning_effort(Some(ReasoningEffortConfig::XHigh));
+
+    assert_eq!(
+        status_line_text(&chat),
+        Some("claude-opus-4-6 max".to_string())
+    );
+}
 #[tokio::test]
 async fn helpers_are_available_and_do_not_panic() {
     let (tx_raw, _rx) = unbounded_channel::<AppEvent>();

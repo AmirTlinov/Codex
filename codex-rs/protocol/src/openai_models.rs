@@ -294,6 +294,12 @@ pub struct ModelInfo {
 }
 
 impl ModelInfo {
+    pub fn effective_context_window(&self) -> Option<i64> {
+        self.context_window.map(|context_window| {
+            context_window.saturating_mul(self.effective_context_window_percent) / 100
+        })
+    }
+
     pub fn auto_compact_token_limit(&self) -> Option<i64> {
         let context_limit = self
             .context_window

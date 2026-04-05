@@ -399,6 +399,20 @@ impl ModelsManager {
         model_info::with_config_overrides(model_info, config)
     }
 
+    /// Build `ModelInfo` offline using the bundled catalog for a specific provider.
+    pub fn construct_model_info_offline(
+        model: &str,
+        config: &Config,
+        provider: &ModelProviderInfo,
+    ) -> ModelInfo {
+        let bundled_models = if let Some(model_catalog) = config.model_catalog.as_ref() {
+            model_catalog.models.clone()
+        } else {
+            Self::load_bundled_models(provider).unwrap_or_default()
+        };
+        Self::construct_model_info_from_candidates(model, &bundled_models, config)
+    }
+
     /// Refresh models if the provided ETag differs from the cached ETag.
     ///
     /// Uses `Online` strategy to fetch latest models when ETags differ.
@@ -753,12 +767,7 @@ impl ModelsManager {
         model: &str,
         config: &Config,
     ) -> ModelInfo {
-        let candidates: &[ModelInfo] = if let Some(model_catalog) = config.model_catalog.as_ref() {
-            &model_catalog.models
-        } else {
-            &[]
-        };
-        Self::construct_model_info_from_candidates(model, candidates, config)
+        Self::construct_model_info_offline(model, config, &config.model_provider)
     }
 }
 

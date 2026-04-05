@@ -7537,7 +7537,8 @@ impl ChatWidget {
             Some(ReasoningEffortConfig::Medium) => "medium",
             Some(ReasoningEffortConfig::High) => "high",
             Some(ReasoningEffortConfig::XHigh)
-                if self.current_model_provider_id() == "claude_cli"
+                if codex_core::canonical_claude_provider_id(self.current_model_provider_id())
+                    == codex_core::CLAUDE_CODE_PROVIDER_ID
                     && self.current_model() == "claude-opus-4-6" =>
             {
                 "max"
@@ -9832,6 +9833,7 @@ impl ChatWidget {
         {
             mask.model = Some(model.to_string());
         }
+        self.sync_token_info_to_selected_model();
         self.refresh_model_dependent_surfaces();
     }
 
@@ -9842,6 +9844,7 @@ impl ChatWidget {
     ) {
         self.config.model_provider_id = provider_id.to_string();
         self.config.model_provider = provider;
+        self.sync_token_info_to_selected_model();
     }
 
     pub(crate) fn current_model_provider_id(&self) -> &str {
@@ -10037,6 +10040,26 @@ impl ChatWidget {
     fn refresh_model_dependent_surfaces(&mut self) {
         self.refresh_model_display();
         self.refresh_status_line();
+    }
+
+    fn sync_token_info_to_selected_model(&mut self) {
+        let Some(mut info) = self.token_info.take() else {
+            return;
+        };
+        let model = self.current_model();
+        if model.is_empty() {
+            self.token_info = Some(info);
+            return;
+        }
+
+        let selected_model_info =
+            codex_core::models_manager::manager::ModelsManager::construct_model_info_offline(
+                model,
+                &self.config,
+                &self.config.model_provider,
+            );
+        info.model_context_window = selected_model_info.effective_context_window();
+        self.apply_token_info(info);
     }
 
     fn model_display_name(&self) -> &str {

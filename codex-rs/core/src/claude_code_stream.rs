@@ -3,6 +3,7 @@ use codex_api::common::ResponseEvent;
 use codex_protocol::models::ContentItem;
 use codex_protocol::models::ResponseItem;
 use codex_protocol::protocol::TokenUsage;
+use serde_json::Value;
 use uuid::Uuid;
 
 #[derive(Default)]
@@ -153,21 +154,26 @@ impl ClaudeCodeStreamAccumulator {
             .or_else(|| self.session_id.clone())
             .unwrap_or_else(|| format!("claude-code-{}", Uuid::new_v4()));
         self.response_id = Some(message_id.clone());
-        let text = extract_text_content(message.get("content")).unwrap_or_else(|| {
-            if self.partial_text.is_empty() {
+        let parsed = parse_assistant_content_blocks(message.get("content"), &message_id)
+            .with_context(|| format!("parse Claude assistant payload for {message_id}"))?;
+        if parsed.events.is_empty() {
+            let text = if self.partial_text.is_empty() {
                 String::new()
             } else {
                 self.partial_text.clone()
-            }
-        });
-        self.assistant_text = Some(text.clone());
-        events.push(ResponseEvent::OutputItemDone(ResponseItem::Message {
-            id: Some(message_id),
-            role: "assistant".to_string(),
-            content: vec![ContentItem::OutputText { text }],
-            end_turn: Some(true),
-            phase: None,
-        }));
+            };
+            self.assistant_text = Some(text.clone());
+            events.push(ResponseEvent::OutputItemDone(ResponseItem::Message {
+                id: Some(message_id),
+                role: "assistant".to_string(),
+                content: vec![ContentItem::OutputText { text }],
+                end_turn: Some(true),
+                phase: None,
+            }));
+        } else {
+            self.assistant_text = Some(parsed.visible_text);
+            events.extend(parsed.events);
+        }
         self.active_message_id = None;
         Ok(events)
     }
@@ -215,21 +221,121 @@ impl ClaudeCodeStreamAccumulator {
     }
 }
 
-fn extract_text_content(content: Option<&serde_json::Value>) -> Option<String> {
-    let content = content?.as_array()?;
-    Some(
-        content
-            .iter()
-            .filter(|block| block.get("type").and_then(serde_json::Value::as_str) == Some("text"))
-            .filter_map(|block| {
-                block
-                    .get("text")
-                    .and_then(serde_json::Value::as_str)
-                    .map(str::to_string)
-            })
-            .collect::<Vec<_>>()
-            .join(""),
-    )
+struct ParsedAssistantContent {
+    visible_text: String,
+    events: Vec<ResponseEvent>,
+}
+
+fn parse_assistant_content_blocks(
+    content: Option<&Value>,
+    message_id: &str,
+) -> anyhow::Result<ParsedAssistantContent> {
+    let Some(content) = content.and_then(Value::as_array) else {
+        return Ok(ParsedAssistantContent {
+            visible_text: String::new(),
+            events: Vec::new(),
+        });
+    };
+
+    let mut visible_text = String::new();
+    let mut events = Vec::new();
+    let mut pending_text = String::new();
+    let mut emitted_text_segments = 0usize;
+    let mut emitted_tool_calls = 0usize;
+
+    let flush_pending_text = |events: &mut Vec<ResponseEvent>,
+                              pending_text: &mut String,
+                              emitted_text_segments: &mut usize,
+                              message_id: &str| {
+        if pending_text.is_empty() {
+            return;
+        }
+        *emitted_text_segments += 1;
+        let item_id = if *emitted_text_segments == 1 {
+            message_id.to_string()
+        } else {
+            format!("{message_id}-text-{emitted_text_segments}")
+        };
+        let text = std::mem::take(pending_text);
+        events.push(ResponseEvent::OutputItemDone(ResponseItem::Message {
+            id: Some(item_id),
+            role: "assistant".to_string(),
+            content: vec![ContentItem::OutputText { text }],
+            end_turn: Some(true),
+            phase: None,
+        }));
+    };
+
+    for block in content {
+        match block.get("type").and_then(Value::as_str) {
+            Some("text") => {
+                if let Some(text) = block.get("text").and_then(Value::as_str) {
+                    visible_text.push_str(text);
+                    pending_text.push_str(text);
+                }
+            }
+            Some("tool_use") => {
+                flush_pending_text(
+                    &mut events,
+                    &mut pending_text,
+                    &mut emitted_text_segments,
+                    message_id,
+                );
+
+                emitted_tool_calls += 1;
+                let tool_use_id = block
+                    .get("id")
+                    .and_then(Value::as_str)
+                    .filter(|id| !id.is_empty())
+                    .ok_or_else(|| anyhow::anyhow!("tool_use block is missing a non-empty `id`"))?
+                    .to_string();
+                let name = block
+                    .get("name")
+                    .and_then(Value::as_str)
+                    .filter(|name| !name.is_empty())
+                    .ok_or_else(|| anyhow::anyhow!("tool_use block is missing a non-empty `name`"))?
+                    .to_string();
+                let item_id = Some(format!("{message_id}-tool-item-{emitted_tool_calls}"));
+                let input = block
+                    .get("input")
+                    .cloned()
+                    .unwrap_or_else(|| Value::Object(Default::default()));
+
+                let item = if let Some(input) = input.as_str() {
+                    ResponseItem::CustomToolCall {
+                        id: item_id,
+                        status: None,
+                        call_id: tool_use_id,
+                        name,
+                        input: input.to_string(),
+                    }
+                } else {
+                    ResponseItem::FunctionCall {
+                        id: item_id,
+                        name,
+                        namespace: None,
+                        arguments: serde_json::to_string(&input)
+                            .context("serialize Claude tool_use input")?,
+                        call_id: tool_use_id,
+                    }
+                };
+                events.push(ResponseEvent::OutputItemDone(item));
+            }
+            _ => {}
+        }
+    }
+
+    flush_pending_text(
+        &mut events,
+        &mut pending_text,
+        &mut emitted_text_segments,
+        message_id,
+    );
+
+    Ok(ParsedAssistantContent {
+        visible_text,
+        events,
+    })
 }
 
 pub(crate) fn parse_token_usage(usage: Option<&serde_json::Value>) -> Option<TokenUsage> {
@@ -390,5 +496,66 @@ mod tests {
             ResponseEvent::ReasoningContentDelta { delta, content_index }
                 if delta == "orphan thought" && *content_index == 0
         ));
+    }
+
+    #[test]
+    fn assistant_payload_with_structured_tool_use_emits_tool_items() {
+        let mut accumulator = ClaudeCodeStreamAccumulator::default();
+
+        let events = accumulator
+            .push_line(
+                r#"{"type":"assistant","message":{"id":"msg-structured","type":"message","role":"assistant","content":[{"type":"text","text":"Running shell."},{"type":"tool_use","id":"toolu-1","name":"mcp__codex__codex-shell","input":{"command":"printf hi"}},{"type":"text","text":"Done."}]}}"#,
+            )
+            .expect("assistant payload should parse");
+
+        assert_eq!(events.len(), 4);
+        assert!(matches!(events[0], ResponseEvent::Created));
+        assert!(matches!(
+            &events[1],
+            ResponseEvent::OutputItemDone(ResponseItem::Message {
+                id: Some(id),
+                role,
+                content,
+                end_turn: Some(true),
+                phase: None,
+            }) if id == "msg-structured"
+                && role == "assistant"
+                && content == &vec![ContentItem::OutputText {
+                    text: "Running shell.".to_string(),
+                }]
+        ));
+        assert!(matches!(
+            &events[2],
+            ResponseEvent::OutputItemDone(ResponseItem::FunctionCall {
+                id: Some(id),
+                name,
+                namespace: None,
+                arguments,
+                call_id,
+            }) if id == "msg-structured-tool-item-1"
+                && name == "mcp__codex__codex-shell"
+                && call_id == "toolu-1"
+                && serde_json::from_str::<serde_json::Value>(arguments)
+                    .expect("tool arguments should be valid json")
+                    == serde_json::json!({ "command": "printf hi" })
+        ));
+        assert!(matches!(
+            &events[3],
+            ResponseEvent::OutputItemDone(ResponseItem::Message {
+                id: Some(id),
+                role,
+                content,
+                end_turn: Some(true),
+                phase: None,
+            }) if id == "msg-structured-text-2"
+                && role == "assistant"
+                && content == &vec![ContentItem::OutputText {
+                    text: "Done.".to_string(),
+                }]
+        ));
+
+        let summary = accumulator.finish();
+        assert_eq!(summary.response_id, "msg-structured");
+        assert_eq!(summary.assistant_text, "Running shell.Done.");
     }
 }

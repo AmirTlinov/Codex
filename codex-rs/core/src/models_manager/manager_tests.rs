@@ -221,6 +221,28 @@ async fn anthropic_provider_uses_multimodal_search_capable_claude_catalog() {
     assert_eq!(haiku.context_window, Some(200_000));
 }
 
+#[tokio::test]
+async fn construct_model_info_offline_uses_selected_provider_catalog() {
+    let codex_home = tempdir().expect("temp dir");
+    let mut config = ConfigBuilder::default()
+        .codex_home(codex_home.path().to_path_buf())
+        .build()
+        .await
+        .expect("load default test config");
+    config.model_provider = crate::create_claude_code_provider();
+    config.model_provider_id = crate::CLAUDE_CODE_PROVIDER_ID.to_string();
+
+    let model = ModelsManager::construct_model_info_offline(
+        "claude-opus-4-6",
+        &config,
+        &config.model_provider,
+    );
+
+    assert_eq!(model.display_name, "Claude Opus 4.6");
+    assert_eq!(model.context_window, Some(200_000));
+    assert_eq!(model.effective_context_window(), Some(190_000));
+}
+
 struct ProviderAuthScript {
     tempdir: TempDir,
     command: String,

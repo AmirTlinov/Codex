@@ -931,10 +931,7 @@ pub(crate) struct TurnContext {
 }
 impl TurnContext {
     pub(crate) fn model_context_window(&self) -> Option<i64> {
-        let effective_context_window_percent = self.model_info.effective_context_window_percent;
-        self.model_info.context_window.map(|context_window| {
-            context_window.saturating_mul(effective_context_window_percent) / 100
-        })
+        self.model_info.effective_context_window()
     }
 
     pub(crate) fn apps_enabled(&self) -> bool {
