@@ -369,12 +369,16 @@ impl ExternalAgentState {
                         )
                         .await;
                 }
-                self.conversation.lock().await.push(ConversationEntry {
-                    role: ConversationRole::Assistant,
-                    text: output.output.clone(),
-                });
+                let completed_output =
+                    (!output.output.trim().is_empty()).then(|| output.output.clone());
+                if let Some(text) = completed_output.as_ref() {
+                    self.conversation.lock().await.push(ConversationEntry {
+                        role: ConversationRole::Assistant,
+                        text: text.clone(),
+                    });
+                }
                 self.status_tx
-                    .send_replace(AgentStatus::Completed(Some(output.output)));
+                    .send_replace(AgentStatus::Completed(completed_output));
             }
             Err(err) => {
                 let message = err.to_string();
@@ -587,7 +591,7 @@ impl ExternalAgentState {
         }
 
         let summary = accumulator.finish();
-        if summary.assistant_text.trim().is_empty() {
+        if summary.assistant_text.trim().is_empty() && !recorded_response_items_live {
             anyhow::bail!("Claude Code returned empty output");
         }
         Ok(ClaudeCodeTurnResult {

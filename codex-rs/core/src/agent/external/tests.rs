@@ -236,6 +236,56 @@ done
     }
 }
 
+fn mock_tool_only_claude_script(root: &TempDir) -> MockClaudeScript {
+    let script_path = root.path().join("mock-claude-tool-only.sh");
+    let args_log_path = root.path().join("tool-only.args.log");
+    let stdin_log_path = root.path().join("tool-only.stdin.log");
+    std::fs::write(
+        &script_path,
+        format!(
+            "#!/usr/bin/env bash\nset -euo pipefail\nIFS= read -r stdin_payload\nprintf '%s\\n' \"$@\" >> '{}'\nprintf -- '--\\n' >> '{}'\nprintf '%s\\n--\\n' \"$stdin_payload\" >> '{}'\nsession_id='123e4567-e89b-12d3-a456-426614174099'\ncat <<EOF\n{{\"type\":\"system\",\"subtype\":\"init\",\"session_id\":\"$session_id\",\"tools\":[],\"mcp_servers\":[],\"model\":\"claude-opus-4-6\",\"permissionMode\":\"bypassPermissions\",\"slash_commands\":[],\"apiKeySource\":\"none\",\"claude_code_version\":\"test\",\"output_style\":\"default\",\"agents\":[],\"skills\":[],\"plugins\":[],\"uuid\":\"init-1\"}}\n{{\"type\":\"assistant\",\"message\":{{\"model\":\"claude-opus-4-6\",\"id\":\"msg-1\",\"type\":\"message\",\"role\":\"assistant\",\"content\":[{{\"type\":\"tool_use\",\"id\":\"toolu-tool-only-1\",\"name\":\"mcp__codex__codex-shell\",\"input\":{{\"command\":\"printf hi\"}}}}],\"stop_reason\":null,\"stop_sequence\":null,\"stop_details\":null,\"usage\":{{\"input_tokens\":3,\"cache_creation_input_tokens\":0,\"cache_read_input_tokens\":0,\"output_tokens\":0,\"service_tier\":\"standard\",\"inference_geo\":\"not_available\"}},\"context_management\":null}},\"parent_tool_use_id\":null,\"session_id\":\"$session_id\",\"uuid\":\"assistant-1\"}}\n{{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":false,\"duration_ms\":10,\"duration_api_ms\":10,\"num_turns\":1,\"result\":\"\",\"stop_reason\":\"tool_use\",\"session_id\":\"$session_id\",\"total_cost_usd\":0.0,\"usage\":{{\"input_tokens\":3,\"cache_creation_input_tokens\":0,\"cache_read_input_tokens\":0,\"output_tokens\":0}},\"modelUsage\":{{}},\"permission_denials\":[],\"uuid\":\"result-1\"}}\nEOF\n",
+            args_log_path.display(),
+            args_log_path.display(),
+            stdin_log_path.display(),
+        ),
+    )
+    .expect("write tool-only mock claude script");
+    let mut permissions = std::fs::metadata(&script_path)
+        .expect("tool-only mock claude metadata")
+        .permissions();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(&script_path, permissions).expect("chmod tool-only mock claude");
+    }
+    MockClaudeScript {
+        script_path,
+        args_log_path,
+        stdin_log_path,
+    }
+}
+
+fn mock_tool_only_claude_direct_script(root: &TempDir) -> std::path::PathBuf {
+    let script_path = root.path().join("mock-claude-tool-only-direct.sh");
+    std::fs::write(
+        &script_path,
+        "#!/usr/bin/env bash\nset -euo pipefail\ncat >/dev/null\nsession_id='123e4567-e89b-12d3-a456-426614174099'\ncat <<EOF\n{\"type\":\"system\",\"subtype\":\"init\",\"session_id\":\"$session_id\",\"tools\":[],\"mcp_servers\":[],\"model\":\"claude-opus-4-6\",\"permissionMode\":\"bypassPermissions\",\"slash_commands\":[],\"apiKeySource\":\"none\",\"claude_code_version\":\"test\",\"output_style\":\"default\",\"agents\":[],\"skills\":[],\"plugins\":[],\"uuid\":\"init-1\"}\n{\"type\":\"assistant\",\"message\":{\"model\":\"claude-opus-4-6\",\"id\":\"msg-1\",\"type\":\"message\",\"role\":\"assistant\",\"content\":[{\"type\":\"tool_use\",\"id\":\"toolu-tool-only-1\",\"name\":\"mcp__codex__codex-shell\",\"input\":{\"command\":\"printf hi\"}}],\"stop_reason\":null,\"stop_sequence\":null,\"stop_details\":null,\"usage\":{\"input_tokens\":3,\"cache_creation_input_tokens\":0,\"cache_read_input_tokens\":0,\"output_tokens\":0,\"service_tier\":\"standard\",\"inference_geo\":\"not_available\"},\"context_management\":null},\"parent_tool_use_id\":null,\"session_id\":\"$session_id\",\"uuid\":\"assistant-1\"}\n{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":false,\"duration_ms\":10,\"duration_api_ms\":10,\"num_turns\":1,\"result\":\"\",\"stop_reason\":\"tool_use\",\"session_id\":\"$session_id\",\"total_cost_usd\":0.0,\"usage\":{\"input_tokens\":3,\"cache_creation_input_tokens\":0,\"cache_read_input_tokens\":0,\"output_tokens\":0},\"modelUsage\":{},\"permission_denials\":[],\"uuid\":\"result-1\"}\nEOF\n",
+    )
+    .expect("write direct tool-only mock claude script");
+    let mut permissions = std::fs::metadata(&script_path)
+        .expect("direct tool-only mock claude metadata")
+        .permissions();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(&script_path, permissions)
+            .expect("chmod direct tool-only mock claude");
+    }
+    script_path
+}
+
 fn read_logged_invocations(mock_script: &MockClaudeScript) -> LoggedInvocations {
     let args_log = std::fs::read_to_string(&mock_script.args_log_path).expect("read args log");
     let stdin_log = std::fs::read_to_string(&mock_script.stdin_log_path).expect("read stdin log");
@@ -520,6 +570,75 @@ async fn run_claude_code_turn_rejects_empty_output() {
     .await
     .expect_err("empty Claude output should fail");
     assert!(error.to_string().contains("empty output"));
+}
+
+#[tokio::test]
+async fn run_claude_code_turn_allows_tool_only_output_when_response_items_present() {
+    let root = TempDir::new().expect("create temp dir");
+    let script_path = mock_tool_only_claude_direct_script(&root);
+
+    let result = run_claude_code_turn(
+        &ClaudeCliConfig {
+            path: Some(script_path),
+            ..Default::default()
+        },
+        ClaudeCliRequest {
+            cwd: root.path().to_path_buf(),
+            model: "claude-opus-4-6".to_string(),
+            system_prompt: "system".to_string(),
+            user_prompt: "user".to_string(),
+            session: ClaudeCliSession::Ephemeral,
+            json_schema: None,
+            tools: None,
+            force_toolless: false,
+            effort: None,
+        },
+        tokio_util::sync::CancellationToken::new(),
+    )
+    .await
+    .expect("tool-only Claude output should still succeed");
+
+    assert!(result.output.is_empty());
+    assert_eq!(
+        result.response_items,
+        vec![ResponseItem::FunctionCall {
+            id: Some("msg-1-tool-item-1".to_string()),
+            name: "mcp__codex__codex-shell".to_string(),
+            namespace: None,
+            arguments: serde_json::json!({ "command": "printf hi" }).to_string(),
+            call_id: "toolu-tool-only-1".to_string(),
+        }]
+    );
+}
+
+#[tokio::test]
+async fn external_agent_registry_allows_tool_only_claude_turn_with_response_items() {
+    let root = TempDir::new().expect("create temp dir");
+    let mock_script = mock_tool_only_claude_script(&root);
+    let registry = ExternalAgentRegistry::default();
+    let thread_id = ThreadId::new();
+
+    registry
+        .spawn_agent(
+            thread_id,
+            ExternalAgentLaunchRequest {
+                host_thread: host_thread(&root, "claude-opus-4-6").await,
+                config_snapshot: test_snapshot(root.path(), "claude-opus-4-6"),
+                developer_instructions: Some("Follow repo truth".to_string()),
+                claude_cli: ClaudeCliConfig {
+                    path: Some(mock_script.script_path),
+                    ..Default::default()
+                },
+                model: "claude-opus-4-6".to_string(),
+                parent_context: Some("[1] user: parent context".to_string()),
+            },
+            text_input("first"),
+        )
+        .await
+        .expect("spawn tool-only external agent");
+
+    let status = wait_for_final_status(&registry, thread_id).await;
+    assert_eq!(status, AgentStatus::Completed(None));
 }
 
 #[tokio::test]

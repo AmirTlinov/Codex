@@ -4,6 +4,8 @@ use codex_protocol::models::ContentItem;
 use codex_protocol::models::ResponseItem;
 use codex_protocol::protocol::TokenUsage;
 use serde_json::Value;
+use std::collections::HashMap;
+use std::collections::HashSet;
 use uuid::Uuid;
 
 #[derive(Default)]
@@ -15,6 +17,8 @@ pub(crate) struct ClaudeCodeStreamAccumulator {
     active_message_id: Option<String>,
     partial_text: String,
     assistant_text: Option<String>,
+    pending_tool_uses: HashMap<usize, PendingToolUse>,
+    emitted_tool_use_ids: HashSet<String>,
 }
 
 pub(crate) struct ClaudeCodeTurnSummary {
@@ -22,6 +26,13 @@ pub(crate) struct ClaudeCodeTurnSummary {
     pub(crate) token_usage: Option<TokenUsage>,
     pub(crate) session_id: Option<String>,
     pub(crate) assistant_text: String,
+}
+
+struct PendingToolUse {
+    tool_use_id: String,
+    name: String,
+    initial_input: Option<Value>,
+    input_json_delta: String,
 }
 
 pub(crate) fn completed_response_items(events: &[ResponseEvent]) -> Vec<ResponseItem> {
@@ -103,41 +114,9 @@ impl ClaudeCodeStreamAccumulator {
                     .and_then(serde_json::Value::as_str)
                     .map(str::to_string);
             }
-            Some("content_block_start") => {
-                let block_type = event
-                    .get("content_block")
-                    .and_then(|block| block.get("type"))
-                    .and_then(serde_json::Value::as_str);
-                if matches!(block_type, Some("text" | "thinking" | "redacted_thinking")) {
-                    self.ensure_active_message_started(&mut events);
-                }
-            }
-            Some("content_block_delta") => {
-                let Some(delta) = event.get("delta").and_then(serde_json::Value::as_object) else {
-                    return Ok(events);
-                };
-                match delta.get("type").and_then(serde_json::Value::as_str) {
-                    Some("text_delta") => {
-                        if let Some(text) = delta.get("text").and_then(serde_json::Value::as_str) {
-                            self.ensure_active_message_started(&mut events);
-                            self.partial_text.push_str(text);
-                            events.push(ResponseEvent::OutputTextDelta(text.to_string()));
-                        }
-                    }
-                    Some("thinking_delta") => {
-                        if let Some(text) =
-                            delta.get("thinking").and_then(serde_json::Value::as_str)
-                        {
-                            self.ensure_active_message_started(&mut events);
-                            events.push(ResponseEvent::ReasoningContentDelta {
-                                delta: text.to_string(),
-                                content_index: 0,
-                            });
-                        }
-                    }
-                    _ => {}
-                }
-            }
+            Some("content_block_start") => self.handle_content_block_start(event, &mut events)?,
+            Some("content_block_delta") => self.handle_content_block_delta(event, &mut events)?,
+            Some("content_block_stop") => self.handle_content_block_stop(event, &mut events)?,
             _ => {}
         }
         Ok(events)
@@ -164,14 +143,22 @@ impl ClaudeCodeStreamAccumulator {
             .or_else(|| self.session_id.clone())
             .unwrap_or_else(|| format!("claude-code-{}", Uuid::new_v4()));
         self.response_id = Some(message_id.clone());
-        let parsed = parse_assistant_content_blocks(message.get("content"), &message_id)
-            .with_context(|| format!("parse Claude assistant payload for {message_id}"))?;
+        let parsed = parse_assistant_content_blocks(
+            message.get("content"),
+            &message_id,
+            &self.emitted_tool_use_ids,
+        )
+        .with_context(|| format!("parse Claude assistant payload for {message_id}"))?;
         if parsed.events.is_empty() {
             let text = if self.partial_text.is_empty() {
                 String::new()
             } else {
                 self.partial_text.clone()
             };
+            if text.is_empty() {
+                self.active_message_id = None;
+                return Ok(events);
+            }
             self.assistant_text = Some(text.clone());
             events.push(ResponseEvent::OutputItemDone(ResponseItem::Message {
                 id: Some(message_id),
@@ -229,6 +216,115 @@ impl ClaudeCodeStreamAccumulator {
             phase: None,
         }));
     }
+
+    fn handle_content_block_start(
+        &mut self,
+        event: &serde_json::Map<String, Value>,
+        events: &mut Vec<ResponseEvent>,
+    ) -> anyhow::Result<()> {
+        let Some(block) = event.get("content_block").and_then(Value::as_object) else {
+            return Ok(());
+        };
+        match block.get("type").and_then(Value::as_str) {
+            Some("text" | "thinking" | "redacted_thinking") => {
+                self.ensure_active_message_started(events);
+            }
+            Some("tool_use") => {
+                let index = event
+                    .get("index")
+                    .and_then(Value::as_u64)
+                    .context("tool_use content_block_start missing index")?
+                    as usize;
+                let tool_use_id = block
+                    .get("id")
+                    .and_then(Value::as_str)
+                    .filter(|id| !id.is_empty())
+                    .ok_or_else(|| anyhow::anyhow!("tool_use block is missing a non-empty `id`"))?
+                    .to_string();
+                let name = block
+                    .get("name")
+                    .and_then(Value::as_str)
+                    .filter(|name| !name.is_empty())
+                    .ok_or_else(|| anyhow::anyhow!("tool_use block is missing a non-empty `name`"))?
+                    .to_string();
+                let initial_input = block.get("input").cloned();
+                self.pending_tool_uses.insert(
+                    index,
+                    PendingToolUse {
+                        tool_use_id,
+                        name,
+                        initial_input,
+                        input_json_delta: String::new(),
+                    },
+                );
+            }
+            _ => {}
+        }
+        Ok(())
+    }
+
+    fn handle_content_block_delta(
+        &mut self,
+        event: &serde_json::Map<String, Value>,
+        events: &mut Vec<ResponseEvent>,
+    ) -> anyhow::Result<()> {
+        let Some(delta) = event.get("delta").and_then(Value::as_object) else {
+            return Ok(());
+        };
+        match delta.get("type").and_then(Value::as_str) {
+            Some("text_delta") => {
+                if let Some(text) = delta.get("text").and_then(Value::as_str) {
+                    self.ensure_active_message_started(events);
+                    self.partial_text.push_str(text);
+                    events.push(ResponseEvent::OutputTextDelta(text.to_string()));
+                }
+            }
+            Some("thinking_delta") => {
+                if let Some(text) = delta.get("thinking").and_then(Value::as_str) {
+                    self.ensure_active_message_started(events);
+                    events.push(ResponseEvent::ReasoningContentDelta {
+                        delta: text.to_string(),
+                        content_index: 0,
+                    });
+                }
+            }
+            Some("input_json_delta") => {
+                let Some(index) = event.get("index").and_then(Value::as_u64) else {
+                    return Ok(());
+                };
+                let Some(partial_json) = delta.get("partial_json").and_then(Value::as_str) else {
+                    return Ok(());
+                };
+                if let Some(tool_use) = self.pending_tool_uses.get_mut(&(index as usize)) {
+                    tool_use.input_json_delta.push_str(partial_json);
+                }
+            }
+            _ => {}
+        }
+        Ok(())
+    }
+
+    fn handle_content_block_stop(
+        &mut self,
+        event: &serde_json::Map<String, Value>,
+        events: &mut Vec<ResponseEvent>,
+    ) -> anyhow::Result<()> {
+        let Some(index) = event.get("index").and_then(Value::as_u64) else {
+            return Ok(());
+        };
+        let Some(tool_use) = self.pending_tool_uses.remove(&(index as usize)) else {
+            return Ok(());
+        };
+        let item = build_tool_use_item(
+            self.response_id.as_deref().or(self.session_id.as_deref()),
+            tool_use,
+        )?;
+        if let Some(call_id) = response_item_call_id(&item) {
+            self.emitted_tool_use_ids.insert(call_id.to_string());
+        }
+        events.push(ResponseEvent::OutputItemDone(item));
+        Ok(())
+    }
 }
 
 struct ParsedAssistantContent {
@@ -239,6 +335,7 @@ struct ParsedAssistantContent {
 fn parse_assistant_content_blocks(
     content: Option<&Value>,
     message_id: &str,
+    emitted_tool_use_ids: &HashSet<String>,
 ) -> anyhow::Result<ParsedAssistantContent> {
     let Some(content) = content.and_then(Value::as_array) else {
         return Ok(ParsedAssistantContent {
@@ -299,6 +396,9 @@ fn parse_assistant_content_blocks(
                     .filter(|id| !id.is_empty())
                     .ok_or_else(|| anyhow::anyhow!("tool_use block is missing a non-empty `id`"))?
                     .to_string();
+                if emitted_tool_use_ids.contains(&tool_use_id) {
+                    continue;
+                }
                 let name = block
                     .get("name")
                     .and_then(Value::as_str)
@@ -346,6 +446,50 @@ fn parse_assistant_content_blocks(
         visible_text,
         events,
     })
+}
+
+fn build_tool_use_item(
+    response_id: Option<&str>,
+    tool_use: PendingToolUse,
+) -> anyhow::Result<ResponseItem> {
+    let item_id = Some(format!(
+        "{}-tool-item-{}",
+        response_id.unwrap_or("claude-code"),
+        tool_use.tool_use_id
+    ));
+    let input = if tool_use.input_json_delta.is_empty() {
+        tool_use
+            .initial_input
+            .unwrap_or_else(|| Value::Object(Default::default()))
+    } else {
+        serde_json::from_str(&tool_use.input_json_delta)
+            .context("parse Claude tool_use input_json_delta")?
+    };
+    if let Some(input) = input.as_str() {
+        Ok(ResponseItem::CustomToolCall {
+            id: item_id,
+            status: None,
+            call_id: tool_use.tool_use_id,
+            name: tool_use.name,
+            input: input.to_string(),
+        })
+    } else {
+        Ok(ResponseItem::FunctionCall {
+            id: item_id,
+            name: tool_use.name,
+            namespace: None,
+            arguments: serde_json::to_string(&input).context("serialize Claude tool_use input")?,
+            call_id: tool_use.tool_use_id,
+        })
+    }
+}
+
+fn response_item_call_id(item: &ResponseItem) -> Option<&str> {
+    match item {
+        ResponseItem::FunctionCall { call_id, .. }
+        | ResponseItem::CustomToolCall { call_id, .. } => Some(call_id.as_str()),
+        _ => None,
+    }
 }
 
 pub(crate) fn parse_token_usage(usage: Option<&serde_json::Value>) -> Option<TokenUsage> {
@@ -567,5 +711,107 @@ mod tests {
         let summary = accumulator.finish();
         assert_eq!(summary.response_id, "msg-structured");
         assert_eq!(summary.assistant_text, "Running shell.Done.");
+    }
+
+    #[test]
+    fn stream_events_emit_structured_tool_use_before_final_assistant_payload() {
+        let mut accumulator = ClaudeCodeStreamAccumulator::default();
+
+        let _ = accumulator
+            .push_line(
+                r#"{"type":"stream_event","event":{"type":"message_start","message":{"id":"msg-stream","type":"message","role":"assistant","content":[]}},"session_id":"mock-session","uuid":"event-1"}"#,
+            )
+            .expect("message_start should parse");
+
+        let start_events = accumulator
+            .push_line(
+                r#"{"type":"stream_event","event":{"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"toolu-stream-1","name":"mcp__codex__codex-shell","input":{}}},"session_id":"mock-session","uuid":"event-2"}"#,
+            )
+            .expect("tool_use start should parse");
+        assert!(start_events.is_empty());
+
+        let delta_events = accumulator
+            .push_line(
+                r#"{"type":"stream_event","event":{"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":"{\"command\":\"printf hi\"}"}},"session_id":"mock-session","uuid":"event-3"}"#,
+            )
+            .expect("tool_use input delta should parse");
+        assert!(delta_events.is_empty());
+
+        let stop_events = accumulator
+            .push_line(
+                r#"{"type":"stream_event","event":{"type":"content_block_stop","index":0},"session_id":"mock-session","uuid":"event-4"}"#,
+            )
+            .expect("tool_use stop should parse");
+        assert_eq!(stop_events.len(), 1);
+        assert!(matches!(
+            &stop_events[0],
+            ResponseEvent::OutputItemDone(ResponseItem::FunctionCall {
+                id: Some(id),
+                name,
+                namespace: None,
+                arguments,
+                call_id,
+            }) if id == "msg-stream-tool-item-toolu-stream-1"
+                && name == "mcp__codex__codex-shell"
+                && call_id == "toolu-stream-1"
+                && serde_json::from_str::<serde_json::Value>(arguments)
+                    .expect("tool arguments should be valid json")
+                    == serde_json::json!({ "command": "printf hi" })
+        ));
+
+        let assistant_events = accumulator
+            .push_line(
+                r#"{"type":"assistant","message":{"id":"msg-stream","type":"message","role":"assistant","content":[{"type":"text","text":"Done."},{"type":"tool_use","id":"toolu-stream-1","name":"mcp__codex__codex-shell","input":{"command":"printf hi"}}]}}"#,
+            )
+            .expect("assistant payload should parse");
+        assert_eq!(assistant_events.len(), 1);
+        assert!(matches!(
+            &assistant_events[0],
+            ResponseEvent::OutputItemDone(ResponseItem::Message {
+                id: Some(id),
+                role,
+                content,
+                end_turn: Some(true),
+                phase: None,
+            }) if id == "msg-stream"
+                && role == "assistant"
+                && content == &vec![ContentItem::OutputText {
+                    text: "Done.".to_string(),
+                }]
+        ));
+    }
+
+    #[test]
+    fn assistant_payload_replaying_streamed_tool_use_does_not_emit_empty_message() {
+        let mut accumulator = ClaudeCodeStreamAccumulator::default();
+
+        let _ = accumulator
+            .push_line(
+                r#"{"type":"stream_event","event":{"type":"message_start","message":{"id":"msg-tool-only","type":"message","role":"assistant","content":[]}},"session_id":"mock-session","uuid":"event-1"}"#,
+            )
+            .expect("message_start should parse");
+        let _ = accumulator
+            .push_line(
+                r#"{"type":"stream_event","event":{"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"toolu-tool-only-1","name":"mcp__codex__codex-shell","input":{}}},"session_id":"mock-session","uuid":"event-2"}"#,
+            )
+            .expect("tool_use start should parse");
+        let _ = accumulator
+            .push_line(
+                r#"{"type":"stream_event","event":{"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":"{\"command\":\"printf hi\"}"}},"session_id":"mock-session","uuid":"event-3"}"#,
+            )
+            .expect("tool_use delta should parse");
+        let streamed_events = accumulator
+            .push_line(
+                r#"{"type":"stream_event","event":{"type":"content_block_stop","index":0},"session_id":"mock-session","uuid":"event-4"}"#,
+            )
+            .expect("tool_use stop should parse");
+        assert_eq!(streamed_events.len(), 1);
+
+        let assistant_events = accumulator
+            .push_line(
+                r#"{"type":"assistant","message":{"id":"msg-tool-only","type":"message","role":"assistant","content":[{"type":"tool_use","id":"toolu-tool-only-1","name":"mcp__codex__codex-shell","input":{"command":"printf hi"}}]}}"#,
+            )
+            .expect("assistant payload should parse");
+        assert!(assistant_events.is_empty());
     }
 }

@@ -75,6 +75,15 @@ This downstream slice is intentionally honest and narrow:
   blocks into normal Codex raw response history as the delegated turn runs,
   instead of collapsing them down to assistant text only, so downstream
   TUI/app-server surfaces can see those tool calls before turn completion too;
+- the shared Claude `stream-json` accumulator now also honors streaming
+  `content_block_start` / `input_json_delta` / `content_block_stop` tool-use
+  events, so both the main Claude lane and external Claude child threads can
+  surface structured tool calls before the terminal assistant payload arrives
+  instead of waiting for the final assistant message to reconstruct them;
+- Claude carrier turns that emit only structured tool items no longer fail
+  solely because the visible assistant text is empty; helper/test flows and
+  external child-thread turns now accept tool-only completions when Codex
+  already received real response items from that turn;
 - when Claudex knows the current Codex executable path, Claude carrier runs now
   also receive a session-scoped internal MCP config that points at
   `codex mcp-server`, so the Claude lane can see a Codex-owned MCP bridge

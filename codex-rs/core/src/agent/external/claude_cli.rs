@@ -567,7 +567,7 @@ pub(crate) async fn run_claude_code_turn(
         }
     }
     let summary = accumulator.finish();
-    if summary.assistant_text.trim().is_empty() {
+    if summary.assistant_text.trim().is_empty() && response_items.is_empty() {
         anyhow::bail!("Claude Code returned empty output");
     }
     Ok(ClaudeCodeTurnResult {

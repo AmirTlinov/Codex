@@ -199,6 +199,13 @@ What it does:
 - streams structured Claude `tool_use` items into external child-thread raw
   response history as delegated turns run, instead of flattening those Claude
   turns down to plain assistant text only;
+- teaches the shared Claude `stream-json` accumulator to emit structured
+  tool-use items from streaming `content_block_*` events too, so main and
+  external Claude lanes surface tool calls before the final assistant payload
+  instead of reconstructing them only at assistant-message closeout;
+- stops rejecting Claude carrier turns that finish with tool items but no
+  visible assistant text, as long as Codex already received real response
+  items from that turn;
 - extends the internal `mcp__codex__codex` bridge surface with an explicit
   `model-provider` override, so Claude-backed turns can start Codex-owned
   sessions against `openai` vs `claude_code` deterministically instead of

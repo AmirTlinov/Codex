@@ -306,6 +306,41 @@ fn mock_claude_structured_tool_script(root: &TempDir) -> MockClaudeScript {
     }
 }
 
+fn mock_claude_streaming_tool_script(root: &TempDir) -> MockClaudeScript {
+    let script_path = root.path().join("mock-control-claude-streaming-tool.sh");
+    let stdin_log_path = root.path().join("control-claude-streaming-tool.stdin.log");
+    let script = [
+        "#!/usr/bin/env bash".to_string(),
+        "set -euo pipefail".to_string(),
+        "IFS= read -r first_line".to_string(),
+        format!("printf '%s\\n--\\n' \"$first_line\" >> '{}'", stdin_log_path.display()),
+        "printf '%s\\n' '{\"type\":\"system\",\"subtype\":\"init\",\"session_id\":\"123e4567-e89b-12d3-a456-4266141740ae\",\"tools\":[],\"mcp_servers\":[],\"model\":\"claude-opus-4-6\",\"permissionMode\":\"bypassPermissions\",\"slash_commands\":[],\"apiKeySource\":\"none\",\"claude_code_version\":\"test\",\"output_style\":\"default\",\"agents\":[],\"skills\":[],\"plugins\":[],\"uuid\":\"init-1\"}'".to_string(),
+        "printf '%s\\n' '{\"type\":\"stream_event\",\"event\":{\"type\":\"message_start\",\"message\":{\"model\":\"claude-opus-4-6\",\"id\":\"msg-stream\",\"type\":\"message\",\"role\":\"assistant\",\"content\":[],\"stop_reason\":null,\"stop_sequence\":null,\"stop_details\":null,\"usage\":{\"input_tokens\":3,\"cache_creation_input_tokens\":0,\"cache_read_input_tokens\":0,\"output_tokens\":2,\"service_tier\":\"standard\",\"inference_geo\":\"not_available\"}}},\"session_id\":\"123e4567-e89b-12d3-a456-4266141740ae\",\"parent_tool_use_id\":null,\"uuid\":\"event-1\"}'".to_string(),
+        "printf '%s\\n' '{\"type\":\"stream_event\",\"event\":{\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"tool_use\",\"id\":\"toolu-stream-1\",\"name\":\"mcp__codex__codex-shell\",\"input\":{}}},\"session_id\":\"123e4567-e89b-12d3-a456-4266141740ae\",\"parent_tool_use_id\":null,\"uuid\":\"event-2\"}'".to_string(),
+        "printf '%s\\n' '{\"type\":\"stream_event\",\"event\":{\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"input_json_delta\",\"partial_json\":\"{\\\"command\\\":\\\"printf hi\\\"}\"}},\"session_id\":\"123e4567-e89b-12d3-a456-4266141740ae\",\"parent_tool_use_id\":null,\"uuid\":\"event-3\"}'".to_string(),
+        "printf '%s\\n' '{\"type\":\"stream_event\",\"event\":{\"type\":\"content_block_stop\",\"index\":0},\"session_id\":\"123e4567-e89b-12d3-a456-4266141740ae\",\"parent_tool_use_id\":null,\"uuid\":\"event-4\"}'".to_string(),
+        "sleep 1".to_string(),
+        "printf '%s\\n' '{\"type\":\"assistant\",\"message\":{\"model\":\"claude-opus-4-6\",\"id\":\"msg-stream\",\"type\":\"message\",\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":\"Running shell.\"},{\"type\":\"tool_use\",\"id\":\"toolu-stream-1\",\"name\":\"mcp__codex__codex-shell\",\"input\":{\"command\":\"printf hi\"}},{\"type\":\"text\",\"text\":\"Done.\"}],\"stop_reason\":null,\"stop_sequence\":null,\"stop_details\":null,\"usage\":{\"input_tokens\":3,\"cache_creation_input_tokens\":0,\"cache_read_input_tokens\":0,\"output_tokens\":2,\"service_tier\":\"standard\",\"inference_geo\":\"not_available\"},\"context_management\":null},\"parent_tool_use_id\":null,\"session_id\":\"123e4567-e89b-12d3-a456-4266141740ae\",\"uuid\":\"assistant-1\"}'".to_string(),
+        "printf '%s\\n' '{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":false,\"duration_ms\":10,\"duration_api_ms\":10,\"num_turns\":1,\"result\":\"Running shell.Done.\",\"stop_reason\":\"end_turn\",\"session_id\":\"123e4567-e89b-12d3-a456-4266141740ae\",\"total_cost_usd\":0.0,\"usage\":{\"input_tokens\":3,\"cache_creation_input_tokens\":0,\"cache_read_input_tokens\":0,\"output_tokens\":2},\"modelUsage\":{},\"permission_denials\":[],\"uuid\":\"result-1\"}'".to_string(),
+    ]
+    .join("\n");
+    std::fs::write(&script_path, script).expect("write mock Claude streaming tool script");
+    let mut permissions = std::fs::metadata(&script_path)
+        .expect("mock Claude streaming tool metadata")
+        .permissions();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(&script_path, permissions)
+            .expect("chmod mock Claude streaming tool");
+    }
+    MockClaudeScript {
+        script_path,
+        stdin_log_path,
+    }
+}
+
 impl AgentControlHarness {
     async fn new() -> Self {
         let (home, config) = test_config().await;
@@ -1128,6 +1163,73 @@ async fn external_claude_agent_persists_structured_tool_use_into_child_thread_hi
                     == serde_json::json!({ "command": "printf hi" })
         )
     }));
+}
+
+#[tokio::test]
+async fn external_claude_agent_streams_tool_use_before_terminal_assistant_payload() {
+    let harness = AgentControlHarness::new().await;
+    let mock_claude = mock_claude_streaming_tool_script(&harness._home);
+    let mut config = harness.config.clone();
+    config.agent_backend = crate::config::AgentBackend::ClaudeCode;
+    config.claude_cli.path = Some(mock_claude.script_path.clone());
+
+    let thread_id = harness
+        .control
+        .spawn_agent(
+            config,
+            text_input("run a streamed Claude tool call"),
+            /*session_source*/ None,
+        )
+        .await
+        .expect("spawn external Claude agent");
+    let child_thread = harness
+        .manager
+        .get_thread(thread_id)
+        .await
+        .expect("external child thread host should exist");
+
+    let tool_event = timeout(Duration::from_secs(5), async {
+        loop {
+            let event = child_thread.next_event().await.expect("child thread event");
+            if matches!(
+                event.msg,
+                EventMsg::RawResponseItem(codex_protocol::protocol::RawResponseItemEvent {
+                    item: ResponseItem::FunctionCall { .. },
+                })
+            ) {
+                break event.msg;
+            }
+        }
+    })
+    .await
+    .expect("streamed Claude tool use should surface before turn completion");
+    assert!(matches!(
+        tool_event,
+        EventMsg::RawResponseItem(codex_protocol::protocol::RawResponseItemEvent {
+            item: ResponseItem::FunctionCall {
+                name,
+                namespace: None,
+                arguments,
+                call_id,
+                ..
+            },
+        }) if name == "mcp__codex__codex-shell"
+            && call_id == "toolu-stream-1"
+            && serde_json::from_str::<serde_json::Value>(&arguments)
+                .expect("tool arguments should be valid json")
+                == serde_json::json!({ "command": "printf hi" })
+    ));
+
+    assert_eq!(
+        harness.control.get_status(thread_id).await,
+        AgentStatus::Running
+    );
+
+    let status = wait_for_final_agent_status(&harness.control, thread_id).await;
+    assert_eq!(
+        status,
+        AgentStatus::Completed(Some("Running shell.Done.".to_string()))
+    );
 }
 
 #[tokio::test]
